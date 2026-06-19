@@ -1,7 +1,7 @@
 """TCER core metric formulas and pricing.
 
 Basic formulas follow CLAUDE.md. The composite layer (L5) — TTAF / TA-TCER /
-PSAC / CAF / CTEI — follows the research report (§6.2–6.5), which is the
+PSAC / CAF / CTEI — follows the metric framework (§6.2–6.5), which is the
 authoritative original framework.
 
 Costs are priced per model via ``pricing`` (each model's tokens at its own
@@ -20,17 +20,17 @@ from .models import SessionMeta, SessionReport, TokenUsage
 PRICING = pricing.default_pricing()
 
 # --------------------------------------------------------------------------- #
-# Composite-layer constants (authoritative source: research report §6)
+# Composite-layer constants (authoritative source: metric framework §6)
 # --------------------------------------------------------------------------- #
-# CTEI baselines = medians (TCER, CPE) / mean (NCPI) of the report's 16-session
+# CTEI baselines = medians (TCER, CPE) / mean (NCPI) of the framework's 16-session
 # reference dataset. Defaults keep CTEI on the same scale as the published
-# report so scores are directly comparable; overridable (report §8.3 — build a
+# framework so scores are directly comparable; overridable (framework §8.3 — build a
 # personal baseline DB from your own accumulated sessions).
 TCER_BASELINE = 76.59  # dataset median TCER (LOC/Mt)
 NCPI_BASELINE = 0.101  # dataset expected NCPI (contribution density)
 CPE_BASELINE = 8.22    # dataset median CPE ($/kLOC)
 
-# Task Type Adjustment Factor (report §6.4, the authoritative source).
+# Task Type Adjustment Factor (framework §6.4, the authoritative source).
 TTAF = {
     "feature": 1.00,      # 新功能开发 greenfield（基准）
     "feature-ext": 0.85,  # 功能扩展 existing codebase
@@ -40,7 +40,7 @@ TTAF = {
     "test": 0.90,         # 测试编写
 }
 
-# Project-stage regression (report §6.5): TCER ≈ -0.000866 * LOC_accum + 83.64
+# Project-stage regression (framework §6.5): TCER ≈ -0.000866 * LOC_accum + 83.64
 PSAC_INTERCEPT = 83.64
 PSAC_SLOPE = 0.000866
 
@@ -113,7 +113,7 @@ def ncpi(net_loc: int | None, loc_accumulated: int | None) -> float | None:
 
 
 def ta_tcer(tcer: float | None, task_type: str | None) -> float | None:
-    """Task-adjusted TCER = TCER / TTAF_task (report §6.4)."""
+    """Task-adjusted TCER = TCER / TTAF_task (framework §6.4)."""
     factor = TTAF.get(task_type or "")
     if tcer is None or not factor:
         return None
@@ -121,7 +121,7 @@ def ta_tcer(tcer: float | None, task_type: str | None) -> float | None:
 
 
 def psac(loc_accumulated: int | None) -> float | None:
-    """Project-Stage Adjustment Coefficient (report §6.5).
+    """Project-Stage Adjustment Coefficient (framework §6.5).
 
     PSAC = intercept / (intercept - slope * LOC_current). Multiply TCER by this
     to neutralize the structural TCER decline of larger codebases.
@@ -133,7 +133,7 @@ def psac(loc_accumulated: int | None) -> float | None:
 
 
 def chr_factor(chr_: float | None) -> float:
-    """CHR reward factor = 1 + CHR*0.5 (report §6.3): +10% CHR → +5% CTEI."""
+    """CHR reward factor = 1 + CHR*0.5 (framework §6.3): +10% CHR → +5% CTEI."""
     return 1.0 + (chr_ or 0.0) * 0.5
 
 
@@ -159,10 +159,10 @@ def ctei(
     ncpi_baseline: float = NCPI_BASELINE,
     cpe_baseline: float = CPE_BASELINE,
 ) -> float | None:
-    """Composite Token Efficiency Index (report §6.3).
+    """Composite Token Efficiency Index (framework §6.3).
 
     CTEI = (TCER/baseline) × (NCPI/baseline) × (CPE_baseline/CPE) × (1+CHR*0.5)
-    Reproduces the report's published per-session scores to <0.1%.
+    Reproduces the framework's published per-session scores to <0.1%.
     """
     if tcer is None or ncpi_ is None or not cpe:
         return None
@@ -175,7 +175,7 @@ def ctei(
 
 
 def grade(ctei_: float | None) -> str | None:
-    """CTEI rating (report §6.3 thresholds)."""
+    """CTEI rating (framework §6.3 thresholds)."""
     if ctei_ is None:
         return None
     if ctei_ > 2.0:

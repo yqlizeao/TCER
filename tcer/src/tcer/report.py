@@ -146,7 +146,7 @@ def _ttaf_of(agg: SessionReport) -> float | None:
 
 
 # --------------------------------------------------------------------------- #
-# CTEI bar chart (report §6.3 — bars colored by rating)
+# CTEI bar chart (metric framework §6.3 — bars colored by rating)
 # --------------------------------------------------------------------------- #
 # ANSI color per CTEI grade.
 _GRADE_COLOR = {

@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-基于真实 Claude Code session 数据，构建多维 AI 编程效率计量体系（TCER/CTEI），参考 `AI编码 Token-to-Code 科学计量研究报告.docx` 中的理论框架。
+基于真实 Claude Code session 数据，构建多维 AI 编程效率计量体系（TCER/CTEI），其理论框架为原创的五层指标体系（详见下文公式与各模块实现）。
 
 核心指标：TCER（LOC/Mt）、NCPI、CHR、CPE、I/O Ratio，以及综合指数 CTEI。
 
@@ -131,7 +131,7 @@ cost = (
 ### 高级指标
 
 - **CAF（缓存调整因子）**：`CAF = TotalInput / (input_tokens + cache_creation_input_tokens)`，消除缓存对效率比较的影响
-- **TTAF（任务类型调整系数）**：新功能=1.00, 功能扩展=0.85, 调试=0.40, 重构=0.50, 代码审查=0.20, 测试编写=0.90（以研究报告 §6.4 为准）
+- **TTAF（任务类型调整系数）**：新功能=1.00, 功能扩展=0.85, 调试=0.40, 重构=0.50, 代码审查=0.20, 测试编写=0.90（以原始框架 §6.4 为准）
 - **PSAC（项目阶段调整系数）**：基于代码库规模的线性回归，每增 1000 LOC 预期 TCER 下降 0.866
 - **TA-TCER**：`TCER / TTAF`，任务调整后的 TCER
 - **CTEI**：多维综合指数，归一化后的可横向对比分数

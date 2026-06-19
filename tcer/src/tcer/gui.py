@@ -53,7 +53,7 @@ _MUTED = "#9e9e9e"
 # Summary cards: (key, 中文名, 单位, 说明). `key` matches the StringVar used by _render.
 METRIC_CARDS = [
     ("TCER", "效率 TCER", "行/百万Token",
-     "Token转码效率比 = 净增代码行 ÷ 百万Token。每花 100 万 Token 产出多少行净代码，越高越省。报告基准中位数 76.6。"),
+     "Token转码效率比 = 净增代码行 ÷ 百万Token。每花 100 万 Token 产出多少行净代码，越高越省。框架基准中位数 76.6。"),
     ("CTEI", "综合指数 CTEI", "",
      "复合 Token 效率指数：把效率、产出密度、成本、缓存合成的单一评分。>2 优秀 · 1~2 良好 · 0.5~1 中等 · 0.1~0.5 低效 · <0.1 极端低效。"),
     ("评级", "评级", "",
@@ -461,7 +461,7 @@ class TcerGui:
             yb = sy(metrics.TCER_BASELINE)
             cv.create_line(x0, yb, x1, yb, fill="#888", dash=(4, 3))
             cv.create_text(x1, yb - 2, anchor="se", fill="#aaaaaa",
-                           text=f"报告基准 {metrics.TCER_BASELINE}", font=("Microsoft YaHei", 7))
+                           text=f"框架基准 {metrics.TCER_BASELINE}", font=("Microsoft YaHei", 7))
         # polyline
         if len(pts) > 1:
             coords = []

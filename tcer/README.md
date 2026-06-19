@@ -19,7 +19,7 @@ in the JSONL — no `git` binary, exact per-session attribution, and it counts w
 the model actually wrote (iterations included). Accumulated codebase size comes
 from scanning the working directory.
 
-Composite layer (L5), per the research report §6:
+Composite layer (L5), per the metric framework §6:
 
 - **NCPI** — net LOC / accumulated codebase LOC (contribution density)
 - **CAF** — cache adjustment factor: `TotalInput / (input + cache_write)`
@@ -74,7 +74,7 @@ they are not listed or counted as separate sessions — so the session count
 matches cc-switch. Use `--no-subagents` to exclude subagent data entirely.
 
 `--task-type` is one of `feature` (default) / `feature-ext` / `debug` / `refactor`
-/ `review` / `test`. CTEI baselines default to the report's reference dataset
+/ `review` / `test`. CTEI baselines default to the framework's reference dataset
 medians (TCER 76.59, NCPI 0.101, CPE 8.22) so scores stay on the published scale;
 override them with `--baseline-*` once you have your own accumulated data.
 
@@ -103,7 +103,7 @@ override them with `--baseline-*` once you have your own accumulated data.
   added (intra-session overwrites are tracked exactly).
 - **NCPI caveat**: at the whole-project aggregate level NCPI can approach/exceed
   1.0 (cumulative net vs current size); it's most meaningful per session.
-- **TTAF source**: values follow the research report §6.4 (refactor 0.50,
+- **TTAF source**: values follow the metric framework §6.4 (refactor 0.50,
   review 0.20), the authoritative framework.
 - **`--chart`**: per-session CTEI bars, sorted desc, colored by grade. Sessions
   with no measurable net code have no CPE/CTEI and are omitted. ANSI color is
@@ -113,6 +113,6 @@ override them with `--baseline-*` once you have your own accumulated data.
 
 Done: read layer + core metrics + git-free LOC + CLI + composite layer (CTEI /
 TTAF / TA-TCER / PSAC / NCPI / CAF) + L3 churn ratio + per-session CTEI bar chart
-+ Tkinter GUI. The CTEI formula reproduces the report's published per-session
++ Tkinter GUI. The CTEI formula reproduces the framework's published per-session
 scores to <0.1% (see `tests/test_metrics.py`). Planned: remaining L3 signals
 (cyclomatic complexity / coverage delta) as opt-in radon/lizard/coverage.py.
