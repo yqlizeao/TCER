@@ -1,0 +1,277 @@
+"""JSONL discovery, parsing and token-usage aggregation.
+
+Structure ported from cc-switch's ``session_manager/providers/claude.rs`` and
+``utils.rs``; the usage aggregation is TCER's own addition (cc-switch only renders
+conversations and never reads ``message.usage``).
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+from .models import SessionMeta, TokenUsage
+from .paths import projects_dir
+
+# Title-extraction noise to skip, matching cc-switch's filters.
+_TITLE_NOISE_PREFIXES = ("<local-command-caveat", "<command-name>")
+TITLE_MAX_CHARS = 80
+
+
+def discover_jsonl(project_hash: str | None = None) -> list[Path]:
+    """Recursively collect every ``*.jsonl`` under a project (or all projects)."""
+    base = projects_dir()
+    if project_hash:
+        base = base / project_hash
+    if not base.is_dir():
+        return []
+    return sorted(base.rglob("*.jsonl"))
+
+
+def is_subagent(path: Path) -> bool:
+    """True if the jsonl lives under a ``subagents/`` directory."""
+    return "subagents" in path.parts
+
+
+def parent_session_id(path: Path) -> str:
+    """Return the parent session id a jsonl belongs to.
+
+    Subagent files live at ``<sessionId>/subagents/agent-*.jsonl`` — their parent
+    is the directory segment just before ``subagents``. Main session files map to
+    their own stem. Used to fold subagent data into the owning session.
+    """
+    parts = path.parts
+    if "subagents" in parts:
+        idx = parts.index("subagents")
+        if idx > 0:
+            return parts[idx - 1]
+    return path.stem
+
+
+def iter_messages(path: Path):
+    """Yield each parsed JSON object in a session jsonl, skipping meta/garbage lines."""
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("isMeta") is True:
+                continue
+            yield obj
+
+
+def aggregate_usage(path: Path) -> TokenUsage:
+    """Sum token usage across all assistant turns in one session file.
+
+    **Dedup by ``message.id``**: one assistant API response is often split across
+    several JSONL lines — one per content block (thinking / text / each tool_use) —
+    and *every* line repeats the same ``message.usage``. Counting each line would
+    multi-count both tokens and turns (observed up to 6× on Bedrock-routed
+    sessions). We count each ``message.id`` once. Lines without an id fall back to
+    being counted individually. (ccusage / token-stats dedup the same way.)
+
+    Turns whose usage is entirely zero (e.g. pure-thinking stubs) are skipped and
+    counted in ``empty_usage_skipped`` per CLAUDE.md note 7.
+    """
+    u = TokenUsage()
+    seen: set[str] = set()
+    for obj in iter_messages(path):
+        msg = obj.get("message")
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        mid = msg.get("id")
+        if isinstance(mid, str):
+            if mid in seen:
+                continue  # same API response, already counted
+            seen.add(mid)
+        usage = msg.get("usage") or {}
+        i = _as_int(usage.get("input_tokens"))
+        cw = _as_int(usage.get("cache_creation_input_tokens"))
+        cr = _as_int(usage.get("cache_read_input_tokens"))
+        o = _as_int(usage.get("output_tokens"))
+        if i + cw + cr + o == 0:
+            u.empty_usage_skipped += 1
+            continue
+        u.input_tokens += i
+        u.cache_creation_input_tokens += cw
+        u.cache_read_input_tokens += cr
+        u.output_tokens += o
+        u.assistant_msgs += 1
+        model = msg.get("model")
+        if isinstance(model, str):
+            u.models.add(model)
+        # Per-model bucket (key "" when the model isn't recorded) so mixed-model
+        # sessions can be priced at each model's own rate. Bucket sums stay equal
+        # to the scalar totals above.
+        u.bucket(model if isinstance(model, str) else "").add(i, cw, cr, o)
+        ts = parse_timestamp_ms(obj.get("timestamp"))
+        if ts is not None:
+            u.started_at = ts if u.started_at is None else min(u.started_at, ts)
+            u.ended_at = ts if u.ended_at is None else max(u.ended_at, ts)
+    return u
+
+
+def read_session_meta(path: Path) -> SessionMeta:
+    """Extract session metadata cheaply via head/tail sampling (for list views).
+
+    Ports cc-switch's ``read_head_tail_lines`` + ``parse_session``: read the first
+    ``head_n`` lines and last ``tail_n`` lines only, so listing hundreds of sessions
+    doesn't require scanning whole files.
+    """
+    head, _tail = _read_head_tail_lines(path, head_n=10, tail_n=30)
+    session_id: str | None = None
+    cwd: str | None = None
+    title: str | None = None
+    for line in head:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if session_id is None:
+            sid = obj.get("sessionId")
+            if isinstance(sid, str):
+                session_id = sid
+        if cwd is None:
+            c = obj.get("cwd")
+            if isinstance(c, str):
+                cwd = c
+        if title is None:
+            msg = obj.get("message")
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                txt = extract_text(msg.get("content")).strip()
+                if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
+                    title = truncate_summary(txt, TITLE_MAX_CHARS)
+    return SessionMeta(
+        session_id=session_id,
+        cwd=cwd,
+        title=title,
+        path=path,
+        is_subagent=is_subagent(path),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Helpers ported from cc-switch utils.rs
+# --------------------------------------------------------------------------- #
+def _read_head_tail_lines(path: Path, head_n: int, tail_n: int) -> tuple[list[str], list[str]]:
+    """Read the first ``head_n`` and last ``tail_n`` lines efficiently.
+
+    For small files (<16 KiB) reads everything once; for larger files seeks to the
+    last ~16 KiB for the tail to avoid scanning the whole file.
+    """
+    size = path.stat().st_size
+    if size < 16_384:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            all_lines = fh.readlines()
+        head = all_lines[:head_n]
+        skip = max(0, len(all_lines) - tail_n)
+        tail = all_lines[skip:]
+        return [l.rstrip("\n") for l in head], [l.rstrip("\n") for l in tail]
+
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        head = [fh.readline().rstrip("\n") for _ in range(head_n)]
+
+    seek_pos = max(0, size - 16_384)
+    with path.open("rb") as fb:
+        fb.seek(seek_pos)
+        if seek_pos > 0:
+            fb.readline()  # discard the possibly-partial first line
+        raw = fb.read().decode("utf-8", errors="replace")
+    tail_lines = raw.splitlines()
+    skip = max(0, len(tail_lines) - tail_n)
+    tail = tail_lines[skip:]
+    return head, tail
+
+
+def parse_timestamp_ms(value) -> int | None:
+    """Normalize a timestamp to epoch milliseconds.
+
+    Accepts integers/floats (ms if >1e12, else seconds), numeric strings, and
+    RFC3339 strings, matching cc-switch's ``parse_timestamp_to_ms``. Returns None
+    for anything unparseable (OSError is possible on Windows for out-of-range dates).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return _ms_from_number(int(value))
+    if isinstance(value, str):
+        s = value.strip()
+        # numeric string?
+        try:
+            return _ms_from_number(int(s))
+        except ValueError:
+            pass
+        try:
+            return _ms_from_number(int(float(s)))
+        except ValueError:
+            pass
+        # RFC3339
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return int(dt.timestamp() * 1000)
+        except (ValueError, OSError, OverflowError):
+            return None
+    return None
+
+
+def _ms_from_number(n: int) -> int:
+    return n if n > 1_000_000_000_000 else n * 1000
+
+
+def extract_text(content) -> str:
+    """Extract a flat text string from a message ``content`` field.
+
+    Handles string / array / object shapes and surfaces tool_use/tool_result, as
+    cc-switch's ``extract_text`` does.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            t = _extract_text_from_item(item)
+            if t and t.strip():
+                parts.append(t)
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        return content.get("text", "") or ""
+    return ""
+
+
+def _extract_text_from_item(item: dict) -> str | None:
+    item_type = item.get("type", "")
+    if item_type == "tool_use":
+        return f"[Tool: {item.get('name', 'unknown')}]"
+    if item_type == "tool_result":
+        nested = extract_text(item.get("content"))
+        return nested or None
+    for key in ("text", "input_text", "output_text"):
+        v = item.get(key)
+        if isinstance(v, str):
+            return v
+    nested = extract_text(item.get("content"))
+    return nested or None
+
+
+def truncate_summary(text: str, max_chars: int) -> str:
+    trimmed = text.strip()
+    if not trimmed:
+        return ""
+    if len(trimmed) <= max_chars:
+        return trimmed
+    return trimmed[:max_chars] + "..."
+
+
+def _as_int(v) -> int:
+    if v is None or isinstance(v, bool):
+        return 0
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0

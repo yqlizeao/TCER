@@ -1,0 +1,6 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"请帮我重构这个函数"}]},"sessionId":"sess-001","cwd":"/tmp/project","timestamp":"2026-03-06T10:00:00Z","uuid":"u1"}
+{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"好的"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":43447,"cache_read_input_tokens":0,"output_tokens":1021}},"timestamp":"2026-03-06T10:00:05Z","uuid":"a1"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"result"}]}]},"sessionId":"sess-001","timestamp":"2026-03-06T10:00:10Z","uuid":"u2"}
+{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":1069,"cache_read_input_tokens":43447,"output_tokens":1473}},"timestamp":"1781061650000","uuid":"a2"}
+{"isMeta":true,"type":"summary","summary":"this line must be skipped","leafUuid":"a2"}
+{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"thinking","thinking":"hmm"}],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}},"timestamp":"2026-03-06T10:00:20Z","uuid":"a3"}
