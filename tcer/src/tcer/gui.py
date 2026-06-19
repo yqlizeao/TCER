@@ -70,20 +70,21 @@ METRIC_CARDS = [
      "总 Token 消耗（输入 + 输出 + 缓存）。"),
 ]
 
-# Per-session table: (key, 中文表头, 宽度, 提示).
+# Per-session table: (key, 中文表头, 宽度, 提示). The model column stretches to
+# absorb leftover width (see _build); the rest are fixed.
 TABLE_COLS = [
-    ("session", "会话", 150, "会话 ID（前 18 位）。"),
-    ("time", "时间", 120, "该会话开始时间。"),
-    ("sub", "子代理", 56, "并入该会话的 subagent（子代理）数量；其 Token 与代码已计入本行。"),
-    ("turns", "回合", 50, "计入统计的 assistant 回复条数。"),
-    ("tokens", "Token", 84, "该会话总 Token 消耗（百万）。"),
-    ("CHR", "缓存命中", 68, "缓存命中率：缓存读取 ÷ 总输入，越高越省。"),
-    ("cost", "成本", 74, "按 API 标价估算的花费（美元）。"),
-    ("netLOC", "净增行", 64, "该会话净写入代码行（写入−删除）。"),
-    ("TCER", "效率", 58, "TCER：净增行 ÷ 百万 Token。"),
-    ("CTEI", "综合", 58, "CTEI 综合效率评分。"),
-    ("评级", "评级", 76, "依 CTEI 的等级（优秀/良好/中等/低效/极端低效）。"),
-    ("model", "模型", 180, "该会话用到的模型（友好名）。多模型混用时逗号分隔；成本据此分模型计价。"),
+    ("session", "会话", 140, "会话 ID（前 18 位）。"),
+    ("time", "开始时间", 96, "该会话的开始时间（首条 assistant 回复的时间戳，与下方时间趋势图横轴一致）。"),
+    ("sub", "子代理", 52, "并入该会话的 subagent（子代理）数量；其 Token 与代码已计入本行。"),
+    ("turns", "回合", 46, "计入统计的 assistant 回复条数。"),
+    ("tokens", "Token", 78, "该会话总 Token 消耗（百万）。"),
+    ("CHR", "缓存命中", 66, "缓存命中率：缓存读取 ÷ 总输入，越高越省。"),
+    ("cost", "成本", 72, "按各模型 list 价估算的花费（美元）。"),
+    ("netLOC", "净增行", 58, "该会话净写入代码行（写入−删除）。"),
+    ("TCER", "效率", 52, "TCER：净增行 ÷ 百万 Token。"),
+    ("CTEI", "综合", 52, "CTEI 综合效率评分。"),
+    ("评级", "评级", 70, "依 CTEI 的等级（优秀/良好/中等/低效/极端低效）。"),
+    ("model", "模型", 160, "该会话用到的模型（友好名）。多模型混用时逗号分隔；成本据此分模型计价。"),
 ]
 
 # Extra glossary entries shown in the 指标说明 window (beyond the cards above).
@@ -170,8 +171,14 @@ class TcerGui:
             pass
         style.configure("Treeview", background=_PANEL, fieldbackground=_PANEL,
                         foreground=_FG, rowheight=22)
-        style.configure("Treeview.Heading", background="#333333", foreground=_FG)
+        style.configure("Treeview.Heading", background="#333333", foreground=_FG,
+                        relief="flat", borderwidth=1)
+        # clam draws a raised (white-ish) border on heading hover/press — keep it dark & flat.
         style.map("Treeview", background=[("selected", "#094771")])
+        style.map("Treeview.Heading",
+                  background=[("active", "#3d3d3d"), ("pressed", "#2b2b2b")],
+                  foreground=[("active", _FG)],
+                  relief=[("active", "flat"), ("pressed", "flat")])
 
     def _build(self) -> None:
         tk, ttk = self.tk, self.ttk
@@ -240,7 +247,10 @@ class TcerGui:
         self.tree = ttk.Treeview(right, columns=keys, show="headings", height=10)
         for key, label, w, tip in TABLE_COLS:
             self.tree.heading(key, text=label)
-            self.tree.column(key, width=w, anchor="w")
+            # Only the model column stretches; the rest stay fixed so model gets
+            # the leftover width instead of every column shrinking evenly.
+            self.tree.column(key, width=w, minwidth=40, anchor="w",
+                             stretch=(key == "model"))
         self.tree.pack(fill="both", expand=True)
         tk.Label(right, text="提示：把鼠标移到上方卡片或点“指标说明”查看每个指标的含义。",
                  bg=_BG, fg=_MUTED, anchor="w", font=("Microsoft YaHei", 8)).pack(fill="x")
