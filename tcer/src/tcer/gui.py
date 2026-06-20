@@ -195,6 +195,35 @@ class TcerGui:
         _Tooltip(tk, task_cb, "任务类型影响 TTAF / TA-TCER：调试、重构、审查等任务天然产出更少代码，"
                               "选对类型才能公平比较效率。")
 
+        # Time filter (since / until)
+        tk.Label(bar, text="时间:", bg=_BG, fg=_FG).pack(side="left", padx=(12, 4))
+        self.since_var = tk.StringVar(value="")
+        since_entry = tk.Entry(bar, textvariable=self.since_var, width=10, bg=_PANEL, fg=_FG,
+                               insertbackground=_FG, relief="flat", highlightthickness=1,
+                               highlightbackground="#3e3e42", highlightcolor="#007acc")
+        since_entry.pack(side="left", padx=2)
+        since_entry.bind("<Return>", lambda e: self._reanalyze())
+        since_entry.bind("<FocusOut>", lambda e: self._reanalyze())
+        _Tooltip(tk, since_entry, "开始日期（YYYY-MM-DD，留空=全部）。按回车或失焦后生效。")
+
+        tk.Label(bar, text="至", bg=_BG, fg=_FG).pack(side="left", padx=2)
+        self.until_var = tk.StringVar(value="")
+        until_entry = tk.Entry(bar, textvariable=self.until_var, width=10, bg=_PANEL, fg=_FG,
+                               insertbackground=_FG, relief="flat", highlightthickness=1,
+                               highlightbackground="#3e3e42", highlightcolor="#007acc")
+        until_entry.pack(side="left", padx=2)
+        until_entry.bind("<Return>", lambda e: self._reanalyze())
+        until_entry.bind("<FocusOut>", lambda e: self._reanalyze())
+        _Tooltip(tk, until_entry, "结束日期（YYYY-MM-DD，留空=全部）。按回车或失焦后生效。")
+
+        # Quick time filter buttons
+        tk.Button(bar, text="本周", command=lambda: self._set_time_range("week"),
+                  bg=_PANEL, fg=_FG, relief="flat", padx=4, pady=2).pack(side="left", padx=2)
+        tk.Button(bar, text="本月", command=lambda: self._set_time_range("month"),
+                  bg=_PANEL, fg=_FG, relief="flat", padx=4, pady=2).pack(side="left", padx=2)
+        tk.Button(bar, text="全部", command=lambda: self._set_time_range("all"),
+                  bg=_PANEL, fg=_FG, relief="flat", padx=4, pady=2).pack(side="left", padx=2)
+
         self.no_sub_var = tk.BooleanVar(value=False)
         chk = tk.Checkbutton(bar, text="排除子代理", variable=self.no_sub_var, bg=_BG, fg=_FG,
                              selectcolor=_PANEL, activebackground=_BG, activeforeground=_FG,
@@ -304,9 +333,30 @@ class TcerGui:
         if proj is None:
             return
         self.status.config(text=f"分析中… {_short_name(proj.name)}")
+        since = self.since_var.get().strip() or None
+        until = self.until_var.get().strip() or None
         args = dict(project=proj.name, no_subagents=self.no_sub_var.get(),
-                    task_type=self.task_var.get())
+                    task_type=self.task_var.get(), since=since, until=until)
         threading.Thread(target=self._worker, args=(args,), daemon=True).start()
+
+    def _set_time_range(self, preset: str) -> None:
+        """Set since/until based on preset ('week' / 'month' / 'all')."""
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        if preset == "week":
+            # Monday of this week
+            monday = today - timedelta(days=today.weekday())
+            self.since_var.set(monday.strftime("%Y-%m-%d"))
+            self.until_var.set("")
+        elif preset == "month":
+            # First day of this month
+            first = today.replace(day=1)
+            self.since_var.set(first.strftime("%Y-%m-%d"))
+            self.until_var.set("")
+        elif preset == "all":
+            self.since_var.set("")
+            self.until_var.set("")
+        self._reanalyze()
 
     def _worker(self, args: dict) -> None:
         try:
