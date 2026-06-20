@@ -48,6 +48,8 @@ class TokenUsage:
     empty_usage_skipped: int = 0  # assistant turns with all-zero usage (skipped)
     started_at: int | None = None  # epoch ms of first counted assistant turn
     ended_at: int | None = None  # epoch ms of last counted assistant turn
+    tool_calls: dict[str, int] = field(default_factory=dict)  # tool_name → call count
+    session_duration_ms: int | None = None  # ended_at - started_at (computed property in practice)
 
     @property
     def total_input(self) -> int:
@@ -67,6 +69,17 @@ class TokenUsage:
 
     def merge(self, other: TokenUsage) -> TokenUsage:
         """Return a new TokenUsage that is the sum of self and other (for aggregation)."""
+        # Merge tool_calls dicts
+        merged_tools: dict[str, int] = {}
+        for tool, count in self.tool_calls.items():
+            merged_tools[tool] = count
+        for tool, count in other.tool_calls.items():
+            merged_tools[tool] = merged_tools.get(tool, 0) + count
+
+        merged_start = _min_ms(self.started_at, other.started_at)
+        merged_end = _max_ms(self.ended_at, other.ended_at)
+        merged_duration = (merged_end - merged_start) if (merged_start and merged_end) else None
+
         return TokenUsage(
             input_tokens=self.input_tokens + other.input_tokens,
             cache_creation_input_tokens=self.cache_creation_input_tokens
@@ -77,8 +90,10 @@ class TokenUsage:
             per_model=_merge_per_model(self.per_model, other.per_model),
             assistant_msgs=self.assistant_msgs + other.assistant_msgs,
             empty_usage_skipped=self.empty_usage_skipped + other.empty_usage_skipped,
-            started_at=_min_ms(self.started_at, other.started_at),
-            ended_at=_max_ms(self.ended_at, other.ended_at),
+            started_at=merged_start,
+            ended_at=merged_end,
+            tool_calls=merged_tools,
+            session_duration_ms=merged_duration,
         )
 
 
@@ -149,3 +164,22 @@ class SessionReport:
     churn_ratio: float | None = None  # deleted / added (rework fraction)
     unseen_writes: int = 0  # Write calls whose target file hadn't been touched yet
                             # in this session (F1 exposure: prior size assumed 0)
+    # --- timing metrics ---
+    avg_turn_latency_sec: float | None = None  # (ended_at - started_at) / assistant_msgs in seconds
+    session_duration_minutes: float | None = None  # session_duration_ms / 60000
+    # --- tool usage pattern ---
+    read_write_ratio: float | None = None  # Read / (Write + Edit)
+    edit_ratio: float | None = None  # Edit / (Edit + Write)
+    exploration_ratio: float | None = None  # (Grep + Glob) / total_tools
+    subagent_density: float | None = None  # subagent_count / assistant_msgs
+    # --- context efficiency ---
+    cache_efficiency: float | None = None  # cache_read / cache_write (>1 means cache paid off)
+    cache_write_ratio: float | None = None  # cache_write / total_input
+    non_cached_input_ratio: float | None = None  # input / total_input
+    # --- file-level quality ---
+    high_churn_file_count: int = 0  # files edited ≥3 times
+    high_churn_details: dict | None = None  # {path: count} for files edited ≥3 (for popup)
+    test_net_loc: int | None = None  # net LOC in test files
+    doc_net_loc: int | None = None  # net LOC in doc files
+    test_loc_ratio: float | None = None  # test_net / net_loc
+    doc_loc_ratio: float | None = None  # doc_net / net_loc

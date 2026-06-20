@@ -102,22 +102,51 @@ def analyze_project(
     code_path = Path(code_dir) if code_dir else cwd
     loc_total = None if no_loc else (loc.tree_loc(code_path) if code_path else None)
 
-    def _mk(meta, u, net, added, deleted, n_sub, unseen) -> SessionReport:
+    def _mk(meta, u, net, added, deleted, n_sub, unseen, sloc=None) -> SessionReport:
+        # Extract file-level quality metrics from SessionLoc if available
+        high_churn = 0
+        test_net = None
+        doc_net = None
+        if sloc:
+            high_churn = sloc.high_churn_files
+            test_net = sloc.test_added - sloc.test_deleted
+            doc_net = sloc.doc_added - sloc.doc_deleted
+
         rep = metrics.compute(
             meta, u, net,
             loc_accumulated=loc_total, task_type=task_type,
             code_added=added, code_deleted=deleted,
+            high_churn_files=high_churn,
+            test_net_loc=test_net,
+            doc_net_loc=doc_net,
             tcer_baseline=baseline_tcer, ncpi_baseline=baseline_ncpi,
             cpe_baseline=baseline_cpe,
         )
         rep.subagent_count = n_sub
         rep.unseen_writes = unseen
+        # Populate high-churn file details (path→count for files edited ≥3).
+        # For merged sessions, union across all slocs; counts are approximate
+        # (each sloc's file_edit_counts starts from scratch).
+        if sloc:
+            details = {}
+            for fp, cnt in sloc.file_edit_counts.items():
+                if cnt >= 3:
+                    details[fp] = details.get(fp, 0) + cnt
+            if details:
+                rep.high_churn_details = dict(sorted(details.items(), key=lambda x: -x[1]))
+        # Fill subagent_density (subagent_count / assistant_msgs)
+        if u.assistant_msgs:
+            rep.subagent_density = n_sub / u.assistant_msgs
         return rep
 
     # Second pass: merge usage + LOC per group, build one report per session.
     reports: list[SessionReport] = []
     tot_added = tot_deleted = tot_unseen = 0
+    tot_high_churn = 0
+    tot_test_added = tot_test_deleted = 0
+    tot_doc_added = tot_doc_deleted = 0
     total_subs = 0
+    tot_file_edit_counts: dict[str, int] = {}
     agg_u = TokenUsage()
     for key, gfiles in groups.items():
         gu = reduce(lambda a, b: a.merge(b),
@@ -133,10 +162,32 @@ def analyze_project(
         added = sum(s.added for s in slocs)
         deleted = sum(s.deleted for s in slocs)
         unseen = sum(s.unseen_writes for s in slocs)
+        # Aggregate file-level quality metrics
+        merged_sloc = loc.SessionLoc(
+            added=added,
+            deleted=deleted,
+            unseen_writes=unseen,
+            high_churn_files=sum(s.high_churn_files for s in slocs),
+            test_added=sum(s.test_added for s in slocs),
+            test_deleted=sum(s.test_deleted for s in slocs),
+            doc_added=sum(s.doc_added for s in slocs),
+            doc_deleted=sum(s.doc_deleted for s in slocs),
+        )
+        # Merge file_edit_counts from all slocs so high_churn_details works.
+        for s in slocs:
+            for fp, cnt in s.file_edit_counts.items():
+                merged_sloc.file_edit_counts[fp] = merged_sloc.file_edit_counts.get(fp, 0) + cnt
         tot_added += added
         tot_deleted += deleted
         tot_unseen += unseen
-        reports.append(_mk(metas[key], gu, added - deleted, added, deleted, n_sub, unseen))
+        tot_high_churn += merged_sloc.high_churn_files
+        tot_test_added += merged_sloc.test_added
+        tot_test_deleted += merged_sloc.test_deleted
+        tot_doc_added += merged_sloc.doc_added
+        tot_doc_deleted += merged_sloc.doc_deleted
+        for fp, cnt in merged_sloc.file_edit_counts.items():
+            tot_file_edit_counts[fp] = tot_file_edit_counts.get(fp, 0) + cnt
+        reports.append(_mk(metas[key], gu, added - deleted, added, deleted, n_sub, unseen, merged_sloc))
 
     agg_meta = SessionMeta(
         session_id="(aggregate)", cwd=str(code_path) if code_path else None,
@@ -145,7 +196,18 @@ def analyze_project(
     if no_loc:
         agg = _mk(agg_meta, agg_u, None, None, None, total_subs, unseen=0)
     else:
-        agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, total_subs, tot_unseen)
+        agg_sloc = loc.SessionLoc(
+            added=tot_added,
+            deleted=tot_deleted,
+            unseen_writes=tot_unseen,
+            high_churn_files=tot_high_churn,
+            test_added=tot_test_added,
+            test_deleted=tot_test_deleted,
+            doc_added=tot_doc_added,
+            doc_deleted=tot_doc_deleted,
+            file_edit_counts=tot_file_edit_counts,
+        )
+        agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, total_subs, tot_unseen, agg_sloc)
 
     return ProjectAnalysis(
         project_hash=proj.name, reports=reports, aggregate=agg,

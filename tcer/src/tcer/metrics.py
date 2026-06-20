@@ -16,6 +16,8 @@ accumulated data.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -65,6 +67,64 @@ PSAC_SLOPE = _get_psac_params()["slope"]
 CHR_WEIGHT = _get_chr_weight()
 
 
+def compute_baselines(reports) -> dict | None:
+    """Derive personal CTEI baselines (TCER/CPE median, NCPI mean) from sessions.
+
+    Returns None if no session has complete TCER/NCPI/CPE data. Framework §8.3
+    recommends building your own reference set once you have accumulated data.
+    """
+    import statistics
+    valid = [r for r in reports
+             if getattr(r, "tcer", None) is not None
+             and getattr(r, "ncpi", None) is not None
+             and getattr(r, "cpe", None) is not None]
+    if not valid:
+        return None
+    return {
+        "tcer": statistics.median(r.tcer for r in valid),
+        "ncpi": statistics.mean(r.ncpi for r in valid),
+        "cpe": statistics.median(r.cpe for r in valid),
+    }
+
+
+def save_baselines(values: dict) -> None:
+    """Write personal CTEI baselines into ``composite_baselines.json`` and refresh.
+
+    Merges into the existing ``ctei_baselines`` block, clears the config cache,
+    and updates the module-level ``*_BASELINE`` constants so the next analysis
+    picks them up. The caller (GUI) confirms before invoking.
+
+    Writes atomically via a temp file + ``os.replace`` to avoid corruption on
+    crash. Works on a shallow copy so the in-memory ``lru_cache`` is never
+    mutated in-place.
+    """
+    # Shallow-copy the cached config so we don't mutate the lru_cache's dict.
+    cfg = {**_load_composite_config()}
+    cfg["ctei_baselines"] = {**cfg.get("ctei_baselines", {}), **values}
+    # Atomic write: write to a sibling temp file, then replace.
+    fd, tmp = tempfile.mkstemp(dir=_COMPOSITE_CONFIG_PATH.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, str(_COMPOSITE_CONFIG_PATH))
+    except BaseException:
+        # On any failure (incl. KeyboardInterrupt) remove the orphan temp file.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+    _load_composite_config.cache_clear()
+
+    global TCER_BASELINE, NCPI_BASELINE, CPE_BASELINE
+    b = _get_baselines()
+    TCER_BASELINE = b["tcer"]
+    NCPI_BASELINE = b["ncpi"]
+    CPE_BASELINE = b["cpe"]
+
+
+
 def _cost_from(o, r: dict[str, float]) -> float:
     """USD cost of one token record ``o`` at rate map ``r`` (TokenUsage or ModelUsage)."""
     return (
@@ -111,6 +171,38 @@ def cost_usd(u: TokenUsage, model: str | None = None) -> float:
     if model is None and u.per_model:
         return sum(cost_by_model(u).values())
     return _cost_from(u, _rates_for(u, model))
+
+
+# --------------------------------------------------------------------------- #
+# New metrics: timing, tool usage, context efficiency
+# --------------------------------------------------------------------------- #
+def avg_turn_latency_sec(u: TokenUsage) -> float | None:
+    """Average latency per assistant turn (seconds). Includes user pauses."""
+    if u.started_at and u.ended_at and u.assistant_msgs:
+        return (u.ended_at - u.started_at) / 1000 / u.assistant_msgs
+    return None
+
+
+def tool_usage_metrics(u: TokenUsage) -> dict[str, float | None]:
+    """Read/Write ratio, Edit ratio, exploration density."""
+    read = u.tool_calls.get("Read", 0)
+    write = u.tool_calls.get("Write", 0)
+    edit = u.tool_calls.get("Edit", 0)
+    grep = u.tool_calls.get("Grep", 0)
+    glob = u.tool_calls.get("Glob", 0)
+    total_tools = sum(u.tool_calls.values())
+
+    return {
+        "read_write_ratio": read / (write + edit) if (write + edit) else None,
+        "edit_ratio": edit / (edit + write) if (edit + write) else None,
+        "exploration_ratio": (grep + glob) / total_tools if total_tools else None,
+    }
+
+
+def cache_efficiency(u: TokenUsage) -> float | None:
+    """Cache read / write ratio (>1 means cache paid off)."""
+    cw = u.cache_creation_input_tokens
+    return (u.cache_read_input_tokens / cw) if cw else None
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +310,9 @@ def compute(
     task_type: str | None = None,
     code_added: int | None = None,
     code_deleted: int | None = None,
+    high_churn_files: int = 0,
+    test_net_loc: int | None = None,
+    doc_net_loc: int | None = None,
     tcer_baseline: float = TCER_BASELINE,
     ncpi_baseline: float = NCPI_BASELINE,
     cpe_baseline: float = CPE_BASELINE,
@@ -252,6 +347,23 @@ def compute(
     ctei_ = ctei(tcer, ncpi_, cpe, chr_, tcer_baseline=tcer_baseline,
                  ncpi_baseline=ncpi_baseline, cpe_baseline=cpe_baseline)
 
+    # --- timing metrics ---
+    avg_turn_lat = avg_turn_latency_sec(u)
+    session_dur_min = (u.session_duration_ms / 60000) if u.session_duration_ms else None
+
+    # --- tool usage pattern ---
+    tool_m = tool_usage_metrics(u)
+    subagent_dens = None  # Will be filled by caller when subagent_count is available
+
+    # --- context efficiency ---
+    cache_eff = cache_efficiency(u)
+    cache_wr = u.cache_creation_input_tokens / total_input if total_input else None
+    non_cached = u.input_tokens / total_input if total_input else None
+
+    # --- file-level quality ---
+    test_ratio = test_net_loc / net_loc if (net_loc and net_loc > 0 and test_net_loc is not None) else None
+    doc_ratio = doc_net_loc / net_loc if (net_loc and net_loc > 0 and doc_net_loc is not None) else None
+
     return SessionReport(
         meta=meta,
         usage=u,
@@ -274,4 +386,22 @@ def compute(
         code_added=code_added,
         code_deleted=code_deleted,
         churn_ratio=churn_ratio(code_added, code_deleted),
+        # --- timing ---
+        avg_turn_latency_sec=avg_turn_lat,
+        session_duration_minutes=session_dur_min,
+        # --- tool usage ---
+        read_write_ratio=tool_m["read_write_ratio"],
+        edit_ratio=tool_m["edit_ratio"],
+        exploration_ratio=tool_m["exploration_ratio"],
+        subagent_density=subagent_dens,
+        # --- context efficiency ---
+        cache_efficiency=cache_eff,
+        cache_write_ratio=cache_wr,
+        non_cached_input_ratio=non_cached,
+        # --- file-level quality ---
+        high_churn_file_count=high_churn_files,
+        test_net_loc=test_net_loc,
+        doc_net_loc=doc_net_loc,
+        test_loc_ratio=test_ratio,
+        doc_loc_ratio=doc_ratio,
     )

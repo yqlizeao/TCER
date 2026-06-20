@@ -14,7 +14,10 @@ from .models import SessionMeta, TokenUsage
 from .paths import projects_dir
 
 # Title-extraction noise to skip, matching cc-switch's filters.
-_TITLE_NOISE_PREFIXES = ("<local-command-caveat", "<command-name>")
+_TITLE_NOISE_PREFIXES = ("<local-command-caveat", "<command-name>", "<ide_opened_file>",
+                         "<command-message>", "/clear")
+# After tag removal, skip these system-generated phrases
+_TITLE_NOISE_AFTER_CLEAN = ("The user opened the file", "You are an expert")
 TITLE_MAX_CHARS = 80
 
 
@@ -81,43 +84,64 @@ def aggregate_usage(path: Path) -> TokenUsage:
     (including zero-usage ones) so sessions with only zero-usage replies still get
     timestamps (needed for accurate git-ground-truth in calibration and for GUI time
     sorting).
+
+    **Tool calls**: counts each tool_use block by name (NOT deduped by message.id,
+    since multiple tool_use blocks in one response are genuine separate calls).
     """
     u = TokenUsage()
     seen: set[str] = set()
     for obj in iter_messages(path):
         msg = obj.get("message")
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+        if not isinstance(msg, dict):
             continue
-        mid = msg.get("id")
-        if isinstance(mid, str):
-            if mid in seen:
-                continue  # same API response, already counted
-            seen.add(mid)
-        # Track time window from all assistant turns (even zero-usage ones).
-        ts = parse_timestamp_ms(obj.get("timestamp"))
-        if ts is not None:
-            u.started_at = ts if u.started_at is None else min(u.started_at, ts)
-            u.ended_at = ts if u.ended_at is None else max(u.ended_at, ts)
-        usage = msg.get("usage") or {}
-        i = _as_int(usage.get("input_tokens"))
-        cw = _as_int(usage.get("cache_creation_input_tokens"))
-        cr = _as_int(usage.get("cache_read_input_tokens"))
-        o = _as_int(usage.get("output_tokens"))
-        if i + cw + cr + o == 0:
-            u.empty_usage_skipped += 1
-            continue
-        u.input_tokens += i
-        u.cache_creation_input_tokens += cw
-        u.cache_read_input_tokens += cr
-        u.output_tokens += o
-        u.assistant_msgs += 1
-        model = msg.get("model")
-        if isinstance(model, str):
-            u.models.add(model)
-        # Per-model bucket (key "" when the model isn't recorded) so mixed-model
-        # sessions can be priced at each model's own rate. Bucket sums stay equal
-        # to the scalar totals above.
-        u.bucket(model if isinstance(model, str) else "").add(i, cw, cr, o)
+
+        # Count tool calls from assistant messages
+        if msg.get("role") == "assistant":
+            mid = msg.get("id")
+            if isinstance(mid, str):
+                if mid in seen:
+                    continue  # same API response, already counted for usage
+                seen.add(mid)
+            # Track time window from all assistant turns (even zero-usage ones).
+            ts = parse_timestamp_ms(obj.get("timestamp"))
+            if ts is not None:
+                u.started_at = ts if u.started_at is None else min(u.started_at, ts)
+                u.ended_at = ts if u.ended_at is None else max(u.ended_at, ts)
+            usage = msg.get("usage") or {}
+            i = _as_int(usage.get("input_tokens"))
+            cw = _as_int(usage.get("cache_creation_input_tokens"))
+            cr = _as_int(usage.get("cache_read_input_tokens"))
+            o = _as_int(usage.get("output_tokens"))
+            if i + cw + cr + o == 0:
+                u.empty_usage_skipped += 1
+                continue
+            u.input_tokens += i
+            u.cache_creation_input_tokens += cw
+            u.cache_read_input_tokens += cr
+            u.output_tokens += o
+            u.assistant_msgs += 1
+            model = msg.get("model")
+            if isinstance(model, str):
+                u.models.add(model)
+            # Per-model bucket (key "" when the model isn't recorded) so mixed-model
+            # sessions can be priced at each model's own rate. Bucket sums stay equal
+            # to the scalar totals above.
+            u.bucket(model if isinstance(model, str) else "").add(i, cw, cr, o)
+
+        # Extract tool_use blocks from content (only assistant messages contain them)
+        if msg.get("role") == "assistant":
+            content = msg.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "tool_use":
+                        tool_name = item.get("name")
+                        if isinstance(tool_name, str):
+                            u.tool_calls[tool_name] = u.tool_calls.get(tool_name, 0) + 1
+
+    # Compute session_duration_ms from the time window
+    if u.started_at and u.ended_at:
+        u.session_duration_ms = u.ended_at - u.started_at
+
     return u
 
 
@@ -127,11 +151,31 @@ def read_session_meta(path: Path) -> SessionMeta:
     Ports cc-switch's ``read_head_tail_lines`` + ``parse_session``: read the first
     ``head_n`` lines and last ``tail_n`` lines only, so listing hundreds of sessions
     doesn't require scanning whole files.
+
+    **Title source = the AI-generated title** (matches VSCode Claude Code's session
+    list). Claude Code writes a refined ``ai-title`` line at the very end of the
+    file as the conversation grows, so the latest title lives in the tail — we take
+    the last non-empty ``aiTitle``. Sessions with no ``ai-title`` yet fall back to
+    the first real user message (VSCode's own pending-title behaviour).
     """
-    head, _tail = _read_head_tail_lines(path, head_n=10, tail_n=30)
+    head, tail = _read_head_tail_lines(path, head_n=20, tail_n=30)
     session_id: str | None = None
     cwd: str | None = None
+
+    # Prefer the AI-generated title. Keep overwriting → the last (newest) non-empty
+    # aiTitle wins. The latest ai-title line sits at the file's end, so the tail
+    # captures it.
     title: str | None = None
+    for line in tail:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") == "ai-title":
+            t = obj.get("aiTitle")
+            if isinstance(t, str) and t.strip():
+                title = t.strip()
+
     for line in head:
         try:
             obj = json.loads(line)
@@ -145,12 +189,21 @@ def read_session_meta(path: Path) -> SessionMeta:
             c = obj.get("cwd")
             if isinstance(c, str):
                 cwd = c
+        # Fallback title only when no ai-title exists: first real user message.
         if title is None:
             msg = obj.get("message")
             if isinstance(msg, dict) and msg.get("role") == "user":
                 txt = extract_text(msg.get("content")).strip()
                 if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
-                    title = truncate_summary(txt, TITLE_MAX_CHARS)
+                    # Remove all XML-like tags (e.g. <ide_opened_file>...</ide_opened_file>)
+                    import re
+                    txt = re.sub(r'<[^>]+>', '', txt).strip()
+                    # Skip system-generated phrases after cleaning
+                    if txt and not txt.startswith(_TITLE_NOISE_AFTER_CLEAN):
+                        title = txt
+
+    if title:
+        title = truncate_summary(title, TITLE_MAX_CHARS)
     return SessionMeta(
         session_id=session_id,
         cwd=cwd,

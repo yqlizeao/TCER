@@ -20,7 +20,8 @@ added. Within a session, overwrites are tracked exactly.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import reader
@@ -44,6 +45,33 @@ EXCLUDE_DIRS = {
 # Tool names that mutate files (so their token cost should produce LOC).
 _EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
+# Path patterns for test files (match any of these regexes)
+_TEST_PATTERNS = [
+    r'/tests?/',           # /test/ or /tests/
+    r'_tests?\.py$',       # foo_test.py
+    r'\.test\.(ts|js|tsx|jsx)$',  # foo.test.ts
+    r'/spec/',             # RSpec style
+]
+
+# Path patterns for documentation files
+_DOC_PATTERNS = [
+    r'\.md$',
+    r'/docs?/',
+    r'README',
+]
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Check if file path matches test file patterns."""
+    normalized = file_path.replace('\\', '/')
+    return any(re.search(pat, normalized, re.IGNORECASE) for pat in _TEST_PATTERNS)
+
+
+def _is_doc_file(file_path: str) -> bool:
+    """Check if file path matches documentation file patterns."""
+    normalized = file_path.replace('\\', '/')
+    return any(re.search(pat, normalized, re.IGNORECASE) for pat in _DOC_PATTERNS)
+
 
 def _nlines(s) -> int:
     """Line count of a string (0 for empty / non-string)."""
@@ -64,12 +92,19 @@ class SessionLoc:
     *existing* file it is wrong: the whole new content is counted as added and the
     deletion is missed (the F1 bug — see the module docstring). This count is an
     upper bound on F1 exposure, not the inflation itself; quantify the real gap
-    with ``calibrate_loc.py`` (git ground truth) when exactness matters.
+    with the GUI's「校准 LOC」feature (git ground truth) when exactness matters.
     """
 
     added: int
     deleted: int
     unseen_writes: int = 0
+    # --- file-level quality metrics ---
+    high_churn_files: int = 0  # files edited ≥3 times
+    test_added: int = 0
+    test_deleted: int = 0
+    doc_added: int = 0
+    doc_deleted: int = 0
+    file_edit_counts: dict[str, int] = field(default_factory=dict)  # internal: path → edit count
 
 
 def session_loc_full(path: Path) -> SessionLoc:
@@ -79,7 +114,10 @@ def session_loc_full(path: Path) -> SessionLoc:
     churn = deleted / added. Only paths with a code suffix are counted.
     """
     file_lines: dict[str, int] = {}  # intra-session current line count per file
+    file_edits: dict[str, int] = {}  # edit count per file
     added = deleted = unseen = 0
+    test_added = test_deleted = 0
+    doc_added = doc_deleted = 0
 
     for obj in reader.iter_messages(path):
         msg = obj.get("message")
@@ -98,6 +136,10 @@ def session_loc_full(path: Path) -> SessionLoc:
             fp = inp.get("file_path") or inp.get("notebook_path") or ""
             if not _is_code(fp):
                 continue
+
+            # Track edit count per file
+            file_edits[fp] = file_edits.get(fp, 0) + 1
+
             # A Write to a file not yet seen in this session assumes old=0 — the
             # F1 exposure. (Edit/MultiEdit only use deltas, so they're immune and
             # don't count here.)
@@ -106,7 +148,29 @@ def session_loc_full(path: Path) -> SessionLoc:
             a, d = _delta_for_tool(name, inp, file_lines, fp)
             added += a
             deleted += d
-    return SessionLoc(added=added, deleted=deleted, unseen_writes=unseen)
+
+            # Classify by file type
+            if _is_test_file(fp):
+                test_added += a
+                test_deleted += d
+            elif _is_doc_file(fp):
+                doc_added += a
+                doc_deleted += d
+
+    # Count high-churn files (edited ≥3 times)
+    high_churn = sum(1 for count in file_edits.values() if count >= 3)
+
+    return SessionLoc(
+        added=added,
+        deleted=deleted,
+        unseen_writes=unseen,
+        high_churn_files=high_churn,
+        test_added=test_added,
+        test_deleted=test_deleted,
+        doc_added=doc_added,
+        doc_deleted=doc_deleted,
+        file_edit_counts=file_edits,
+    )
 
 
 def session_loc(path: Path) -> tuple[int, int]:

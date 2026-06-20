@@ -3,7 +3,8 @@
 Token-to-Code Efficiency Ratio — offline metrics for Claude Code sessions.
 
 `tcer` parses the JSONL session files Claude Code writes under `~/.claude/projects/`
-(no API calls, no instrumentation) and computes token-efficiency metrics:
+(no API calls, no instrumentation, no git dependency, no network) and computes
+token-efficiency metrics:
 
 - **CHR** — cache hit ratio
 - **I/O ratio** — total input / output
@@ -40,20 +41,8 @@ changes, fully portable. Run the package straight from `src/` with `python -m`:
 
 ```bash
 cd tcer/src
-python -m tcer.gui                                        # launch the Tkinter GUI
-python -m tcer.cli list                                   # show all discovered projects
-
-python -m tcer.cli report --project TCER                  # full report for a project
-python -m tcer.cli report --project TCER --session <id>   # single session (substring match)
-python -m tcer.cli report --project TCER --no-subagents   # main sessions only
-python -m tcer.cli report --project TCER --code-dir DIR   # dir scanned for accumulated LOC
-python -m tcer.cli report --project TCER --no-loc         # token metrics only (skip LOC/TCER)
-python -m tcer.cli report --project TCER --csv out.csv    # export per-session CSV
-python -m tcer.cli report --project TCER --json           # JSON to stdout
-python -m tcer.cli report --project TCER --task-type debug      # TTAF/TA-TCER for a debug session
-python -m tcer.cli report --project TCER --baseline-tcer 80     # override CTEI baselines
-python -m tcer.cli report --project TCER --chart                # per-session CTEI bar chart (colored)
-python -m tcer.cli report --project TCER --chart --no-color     # chart without ANSI color
+python -m tcer                                        # launch the Tkinter GUI (main entry)
+python -m tcer.gui                                    # same (compatibility entry)
 ```
 
 Running from `src/` puts the `tcer` package on the import path with zero setup —
@@ -61,22 +50,28 @@ no editable install, no console-script entry points on your PATH.
 
 ### GUI
 
-`python -m tcer.gui` (run from `tcer/src`) opens a desktop window: a
-project list on the left, a metrics report on the right (summary cards +
-per-session table colored by CTEI grade + a per-session CTEI bar chart). The
-task-type selector and "exclude subagent" toggle re-run the analysis live. Pure
-stdlib `tkinter`; analysis runs on a background thread so the UI stays responsive.
+`python -m tcer` (run from `tcer/src`) opens a Tkinter desktop window with a
+three-column layout: **project list** on the left, **session list** in the middle,
+and a **right panel** showing detailed metrics. The right panel is a tabbed
+notebook with three tabs:
 
-`--project` accepts a name or hash; `TCER` resolves to the `c--GitHub-TCER` folder.
-By default **subagents are folded into their parent session** (one session =
-main file + its subagents): their tokens and code count toward the parent, but
-they are not listed or counted as separate sessions — so the session count
-matches cc-switch. Use `--no-subagents` to exclude subagent data entirely.
+- **五层指标** (five-layer metrics) — 41 metrics across all five layers, with
+  a glossary popup featuring color-coded metric explanations.
+- **综合效率指数排名** (CTEI ranking) — per-session CTEI bar chart, sorted
+  descending, colored by grade.
+- **趋势** (trend) — line chart showing metric trends over time.
 
-`--task-type` is one of `feature` (default) / `feature-ext` / `debug` / `refactor`
-/ `review` / `test`. CTEI baselines default to the framework's reference dataset
-medians (TCER 76.59, NCPI 0.101, CPE 8.22) so scores stay on the published scale;
-override them with `--baseline-*` once you have your own accumulated data.
+Top bar controls: **task type** selector, **time range** filter, and
+**view toggle** (project/session). Features:
+
+- **Export** — JSON / CSV / Markdown via the menu bar.
+- **Model detail popup** — per-model token usage, cost, and percentage breakdown.
+- **High-churn files popup** — files edited ≥3 times with edit counts.
+- **Baseline reference** — current CTEI baselines shown in L5 metrics panel.
+
+Analysis runs on a background thread so the UI stays responsive. Pure stdlib
+`tkinter` (MVC architecture, 6 modules). Purely offline — no git dependency,
+no network access.
 
 ## Design notes
 
@@ -106,20 +101,23 @@ override them with `--baseline-*` once you have your own accumulated data.
   `Write` touches, upper-bounding F1 exposure. Real-world bias depends on your
   workflow: TCER's 9 sessions show 0% (new-file `Write` + old-file `Edit`), but
   a controlled overwrite-existing-file scenario inflates net by 100 lines per
-  call. For exact quantification, `../calibrate_loc.py` (git ground-truth) is
-  provided; the core stays git-free and the exposure is visible via the counter.
+  call. **NEW**: the GUI's「校准 LOC」button compares tool-call LOC against git
+  ground truth (`git log --numstat`) to quantify actual deviation per session
+  and compute a global calibration factor. The core stays git-free and the
+  exposure is visible via the counter.
 - **NCPI caveat**: at the whole-project aggregate level NCPI can approach/exceed
   1.0 (cumulative net vs current size); it's most meaningful per session.
 - **TTAF source**: values follow the metric framework §6.4 (refactor 0.50,
   review 0.20), the authoritative framework.
-- **`--chart`**: per-session CTEI bars, sorted desc, colored by grade. Sessions
-  with no measurable net code have no CPE/CTEI and are omitted. ANSI color is
-  auto-disabled when stdout is not a TTY (e.g. piped).
+- **CTEI chart**: per-session CTEI bars, sorted desc, colored by grade. Sessions
+  with no measurable net code have no CPE/CTEI and are omitted. Available in
+  the GUI's「综合效率指数排名」tab.
 
 ## Scope
 
-Done: read layer + core metrics + git-free LOC + CLI + composite layer (CTEI /
-TTAF / TA-TCER / PSAC / NCPI / CAF) + L3 churn ratio + per-session CTEI bar chart
-+ Tkinter GUI. The CTEI formula reproduces the framework's published per-session
-scores to <0.1% (see `tests/test_metrics.py`). Planned: remaining L3 signals
-(cyclomatic complexity / coverage delta) as opt-in radon/lizard/coverage.py.
+Done: read layer + core metrics + git-free LOC + composite layer (CTEI / TTAF
+/ TA-TCER / PSAC / NCPI / CAF) + L3 metrics + Tkinter GUI (MVC architecture,
+6 modules) + CTEI bar chart + trend chart + export (JSON/CSV/MD) + model
+detail popup + high-churn files popup + baseline reference in L5. GUI-only
+(CLI retired). Purely offline — no git, no network. The CTEI formula
+reproduces the framework's published per-session scores to <0.1%.
