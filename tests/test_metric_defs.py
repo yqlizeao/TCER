@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tcer import metrics
+from tcer.core import metrics
 from tcer.gui import metric_defs
-from tcer.models import SessionMeta, TokenUsage
+from tcer.core.models import SessionMeta, TokenUsage
 
 
 def _report():

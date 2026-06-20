@@ -15,8 +15,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from .. import analyze, export as export_mod, metrics
-from ..paths import list_projects
+from tcer.core import analyze, export as export_mod, metrics
+from tcer.core.paths import list_projects
 from . import popups, theme, views
 from .views import CteiBarChart, FilterBar, MetricPanel, ProjectColumn, SessionColumn, TrendChart
 

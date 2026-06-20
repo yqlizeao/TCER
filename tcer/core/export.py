@@ -12,9 +12,9 @@ import io
 import json
 from pathlib import Path
 
-from . import format as fmt
-from . import metrics
-from .models import SessionReport, TokenUsage
+from tcer.core import format as fmt
+from tcer.core import metrics
+from tcer.core.models import SessionReport, TokenUsage
 
 
 # --------------------------------------------------------------------------- #

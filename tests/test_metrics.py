@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tcer import metrics
-from tcer.models import SessionMeta, TokenUsage
+from tcer.core import metrics
+from tcer.core.models import SessionMeta, TokenUsage
 
 META = SessionMeta(session_id="s", cwd="/tmp", title=None,
                    path=Path("/tmp/s.jsonl"), is_subagent=False)

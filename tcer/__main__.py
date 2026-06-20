@@ -1,12 +1,9 @@
-"""``python -m tcer`` — launch the TCER GUI (the product's only entry point).
-
-The CLI has been retired; TCER is GUI-only. ``python -m tcer.gui`` is an alias.
-"""
+"""``python -m tcer`` — launch the TCER GUI."""
 from __future__ import annotations
 
 import sys
 
-from .gui import main
+from tcer.gui import main
 
 if __name__ == "__main__":
     sys.exit(main())

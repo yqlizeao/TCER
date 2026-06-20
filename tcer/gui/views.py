@@ -10,9 +10,9 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from .. import metrics
-from ..export import ctei_ranking
-from ..format import fmt_dt
+from tcer.core import metrics
+from tcer.core.export import ctei_ranking
+from tcer.core.format import fmt_dt
 from . import theme
 from .metric_defs import LAYERS, report_values
 from .widgets import Card, MetricCell, ScrollFrame, Tooltip

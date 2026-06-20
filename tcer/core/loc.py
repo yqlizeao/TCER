@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import reader
+from tcer.core import reader
 
 # File suffixes counted as "code". Deliberately includes docs (.md) and config
 # (.json/.yaml/.toml) since notes and project files are real output for this repo.

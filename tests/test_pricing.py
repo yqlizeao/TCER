@@ -1,6 +1,6 @@
 """Tests for per-model pricing resolution (data/model_pricing.json + pricing.py)."""
-from tcer import metrics, pricing
-from tcer.models import TokenUsage
+from tcer.core import metrics, pricing
+from tcer.core.models import TokenUsage
 
 
 def test_table_loaded():

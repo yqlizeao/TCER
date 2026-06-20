@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
 
-from . import loc, metrics, reader
-from .models import SessionMeta, SessionReport, TokenUsage
-from .paths import resolve_project
+from tcer.core import loc, metrics, reader
+from tcer.core.models import SessionMeta, SessionReport, TokenUsage
+from tcer.core.paths import resolve_project
 
 
 @dataclass

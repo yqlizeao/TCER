@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tcer import metrics
-from tcer.models import SessionMeta, TokenUsage
+from tcer.core import metrics
+from tcer.core.models import SessionMeta, TokenUsage
 
 
 def _report(net_loc: int):

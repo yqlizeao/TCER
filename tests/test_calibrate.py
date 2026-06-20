@@ -4,7 +4,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from tcer import calibrate, loc
+from tcer.core import calibrate, loc
 
 
 def test_parse_numstat_line():

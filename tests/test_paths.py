@@ -1,7 +1,7 @@
 """Tests for paths.py — hash encoding (CLAUDE.md spec)."""
 from __future__ import annotations
 
-from tcer import paths
+from tcer.core import paths
 
 
 def test_encode_hash_windows_path():

@@ -10,8 +10,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .models import SessionMeta, TokenUsage
-from .paths import projects_dir
+from tcer.core.models import SessionMeta, TokenUsage
+from tcer.core.paths import projects_dir
 
 # Title-extraction noise to skip, matching cc-switch's filters.
 _TITLE_NOISE_PREFIXES = ("<local-command-caveat", "<command-name>", "<ide_opened_file>",

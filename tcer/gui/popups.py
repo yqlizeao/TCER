@@ -9,8 +9,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from .. import format as fmt
-from .. import metrics
+from tcer.core import format as fmt
+from tcer.core import metrics
 from . import theme
 from .metric_defs import CONCEPT_NOTES, LAYERS
 from .widgets import ScrollFrame

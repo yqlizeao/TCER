@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from tcer import loc
+from tcer.core import loc
 
 
 def _write_jsonl(path, tool_calls):

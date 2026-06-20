@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from . import analyze, loc, paths, reader
+from tcer.core import analyze, loc, paths, reader
 
 
 @dataclass

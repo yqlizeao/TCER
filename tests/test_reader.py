@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tcer import reader
+from tcer.core import reader
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample.jsonl"
 

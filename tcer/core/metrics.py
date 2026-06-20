@@ -21,8 +21,8 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 
-from . import pricing
-from .models import SessionMeta, SessionReport, TokenUsage
+from tcer.core import pricing
+from tcer.core.models import SessionMeta, SessionReport, TokenUsage
 
 # Fallback $/MTok rates for unknown / mixed-model usage. Mirrors the ``default``
 # block of ``data/model_pricing.json`` (Anthropic generic list price; cache read
@@ -30,7 +30,7 @@ from .models import SessionMeta, SessionReport, TokenUsage
 # via ``pricing.resolve``; see ``cost_usd`` below.
 PRICING = pricing.default_pricing()
 
-_COMPOSITE_CONFIG_PATH = Path(__file__).parent / "data" / "composite_baselines.json"
+_COMPOSITE_CONFIG_PATH = Path(__file__).parent.parent / "data" / "composite_baselines.json"
 
 
 @lru_cache(maxsize=1)

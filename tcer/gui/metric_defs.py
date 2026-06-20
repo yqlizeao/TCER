@@ -13,9 +13,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .. import format as fmt
-from .. import metrics as _metrics
-from ..models import SessionReport
+from tcer.core import format as fmt
+from tcer.core import metrics as _metrics
+from tcer.core.models import SessionReport
 
 
 @dataclass(frozen=True)

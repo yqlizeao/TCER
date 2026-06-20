@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tcer import export, format as fmt, metrics
-from tcer.models import SessionMeta, TokenUsage
+from tcer.core import export, format as fmt, metrics
+from tcer.core.models import SessionMeta, TokenUsage
 
 
 def _report(net_loc: int, sub: bool = False, sid: str = "sess") -> metrics.SessionReport:
