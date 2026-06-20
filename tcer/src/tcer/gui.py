@@ -274,8 +274,10 @@ class TcerGui:
         # Per-session table
         keys = [c[0] for c in TABLE_COLS]
         self.tree = ttk.Treeview(right, columns=keys, show="headings", height=10)
+        self._sort_col = "CTEI"  # default sort column
+        self._sort_reverse = True  # default descending (high CTEI first)
         for key, label, w, tip in TABLE_COLS:
-            self.tree.heading(key, text=label)
+            self.tree.heading(key, text=label, command=lambda k=key: self._sort_by(k))
             # Only the model column stretches; the rest stay fixed so model gets
             # the leftover width instead of every column shrinking evenly.
             self.tree.column(key, width=w, minwidth=40, anchor="w",
@@ -358,6 +360,18 @@ class TcerGui:
             self.until_var.set("")
         self._reanalyze()
 
+    def _sort_by(self, col: str) -> None:
+        """Sort table by column (toggle ascending/descending)."""
+        if col == self._sort_col:
+            # Same column → toggle direction
+            self._sort_reverse = not self._sort_reverse
+        else:
+            # New column → default to descending for numeric, ascending for text
+            self._sort_col = col
+            self._sort_reverse = col not in ("session", "time", "model", "评级")
+        if self._current:
+            self._render(self._current)
+
     def _worker(self, args: dict) -> None:
         try:
             result = analyze.analyze_project(**args)
@@ -396,7 +410,39 @@ class TcerGui:
         self.tree.delete(*self.tree.get_children())
         for tag, color in GRADE_HEX.items():
             self.tree.tag_configure(tag, foreground=color)
-        for r in a.reports:
+
+        # Sort by current column and direction
+        def sort_key(r):
+            col = self._sort_col
+            if col == "session":
+                return r.meta.session_id or ""
+            if col == "time":
+                return r.usage.started_at or 0
+            if col == "sub":
+                return r.subagent_count or 0
+            if col == "turns":
+                return r.usage.assistant_msgs
+            if col == "tokens":
+                return r.usage.total
+            if col == "CHR":
+                return r.chr or -1
+            if col == "cost":
+                return r.cost or -1
+            if col == "netLOC":
+                return r.net_loc or -1
+            if col == "TCER":
+                return r.tcer or -1
+            if col == "CTEI":
+                return r.ctei or -1
+            if col == "评级":
+                return r.grade or "zzz"  # sort None last
+            if col == "model":
+                return ", ".join(sorted(r.usage.models)) if r.usage.models else ""
+            return 0
+
+        sorted_reports = sorted(a.reports, key=sort_key, reverse=self._sort_reverse)
+
+        for r in sorted_reports:
             sid = (r.meta.session_id or r.meta.path.stem)[:18]
             row = (
                 sid,
