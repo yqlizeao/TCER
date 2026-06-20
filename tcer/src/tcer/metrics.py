@@ -7,8 +7,17 @@ authoritative original framework.
 Costs are priced per model via ``pricing`` (each model's tokens at its own
 $/MTok rate), falling back to the Anthropic list-price ``default`` for unknown
 or mixed-model usage; see ``cost_usd``.
+
+Composite-layer constants (TTAF, CTEI baselines, PSAC regression, CHR weight)
+are loaded from ``data/composite_baselines.json`` — a hand-editable config so
+you can override the framework's reference-dataset defaults with your own
+accumulated data.
 """
 from __future__ import annotations
+
+import json
+from functools import lru_cache
+from pathlib import Path
 
 from . import pricing
 from .models import SessionMeta, SessionReport, TokenUsage
@@ -19,30 +28,41 @@ from .models import SessionMeta, SessionReport, TokenUsage
 # via ``pricing.resolve``; see ``cost_usd`` below.
 PRICING = pricing.default_pricing()
 
-# --------------------------------------------------------------------------- #
-# Composite-layer constants (authoritative source: metric framework §6)
-# --------------------------------------------------------------------------- #
-# CTEI baselines = medians (TCER, CPE) / mean (NCPI) of the framework's 16-session
-# reference dataset. Defaults keep CTEI on the same scale as the published
-# framework so scores are directly comparable; overridable (framework §8.3 — build a
-# personal baseline DB from your own accumulated sessions).
-TCER_BASELINE = 76.59  # dataset median TCER (LOC/Mt)
-NCPI_BASELINE = 0.101  # dataset expected NCPI (contribution density)
-CPE_BASELINE = 8.22    # dataset median CPE ($/kLOC)
+_COMPOSITE_CONFIG_PATH = Path(__file__).parent / "data" / "composite_baselines.json"
 
-# Task Type Adjustment Factor (framework §6.4, the authoritative source).
-TTAF = {
-    "feature": 1.00,      # 新功能开发 greenfield（基准）
-    "feature-ext": 0.85,  # 功能扩展 existing codebase
-    "debug": 0.40,        # Bug 调试 / fix
-    "refactor": 0.50,     # 重构
-    "review": 0.20,       # 代码审查
-    "test": 0.90,         # 测试编写
-}
 
-# Project-stage regression (framework §6.5): TCER ≈ -0.000866 * LOC_accum + 83.64
-PSAC_INTERCEPT = 83.64
-PSAC_SLOPE = 0.000866
+@lru_cache(maxsize=1)
+def _load_composite_config() -> dict:
+    """Load composite-layer config (TTAF / baselines / PSAC / CHR weight)."""
+    with _COMPOSITE_CONFIG_PATH.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+# Composite-layer constants (loaded from config; expose module-level for backward compat).
+def _get_ttaf() -> dict[str, float]:
+    return _load_composite_config()["ttaf"]
+
+
+def _get_baselines() -> dict[str, float]:
+    return _load_composite_config()["ctei_baselines"]
+
+
+def _get_psac_params() -> dict[str, float]:
+    return _load_composite_config()["psac"]
+
+
+def _get_chr_weight() -> float:
+    return _load_composite_config()["chr_weight"]
+
+
+# Module-level read-only views (for backward compat with existing callers that read these).
+TTAF = {k: v for k, v in _get_ttaf().items() if not k.startswith("_")}
+TCER_BASELINE = _get_baselines()["tcer"]
+NCPI_BASELINE = _get_baselines()["ncpi"]
+CPE_BASELINE = _get_baselines()["cpe"]
+PSAC_INTERCEPT = _get_psac_params()["intercept"]
+PSAC_SLOPE = _get_psac_params()["slope"]
+CHR_WEIGHT = _get_chr_weight()
 
 
 def _cost_from(o, r: dict[str, float]) -> float:
@@ -133,8 +153,8 @@ def psac(loc_accumulated: int | None) -> float | None:
 
 
 def chr_factor(chr_: float | None) -> float:
-    """CHR reward factor = 1 + CHR*0.5 (framework §6.3): +10% CHR → +5% CTEI."""
-    return 1.0 + (chr_ or 0.0) * 0.5
+    """CHR reward factor = 1 + CHR*weight (framework §6.3): +10% CHR → +5% CTEI (default weight)."""
+    return 1.0 + (chr_ or 0.0) * CHR_WEIGHT
 
 
 def churn_ratio(added: int | None, deleted: int | None) -> float | None:

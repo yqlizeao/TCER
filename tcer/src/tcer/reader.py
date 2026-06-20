@@ -76,6 +76,11 @@ def aggregate_usage(path: Path) -> TokenUsage:
 
     Turns whose usage is entirely zero (e.g. pure-thinking stubs) are skipped and
     counted in ``empty_usage_skipped`` per CLAUDE.md note 7.
+
+    **Time window**: tracks ``started_at`` / ``ended_at`` from *all* assistant turns
+    (including zero-usage ones) so sessions with only zero-usage replies still get
+    timestamps (needed for accurate git-ground-truth in calibration and for GUI time
+    sorting).
     """
     u = TokenUsage()
     seen: set[str] = set()
@@ -88,6 +93,11 @@ def aggregate_usage(path: Path) -> TokenUsage:
             if mid in seen:
                 continue  # same API response, already counted
             seen.add(mid)
+        # Track time window from all assistant turns (even zero-usage ones).
+        ts = parse_timestamp_ms(obj.get("timestamp"))
+        if ts is not None:
+            u.started_at = ts if u.started_at is None else min(u.started_at, ts)
+            u.ended_at = ts if u.ended_at is None else max(u.ended_at, ts)
         usage = msg.get("usage") or {}
         i = _as_int(usage.get("input_tokens"))
         cw = _as_int(usage.get("cache_creation_input_tokens"))
@@ -108,10 +118,6 @@ def aggregate_usage(path: Path) -> TokenUsage:
         # sessions can be priced at each model's own rate. Bucket sums stay equal
         # to the scalar totals above.
         u.bucket(model if isinstance(model, str) else "").add(i, cw, cr, o)
-        ts = parse_timestamp_ms(obj.get("timestamp"))
-        if ts is not None:
-            u.started_at = ts if u.started_at is None else min(u.started_at, ts)
-            u.ended_at = ts if u.ended_at is None else max(u.ended_at, ts)
     return u
 
 

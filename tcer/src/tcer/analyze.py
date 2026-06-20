@@ -80,7 +80,7 @@ def analyze_project(
     code_path = Path(code_dir) if code_dir else cwd
     loc_total = None if no_loc else (loc.tree_loc(code_path) if code_path else None)
 
-    def _mk(meta, u, net, added, deleted, n_sub) -> SessionReport:
+    def _mk(meta, u, net, added, deleted, n_sub, unseen) -> SessionReport:
         rep = metrics.compute(
             meta, u, net,
             loc_accumulated=loc_total, task_type=task_type,
@@ -89,11 +89,12 @@ def analyze_project(
             cpe_baseline=baseline_cpe,
         )
         rep.subagent_count = n_sub
+        rep.unseen_writes = unseen
         return rep
 
     # Second pass: merge usage + LOC per group, build one report per session.
     reports: list[SessionReport] = []
-    tot_added = tot_deleted = 0
+    tot_added = tot_deleted = tot_unseen = 0
     total_subs = 0
     agg_u = TokenUsage()
     for key, gfiles in groups.items():
@@ -103,25 +104,26 @@ def analyze_project(
         total_subs += n_sub
         agg_u = agg_u.merge(gu)
         if no_loc:
-            reports.append(_mk(metas[key], gu, None, None, None, n_sub))
+            reports.append(_mk(metas[key], gu, None, None, None, n_sub, unseen=0))
             continue
-        added = deleted = 0
-        for f in gfiles:
-            a, d = loc.session_loc(f)
-            added += a
-            deleted += d
+        # Sum LOC across all files in this group (main session + its subagents).
+        slocs = [loc.session_loc_full(f) for f in gfiles]
+        added = sum(s.added for s in slocs)
+        deleted = sum(s.deleted for s in slocs)
+        unseen = sum(s.unseen_writes for s in slocs)
         tot_added += added
         tot_deleted += deleted
-        reports.append(_mk(metas[key], gu, added - deleted, added, deleted, n_sub))
+        tot_unseen += unseen
+        reports.append(_mk(metas[key], gu, added - deleted, added, deleted, n_sub, unseen))
 
     agg_meta = SessionMeta(
         session_id="(aggregate)", cwd=str(code_path) if code_path else None,
         title=None, path=proj, is_subagent=False,
     )
     if no_loc:
-        agg = _mk(agg_meta, agg_u, None, None, None, total_subs)
+        agg = _mk(agg_meta, agg_u, None, None, None, total_subs, unseen=0)
     else:
-        agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, total_subs)
+        agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, total_subs, tot_unseen)
 
     return ProjectAnalysis(
         project_hash=proj.name, reports=reports, aggregate=agg,

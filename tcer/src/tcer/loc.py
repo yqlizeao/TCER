@@ -20,6 +20,7 @@ added. Within a session, overwrites are tracked exactly.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import reader
@@ -53,14 +54,32 @@ def _is_code(file_path: str) -> bool:
     return Path(file_path).suffix.lower() in CODE_SUFFIXES
 
 
-def session_loc(path: Path) -> tuple[int, int]:
-    """Return (added, deleted) code lines from one session's file-mutating tool calls.
+@dataclass
+class SessionLoc:
+    """LOC breakdown for one session, plus an F1 exposure counter.
+
+    ``unseen_writes`` counts ``Write`` calls whose target file the session hadn't
+    touched yet — i.e. where the prior size was *assumed to be 0*. For a Write to a
+    genuinely new file that assumption is correct; for a Write that overwrites an
+    *existing* file it is wrong: the whole new content is counted as added and the
+    deletion is missed (the F1 bug — see the module docstring). This count is an
+    upper bound on F1 exposure, not the inflation itself; quantify the real gap
+    with ``calibrate_loc.py`` (git ground truth) when exactness matters.
+    """
+
+    added: int
+    deleted: int
+    unseen_writes: int = 0
+
+
+def session_loc_full(path: Path) -> SessionLoc:
+    """Full LOC breakdown for one session (added / deleted / unseen_writes).
 
     Replays Write/Edit/MultiEdit/NotebookEdit in order. Net LOC = added - deleted;
     churn = deleted / added. Only paths with a code suffix are counted.
     """
     file_lines: dict[str, int] = {}  # intra-session current line count per file
-    added = deleted = 0
+    added = deleted = unseen = 0
 
     for obj in reader.iter_messages(path):
         msg = obj.get("message")
@@ -79,10 +98,21 @@ def session_loc(path: Path) -> tuple[int, int]:
             fp = inp.get("file_path") or inp.get("notebook_path") or ""
             if not _is_code(fp):
                 continue
+            # A Write to a file not yet seen in this session assumes old=0 — the
+            # F1 exposure. (Edit/MultiEdit only use deltas, so they're immune and
+            # don't count here.)
+            if name == "Write" and fp not in file_lines:
+                unseen += 1
             a, d = _delta_for_tool(name, inp, file_lines, fp)
             added += a
             deleted += d
-    return added, deleted
+    return SessionLoc(added=added, deleted=deleted, unseen_writes=unseen)
+
+
+def session_loc(path: Path) -> tuple[int, int]:
+    """``(added, deleted)`` — backward-compatible tuple view of ``session_loc_full``."""
+    r = session_loc_full(path)
+    return r.added, r.deleted
 
 
 def _delta_for_tool(name: str, inp: dict, file_lines: dict[str, int], fp: str) -> tuple[int, int]:
@@ -143,7 +173,10 @@ def tree_loc(root: Path) -> int | None:
                 continue
             fpath = Path(dirpath) / fn
             try:
-                with open(fpath, "rb") as fh:
+                # Text mode with universal newlines so the count matches
+                # ``_nlines`` (splitlines): \r\n and lone \r are normalized to \n
+                # before splitting, the same as session_loc's line accounting.
+                with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
                     total += sum(1 for _ in fh)
             except OSError:
                 continue

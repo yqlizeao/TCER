@@ -1,0 +1,29 @@
+{
+  "_meta": {
+    "description": "Composite-layer (L5) baselines and task-type adjustment factors",
+    "source": "Default values from the metric framework §6.3–6.5 (16-session reference dataset)",
+    "last_updated": "2026-06-20"
+  },
+  "ctei_baselines": {
+    "tcer": 76.59,
+    "ncpi": 0.101,
+    "cpe": 8.22,
+    "_note": "Medians (TCER, CPE) and mean (NCPI) from the framework's reference dataset. Override these once you have your own accumulated data."
+  },
+  "ttaf": {
+    "feature": 1.0,
+    "feature-ext": 0.85,
+    "debug": 0.4,
+    "refactor": 0.5,
+    "review": 0.2,
+    "test": 0.9,
+    "_note": "Task Type Adjustment Factor (framework §6.4). Values represent relative difficulty: feature (greenfield) is the baseline 1.0."
+  },
+  "psac": {
+    "intercept": 83.64,
+    "slope": 0.000866,
+    "_note": "Project-Stage Adjustment Coefficient regression (framework §6.5): TCER ≈ -slope * LOC_accum + intercept. Neutralizes the structural TCER decline of larger codebases."
+  },
+  "chr_weight": 0.5,
+  "_chr_note": "CHR reward factor = 1 + CHR * chr_weight (framework §6.3). A 10% CHR increase yields a 5% CTEI boost."
+}

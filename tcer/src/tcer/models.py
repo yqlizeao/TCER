@@ -147,3 +147,5 @@ class SessionReport:
     code_deleted: int | None = None  # gross code lines deleted (from tool calls)
     subagent_count: int = 0  # number of subagent sessions folded into this one
     churn_ratio: float | None = None  # deleted / added (rework fraction)
+    unseen_writes: int = 0  # Write calls whose target file hadn't been touched yet
+                            # in this session (F1 exposure: prior size assumed 0)

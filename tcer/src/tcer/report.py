@@ -118,6 +118,8 @@ def _composite_lines(agg: SessionReport) -> list[str]:
     lines = []
     if agg.churn_ratio is not None or agg.code_added is not None:
         churn = fmt_pct(agg.churn_ratio)
+        f1_warn = (f"  ⚠ {agg.unseen_writes} unseen Writes (F1 exposure)"
+                   if agg.unseen_writes else "")
         lines += [
             "",
             "Quality (L3)",
@@ -125,6 +127,8 @@ def _composite_lines(agg: SessionReport) -> list[str]:
             f"  code added/del   : +{fmt_int(agg.code_added)} / -{fmt_int(agg.code_deleted)}",
             f"  churn ratio      : {churn}  (deleted / added — lower is less rework)",
         ]
+        if f1_warn:
+            lines.append(f1_warn)
     lines += [
         "",
         "Composite (L5)",
@@ -231,6 +235,7 @@ def _report_row_dict(r: SessionReport) -> dict:
         "code_added": r.code_added,
         "code_deleted": r.code_deleted,
         "churn_ratio": r.churn_ratio,
+        "unseen_writes": r.unseen_writes,
         "models": sorted(u.models),
         "models_label": models_label(u),
         "cost_by_model": {m: round(c, 6) for m, c in sorted(metrics.cost_by_model(u).items())},

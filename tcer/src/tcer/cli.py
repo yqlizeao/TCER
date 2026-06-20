@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--csv", metavar="FILE", help="write per-session CSV to FILE")
     r.add_argument("--chart", action="store_true", help="render a per-session CTEI bar chart")
     r.add_argument("--no-color", action="store_true", help="disable ANSI color in the chart")
+    r.add_argument("--compute-baselines", action="store_true",
+                   help="compute TCER/NCPI/CPE baselines from this project's sessions and print them (does not modify config)")
     return p
 
 
@@ -74,6 +76,10 @@ def cmd_report(args) -> int:
     except FileNotFoundError as e:
         raise SystemExit(f"error: {e}")
 
+    if args.compute_baselines:
+        _print_computed_baselines(result.reports)
+        return 0
+
     if args.json:
         print(report.to_json(result.reports, result.aggregate, result.n_sessions))
         return 0
@@ -90,6 +96,33 @@ def cmd_report(args) -> int:
         print()
         print(report.ctei_chart(result.reports, color=color))
     return 0
+
+
+def _print_computed_baselines(reports: list) -> None:
+    """Compute TCER/NCPI/CPE baselines from sessions (median/mean) and print as JSON snippet."""
+    import statistics
+    valid = [r for r in reports if r.tcer is not None and r.ncpi is not None and r.cpe is not None]
+    if not valid:
+        print("(no sessions with complete TCER/NCPI/CPE data to compute baselines)")
+        return
+    tcer_vals = [r.tcer for r in valid]
+    ncpi_vals = [r.ncpi for r in valid]
+    cpe_vals = [r.cpe for r in valid]
+    tcer_med = statistics.median(tcer_vals)
+    ncpi_mean = statistics.mean(ncpi_vals)
+    cpe_med = statistics.median(cpe_vals)
+    print(f"Computed baselines from {len(valid)} sessions:")
+    print(f"  TCER (median) : {tcer_med:.2f}")
+    print(f"  NCPI (mean)   : {ncpi_mean:.3f}")
+    print(f"  CPE (median)  : ${cpe_med:.2f}")
+    print()
+    print("To use these as your CTEI baselines, edit tcer/src/tcer/data/composite_baselines.json:")
+    print('  "ctei_baselines": {')
+    print(f'    "tcer": {tcer_med:.2f},')
+    print(f'    "ncpi": {ncpi_mean:.3f},')
+    print(f'    "cpe": {cpe_med:.2f}')
+    print('  }')
+
 
 
 def cmd_gui(args) -> int:

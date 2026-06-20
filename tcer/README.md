@@ -98,9 +98,16 @@ override them with `--baseline-*` once you have your own accumulated data.
   rewrote during sessions (the real Token→Code work), so it's typically larger
   than what eventually lands in git — a more faithful efficiency denominator that
   doesn't depend on commit habits.
-- **Cross-session overwrite caveat**: a `Write` overwriting a file written in an
-  *earlier* session can't see its prior length, so it counts the full content as
-  added (intra-session overwrites are tracked exactly).
+- **F1 exposure (Write-over-preexisting-file)**: `session_loc` assumes `old=0`
+  when a `Write` first touches a file in that session — correct for new files,
+  wrong for overwrites of *existing* files (the whole new content is counted as
+  added; the deletion is missed). `Edit` uses only line deltas and is immune.
+  Reports show an `unseen_writes` count (Quality L3 layer): the number of first
+  `Write` touches, upper-bounding F1 exposure. Real-world bias depends on your
+  workflow: TCER's 9 sessions show 0% (new-file `Write` + old-file `Edit`), but
+  a controlled overwrite-existing-file scenario inflates net by 100 lines per
+  call. For exact quantification, `../calibrate_loc.py` (git ground-truth) is
+  provided; the core stays git-free and the exposure is visible via the counter.
 - **NCPI caveat**: at the whole-project aggregate level NCPI can approach/exceed
   1.0 (cumulative net vs current size); it's most meaningful per session.
 - **TTAF source**: values follow the metric framework §6.4 (refactor 0.50,
