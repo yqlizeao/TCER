@@ -199,6 +199,7 @@ python -m tcer.cli report --project TCER --task-type debug  # 指定任务类型
 python -m tcer.cli report --project TCER --chart        # 各会话 CTEI 条形图（按评级着色）
 python -m tcer.cli report --project TCER --json         # 导出 JSON
 python -m tcer.cli report --project TCER --csv out.csv  # 导出逐会话 CSV
+python -m tcer.cli report --project TCER --markdown report.md  # 导出 Markdown 摘要（适合贴进文档/PR）
 python -m tcer.cli report --project TCER --no-loc       # 仅 Token 指标，跳过 LOC/TCER
 python -m tcer.cli report --project TCER --compute-baselines  # 从项目数据计算 CTEI 基准（中位数/均值）
 ```

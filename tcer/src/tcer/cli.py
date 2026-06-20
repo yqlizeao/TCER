@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"CTEI CPE baseline (default {metrics.CPE_BASELINE}, report median)")
     r.add_argument("--json", action="store_true", help="emit JSON to stdout")
     r.add_argument("--csv", metavar="FILE", help="write per-session CSV to FILE")
+    r.add_argument("--markdown", metavar="FILE", help="write Markdown summary to FILE (shareable report)")
     r.add_argument("--chart", action="store_true", help="render a per-session CTEI bar chart")
     r.add_argument("--no-color", action="store_true", help="disable ANSI color in the chart")
     r.add_argument("--compute-baselines", action="store_true",
@@ -86,6 +87,12 @@ def cmd_report(args) -> int:
     if args.csv:
         Path(args.csv).write_text(report.to_csv(result.reports), encoding="utf-8")
         print(f"wrote {args.csv} ({result.n_sessions} sessions)")
+        return 0
+    if args.markdown:
+        md = report.to_markdown(result.reports, result.aggregate, result.n_sessions,
+                                result.code_dir, project_name=args.project)
+        Path(args.markdown).write_text(md, encoding="utf-8")
+        print(f"wrote {args.markdown} ({result.n_sessions} sessions)")
         return 0
 
     print(report.session_table(result.reports))
