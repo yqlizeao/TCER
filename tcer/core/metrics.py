@@ -30,7 +30,7 @@ from tcer.core.models import SessionMeta, SessionReport, TokenUsage
 # via ``pricing.resolve``; see ``cost_usd`` below.
 PRICING = pricing.default_pricing()
 
-_COMPOSITE_CONFIG_PATH = Path(__file__).parent.parent / "data" / "composite_baselines.json"
+_COMPOSITE_CONFIG_PATH = Path(__file__).parent.parent / "config" / "composite_baselines.json"
 
 
 @lru_cache(maxsize=1)

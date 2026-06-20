@@ -15,7 +15,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-_DATA_PATH = Path(__file__).parent.parent / "data" / "model_pricing.json"
+_DATA_PATH = Path(__file__).parent.parent / "config" / "model_pricing.json"
 
 # The four billing dimensions, in TCER's canonical key order.
 RATE_KEYS = ("input", "output", "cache_read", "cache_write")
