@@ -251,25 +251,11 @@ class TcerGui:
         right = tk.Frame(paned, bg=_BG)
         paned.add(right)
 
-        # Summary cards
+        # Five-layer metric system (collapsible cards)
         self.summary = tk.Frame(right, bg=_BG)
         self.summary.pack(fill="x", pady=(0, 6))
         self._summary_vars: dict = {}
-        for i, (key, name, unit, tip) in enumerate(METRIC_CARDS):
-            cell = tk.Frame(self.summary, bg=_PANEL, padx=10, pady=6)
-            cell.grid(row=0, column=i, sticky="nsew", padx=3)
-            self.summary.grid_columnconfigure(i, weight=1)
-            title = tk.Label(cell, text=name, bg=_PANEL, fg=_MUTED, font=("Microsoft YaHei", 8))
-            title.pack(anchor="w")
-            var = tk.StringVar(value="-")
-            self._summary_vars[key] = var
-            val = tk.Label(cell, textvariable=var, bg=_PANEL, fg=_FG, font=("Segoe UI", 13, "bold"))
-            val.pack(anchor="w")
-            unit_lbl = tk.Label(cell, text=unit or " ", bg=_PANEL, fg=_MUTED, font=("Microsoft YaHei", 7))
-            unit_lbl.pack(anchor="w")
-            full_tip = f"{name}\n{tip}"
-            for w in (cell, title, val, unit_lbl):
-                _Tooltip(tk, w, full_tip)
+        self._build_five_layers(right)
 
         # Per-session table
         keys = [c[0] for c in TABLE_COLS]
@@ -324,6 +310,80 @@ class TcerGui:
         if self._projects:
             self.proj_list.selection_set(0)
             self._reanalyze()
+
+    def _build_five_layers(self, parent) -> None:
+        """Build five-layer metric visualization (L1-L5)."""
+        tk = self.tk
+
+        # Layer colors (progressive from data to insight)
+        layer_colors = {
+            "L1": "#2d2d30",  # dark gray - raw data
+            "L2": "#1e3a5f",  # dark blue - efficiency
+            "L3": "#1e4d2b",  # dark green - quality
+            "L4": "#5f3a1e",  # dark brown - economics
+            "L5": "#4a1e5f",  # dark purple - synthesis
+        }
+
+        layers = [
+            ("L1", "原始层", "Token 用量", [
+                ("input", "输入", "K", "非缓存输入 Token（千）"),
+                ("cache_write", "缓存写入", "K", "本次写入缓存的 Token（千）"),
+                ("cache_read", "缓存读取", "K", "从缓存读取的 Token（千）"),
+                ("output", "输出", "K", "输出 Token（千）"),
+            ]),
+            ("L2", "效率层", "Token 转化效率", [
+                ("TCER", "TCER", "行/Mt", "净增代码行 ÷ 百万 Token"),
+                ("CHR", "缓存命中", "%", "缓存读取 ÷ 总输入"),
+                ("io_ratio", "I/O 比", "", "总输入 ÷ 输出"),
+            ]),
+            ("L3", "质量层", "代码产出质量", [
+                ("净LOC", "净增代码", "行", "写入 − 删除"),
+                ("churn", "返工率", "%", "删除 ÷ 写入"),
+            ]),
+            ("L4", "经济层", "成本效益", [
+                ("成本", "总成本", "$", "按模型 list 价估算"),
+                ("cpe", "CPE", "$/千行", "成本 ÷ 净增行 × 1000"),
+            ]),
+            ("L5", "综合层", "最终评分", [
+                ("CTEI", "CTEI", "", "复合效率指数"),
+                ("评级", "评级", "", "优秀/良好/中等/低效/极端低效"),
+            ]),
+        ]
+
+        for layer_id, layer_name, layer_desc, metrics in layers:
+            # Layer header
+            header = tk.Frame(self.summary, bg=layer_colors[layer_id], padx=8, pady=4)
+            header.pack(fill="x", pady=(0, 1))
+
+            label_text = f"▼ {layer_id} {layer_name} — {layer_desc}"
+            label = tk.Label(header, text=label_text, bg=layer_colors[layer_id], fg=_FG,
+                           font=("Microsoft YaHei", 9, "bold"), anchor="w")
+            label.pack(side="left")
+
+            # Metrics row
+            metrics_frame = tk.Frame(self.summary, bg=_PANEL, padx=8, pady=6)
+            metrics_frame.pack(fill="x", pady=(0, 2))
+
+            for i, (key, name, unit, tip) in enumerate(metrics):
+                cell = tk.Frame(metrics_frame, bg=_PANEL, padx=8, pady=4)
+                cell.grid(row=0, column=i, sticky="nsew", padx=2)
+                metrics_frame.grid_columnconfigure(i, weight=1)
+
+                title = tk.Label(cell, text=name, bg=_PANEL, fg=_MUTED, font=("Microsoft YaHei", 8))
+                title.pack(anchor="w")
+
+                var = tk.StringVar(value="-")
+                self._summary_vars[key] = var
+
+                val = tk.Label(cell, textvariable=var, bg=_PANEL, fg=_FG, font=("Segoe UI", 12, "bold"))
+                val.pack(anchor="w")
+
+                unit_lbl = tk.Label(cell, text=unit or " ", bg=_PANEL, fg=_MUTED, font=("Microsoft YaHei", 7))
+                unit_lbl.pack(anchor="w")
+
+                full_tip = f"{name}\n{tip}"
+                for w in (cell, title, val, unit_lbl):
+                    _Tooltip(tk, w, full_tip)
 
     def _selected_project(self) -> Path | None:
         sel = self.proj_list.curselection()
@@ -399,14 +459,29 @@ class TcerGui:
     def _render(self, a: analyze.ProjectAnalysis) -> None:
         agg = a.aggregate
         sv = self._summary_vars
+
+        # L1 原始层
+        sv["input"].set(f"{agg.usage.input_tokens / 1e3:.1f}")
+        sv["cache_write"].set(f"{agg.usage.cache_creation_input_tokens / 1e3:.1f}")
+        sv["cache_read"].set(f"{agg.usage.cache_read_input_tokens / 1e3:.1f}")
+        sv["output"].set(f"{agg.usage.output_tokens / 1e3:.1f}")
+
+        # L2 效率层
         sv["TCER"].set(fmt_float(agg.tcer, "0.0"))
-        sv["CTEI"].set(fmt_float(agg.ctei, "0.00"))
-        sv["评级"].set(agg.grade or "-")
+        sv["CHR"].set(fmt_pct(agg.chr))
+        sv["io_ratio"].set(fmt_float(agg.io_ratio, "0.1"))
+
+        # L3 质量层
         sv["净LOC"].set(fmt_int(agg.net_loc))
         sv["churn"].set(fmt_pct(agg.churn_ratio))
+
+        # L4 经济层
         sv["成本"].set(fmt_money(agg.cost))
-        sv["CHR"].set(fmt_pct(agg.chr))
-        sv["tokens"].set(f"{agg.usage.total / 1e6:.1f}")
+        sv["cpe"].set(fmt_money(agg.cpe))
+
+        # L5 综合层
+        sv["CTEI"].set(fmt_float(agg.ctei, "0.00"))
+        sv["评级"].set(agg.grade or "-")
 
         self.tree.delete(*self.tree.get_children())
         for tag, color in GRADE_HEX.items():
