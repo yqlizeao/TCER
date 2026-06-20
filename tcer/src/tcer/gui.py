@@ -325,28 +325,35 @@ class TcerGui:
         }
 
         layers = [
-            ("L1", "原始层", "Token 用量", [
+            ("L1", "原始层", "Token 用量明细", [
+                ("total_tokens", "总消耗", "百万", "总 Token 消耗（输入 + 输出 + 缓存）"),
                 ("input", "输入", "K", "非缓存输入 Token（千）"),
-                ("cache_write", "缓存写入", "K", "本次写入缓存的 Token（千）"),
-                ("cache_read", "缓存读取", "K", "从缓存读取的 Token（千）"),
                 ("output", "输出", "K", "输出 Token（千）"),
+                ("cache_write", "缓存创建", "K", "本次写入缓存的 Token（千）"),
+                ("cache_read", "缓存命中", "K", "从缓存读取的 Token（千）"),
             ]),
             ("L2", "效率层", "Token 转化效率", [
                 ("TCER", "TCER", "行/Mt", "净增代码行 ÷ 百万 Token"),
-                ("CHR", "缓存命中", "%", "缓存读取 ÷ 总输入"),
+                ("CHR", "缓存命中率", "%", "缓存读取 ÷ 总输入"),
                 ("io_ratio", "I/O 比", "", "总输入 ÷ 输出"),
+                ("CAF", "缓存调整", "", "缓存调整因子（消除缓存对效率比较的影响）"),
             ]),
             ("L3", "质量层", "代码产出质量", [
-                ("净LOC", "净增代码", "行", "写入 − 删除"),
-                ("churn", "返工率", "%", "删除 ÷ 写入"),
+                ("net_loc", "净增行", "行", "写入 − 删除"),
+                ("added", "写入行", "行", "总写入代码行"),
+                ("deleted", "删除行", "行", "总删除代码行"),
+                ("churn", "返工率", "%", "删除 ÷ 写入（越低越好）"),
             ]),
-            ("L4", "经济层", "成本效益", [
-                ("成本", "总成本", "$", "按模型 list 价估算"),
-                ("cpe", "CPE", "$/千行", "成本 ÷ 净增行 × 1000"),
+            ("L4", "经济层", "成本分析", [
+                ("cost", "总成本", "$", "按各模型 list 价分别估算并求和"),
+                ("cost_per_mt", "$/Mt", "$/百万", "每百万 Token 的实付成本"),
+                ("cpe", "CPE", "$/千行", "有效千行代码成本（成本 ÷ 净增行 × 1000）"),
             ]),
             ("L5", "综合层", "最终评分", [
-                ("CTEI", "CTEI", "", "复合效率指数"),
-                ("评级", "评级", "", "优秀/良好/中等/低效/极端低效"),
+                ("CTEI", "CTEI", "", "复合 Token 效率指数"),
+                ("grade", "评级", "", "优秀/良好/中等/低效/极端低效"),
+                ("TTAF", "任务类型", "", "feature/debug/refactor 等"),
+                ("PSAC", "阶段调整", "", "项目阶段调整系数"),
             ]),
         ]
 
@@ -460,28 +467,35 @@ class TcerGui:
         agg = a.aggregate
         sv = self._summary_vars
 
-        # L1 原始层
+        # L1 原始层（5 个指标）
+        sv["total_tokens"].set(f"{agg.usage.total / 1e6:.2f}")
         sv["input"].set(f"{agg.usage.input_tokens / 1e3:.1f}")
+        sv["output"].set(f"{agg.usage.output_tokens / 1e3:.1f}")
         sv["cache_write"].set(f"{agg.usage.cache_creation_input_tokens / 1e3:.1f}")
         sv["cache_read"].set(f"{agg.usage.cache_read_input_tokens / 1e3:.1f}")
-        sv["output"].set(f"{agg.usage.output_tokens / 1e3:.1f}")
 
-        # L2 效率层
+        # L2 效率层（4 个指标）
         sv["TCER"].set(fmt_float(agg.tcer, "0.0"))
         sv["CHR"].set(fmt_pct(agg.chr))
         sv["io_ratio"].set(fmt_float(agg.io_ratio, "0.1"))
+        sv["CAF"].set(fmt_float(agg.caf, "0.00"))
 
-        # L3 质量层
-        sv["净LOC"].set(fmt_int(agg.net_loc))
+        # L3 质量层（4 个指标）
+        sv["net_loc"].set(fmt_int(agg.net_loc))
+        sv["added"].set(fmt_int(agg.code_added))
+        sv["deleted"].set(fmt_int(agg.code_deleted))
         sv["churn"].set(fmt_pct(agg.churn_ratio))
 
-        # L4 经济层
-        sv["成本"].set(fmt_money(agg.cost))
+        # L4 经济层（3 个指标）
+        sv["cost"].set(fmt_money(agg.cost))
+        sv["cost_per_mt"].set(f"{agg.cost_per_mt:.2f}")
         sv["cpe"].set(fmt_money(agg.cpe))
 
-        # L5 综合层
+        # L5 综合层（4 个指标）
         sv["CTEI"].set(fmt_float(agg.ctei, "0.00"))
-        sv["评级"].set(agg.grade or "-")
+        sv["grade"].set(agg.grade or "-")
+        sv["TTAF"].set(agg.task_type or "-")  # 显示任务类型而非 TTAF（TTAF 是 per-session）
+        sv["PSAC"].set(fmt_float(agg.psac, "0.000"))
 
         self.tree.delete(*self.tree.get_children())
         for tag, color in GRADE_HEX.items():
