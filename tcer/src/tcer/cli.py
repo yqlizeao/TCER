@@ -23,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--project", required=True,
                    help="project name or hash (e.g. TCER resolves c--GitHub-TCER)")
     r.add_argument("--session", help="filter to sessions whose id contains this substring")
+    r.add_argument("--since", help="include only sessions starting on/after this date (YYYY-MM-DD)")
+    r.add_argument("--until", help="include only sessions starting on/before this date (YYYY-MM-DD)")
     r.add_argument("--no-subagents", action="store_true",
                    help="exclude subagent session files (included by default)")
     r.add_argument("--code-dir",
@@ -73,6 +75,8 @@ def cmd_report(args) -> int:
             baseline_tcer=args.baseline_tcer,
             baseline_ncpi=args.baseline_ncpi,
             baseline_cpe=args.baseline_cpe,
+            since=args.since,
+            until=args.until,
         )
     except FileNotFoundError as e:
         raise SystemExit(f"error: {e}")

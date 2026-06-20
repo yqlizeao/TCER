@@ -38,12 +38,18 @@ def analyze_project(
     baseline_tcer: float = metrics.TCER_BASELINE,
     baseline_ncpi: float = metrics.NCPI_BASELINE,
     baseline_cpe: float = metrics.CPE_BASELINE,
+    since: str | None = None,
+    until: str | None = None,
 ) -> ProjectAnalysis:
     """Analyze one project (optionally one session) and return per-session + aggregate.
 
     Subagent JSONL files are merged into their parent session: their tokens and LOC
     are counted (real cost), but they are not listed or counted as separate sessions.
     ``no_subagents=True`` excludes subagent data entirely.
+
+    Time filters ``since`` / ``until`` (YYYY-MM-DD strings) include sessions whose
+    ``started_at`` falls within the range (inclusive). Sessions without timestamps
+    are excluded.
 
     Raises ``FileNotFoundError`` if the project or any matching session is missing.
     """
@@ -56,6 +62,22 @@ def analyze_project(
         raise FileNotFoundError(f"no session files in {proj}")
     if no_subagents:
         files = [f for f in files if not reader.is_subagent(f)]
+
+    # Time filtering: parse YYYY-MM-DD to ms timestamp, filter sessions by started_at.
+    since_ms = _parse_date_to_ms(since) if since else None
+    until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
+    if since_ms or until_ms:
+        filtered = []
+        for f in files:
+            u = reader.aggregate_usage(f)
+            if u.started_at is None:
+                continue  # skip sessions with no timestamp
+            if since_ms and u.started_at < since_ms:
+                continue
+            if until_ms and u.started_at > until_ms:
+                continue
+            filtered.append(f)
+        files = filtered
 
     # Group files by parent session id (subagents fold into the owning session).
     groups: dict[str, list[Path]] = {}
@@ -135,3 +157,20 @@ def _synth_meta(session_id: str, sample: Path) -> SessionMeta:
     """Metadata for a session whose main file is missing (orphan subagents only)."""
     return SessionMeta(session_id=session_id, cwd=None, title=None,
                        path=sample, is_subagent=False)
+
+
+def _parse_date_to_ms(date_str: str, end_of_day: bool = False) -> int:
+    """Parse YYYY-MM-DD to ms timestamp (start or end of day UTC).
+
+    Raises ValueError on malformed input.
+    """
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if end_of_day:
+            # End of day = 23:59:59.999999
+            dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return int(dt.timestamp() * 1000)
+    except ValueError as e:
+        raise ValueError(f"Invalid date format '{date_str}' (expected YYYY-MM-DD)") from e
+

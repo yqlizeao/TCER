@@ -207,6 +207,8 @@ python -m tcer.cli list                            # 列出本地所有项目
 
 python -m tcer.cli report --project TCER                # 某项目完整报告
 python -m tcer.cli report --project TCER --no-subagents # 仅主会话
+python -m tcer.cli report --project TCER --since 2026-06-01  # 6月以来的会话
+python -m tcer.cli report --project TCER --since 2026-06-01 --until 2026-06-15  # 时间范围
 python -m tcer.cli report --project TCER --task-type debug  # 指定任务类型（影响 TTAF/TA-TCER）
 python -m tcer.cli report --project TCER --chart        # 各会话 CTEI 条形图（按评级着色）
 python -m tcer.cli report --project TCER --json         # 导出 JSON
