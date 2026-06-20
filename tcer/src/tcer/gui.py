@@ -283,6 +283,7 @@ class TcerGui:
             self.tree.column(key, width=w, minwidth=40, anchor="w",
                              stretch=(key == "model"))
         self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<Double-Button-1>", self._show_session_detail)
         tk.Label(right, text="提示：把鼠标移到上方卡片或点“指标说明”查看每个指标的含义。",
                  bg=_BG, fg=_MUTED, anchor="w", font=("Microsoft YaHei", 8)).pack(fill="x")
 
@@ -620,6 +621,97 @@ class TcerGui:
                        font=("Segoe UI", 7))
 
     # --------------------------------------------------------------- glossary
+    def _show_session_detail(self, event=None) -> None:
+        """Show detailed metrics for the selected session in a popup."""
+        sel = self.tree.selection()
+        if not sel or not self._current:
+            return
+        item = sel[0]
+        sid_short = self.tree.item(item, "values")[0]
+        # Find the full report
+        report = None
+        for r in self._current.reports:
+            if (r.meta.session_id or r.meta.path.stem).startswith(sid_short):
+                report = r
+                break
+        if not report:
+            return
+
+        tk = self.tk
+        win = tk.Toplevel(self.root)
+        win.title(f"会话详情 · {sid_short}")
+        win.geometry("580x680")
+        win.configure(bg=_BG)
+
+        txt = tk.Text(win, wrap="word", bg=_PANEL, fg=_FG, font=("Consolas", 10),
+                      insertbackground=_FG, padx=12, pady=12, relief="flat",
+                      highlightthickness=0)
+        txt.pack(fill="both", expand=True, padx=8, pady=8)
+
+        r = report
+        u = r.usage
+        lines = [
+            f"会话 ID: {r.meta.session_id or '(无)'}",
+            f"路径: {r.meta.path}",
+            f"工作目录: {r.meta.cwd or '(未知)'}",
+            f"标题: {r.meta.title or '(无标题)'}",
+            "",
+            "=== 时间 ===",
+            f"开始: {_fmt_dt(u.started_at, '%Y-%m-%d %H:%M:%S')}",
+            f"结束: {_fmt_dt(u.ended_at, '%Y-%m-%d %H:%M:%S')}",
+            "",
+            "=== Token 用量（L1 原始层）===",
+            f"输入 (非缓存): {u.input_tokens:,}",
+            f"缓存写入: {u.cache_creation_input_tokens:,}",
+            f"缓存读取: {u.cache_read_input_tokens:,}",
+            f"输出: {u.output_tokens:,}",
+            f"总计: {u.total:,} ({u.total / 1e6:.2f} M)",
+            f"助手回合数: {u.assistant_msgs}",
+            f"零 usage 跳过: {u.empty_usage_skipped}",
+            "",
+            "=== 效率层（L2）===",
+            f"TCER: {fmt_float(r.tcer, '0.00')} LOC/Mt",
+            f"CHR (缓存命中率): {fmt_pct(r.chr)}",
+            f"I/O Ratio: {fmt_float(r.io_ratio, '0.0')}",
+            "",
+            "=== 质量层（L3）===",
+            f"净增行: {fmt_int(r.net_loc)}",
+            f"  写入: {fmt_int(r.loc_stat.added) if r.loc_stat else 'N/A'}",
+            f"  删除: {fmt_int(r.loc_stat.deleted) if r.loc_stat else 'N/A'}",
+            f"Churn 率: {fmt_pct(r.churn_ratio)}",
+            f"未见文件的 Write: {r.unseen_writes}",
+            "",
+            "=== 经济层（L4）===",
+            f"成本 (list 价): {fmt_money(r.cost)}",
+            f"$/Mt: {fmt_float(r.cost_per_mt, '0.00')}",
+            f"CPE ($/千行): {fmt_money(r.cpe)}",
+            "",
+            "=== 综合层（L5）===",
+            f"任务类型: {r.task_type or '(未设)'}",
+            f"TTAF 系数: {fmt_float(r.ttaf, '0.00')}",
+            f"TA-TCER: {fmt_float(r.ta_tcer, '0.00')}",
+            f"NCPI: {fmt_float(r.ncpi, '0.000')}",
+            f"CAF: {fmt_float(r.caf, '0.00')}",
+            f"PSAC: {fmt_float(r.psac, '0.000')}",
+            f"TCER (阶段调整后): {fmt_float(r.tcer_phase_adj, '0.00')}",
+            f"CTEI: {fmt_float(r.ctei, '0.000')}",
+            f"评级: {r.grade or '(无)'}",
+            "",
+            "=== 模型 ===",
+        ]
+        for m in sorted(u.models):
+            lines.append(f"  {m}")
+        if u.per_model:
+            lines.append("")
+            lines.append("逐模型成本:")
+            from . import metrics
+            for m, bucket_u in u.per_model.items():
+                cost = metrics.cost_usd(bucket_u, model=m)
+                lines.append(f"  {m or '(未记录)'}: {fmt_money(cost)}")
+
+        txt.insert("end", "\n".join(lines))
+        txt.config(state="disabled")
+
     def _show_glossary(self) -> None:
         tk = self.tk
         win = tk.Toplevel(self.root)
