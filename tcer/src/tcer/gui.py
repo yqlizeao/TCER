@@ -235,70 +235,69 @@ class TcerGui:
         self.status = tk.Label(bar, text="就绪", bg=_BG, fg="#9cdcfe", anchor="e")
         self.status.pack(side="right")
 
-        # Main split: project list | report panel
+        # Main layout: three columns (project | session | metrics)
         paned = tk.PanedWindow(self.root, orient="horizontal", bg=_BG, sashwidth=4)
         paned.pack(fill="both", expand=True, padx=8, pady=4)
 
+        # Left column: Project list
         left = tk.Frame(paned, bg=_PANEL)
         tk.Label(left, text="项目（会话数）", bg=_PANEL, fg=_FG, anchor="w").pack(fill="x", padx=6, pady=2)
         self.proj_list = tk.Listbox(left, bg=_PANEL, fg=_FG, selectbackground="#094771",
                                     highlightthickness=0, borderwidth=0, exportselection=False,
-                                    width=34, activestyle="none")
+                                    width=28, activestyle="none")
         self.proj_list.pack(fill="both", expand=True, padx=6, pady=4)
         self.proj_list.bind("<<ListboxSelect>>", lambda e: self._reanalyze())
         paned.add(left)
 
-        right = tk.Frame(paned, bg=_BG)
-        paned.add(right)
+        # Middle column: Session table
+        middle = tk.Frame(paned, bg=_BG)
+        paned.add(middle)
 
-        # Five-layer metric system (collapsible cards)
-        self.summary = tk.Frame(right, bg=_BG)
-        self.summary.pack(fill="x", pady=(0, 6))
-        self._summary_vars: dict = {}
-        self._build_five_layers(right)
+        tk.Label(middle, text="会话列表（点击查看详情）", bg=_BG, fg=_FG, anchor="w",
+                 font=("Microsoft YaHei", 9, "bold")).pack(fill="x", padx=6, pady=(0, 4))
 
-        # Per-session table
         keys = [c[0] for c in TABLE_COLS]
-        self.tree = ttk.Treeview(right, columns=keys, show="headings", height=10)
-        self._sort_col = "CTEI"  # default sort column
-        self._sort_reverse = True  # default descending (high CTEI first)
+        self.tree = ttk.Treeview(middle, columns=keys, show="headings", height=20)
+        self._sort_col = "CTEI"
+        self._sort_reverse = True
         for key, label, w, tip in TABLE_COLS:
             self.tree.heading(key, text=label, command=lambda k=key: self._sort_by(k))
-            # Only the model column stretches; the rest stay fixed so model gets
-            # the leftover width instead of every column shrinking evenly.
             self.tree.column(key, width=w, minwidth=40, anchor="w",
                              stretch=(key == "model"))
         self.tree.pack(fill="both", expand=True)
-        self.tree.bind("<Double-Button-1>", self._show_session_detail)
-        tk.Label(right, text="提示：把鼠标移到上方卡片或点“指标说明”查看每个指标的含义。",
-                 bg=_BG, fg=_MUTED, anchor="w", font=("Microsoft YaHei", 8)).pack(fill="x")
+        self.tree.bind("<<TreeviewSelect>>", self._on_session_select)
 
-        # Chart with a mode selector (time trends + CTEI ranking)
-        chart_bar = tk.Frame(right, bg=_BG)
-        chart_bar.pack(fill="x", pady=(8, 0))
-        tk.Label(chart_bar, text="图表:", bg=_BG, fg=_FG).pack(side="left")
-        self.chart_var = tk.StringVar(value="TCER 时间趋势")
-        chart_modes = ["TCER 时间趋势", "CTEI 时间趋势", "CPE 时间趋势",
-                       "缓存命中 时间趋势", "成本 时间趋势", "CTEI 评级排名", "代码产出分布"]
-        chart_cb = ttk.Combobox(chart_bar, textvariable=self.chart_var, width=16,
-                                values=chart_modes, state="readonly")
-        chart_cb.pack(side="left", padx=6)
-        chart_cb.bind("<<ComboboxSelected>>", lambda e: self._draw_chart())
-        tk.Label(chart_bar, text="（横轴为会话开始时间，按时间排序）", bg=_BG, fg=_MUTED,
-                 font=("Microsoft YaHei", 8)).pack(side="left")
+        # Right column: Metrics panel
+        right = tk.Frame(paned, bg=_BG)
+        paned.add(right)
 
-        self.canvas = tk.Canvas(right, bg=_PANEL, height=240, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=False, pady=4)
-        self.canvas.bind("<Configure>", lambda e: self._draw_chart())
+        # View switcher (Project view / Session view)
+        view_bar = tk.Frame(right, bg=_BG)
+        view_bar.pack(fill="x", pady=(0, 8))
 
-        # Grade legend
-        legend = tk.Frame(right, bg=_BG)
-        legend.pack(fill="x")
-        tk.Label(legend, text="评级:", bg=_BG, fg=_MUTED, font=("Microsoft YaHei", 8)).pack(side="left")
-        ranges = {"优秀": ">2", "良好": "1~2", "中等": "0.5~1", "低效": "0.1~0.5", "极端低效": "<0.1"}
-        for g, color in GRADE_HEX.items():
-            tk.Label(legend, text=f"■ {g} ({ranges[g]})", bg=_BG, fg=color,
-                     font=("Microsoft YaHei", 8)).pack(side="left", padx=6)
+        self.view_mode = tk.StringVar(value="project")  # "project" or "session"
+
+        tk.Label(view_bar, text="视图:", bg=_BG, fg=_FG, font=("Microsoft YaHei", 9, "bold")).pack(side="left", padx=(0, 8))
+
+        proj_btn = tk.Radiobutton(view_bar, text="● 项目汇总", variable=self.view_mode, value="project",
+                                  bg=_BG, fg=_FG, selectcolor=_BG, activebackground=_BG,
+                                  activeforeground="#007acc", font=("Microsoft YaHei", 9),
+                                  command=self._switch_view)
+        proj_btn.pack(side="left", padx=4)
+
+        sess_btn = tk.Radiobutton(view_bar, text="○ Session 详情", variable=self.view_mode, value="session",
+                                  bg=_BG, fg=_FG, selectcolor=_BG, activebackground=_BG,
+                                  activeforeground="#007acc", font=("Microsoft YaHei", 9),
+                                  command=self._switch_view)
+        sess_btn.pack(side="left", padx=4)
+
+        # Five-layer metrics
+        self.summary = tk.Frame(right, bg=_BG)
+        self.summary.pack(fill="both", expand=True, pady=(0, 6))
+        self._summary_vars: dict = {}
+        self._build_five_layers(right)
+
+    # --------------------------------------------------------------- five layers
 
     # --------------------------------------------------------------- actions
     def load_projects(self) -> None:
@@ -391,6 +390,88 @@ class TcerGui:
                 full_tip = f"{name}\n{tip}"
                 for w in (cell, title, val, unit_lbl):
                     _Tooltip(tk, w, full_tip)
+
+    def _switch_view(self) -> None:
+        """Switch between project view and session view."""
+        mode = self.view_mode.get()
+        if mode == "project":
+            # Show project aggregate
+            if self._current:
+                self._render(self._current)
+        else:
+            # Show selected session (if any)
+            sel = self.tree.selection()
+            if sel and self._current:
+                self._render_selected_session()
+            else:
+                # No session selected, clear metrics
+                for var in self._summary_vars.values():
+                    var.set("-")
+
+    def _on_session_select(self, event=None) -> None:
+        """Handle session selection in the middle column."""
+        if self.view_mode.get() == "session":
+            # In session view, update metrics for selected session
+            self._render_selected_session()
+
+    def _render_selected_session(self) -> None:
+        """Render five-layer metrics for the currently selected session."""
+        sel = self.tree.selection()
+        if not sel or not self._current:
+            return
+
+        # Get session ID from table
+        item = sel[0]
+        sid_short = self.tree.item(item, "values")[0]
+
+        # Find the full report
+        report = None
+        for r in self._current.reports:
+            if (r.meta.session_id or r.meta.path.stem).startswith(sid_short):
+                report = r
+                break
+
+        if not report:
+            return
+
+        # Render session metrics (same logic as project aggregate, but for single session)
+        sv = self._summary_vars
+        r = report
+        u = r.usage
+
+        # L1 原始层
+        sv["total_tokens"].set(f"{u.total / 1e6:.2f}")
+        sv["input"].set(f"{u.input_tokens / 1e3:.1f}")
+        sv["output"].set(f"{u.output_tokens / 1e3:.1f}")
+        sv["cache_write"].set(f"{u.cache_creation_input_tokens / 1e3:.1f}")
+        sv["cache_read"].set(f"{u.cache_read_input_tokens / 1e3:.1f}")
+
+        # L2 效率层
+        sv["TCER"].set(fmt_float(r.tcer, "0.0"))
+        sv["CHR"].set(fmt_pct(r.chr))
+        sv["io_ratio"].set(fmt_float(r.io_ratio, "0.1"))
+        sv["CAF"].set(fmt_float(r.caf, "0.00"))
+
+        # L3 质量层
+        sv["net_loc"].set(fmt_int(r.net_loc))
+        if r.loc_stat:
+            sv["added"].set(fmt_int(r.loc_stat.added))
+            sv["deleted"].set(fmt_int(r.loc_stat.deleted))
+        else:
+            sv["added"].set("-")
+            sv["deleted"].set("-")
+        sv["churn"].set(fmt_pct(r.churn_ratio))
+
+        # L4 经济层
+        sv["cost"].set(fmt_money(r.cost))
+        sv["cost_per_mt"].set(f"{r.cost_per_mt:.2f}")
+        sv["cpe"].set(fmt_money(r.cpe))
+
+        # L5 综合层
+        sv["CTEI"].set(fmt_float(r.ctei, "0.00"))
+        sv["grade"].set(r.grade or "-")
+        sv["TTAF"].set(r.task_type or "-")
+        sv["PSAC"].set(fmt_float(r.psac, "0.000"))
 
     def _selected_project(self) -> Path | None:
         sel = self.proj_list.curselection()
@@ -549,165 +630,10 @@ class TcerGui:
                 models_label(r.usage),
             )
             self.tree.insert("", "end", values=row, tags=((r.grade,) if r.grade else ()))
-        self._draw_chart()
 
     def _show_error(self, msg: str) -> None:
         self.tree.delete(*self.tree.get_children())
         self.tree.insert("", "end", values=(msg[:120],) + ("",) * (len(TABLE_COLS) - 1))
-
-    def _draw_chart(self) -> None:
-        cv = self.canvas
-        cv.delete("all")
-        if not self._current:
-            return
-        mode = self.chart_var.get()
-        if mode == "CTEI 评级排名":
-            self._draw_bars()
-            return
-        if mode == "代码产出分布":
-            self._draw_loc_dist()
-            return
-        key = {"TCER 时间趋势": "tcer", "CTEI 时间趋势": "ctei", "CPE 时间趋势": "cpe",
-               "缓存命中 时间趋势": "chr", "成本 时间趋势": "cost"}.get(mode, "tcer")
-        self._draw_trend(key, mode)
-
-    def _draw_bars(self) -> None:
-        cv = self.canvas
-        scored = [r for r in self._current.reports if r.ctei is not None]
-        if not scored:
-            cv.create_text(12, 12, anchor="nw", fill=_MUTED,
-                           text="暂无单会话 CTEI（这些会话没有可测的净代码，或已关闭 LOC 统计）",
-                           font=("Microsoft YaHei", 9))
-            return
-        scored.sort(key=lambda r: r.ctei, reverse=True)
-        w = cv.winfo_width()
-        h = cv.winfo_height()
-        if w <= 1:
-            w = 900
-        if h <= 1:
-            h = 240
-        top = max(r.ctei for r in scored) or 1.0
-        pad_l, pad_r, row_h = 150, 60, 22
-        max_bar = max(40, w - pad_l - pad_r)
-        for i, r in enumerate(scored):
-            y = 8 + i * row_h
-            if y + row_h > h:
-                break
-            sid = (r.meta.session_id or r.meta.path.stem)[:16]
-            cv.create_text(8, y + row_h / 2, anchor="w", fill=_FG, text=sid, font=("Consolas", 8))
-            bar = max(2, int(r.ctei / top * max_bar))
-            color = GRADE_HEX.get(r.grade or "", "#666666")
-            cv.create_rectangle(pad_l, y + 3, pad_l + bar, y + row_h - 3, fill=color, width=0)
-            cv.create_text(pad_l + bar + 6, y + row_h / 2, anchor="w", fill=_FG,
-                           text=f"{r.ctei:.3f} {r.grade or ''}", font=("Microsoft YaHei", 8))
-
-    def _draw_loc_dist(self) -> None:
-        """Draw code output distribution (stacked bars by session, sorted by time)."""
-        cv = self.canvas
-        reports = [r for r in self._current.reports
-                   if r.net_loc and r.net_loc > 0 and r.usage.started_at is not None]
-        if not reports:
-            cv.create_text(12, 12, anchor="nw", fill=_MUTED,
-                           text="无净代码产出（这些会话未写入代码，或已关闭 LOC 统计）",
-                           font=("Microsoft YaHei", 9))
-            return
-        reports.sort(key=lambda r: r.usage.started_at)  # time order
-        w = cv.winfo_width() if cv.winfo_width() > 1 else 900
-        h = cv.winfo_height() if cv.winfo_height() > 1 else 240
-        ml, mr, mt, mb = 60, 18, 22, 38
-        x0, y0, x1, y1 = ml, mt, w - mr, h - mb
-
-        total_loc = sum(r.net_loc for r in reports)
-        # Draw stacked bars (one per session, width proportional to LOC)
-        x = x0
-        bar_width = x1 - x0
-        for r in reports:
-            frac = r.net_loc / total_loc
-            seg_w = bar_width * frac
-            color = GRADE_HEX.get(r.grade or "", "#666666")
-            cv.create_rectangle(x, y0, x + seg_w, y1, fill=color, width=0)
-            # Label if wide enough
-            if seg_w > 30:
-                sid = (r.meta.session_id or r.meta.path.stem)[:8]
-                cv.create_text(x + seg_w / 2, (y0 + y1) / 2, text=sid, fill="#ffffff",
-                               font=("Consolas", 8), angle=90)
-            x += seg_w
-
-        # Y-axis label
-        cv.create_text(8, (y0 + y1) / 2, text="代码行", fill=_MUTED, angle=90,
-                       font=("Microsoft YaHei", 9))
-        # Total label
-        cv.create_text((x0 + x1) / 2, y1 + 18, text=f"总净增：{total_loc:,} 行（{len(reports)} 个会话）",
-                       fill=_FG, font=("Microsoft YaHei", 9))
-
-    def _draw_trend(self, key: str, title: str) -> None:
-        cv = self.canvas
-        pts = [(r.usage.started_at, getattr(r, key), r.grade)
-               for r in self._current.reports
-               if r.usage.started_at is not None and getattr(r, key) is not None]
-        pts.sort(key=lambda p: p[0])
-        if not pts:
-            cv.create_text(12, 12, anchor="nw", fill=_MUTED,
-                           text="无足够的带时间数据点（该指标在这些会话上不可用）",
-                           font=("Microsoft YaHei", 9))
-            return
-        w = cv.winfo_width() if cv.winfo_width() > 1 else 900
-        h = cv.winfo_height() if cv.winfo_height() > 1 else 240
-        ml, mr, mt, mb = 60, 18, 22, 38
-        x0, y0, x1, y1 = ml, mt, w - mr, h - mb
-
-        vals = [v for _, v, _ in pts]
-        vmin, vmax = min(vals), max(vals)
-        if vmax == vmin:
-            vmax = vmin + (abs(vmin) or 1)
-        span = vmax - vmin
-        vmin -= span * 0.12
-        vmax += span * 0.12
-        tmin = pts[0][0]
-        tmax = pts[-1][0]
-        tspan = (tmax - tmin) or 1
-
-        def sx(t):
-            return x0 + (x1 - x0) * ((t - tmin) / tspan) if len(pts) > 1 else (x0 + x1) / 2
-
-        def sy(v):
-            return y1 - (y1 - y0) * ((v - vmin) / (vmax - vmin))
-
-        # axes
-        cv.create_line(x0, y0, x0, y1, fill="#555")
-        cv.create_line(x0, y1, x1, y1, fill="#555")
-        cv.create_text(x0, y0 - 6, anchor="sw", fill=_FG, text=title, font=("Microsoft YaHei", 9))
-        # y gridlines + labels
-        for frac in (0.0, 0.5, 1.0):
-            v = vmin + (vmax - vmin) * frac
-            yy = sy(v)
-            cv.create_line(x0, yy, x1, yy, fill="#3a3a3a")
-            cv.create_text(x0 - 6, yy, anchor="e", fill=_MUTED, text=_axis_label(key, v),
-                           font=("Segoe UI", 8))
-        # TCER baseline reference
-        if key == "tcer" and vmin < metrics.TCER_BASELINE < vmax:
-            yb = sy(metrics.TCER_BASELINE)
-            cv.create_line(x0, yb, x1, yb, fill="#888", dash=(4, 3))
-            cv.create_text(x1, yb - 2, anchor="se", fill="#aaaaaa",
-                           text=f"框架基准 {metrics.TCER_BASELINE}", font=("Microsoft YaHei", 7))
-        # polyline
-        if len(pts) > 1:
-            coords = []
-            for t, v, _ in pts:
-                coords += [sx(t), sy(v)]
-            cv.create_line(*coords, fill="#4fc3f7", width=2)
-        # points (colored by grade) + sparse date labels
-        n = len(pts)
-        for i, (t, v, grade) in enumerate(pts):
-            xx, yy = sx(t), sy(v)
-            color = GRADE_HEX.get(grade or "", "#4fc3f7")
-            cv.create_oval(xx - 4, yy - 4, xx + 4, yy + 4, fill=color, outline="#ffffff", width=1)
-            if i == 0 or i == n - 1 or (n > 4 and i == n // 2):
-                cv.create_text(xx, y1 + 4, anchor="n", fill=_MUTED,
-                               text=_fmt_dt(t, "%m-%d"), font=("Segoe UI", 7))
-        cv.create_text(x1, y1 + 4, anchor="ne", fill=_MUTED,
-                       text=f"{_fmt_dt(tmin, '%Y-%m-%d')} → {_fmt_dt(tmax, '%Y-%m-%d')}",
-                       font=("Segoe UI", 7))
 
     # --------------------------------------------------------------- glossary
     def _show_session_detail(self, event=None) -> None:
