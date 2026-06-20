@@ -74,13 +74,7 @@ def test_gui_row_matches_columns():
     from tcer import gui
     r = _report(500)
     r.usage.models.add("claude-opus-4-8")
-    # Re-create the row tuple exactly as _render builds it.
-    row = (
-        (r.meta.session_id or r.meta.path.stem)[:18],
-        "", "1", report.fmt_int(r.usage.assistant_msgs),
-        f"{r.usage.total/1e6:.2f}M", report.fmt_pct(r.chr), report.fmt_money(r.cost),
-        report.fmt_int(r.net_loc), report.fmt_float(r.tcer, "0.0"),
-        report.fmt_float(r.ctei, "0.00"), r.grade or "", report.models_label(r.usage),
-    )
+    # Re-create the row tuple exactly as _render builds it (now just session ID)
+    row = (r.meta.session_id or r.meta.path.stem,)
     assert len(row) == len(gui.TABLE_COLS)
-    assert "Claude Opus 4.8" in row[-1]
+    assert len(row) == 1  # Only session ID now
