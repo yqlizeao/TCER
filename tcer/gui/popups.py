@@ -156,9 +156,9 @@ class ModelsPopup:
     """模型使用详情 — per-model token usage, cost, and percentage breakdown."""
 
     def __init__(self, parent, usage, title_suffix: str = "") -> None:
-        from .. import metrics as metrics_mod
-        from ..format import fmt_money
-        from ..pricing import label as model_label
+        from tcer.core import metrics as metrics_mod
+        from tcer.core.format import fmt_money
+        from tcer.core.pricing import label as model_label
 
         win = _new_window(parent, f"模型使用详情{title_suffix}", "520x560")
         tk.Label(win, text="模型使用详情", bg=theme.BG, fg=theme.FG,
