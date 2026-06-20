@@ -237,12 +237,11 @@ class TcerGui:
         self.proj_list.bind("<<ListboxSelect>>", lambda e: self._reanalyze())
         paned.add(left, minsize=200)
 
-        # Middle column: Session table
-        middle = tk.Frame(paned, bg=_BG, width=700)
+        # Middle column: Session list (same style as project list)
+        middle = tk.Frame(paned, bg=_PANEL, width=700)
         paned.add(middle, minsize=500)
 
-        tk.Label(middle, text="会话列表（点击查看详情）", bg=_BG, fg=_FG, anchor="w",
-                 font=("Microsoft YaHei", 9, "bold")).pack(fill="x", padx=6, pady=(0, 4))
+        tk.Label(middle, text="会话列表（点击查看详情）", bg=_PANEL, fg=_FG, anchor="w").pack(fill="x", padx=6, pady=2)
 
         keys = [c[0] for c in TABLE_COLS]
         self.tree = ttk.Treeview(middle, columns=keys, show="headings", height=20)
@@ -252,7 +251,7 @@ class TcerGui:
             self.tree.heading(key, text=label, command=lambda k=key: self._sort_by(k))
             # Session column stretches to fill width
             self.tree.column(key, width=w, minwidth=200, anchor="w", stretch=True)
-        self.tree.pack(fill="both", expand=True)
+        self.tree.pack(fill="both", expand=True, padx=6, pady=4)
         self.tree.bind("<<TreeviewSelect>>", self._on_session_select)
 
         # Right column: Metrics panel
