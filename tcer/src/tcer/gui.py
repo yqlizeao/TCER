@@ -295,7 +295,7 @@ class TcerGui:
         self.summary = tk.Frame(right, bg=_BG)
         self.summary.pack(fill="both", expand=True, pady=(0, 6))
         self._summary_vars: dict = {}
-        self._build_five_layers(right)
+        self._build_five_layers(self.summary)  # Pass self.summary, not right
 
     # --------------------------------------------------------------- five layers
 
@@ -358,7 +358,7 @@ class TcerGui:
 
         for layer_id, layer_name, layer_desc, metrics in layers:
             # Layer header
-            header = tk.Frame(self.summary, bg=layer_colors[layer_id], padx=8, pady=4)
+            header = tk.Frame(parent, bg=layer_colors[layer_id], padx=8, pady=4)
             header.pack(fill="x", pady=(0, 1))
 
             label_text = f"▼ {layer_id} {layer_name} — {layer_desc}"
@@ -367,7 +367,7 @@ class TcerGui:
             label.pack(side="left")
 
             # Metrics row
-            metrics_frame = tk.Frame(self.summary, bg=_PANEL, padx=8, pady=6)
+            metrics_frame = tk.Frame(parent, bg=_PANEL, padx=8, pady=6)
             metrics_frame.pack(fill="x", pady=(0, 2))
 
             for i, (key, name, unit, tip) in enumerate(metrics):
