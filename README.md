@@ -9,11 +9,13 @@
 ```
 .
 ├── CLAUDE.md                                    # 项目规格文档
-└── tcer/                                        # 实现：纯 Python 标准库，零第三方依赖
-    ├── src/tcer/                                # 源码（核心库 + gui 包）
-    ├── tests/                                   # 测试（7 文件，76 项全过）
-    ├── conftest.py                              # 让 python -m pytest 找到 src/
-    └── README.md                                # 英文说明
+├── README.md                                    # 本文档
+├── conftest.py                                  # pytest 引导
+├── tcer/                                        # Python 包：纯标准库，零第三方依赖
+│   ├── reader.py / loc.py / metrics.py / ...    # 核心库
+│   ├── data/                                    # 配置（价表、基准）
+│   └── gui/                                     # Tkinter 图形界面（MVC 架构）
+└── tests/                                       # 测试（76 项全过）
 ```
 
 ## 这个工具做什么
@@ -51,9 +53,9 @@
 | **CTEI** | 复合 Token 效率指数（综合评分） | (TCER/基准)×(NCPI/基准)×(基准CPE/CPE)×(1+CHR×0.5) |
 
 CTEI 评级：**优秀 >2 · 良好 1~2 · 中等 0.5~1 · 低效 0.1~0.5 · 极端低效 <0.1**。
-实现已验证能**复现原始框架发布的逐会话评分（误差 <0.1%）**。成本按**各模型 list 价**分别估算并求和（价表见 `tcer/src/tcer/data/model_pricing.json`，≈160 模型；未知模型回退 Anthropic 标价 input \$3 / output \$15 / cache-write \$3.75 / cache-read \$0.30 每百万 Token）。
+实现已验证能**复现原始框架发布的逐会话评分（误差 <0.1%）**。成本按**各模型 list 价**分别估算并求和（价表见 `tcer/data/model_pricing.json`，≈160 模型；未知模型回退 Anthropic 标价 input \$3 / output \$15 / cache-write \$3.75 / cache-read \$0.30 每百万 Token）。
 
-**软指标（TTAF / 基准值 / CHR 权重）可配置**：`tcer/src/tcer/data/composite_baselines.json` 存储 CTEI 基准、TTAF 系数、PSAC 回归参数、CHR 权重。默认值来自原始框架的 16 会话参考数据集，你可以：
+**软指标（TTAF / 基准值 / CHR 权重）可配置**：`tcer/data/composite_baselines.json` 存储 CTEI 基准、TTAF 系数、PSAC 回归参数、CHR 权重。默认值来自原始框架的 16 会话参考数据集，你可以：
 - 手改 JSON 覆盖任意系数
 - 用 GUI 的「计算个人基准」按钮从自己积累的数据计算中位数/均值，建立个人基准（框架 §8.3 建议）
 
@@ -198,21 +200,20 @@ CTEI = (TCER / TCER_baseline)
 
 ## 运行（绿色免安装）
 
-纯 Python ≥3.11 标准库，**无需安装**：不用 `pip`、不改 PATH、完全便携。直接从 `src/` 目录用 `python -m` 运行：
+纯 Python ≥3.11 标准库，**无需安装**：不用 `pip`、不改 PATH、完全便携。从仓库根目录直接运行：
 
 ```bash
-cd tcer/src
 python -m tcer                                    # 启动图形界面（主入口，全中文）
 python -m tcer.gui                                # 同上（兼容入口）
 ```
 
-> 从 `src/` 目录运行会自动把 `tcer` 包加入导入路径，零配置——不需要 editable 安装，也不会往 PATH 里塞 console 命令。
+> 零配置——不需要 editable 安装，也不会往 PATH 里塞 console 命令。
 
 **子代理（subagent）会并入其父会话**作为同一个 session：它们的 Token 与代码计入父会话（保留真实成本），不单独计为一个 session。
 
 ### 图形界面
 
-`python -m tcer`（从 `tcer/src` 目录运行）打开桌面窗口。三栏布局：左侧项目列表、中间会话列表、右侧面板。右侧 Notebook 含三个标签页：
+`python -m tcer` 打开桌面窗口。三栏布局：左侧项目列表、中间会话列表、右侧面板。右侧 Notebook 含三个标签页：
 
 - **五层指标**：45 个指标，按层级分组（L0 数据 / L1 原始 / L2 效率 / L3 质量 / L4 经济 / L5 综合），鼠标悬停可看每个指标的中文解释。颜色分级：红=终极指标 TCER，橘=复合指标，蓝=高级指标，白=基础指标。L5 含当前 CTEI 基准参考值。
 - **综合效率指数排名**：条形图，按 CTEI 评级着色。

@@ -111,8 +111,8 @@ JSONL 格式，每行一个 JSON 对象。主要 `type` 字段：
 
 成本不再一律按 Claude 计价。每模型的 `$/MTok` 价表来自 cc-switch 的 `seed_model_pricing()`（厂商官方 list 价，~160 个模型），落盘为可手改配置：
 
-- **配置文件**：`tcer/src/tcer/data/model_pricing.json`（`_meta` 记录来源/抓取日期；`default` 为未知模型回退价；`models` 按 model_id 索引，字段 `input/output/cache_read/cache_write`）
-- **加载与解析**：`tcer/src/tcer/pricing.py` —— `resolve(model)` 按「精确 id → 最长前缀 id（兼容 Claude Code 追加的 `[1m]`/日期后缀）→ default」解析；`label(model)` 返回友好名；`default_pricing()` 返回回退价
+- **配置文件**：`tcer/data/model_pricing.json`（`_meta` 记录来源/抓取日期；`default` 为未知模型回退价；`models` 按 model_id 索引，字段 `input/output/cache_read/cache_write`）
+- **加载与解析**：`tcer/pricing.py` —— `resolve(model)` 按「精确 id → 最长前缀 id（兼容 Claude Code 追加的 `[1m]`/日期后缀）→ default」解析；`label(model)` 返回友好名；`default_pricing()` 返回回退价
 - **逐模型计价（含混用会话）**：`reader` 在累加时按 `message.model` 分桶（`TokenUsage.per_model`，无 model 记为 `""`），`merge` 自动合并分桶（subagent 折叠、session 聚合都不丢）。`metrics.cost_usd(u)` 对每个分桶用各自价表算成本再相加，**混用多模型的会话也精确**；`metrics.cost_by_model(u)` 给出逐模型成本明细（JSON 导出含 `cost_by_model` 字段）。`cost_usd(u, model=...)` 可强制全部按某模型计价；无分桶的合成 usage 回退到「单一模型→default」
 - **扩展**：后续新增模型只需编辑该 JSON 的 `models`，无需改代码
 
@@ -283,7 +283,7 @@ gui/
 
 1. **禁止新增中间产物**：截图、临时脚本、草稿 md、`.pytest_cache` 等用完即删，不提交。必要的经验/理解写入本文件（CLAUDE.md），不另建文件。
 2. **GUI 全中文、代码用缩写**：界面显示完整中文（如「缓存命中率」而非「CHR」），仅 TCER 保留英文缩写（这是产品核心指标）。代码标识符可用缩写（`chr`/`ctei`/`ncpi`…）。
-3. **运行方式**：`cd tcer/src && python -m tcer`（绿色免安装，不装包不改 PATH）。`python -m tcer.gui` 为兼容入口。
+3. **运行方式**：`python -m tcer`（从仓库根目录运行，绿色免安装，不装包不改 PATH）。`python -m tcer.gui` 为兼容入口。
 4. **库层不动**：`reader`/`loc`/`metrics`/`pricing`/`models`/`paths`/`analyze`/`calibrate` 有完整测试覆盖，改动需谨慎。GUI 改动集中在 `gui/` 包内。
 5. **纯离线**：不依赖任何版本管理工具（git 等）、不做任何联网操作。所有数据来自本地 `~/.claude/` 目录的 JSONL 文件。GUI 不暴露任何需要 git 或网络的功能。
 
