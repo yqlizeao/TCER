@@ -240,18 +240,18 @@ class TcerGui:
         paned.pack(fill="both", expand=True, padx=8, pady=4)
 
         # Left column: Project list
-        left = tk.Frame(paned, bg=_PANEL)
+        left = tk.Frame(paned, bg=_PANEL, width=240)
         tk.Label(left, text="项目（会话数）", bg=_PANEL, fg=_FG, anchor="w").pack(fill="x", padx=6, pady=2)
         self.proj_list = tk.Listbox(left, bg=_PANEL, fg=_FG, selectbackground="#094771",
                                     highlightthickness=0, borderwidth=0, exportselection=False,
                                     width=28, activestyle="none")
         self.proj_list.pack(fill="both", expand=True, padx=6, pady=4)
         self.proj_list.bind("<<ListboxSelect>>", lambda e: self._reanalyze())
-        paned.add(left)
+        paned.add(left, minsize=200)
 
         # Middle column: Session table
-        middle = tk.Frame(paned, bg=_BG)
-        paned.add(middle)
+        middle = tk.Frame(paned, bg=_BG, width=700)
+        paned.add(middle, minsize=500)
 
         tk.Label(middle, text="会话列表（点击查看详情）", bg=_BG, fg=_FG, anchor="w",
                  font=("Microsoft YaHei", 9, "bold")).pack(fill="x", padx=6, pady=(0, 4))
@@ -268,8 +268,8 @@ class TcerGui:
         self.tree.bind("<<TreeviewSelect>>", self._on_session_select)
 
         # Right column: Metrics panel
-        right = tk.Frame(paned, bg=_BG)
-        paned.add(right)
+        right = tk.Frame(paned, bg=_BG, width=500)
+        paned.add(right, minsize=400)
 
         # View switcher (Project view / Session view)
         view_bar = tk.Frame(right, bg=_BG)
