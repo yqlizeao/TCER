@@ -292,7 +292,7 @@ class TcerGui:
         tk.Label(chart_bar, text="图表:", bg=_BG, fg=_FG).pack(side="left")
         self.chart_var = tk.StringVar(value="TCER 时间趋势")
         chart_modes = ["TCER 时间趋势", "CTEI 时间趋势", "CPE 时间趋势",
-                       "缓存命中 时间趋势", "成本 时间趋势", "CTEI 评级排名"]
+                       "缓存命中 时间趋势", "成本 时间趋势", "CTEI 评级排名", "代码产出分布"]
         chart_cb = ttk.Combobox(chart_bar, textvariable=self.chart_var, width=16,
                                 values=chart_modes, state="readonly")
         chart_cb.pack(side="left", padx=6)
@@ -474,6 +474,9 @@ class TcerGui:
         if mode == "CTEI 评级排名":
             self._draw_bars()
             return
+        if mode == "代码产出分布":
+            self._draw_loc_dist()
+            return
         key = {"TCER 时间趋势": "tcer", "CTEI 时间趋势": "ctei", "CPE 时间趋势": "cpe",
                "缓存命中 时间趋势": "chr", "成本 时间趋势": "cost"}.get(mode, "tcer")
         self._draw_trend(key, mode)
@@ -507,6 +510,45 @@ class TcerGui:
             cv.create_rectangle(pad_l, y + 3, pad_l + bar, y + row_h - 3, fill=color, width=0)
             cv.create_text(pad_l + bar + 6, y + row_h / 2, anchor="w", fill=_FG,
                            text=f"{r.ctei:.3f} {r.grade or ''}", font=("Microsoft YaHei", 8))
+
+    def _draw_loc_dist(self) -> None:
+        """Draw code output distribution (stacked bars by session, sorted by time)."""
+        cv = self.canvas
+        reports = [r for r in self._current.reports
+                   if r.net_loc and r.net_loc > 0 and r.usage.started_at is not None]
+        if not reports:
+            cv.create_text(12, 12, anchor="nw", fill=_MUTED,
+                           text="无净代码产出（这些会话未写入代码，或已关闭 LOC 统计）",
+                           font=("Microsoft YaHei", 9))
+            return
+        reports.sort(key=lambda r: r.usage.started_at)  # time order
+        w = cv.winfo_width() if cv.winfo_width() > 1 else 900
+        h = cv.winfo_height() if cv.winfo_height() > 1 else 240
+        ml, mr, mt, mb = 60, 18, 22, 38
+        x0, y0, x1, y1 = ml, mt, w - mr, h - mb
+
+        total_loc = sum(r.net_loc for r in reports)
+        # Draw stacked bars (one per session, width proportional to LOC)
+        x = x0
+        bar_width = x1 - x0
+        for r in reports:
+            frac = r.net_loc / total_loc
+            seg_w = bar_width * frac
+            color = GRADE_HEX.get(r.grade or "", "#666666")
+            cv.create_rectangle(x, y0, x + seg_w, y1, fill=color, width=0)
+            # Label if wide enough
+            if seg_w > 30:
+                sid = (r.meta.session_id or r.meta.path.stem)[:8]
+                cv.create_text(x + seg_w / 2, (y0 + y1) / 2, text=sid, fill="#ffffff",
+                               font=("Consolas", 8), angle=90)
+            x += seg_w
+
+        # Y-axis label
+        cv.create_text(8, (y0 + y1) / 2, text="代码行", fill=_MUTED, angle=90,
+                       font=("Microsoft YaHei", 9))
+        # Total label
+        cv.create_text((x0 + x1) / 2, y1 + 18, text=f"总净增：{total_loc:,} 行（{len(reports)} 个会话）",
+                       fill=_FG, font=("Microsoft YaHei", 9))
 
     def _draw_trend(self, key: str, title: str) -> None:
         cv = self.canvas
