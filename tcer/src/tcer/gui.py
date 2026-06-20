@@ -303,6 +303,7 @@ class TcerGui:
 
         # Layer colors (progressive from data to insight)
         layer_colors = {
+            "L0": "#1e1e1e",  # darkest - raw metadata
             "L1": "#2d2d30",  # dark gray - raw data
             "L2": "#1e3a5f",  # dark blue - efficiency
             "L3": "#1e4d2b",  # dark green - quality
@@ -311,6 +312,14 @@ class TcerGui:
         }
 
         layers = [
+            ("L0", "数据层", "原始统计", [
+                ("subagent", "子代理", "", "并入该会话的 subagent 数量"),
+                ("turns", "回合", "", "assistant 回复条数"),
+                ("started", "开始时间", "", "首条 assistant 回复的时间戳"),
+                ("duration", "持续时长", "小时", "首尾回复时间差"),
+                ("models", "模型", "", "该会话使用的模型（友好名）"),
+                ("skipped", "跳过回合", "", "usage 为 0 的轻量回复数"),
+            ]),
             ("L1", "原始层", "Token 用量明细", [
                 ("total_tokens", "总消耗", "百万", "总 Token 消耗（输入 + 输出 + 缓存）"),
                 ("input", "输入", "K", "非缓存输入 Token（千）"),
@@ -426,6 +435,19 @@ class TcerGui:
         r = report
         u = r.usage
 
+        # L0 数据层 - 单个 session
+        sv["subagent"].set(str(r.subagent_count or 0))
+        sv["turns"].set(fmt_int(u.assistant_msgs))
+        sv["started"].set(_fmt_dt(u.started_at, "%m-%d %H:%M") if u.started_at else "-")
+        # 持续时长
+        if u.started_at and u.ended_at:
+            duration_h = (u.ended_at - u.started_at) / 1000 / 3600
+            sv["duration"].set(f"{duration_h:.1f}")
+        else:
+            sv["duration"].set("-")
+        sv["models"].set(models_label(u) if u.models else "-")
+        sv["skipped"].set(fmt_int(u.empty_usage_skipped))
+
         # L1 原始层
         sv["total_tokens"].set(f"{u.total / 1e6:.2f}")
         sv["input"].set(f"{u.input_tokens / 1e3:.1f}")
@@ -441,12 +463,8 @@ class TcerGui:
 
         # L3 质量层
         sv["net_loc"].set(fmt_int(r.net_loc))
-        if r.loc_stat:
-            sv["added"].set(fmt_int(r.loc_stat.added))
-            sv["deleted"].set(fmt_int(r.loc_stat.deleted))
-        else:
-            sv["added"].set("-")
-            sv["deleted"].set("-")
+        sv["added"].set(fmt_int(r.code_added))
+        sv["deleted"].set(fmt_int(r.code_deleted))
         sv["churn"].set(fmt_pct(r.churn_ratio))
 
         # L4 经济层
@@ -534,6 +552,19 @@ class TcerGui:
     def _render(self, a: analyze.ProjectAnalysis) -> None:
         agg = a.aggregate
         sv = self._summary_vars
+
+        # L0 数据层（6 个指标）- 项目汇总
+        sv["subagent"].set(str(sum(r.subagent_count or 0 for r in a.reports)))
+        sv["turns"].set(fmt_int(agg.usage.assistant_msgs))
+        sv["started"].set(_fmt_dt(agg.usage.started_at, "%m-%d %H:%M") if agg.usage.started_at else "-")
+        # 持续时长：最早到最晚的时间差
+        if agg.usage.started_at and agg.usage.ended_at:
+            duration_h = (agg.usage.ended_at - agg.usage.started_at) / 1000 / 3600
+            sv["duration"].set(f"{duration_h:.1f}")
+        else:
+            sv["duration"].set("-")
+        sv["models"].set(models_label(agg.usage) if agg.usage.models else "-")
+        sv["skipped"].set(fmt_int(agg.usage.empty_usage_skipped))
 
         # L1 原始层（5 个指标）
         sv["total_tokens"].set(f"{agg.usage.total / 1e6:.2f}")
