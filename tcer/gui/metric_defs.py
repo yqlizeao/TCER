@@ -47,8 +47,9 @@ GROUPS: list[Group] = [
                "有效回合 = 总数（无需减去跳过）。", "basic"),
         Metric("started", "开始时间", "", "会话中第一条助手回复的时间戳。", "basic"),
         Metric("last_time", "最后时间", "", "会话中最后一条助手回复的时间戳。配合「开始时间」可判断会话活跃时段。", "basic"),
-        Metric("duration", "持续时长", "小时",
-               "首条到末条助手回复的时间差。注意：这包含用户暂停阅读的时间，不是 AI 纯计算时间。"
+        Metric("duration", "持续时长", "小时/分钟",
+               "首条到末条助手回复的时间差。不足 1 小时显示分钟数。"
+               "注意：这包含用户暂停阅读的时间，不是 AI 纯计算时间。"
                "一个持续 2 小时的会话，AI 可能只活跃了其中 30 分钟。", "basic"),
         Metric("models", "模型", "", "该会话使用的 AI 模型（友好名）。同一会话可能混用多个模型。", "basic"),
         Metric("tools", "工具调用", "",
@@ -229,7 +230,11 @@ CONCEPT_NOTES: list[tuple[str, str, str]] = [
 def _duration_hours(report: SessionReport) -> str:
     u = report.usage
     if u.started_at and u.ended_at:
-        return f"{(u.ended_at - u.started_at) / 1000 / 3600:.1f}"
+        hours = (u.ended_at - u.started_at) / 1000 / 3600
+        if hours < 1:
+            minutes = hours * 60
+            return f"{minutes:.0f} 分钟"
+        return f"{hours:.1f} 小时"
     return "-"
 
 
