@@ -463,7 +463,7 @@ class RadarPopup:
             canvas.create_text(rx, ry, text=raw_text, fill=theme.MUTED,
                                font=theme.FONT_MONO)
 
-        # Data polygon
+        # Data polygon (solid fill + outline)
         data_pts = []
         for ai, (key, label, raw, norm) in enumerate(axis_data):
             angle = math.pi / 2 + 2 * math.pi * ai / n
@@ -471,7 +471,7 @@ class RadarPopup:
             py = cy - R * norm * math.sin(angle)
             data_pts.extend([px, py])
         canvas.create_polygon(data_pts, outline=theme.ACCENT,
-                              fill="#007acc33", width=2)
+                              fill="#1a3a5a", width=2)
         # Data dots
         for ai in range(0, len(data_pts), 2):
             px, py = data_pts[ai], data_pts[ai + 1]
