@@ -404,10 +404,16 @@ class RadarPopup:
     """
 
     # (key, label, norm_type, ref)
-    # norm_type: "grade"=val/ref; "grade_inv"=ref/val(低好); "pct"=0-1; "pct_inv"=1-val; "ratio"=val/ref
+    # norm_type:
+    #   "grade"     = val/ref (越高越好, ref=优秀阈值)
+    #   "grade_inv" = ref/val (越低越好, ref=优秀阈值)
+    #   "pct"       = 0-1 比率, 直接使用
+    #   "pct100"    = 0-100 百分比, /100 后使用
+    #   "pct_inv"   = 1-val (越低越好, 0-1 比率)
+    #   "ratio"     = val/ref (有参考值)
     _AXES = [
         ("ctei",  "综合效率", "grade",     2.0),
-        ("chr",   "缓存命中", "pct",       1.0),
+        ("chr",   "缓存命中", "pct100",    1.0),
         ("cpe",   "千行成本", "grade_inv", 8.22),
         ("churn", "返工率",   "pct_inv",   1.0),
         ("read_write_ratio", "读写比", "ratio", 3.0),
@@ -493,6 +499,8 @@ class RadarPopup:
             return max(0.0, min(1.0, raw / ref))
         if ntype == "grade_inv":
             return max(0.0, min(1.0, ref / raw)) if raw > 0 else 1.0
+        if ntype == "pct100":
+            return max(0.0, min(1.0, raw / 100.0))
         if ntype == "pct":
             return max(0.0, min(1.0, raw))
         if ntype == "pct_inv":
@@ -505,7 +513,11 @@ class RadarPopup:
     def _fmt_raw(key, raw):
         if raw is None:
             return "—"
-        if key in ("chr", "churn"):
+        if key == "chr":
+            # metric_raw_value already scales chr to 0-100
+            return f"{raw:.1f}%"
+        if key == "churn":
+            # churn is 0-1 ratio, display as percentage
             return f"{raw * 100:.1f}%"
         if key == "cpe":
             return f"${raw:.1f}"

@@ -187,31 +187,45 @@ class ProjectColumn:
         self.scroll = sf
         self.container = sf.inner
 
-    def update(self, projects) -> None:
+    def update(self, projects, empty_projects: set | None = None) -> None:
         for card in self._cards:
             card.frame.destroy()
         self._cards.clear()
         self._selected = None
         self._projects = projects
+        self._empty = empty_projects or set()
         for idx, d in enumerate(projects):
-            card = self._make_card(d, idx)
+            card = self._make_card(d, idx, is_empty=(idx in self._empty))
             self._cards.append(card)
         self.count_label.config(text=f"项目（{len(projects)}）")
         self.scroll.update_scroll()
+        # 自动选中第一个有数据的项目
         if self._cards:
-            self._select(self._cards[0])
+            first_valid = next(
+                (i for i in range(len(self._cards)) if i not in self._empty), None
+            )
+            if first_valid is not None:
+                self._select(self._cards[first_valid], first_valid)
 
-    def _make_card(self, project_dir, idx):
+    def _make_card(self, project_dir, idx, *, is_empty=False):
         card = Card(self.container,
-                    on_click=lambda c, i=idx: self._select(c, i),
+                    on_click=lambda c, i=idx, e=is_empty: self._on_card_click(c, i, e),
                     on_right_click=lambda e, _i=idx, _d=project_dir: self._on_right_click(e, _i, _d),
                     padx=1, pady=1)
         name = _short_name(project_dir.name)
-        lbl = tk.Label(card.frame, text=name, bg=theme.PANEL_2, fg=theme.FG,
+        if is_empty:
+            name += " （无会话）"
+        fg = theme.MUTED if is_empty else theme.FG
+        lbl = tk.Label(card.frame, text=name, bg=theme.PANEL_2, fg=fg,
                        font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         lbl.pack(fill="x", padx=4, pady=3)
         card.bind_to(lbl)
         return card
+
+    def _on_card_click(self, card, idx, is_empty):
+        if is_empty:
+            return  # 空项目不响应点击
+        self._select(card, idx)
 
     def _select(self, card, idx=None):
         if self._selected is not None:
@@ -224,24 +238,30 @@ class ProjectColumn:
     def _on_right_click(self, event, idx, project_dir):
         """Right-click context menu on a project card."""
         name = _short_name(project_dir.name)
+        is_empty = idx in self._empty
         menu = tk.Menu(self.container, tearoff=False, bg=theme.PANEL, fg=theme.FG,
                        activebackground=theme.ACCENT, activeforeground=theme.FG)
 
-        menu.add_command(
-            label=f"🔄 刷新此项目 · {name[:30]}",
-            command=lambda: self._select_and_refresh(idx),
-        )
+        if is_empty:
+            menu.add_command(
+                label=f"📭 {name[:30]}（无会话数据）", state="disabled",
+            )
+        else:
+            menu.add_command(
+                label=f"🔄 刷新此项目 · {name[:30]}",
+                command=lambda: self._select_and_refresh(idx),
+            )
 
-        menu.add_separator()
+            menu.add_separator()
 
-        menu.add_command(
-            label="📊 查看项目概览（指标分类）",
-            command=lambda: self._select_and_view(idx, "project"),
-        )
-        menu.add_command(
-            label="📊 查看会话详情视图",
-            command=lambda: self._select_and_view(idx, "session"),
-        )
+            menu.add_command(
+                label="📊 查看项目概览（指标分类）",
+                command=lambda: self._select_and_view(idx, "project"),
+            )
+            menu.add_command(
+                label="📊 查看会话详情视图",
+                command=lambda: self._select_and_view(idx, "session"),
+            )
 
         menu.add_separator()
 
@@ -600,9 +620,18 @@ def metric_raw_value(report, key: str) -> float | None:
     """Extract the raw numeric value for *key* from a SessionReport.
 
     Returns None when the metric is unavailable or not numeric.
-    Special-cases a few keys whose live on ``report.usage`` or need scaling.
+    Special-cases keys whose attribute names differ from the metric key
+    or that live on ``report.usage``.
     """
     u = report.usage
+    # Key → attribute name mismatches (metric_defs key != SessionReport attr)
+    _ATTR_MAP = {
+        "churn": "churn_ratio",
+        "added": "code_added",
+        "deleted": "code_deleted",
+        "test_loc": "test_net_loc",
+        "doc_loc": "doc_net_loc",
+    }
     try:
         if key == "chr":
             return report.chr * 100.0 if report.chr is not None else None
@@ -634,8 +663,9 @@ def metric_raw_value(report, key: str) -> float | None:
             return float(u.user_msgs)
         if key == "thinking_count":
             return float(u.thinking_count)
-        # Default: direct attribute on report
-        v = getattr(report, key, None)
+        # Attribute name remapping for mismatches
+        attr = _ATTR_MAP.get(key, key)
+        v = getattr(report, attr, None)
         if v is None:
             return None
         return float(v)
