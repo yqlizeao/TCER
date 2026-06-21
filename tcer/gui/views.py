@@ -543,6 +543,8 @@ class MetricPanel:
                 on_click = self.controller.show_user_msgs
             elif metric.key == "files_touched":
                 on_click = self.controller.show_files_touched
+            elif metric.key == "cost":
+                on_click = self.controller.show_cost_breakdown
             else:
                 on_click = None
             cell = MetricCell(grid, metric, on_click=on_click)

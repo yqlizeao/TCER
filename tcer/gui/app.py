@@ -214,6 +214,18 @@ class TcerGui:
             suffix = " · 项目汇总"
         popups.ModelsPopup(self.root, usage, suffix)
 
+    def show_cost_breakdown(self) -> None:
+        if not self._current:
+            return
+        if self.view_mode.get() == "session" and self._selected_session_id:
+            report = self._session_report(self._selected_session_id)
+            usage = report.usage if report else self._current.aggregate.usage
+            suffix = f" · {self._selected_session_id[:16]}…" if report else " · 项目汇总"
+        else:
+            usage = self._current.aggregate.usage
+            suffix = " · 项目汇总"
+        popups.CostBreakdownPopup(self.root, usage, suffix)
+
     def show_user_msgs(self) -> None:
         report = self._rendered_report
         if report and report.usage.user_message_texts:

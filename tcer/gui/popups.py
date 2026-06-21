@@ -264,6 +264,94 @@ class ModelsPopup:
                     lbl.pack(side="left", padx=8)
 
 
+class CostBreakdownPopup:
+    """成本明细 — per-model cost sorted by cost, with cost-effectiveness metric."""
+
+    _COLOR = "#ce9178"  # warm orange for cost bars
+
+    def __init__(self, parent, usage, title_suffix: str = "") -> None:
+        from tcer.core import metrics as metrics_mod
+        from tcer.core.format import fmt_money
+        from tcer.core.pricing import label as model_label
+
+        win = _new_window(parent, f"成本明细{title_suffix}", "560x560")
+        tk.Label(win, text="成本明细", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING, pady=10).pack()
+        tk.Label(win, text="各模型成本、Token 效率（每美元 Token 数）", bg=theme.BG,
+                 fg=theme.MUTED, font=theme.FONT_UI, pady=5).pack()
+
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = sf.inner
+
+        per_model = usage.per_model
+        _SKIP = {"<synthetic>", ""}
+        per_model = {k: v for k, v in per_model.items() if k not in _SKIP and k}
+
+        if not per_model:
+            tk.Label(inner, text="无逐模型数据", bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI, pady=40).pack()
+            return
+
+        total_cost = metrics_mod.cost_usd(usage)
+
+        # Build items: (model_id, cost, total_tokens, tokens_per_dollar)
+        items = []
+        for model_id, mu in per_model.items():
+            tok = mu.input_tokens + mu.output_tokens + mu.cache_creation_input_tokens + mu.cache_read_input_tokens
+            cost = metrics_mod.cost_usd(mu, model=model_id or None)
+            tpd = tok / cost if cost > 0 else float("inf")
+            items.append((model_id, cost, tok, tpd))
+        items.sort(key=lambda x: x[1], reverse=True)
+
+        # Summary header
+        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head.pack(fill="x", pady=10)
+        tk.Label(head, text=f"总计 {fmt_money(total_cost)} · {len(per_model)} 个模型",
+                 bg="#2a2a2e", fg=self._COLOR, font=theme.FONT_UI_BOLD).pack()
+
+        max_cost = items[0][1] if items else 1
+
+        for model_id, cost, tok, tpd in items:
+            pct = cost / total_cost * 100 if total_cost else 0
+            name = model_label(model_id) if model_id else "(未记录)"
+
+            # Header row
+            tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
+            hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            hdr.pack(fill="x")
+            tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
+                     font=theme.FONT_VALUE).pack(side="left")
+            tk.Label(hdr, text=f"{fmt_money(cost)}（{pct:.1f}%）",
+                     bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+                     font=theme.FONT_MONO).pack(side="right")
+
+            # Cost bar
+            bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            bar_frame.pack(fill="x")
+            bar_bg = tk.Frame(bar_frame, bg="#333333", height=10)
+            bar_bg.pack(fill="x")
+            if max_cost > 0:
+                tk.Frame(bar_bg, bg=self._COLOR, height=10).place(
+                    relx=0, rely=0, relwidth=cost / max_cost, relheight=1.0)
+
+            # Detail line: tokens + cost-effectiveness
+            det = tk.Frame(inner, bg=theme.PANEL, padx=12, pady=4)
+            det.pack(fill="x")
+            tk.Label(det, text=f"Token {tok:,}",
+                     bg=theme.PANEL, fg=theme.MUTED,
+                     font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
+            if tpd == float("inf"):
+                eff_text = "效率 ∞（免费）"
+                eff_color = theme.SUCCESS
+            else:
+                eff_text = f"效率 {tpd:,.0f} Token/$"
+                eff_color = theme.SUCCESS if tpd > 1_000_000 else theme.MUTED
+            tk.Label(det, text=eff_text,
+                     bg=theme.PANEL, fg=eff_color,
+                     font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
+
+
 class CalibratePopup:
     """校准结果 — tcer LOC vs git ground truth, per session + summary."""
 
