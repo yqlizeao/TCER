@@ -37,7 +37,7 @@ class TcerGui:
         self._no_loc: bool = False
 
         root.title("TCER — Token 转码效率计量")
-        root.geometry("1400x820")
+        root.geometry("1600x900")
         root.configure(bg=theme.BG)
         theme.setup_style(ttk)
 
