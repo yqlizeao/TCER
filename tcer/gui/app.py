@@ -18,6 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 from tcer.core import analyze, export as export_mod, metrics
 from tcer.core.calibrate import calibrate_project
 from tcer.core.paths import list_projects
+from tcer.core.reader import discover_jsonl
 from . import popups, theme, views
 from .views import CteiBarChart, FilterBar, MetricPanel, ProjectColumn, SessionColumn, TrendChart
 
@@ -81,9 +82,15 @@ class TcerGui:
 
     # --------------------------------------------------------------- projects
     def refresh_projects(self) -> None:
-        self._projects = list_projects()
+        all_projects = list_projects()
+        # 过滤掉没有会话 JSONL 文件的空目录（如纯 memory 目录）
+        self._projects = [p for p in all_projects if discover_jsonl(p.name)]
         self.project_col.update(self._projects)
-        self.filter.set_status(f"发现 {len(self._projects)} 个项目")
+        skipped = len(all_projects) - len(self._projects)
+        status = f"发现 {len(self._projects)} 个项目"
+        if skipped:
+            status += f"（跳过 {skipped} 个空目录）"
+        self.filter.set_status(status)
 
     def on_select_project(self, idx: int) -> None:
         self._selected_project_idx = idx

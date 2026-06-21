@@ -397,16 +397,21 @@ class FilesTouchedPopup:
 
 
 class RadarPopup:
-    """六维效率雷达 — hexagonal radar chart for one session vs project range."""
+    """六维效率雷达 — hexagonal radar chart with absolute-grade normalization.
 
-    # One representative metric per G-group.
+    Each axis uses a fixed reference scale (grade thresholds or natural bounds)
+    instead of project min/max, so outliers don't distort the shape.
+    """
+
+    # (key, label, norm_type, ref)
+    # norm_type: "grade"=val/ref; "grade_inv"=ref/val(低好); "pct"=0-1; "pct_inv"=1-val; "ratio"=val/ref
     _AXES = [
-        ("turns", "助手回合"),
-        ("total_tokens", "Token"),
-        ("chr", "缓存命中"),
-        ("net_loc", "净增行"),
-        ("cost", "成本"),
-        ("ctei", "CTEI"),
+        ("ctei",  "综合效率", "grade",     2.0),
+        ("chr",   "缓存命中", "pct",       1.0),
+        ("cpe",   "千行成本", "grade_inv", 8.22),
+        ("churn", "返工率",   "pct_inv",   1.0),
+        ("read_write_ratio", "读写比", "ratio", 3.0),
+        ("tcer",  "编码效率", "grade",     76.59),
     ]
 
     def __init__(self, parent, report, all_reports) -> None:
@@ -420,16 +425,12 @@ class RadarPopup:
                            width=400, height=400)
         canvas.pack(padx=16, pady=16)
 
-        # Collect raw values for normalization
+        # Normalize each axis to 0-1 using absolute scales
         axis_data = []
-        for key, _label in self._AXES:
-            vals = [metric_raw_value(r, key) for r in all_reports]
-            valid = [v for v in vals if v is not None]
-            my_val = metric_raw_value(report, key)
-            lo = min(valid) if valid else 0
-            hi = max(valid) if valid else 1
-            norm = (my_val - lo) / (hi - lo) if hi > lo and my_val is not None else 0.5
-            axis_data.append((key, _label, my_val, max(0.0, min(1.0, norm))))
+        for key, label, ntype, ref in self._AXES:
+            raw = metric_raw_value(report, key)
+            norm = self._normalize(raw, ntype, ref)
+            axis_data.append((key, label, raw, norm))
 
         # Draw hexagonal radar
         cx, cy, R = 200, 210, 140
@@ -444,6 +445,8 @@ class RadarPopup:
                 py = cy - R * frac * math.sin(angle)
                 pts.extend([px, py])
             canvas.create_polygon(pts, outline="#3e3e42", fill="", dash=(2, 3))
+        canvas.create_text(cx + R * 0.52, cy - 4, text="50%",
+                           fill="#444444", font=theme.FONT_MONO)
 
         # Axes + labels
         for ai, (key, label, raw, norm) in enumerate(axis_data):
@@ -451,19 +454,17 @@ class RadarPopup:
             ex = cx + R * math.cos(angle)
             ey = cy - R * math.sin(angle)
             canvas.create_line(cx, cy, ex, ey, fill="#3e3e42")
-            # Label
-            lx = cx + (R + 22) * math.cos(angle)
-            ly = cy - (R + 22) * math.sin(angle)
+            lx = cx + (R + 24) * math.cos(angle)
+            ly = cy - (R + 24) * math.sin(angle)
             canvas.create_text(lx, ly, text=label, fill=theme.FG,
-                               font=theme.FONT_UI_SMALL)
-            # Raw value
-            raw_text = f"{raw:g}" if raw is not None else "—"
-            rx = cx + (R + 22) * math.cos(angle)
-            ry = cy - (R + 22) * math.sin(angle) + 12
+                               font=theme.FONT_UI_SMALL_BOLD)
+            raw_text = self._fmt_raw(key, raw)
+            rx = cx + (R + 24) * math.cos(angle)
+            ry = cy - (R + 24) * math.sin(angle) + 14
             canvas.create_text(rx, ry, text=raw_text, fill=theme.MUTED,
                                font=theme.FONT_MONO)
 
-        # Data polygon (solid fill + outline)
+        # Data polygon
         data_pts = []
         for ai, (key, label, raw, norm) in enumerate(axis_data):
             angle = math.pi / 2 + 2 * math.pi * ai / n
@@ -472,17 +473,49 @@ class RadarPopup:
             data_pts.extend([px, py])
         canvas.create_polygon(data_pts, outline=theme.ACCENT,
                               fill="#1a3a5a", width=2)
-        # Data dots
         for ai in range(0, len(data_pts), 2):
             px, py = data_pts[ai], data_pts[ai + 1]
             canvas.create_oval(px - 3, py - 3, px + 3, py + 3,
                                fill=theme.ACCENT, outline=theme.FG)
 
-        canvas.create_text(cx, 14, text="六维效率雷达（归一化到项目范围）",
+        canvas.create_text(cx, 14, text="六维效率雷达（绝对刻度，外圈=100%）",
                            fill=theme.MUTED, font=theme.FONT_UI_SMALL)
 
         tk.Button(win, text="关闭", command=win.destroy, bg=theme.ACCENT,
                   fg=theme.FG, relief="flat", padx=20, pady=4).pack(pady=6)
+
+    @staticmethod
+    def _normalize(raw, ntype, ref):
+        """Normalize raw value to 0-1 using absolute scale."""
+        if raw is None:
+            return 0.0
+        if ntype == "grade":
+            return max(0.0, min(1.0, raw / ref))
+        if ntype == "grade_inv":
+            return max(0.0, min(1.0, ref / raw)) if raw > 0 else 1.0
+        if ntype == "pct":
+            return max(0.0, min(1.0, raw))
+        if ntype == "pct_inv":
+            return max(0.0, min(1.0, 1.0 - raw))
+        if ntype == "ratio":
+            return max(0.0, min(1.0, raw / ref))
+        return 0.0
+
+    @staticmethod
+    def _fmt_raw(key, raw):
+        if raw is None:
+            return "—"
+        if key in ("chr", "churn"):
+            return f"{raw * 100:.1f}%"
+        if key == "cpe":
+            return f"${raw:.1f}"
+        if key == "ctei":
+            return f"{raw:.2f}"
+        if key == "tcer":
+            return f"{raw:.1f}"
+        if key == "read_write_ratio":
+            return f"{raw:.2f}"
+        return f"{raw:g}"
 
 
 def _copy(win, text: str) -> None:

@@ -271,13 +271,15 @@ class ProjectColumn:
         self._select(self._cards[idx], idx)
 
     def _select_and_view(self, idx, mode):
-        # First ensure this project is selected (loads data if needed)
         already_selected = (self._selected is self._cards[idx])
-        if not already_selected:
+        if already_selected and self.controller._current:
+            # Data already loaded — just switch view mode and re-render
+            self.controller.view_mode.set(mode)
+            self.controller._on_view_change()
+        else:
+            # Need to load data first; switch mode, then select (triggers reanalyze)
+            self.controller.view_mode.set(mode)
             self._select(self._cards[idx], idx)
-        # Switch view mode
-        self.controller.view_mode.set(mode)
-        self.controller._on_view_change()
 
     def _open_in_explorer(self, project_dir):
         import subprocess
@@ -433,14 +435,22 @@ class SessionColumn:
 
     def _navigate_to_trend(self, sid):
         """Switch to trend tab and highlight this session's data point."""
+        from tkinter import messagebox
+        if not self.controller._current:
+            messagebox.showinfo("定位", "请先分析一个项目，趋势图才有数据。")
+            return
         # Switch notebook to trend tab (3rd tab, 0-indexed)
         try:
             nb = self.controller._nb
             nb.select(2)
         except Exception:
             pass
+        # Ensure trend chart has data (may not have been drawn yet)
+        tc = self.controller.trend_chart
+        if not tc._reports:
+            tc.update(self.controller._current.reports)
         # Highlight the session in the trend chart
-        self.controller.trend_chart.select_session_by_sid(sid)
+        tc.select_session_by_sid(sid)
         # Also select in the session column for consistency
         self.controller.on_select_session(sid)
 
@@ -1441,15 +1451,20 @@ class TrendChart:
             for j, ri in enumerate(ol.report_indices):
                 if ri == self._selected_idx:
                     px, py = ol.screen_pts[j]
-                    # Vertical crosshair line
+                    # Vertical crosshair line (solid, visible)
                     c.create_line(px, self._PAD_T, px,
                                   c.winfo_height() - self._PAD_B,
-                                  fill=theme.ACCENT, dash=(3, 3), width=1)
-                    # Selection ring (larger and more visible)
-                    c.create_oval(px - 8, py - 8, px + 8, py + 8,
-                                  outline=theme.FG, width=2)
-                    c.create_oval(px - 8, py - 8, px + 8, py + 8,
-                                  outline=theme.ACCENT, width=1)
+                                  fill=theme.ACCENT, dash=(4, 3), width=1)
+                    # Selection ring (large, bright)
+                    c.create_oval(px - 10, py - 10, px + 10, py + 10,
+                                  outline=theme.ACCENT, width=2)
+                    # Label showing which session is selected
+                    sel_r = self._reports[ri] if ri < len(self._reports) else None
+                    if sel_r:
+                        sel_sid = (sel_r.meta.session_id or sel_r.meta.path.stem)[:12]
+                        c.create_text(px, py - 16, text=f"▸ {sel_sid}…",
+                                      fill=theme.ACCENT, font=theme.FONT_UI_SMALL_BOLD,
+                                      anchor="s")
                     break
 
     def _draw_prediction(self, c, ol, xv, yv, pad_l, plot_w) -> None:
