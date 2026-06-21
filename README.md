@@ -8,11 +8,18 @@
 
 ## 快速开始
 
+**推荐方式**：双击启动脚本（自动检测 Python 环境）
+
+- Windows：`launch.bat`
+- macOS：`launch.command`
+
+**命令行**：
+
 ```bash
 python -m tcer
 ```
 
-纯 Python ≥3.11 标准库，零依赖，免安装。
+需要 Python ≥3.11 标准库，零依赖，免安装。
 
 ## 特性
 
