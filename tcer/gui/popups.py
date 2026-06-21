@@ -12,7 +12,7 @@ from tkinter import ttk
 from tcer.core import format as fmt
 from tcer.core import metrics
 from . import theme
-from .metric_defs import CONCEPT_NOTES, LAYERS
+from .metric_defs import CONCEPT_NOTES, GROUPS
 from .widgets import ScrollFrame
 
 
@@ -42,17 +42,16 @@ class GlossaryPopup:
         for level, color in theme.LEVEL_COLORS.items():
             txt.tag_configure(level, foreground=color, font=theme.FONT_UI_BOLD)
 
-        label = {"basic": "白色=基础", "advanced": "蓝色=高级",
-                 "compound": "橘黄=复合", "ultimate": "红色=终极"}
+        label = {"basic": "白色=基准值", "compound": "黄色=含magic number"}
         txt.insert("end", "TCER 指标速查\n\n", "h")
         txt.insert("end", "颜色说明: ", "h")
-        for level in ("ultimate", "compound", "advanced", "basic"):
+        for level in ("compound", "basic"):
             txt.insert("end", f"● {label[level]} ", level)
         txt.insert("end", "\n\n")
 
-        for layer in LAYERS:
-            txt.insert("end", f"{layer.id} {layer.name} — {layer.desc}\n", "h")
-            for m in layer.metrics:
+        for group in GROUPS:
+            txt.insert("end", f"{group.id} {group.name}\n", "h")
+            for m in group.metrics:
                 txt.insert("end", f"{m.name}" + (f"（{m.unit}）" if m.unit else "") + "\n", m.level)
                 txt.insert("end", m.tip + "\n\n")
         txt.insert("end", "补充说明\n\n", "h")
@@ -135,21 +134,26 @@ class ToolCallsPopup:
                      font=theme.FONT_UI, pady=40).pack()
         else:
             total = sum(tc.values())
-            head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
-            head.pack(fill="x", pady=(0, 10))
-            tk.Label(head, text=f"总计 {total} 次调用 · {len(tc)} 种工具", bg="#2a2a2e",
-                     fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
             for name, count in sorted(tc.items(), key=lambda x: x[1], reverse=True):
                 pct = count / total * 100 if total else 0
                 row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=6)
                 row.pack(fill="x", pady=2)
                 tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
                          font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
-                tk.Label(row, text=f"{count} 次（{pct:.1f}%）", bg=theme.PANEL, fg=theme.MUTED,
+                errs = usage.tool_errors_by_tool.get(name, 0)
+                err_suffix = f"  ❌{errs}" if errs else ""
+                tk.Label(row, text=f"{count} 次（{pct:.1f}%）{err_suffix}", bg=theme.PANEL,
+                         fg=theme.ERROR if errs else theme.MUTED,
                          anchor="e", font=theme.FONT_MONO).pack(side="right")
+                # Blue bar with red error overlay on top
                 bar = tk.Frame(inner, bg=theme.PANEL, height=4)
                 bar.pack(fill="x", padx=8, pady=(0, 8))
-                tk.Frame(bar, bg=theme.ACCENT, width=int(pct * 4.5), height=4).pack(side="left")
+                blue = tk.Frame(bar, bg=theme.ACCENT, width=int(pct * 4.5), height=4)
+                blue.pack(side="left")
+                if errs:
+                    err_pct = errs / count if count else 0
+                    red = tk.Frame(bar, bg=theme.ERROR, height=4)
+                    red.place(in_=blue, relwidth=err_pct)
 
 
 class ModelsPopup:
@@ -341,6 +345,55 @@ class HighChurnFilesPopup:
         total = sum(details.values())
         tk.Label(summary, text=f"共 {len(details)} 个高频文件，合计 {total} 次改动",
                  bg=theme.BG, fg=theme.MUTED, font=theme.FONT_MONO).pack(anchor="w")
+
+
+class UserMsgsPopup:
+    """用户消息 — all user messages in this session."""
+
+    def __init__(self, parent, messages: list[str]) -> None:
+        win = _new_window(parent, "用户消息", "600x480")
+        tk.Label(win, text=f"用户消息（共 {len(messages)} 条）", bg=theme.BG,
+                 fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
+
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = sf.inner
+
+        if not messages:
+            tk.Label(inner, text="未记录到用户消息", bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI, pady=40).pack()
+        else:
+            for idx, txt in enumerate(messages, 1):
+                row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=4)
+                row.pack(fill="x", pady=2)
+                tk.Label(row, text=f"{idx}.", bg=theme.PANEL, fg=theme.MUTED,
+                         font=theme.FONT_MONO, anchor="ne", width=4).pack(side="left", anchor="n")
+                tk.Label(row, text=txt, bg=theme.PANEL, fg=theme.FG,
+                         font=theme.FONT_UI, wraplength=500, justify="left",
+                         anchor="w").pack(side="left", fill="x", expand=True)
+
+
+class FilesTouchedPopup:
+    """涉及文件 — all files read, written, or edited in this session."""
+
+    def __init__(self, parent, details: dict[str, int]) -> None:
+        win = _new_window(parent, "涉及文件", "560x420")
+        tk.Label(win, text=f"涉及文件（共 {len(details)} 个）", bg=theme.BG,
+                 fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
+        tk.Label(win, text="会话中被读取、写入或编辑过的文件，含操作次数。",
+                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI, wraplength=520,
+                 justify="left", padx=16).pack(pady=(0, 8))
+
+        cols = ("path", "ops")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=16)
+        tree.heading("path", text="文件路径")
+        tree.heading("ops", text="操作次数")
+        tree.column("path", width=420, anchor="w")
+        tree.column("ops", width=100, anchor="e")
+        tree.pack(fill="both", expand=True, padx=10, pady=8)
+        for fp, cnt in sorted(details.items(), key=lambda x: x[1], reverse=True):
+            display = fp if len(fp) < 60 else "…" + fp[-57:]
+            tree.insert("", "end", values=(display, cnt))
 
 
 def _copy(win, text: str) -> None:

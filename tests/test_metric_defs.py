@@ -1,6 +1,6 @@
 """Guard the metric_defs single-source-of-truth invariant.
 
-Every metric key declared in ``LAYERS`` must be produced by ``report_values``;
+Every metric key declared in ``GROUPS`` must be produced by ``report_values``;
 otherwise the grid would silently show "-" for an undefined key. This catches
 drift between the definitions and the formatter.
 """
@@ -27,12 +27,12 @@ def test_every_layer_key_is_formatted():
     assert not missing, f"metric_defs keys missing from report_values: {missing}"
 
 
-def test_layers_cover_six_framework_layers():
-    assert [l.id for l in metric_defs.LAYERS] == ["L0", "L1", "L2", "L3", "L4", "L5"]
+def test_groups_cover_six_groups():
+    assert [g.id for g in metric_defs.GROUPS] == ["G1", "G2", "G3", "G4", "G5", "G6"]
 
 
 def test_tcer_is_the_only_english_metric_name():
     """Requirement: GUI shows full Chinese; TCER is the sole abbreviation kept."""
-    english = [m.name for layer in metric_defs.LAYERS for m in layer.metrics
+    english = [m.name for group in metric_defs.GROUPS for m in group.metrics
                if m.name.isascii() and any(c.isalpha() for c in m.name)]
     assert english == ["TCER"], f"unexpected English metric names: {english}"

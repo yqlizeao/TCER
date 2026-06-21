@@ -8,7 +8,7 @@ from tcer.core.models import SessionMeta, TokenUsage
 
 
 def _report(net_loc: int, sub: bool = False, sid: str = "sess") -> metrics.SessionReport:
-    """Build a SessionReport with a populated composite layer via compute()."""
+    """Build a SessionReport with populated composite fields via compute()."""
     meta = SessionMeta(session_id=sid, cwd="/tmp", title=None,
                        path=Path(f"/tmp/{sid}.jsonl"), is_subagent=sub)
     u = TokenUsage(input_tokens=500_000, output_tokens=500_000)  # total 1Mt

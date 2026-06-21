@@ -25,6 +25,14 @@ class ModelUsage:
         self.output_tokens += o
 
 
+@dataclass(frozen=True)
+class ToolOp:
+    """One tool call recorded with its turn position for temporal analysis."""
+    turn: int       # assistant message sequence (0-based)
+    tool: str       # "Read" / "Write" / "Edit" / "Grep" / "Glob" / …
+    path: str       # file_path from tool input ("" if unavailable)
+
+
 @dataclass
 class TokenUsage:
     """Accumulated token usage for one session (or an aggregate of sessions).
@@ -50,6 +58,13 @@ class TokenUsage:
     ended_at: int | None = None  # epoch ms of last counted assistant turn
     tool_calls: dict[str, int] = field(default_factory=dict)  # tool_name → call count
     session_duration_ms: int | None = None  # ended_at - started_at (computed property in practice)
+    # --- new extraction fields ---
+    user_msgs: int = 0  # count of type=="user" lines
+    tool_errors: int = 0  # count of tool_result with is_error=true
+    tool_errors_by_tool: dict[str, int] = field(default_factory=dict)  # tool_name → error count
+    thinking_count: int = 0  # count of thinking content blocks
+    tool_ops: list[ToolOp] = field(default_factory=list)  # ordered tool calls for temporal analysis
+    user_message_texts: list[str] = field(default_factory=list)  # extracted user message text
 
     @property
     def total_input(self) -> int:
@@ -80,6 +95,13 @@ class TokenUsage:
         merged_end = _max_ms(self.ended_at, other.ended_at)
         merged_duration = (merged_end - merged_start) if (merged_start and merged_end) else None
 
+        # Rebase other's tool_ops turns so they continue after self's last turn
+        self_max_turn = max((op.turn for op in self.tool_ops), default=-1)
+        rebased_other_ops = [
+            ToolOp(op.turn + self_max_turn + 1, op.tool, op.path)
+            for op in other.tool_ops
+        ]
+
         return TokenUsage(
             input_tokens=self.input_tokens + other.input_tokens,
             cache_creation_input_tokens=self.cache_creation_input_tokens
@@ -94,6 +116,12 @@ class TokenUsage:
             ended_at=merged_end,
             tool_calls=merged_tools,
             session_duration_ms=merged_duration,
+            user_msgs=self.user_msgs + other.user_msgs,
+            tool_errors=self.tool_errors + other.tool_errors,
+            tool_errors_by_tool=_merge_dicts(self.tool_errors_by_tool, other.tool_errors_by_tool),
+            thinking_count=self.thinking_count + other.thinking_count,
+            tool_ops=self.tool_ops + rebased_other_ops,
+            user_message_texts=self.user_message_texts + other.user_message_texts,
         )
 
 
@@ -110,6 +138,14 @@ def _merge_per_model(
                 out[model] = dst
             dst.add(mu.input_tokens, mu.cache_creation_input_tokens,
                     mu.cache_read_input_tokens, mu.output_tokens)
+    return out
+
+
+def _merge_dicts(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
+    """Sum two int-valued dicts key by key."""
+    out = dict(a)
+    for k, v in b.items():
+        out[k] = out.get(k, 0) + v
     return out
 
 
@@ -132,6 +168,7 @@ class SessionMeta:
     title: str | None
     path: Path
     is_subagent: bool
+    entrypoint: str | None = None  # "claude-vscode" / "claude-cli" / etc.
 
 
 @dataclass
@@ -147,7 +184,7 @@ class SessionReport:
     net_loc: int | None
     tcer: float | None  # LOC/Mt
     cpe: float | None  # $ per 1000 LOC
-    # --- composite layer (L5), populated when loc_accumulated / task_type available ---
+    # --- 综合评分 (G6), populated when loc_accumulated / task_type available ---
     loc_accumulated: int | None = None  # current codebase size (for NCPI / PSAC)
     ncpi: float | None = None  # net code production index = net_loc / loc_accumulated
     caf: float | None = None  # cache adjustment factor
@@ -157,7 +194,7 @@ class SessionReport:
     tcer_phase_adj: float | None = None  # tcer * psac
     ctei: float | None = None  # composite token efficiency index
     grade: str | None = None  # CTEI rating label
-    # --- quality layer (L3) ---
+    # --- 代码产出与质量 (G4) ---
     code_added: int | None = None  # gross code lines added (from tool calls)
     code_deleted: int | None = None  # gross code lines deleted (from tool calls)
     subagent_count: int = 0  # number of subagent sessions folded into this one
@@ -183,3 +220,10 @@ class SessionReport:
     doc_net_loc: int | None = None  # net LOC in doc files
     test_loc_ratio: float | None = None  # test_net / net_loc
     doc_loc_ratio: float | None = None  # doc_net / net_loc
+    # --- new quality metrics ---
+    tool_error_rate: float | None = None  # tool_errors / total_tool_calls
+    files_touched: int = 0  # unique file paths across Read/Write/Edit
+    files_touched_details: dict | None = None  # {path: operations} for popup
+    thinking_count: int = 0  # thinking content blocks
+    search_edit_ratio: float | None = None  # edits / (searches + edits)
+    read_before_write: float | None = None  # files read before being written/edited

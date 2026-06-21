@@ -12,7 +12,7 @@
 
 ```bash
 python -m tcer            # 启动 GUI
-python -m pytest tests/   # 运行测试（76 项）
+python -m pytest tests/   # 运行测试（84 项）
 ```
 
 ## 仓库结构
@@ -23,21 +23,27 @@ TCER/
 │   ├── core/              核心库（reader / loc / metrics / pricing / models / paths / analyze / export / format）
 │   ├── gui/               GUI（app / theme / metric_defs / widgets / views / popups）
 │   └── config/            配置（model_pricing.json / composite_baselines.json）
-├── tests/                 测试（76 项）
+├── tests/                 测试（84 项）
 └── doc/                   详细文档
     ├── metrics.md         指标公式与计算步骤
     ├── data-format.md     JSONL 数据格式与 LOC 原理
     └── architecture.md    MVC 架构与工程规范
 ```
 
-## 核心指标
+## 指标分类（6 组 · 49 项）
 
-| 指标 | 含义 | 公式要点 |
-|------|------|----------|
-| **TCER** | Token 转码效率比 | 净增行 ÷ 百万Token |
-| **CHR** | 缓存命中率 | 缓存读取 ÷ 总输入 |
-| **CPE** | 千行代码成本 | 成本 ÷ 净增行 × 1000 |
-| **CTEI** | 综合效率指数 | (TCER/基准)×(NCPI/基准)×(CPE基准/CPE)×(1+CHR×0.5) |
+GUI 指标按关注维度分为 6 组（扁平，无层级关系）：
+
+| 组 | 名称 | 数量 | 内容 |
+|---|------|------|------|
+| G1 | 会话概况 | 11 | 元数据（时长、模型、回合、工具调用、用户消息等） |
+| G2 | Token 用量 | 5 | 原始消耗（输入/输出/缓存） |
+| G3 | 缓存效率 | 6 | 缓存利用率比率 |
+| G4 | 代码产出与质量 | 13 | LOC、返工率、工具行为比率、搜索后编辑比等 |
+| G5 | 成本分析 | 3 | 金钱代价 |
+| G6 | 综合评分 | 11 | 效率指标 + CTEI 评分 + 基准参数 |
+
+**字体颜色**：白色 = 基准值/纯数据；黄色 = 含 magic number，仅作参考。
 
 > 指标公式、计算步骤、算例：[doc/metrics.md](doc/metrics.md)
 
@@ -55,6 +61,7 @@ TCER/
 2. **LOC 不依赖 git**：净增代码来自会话内工具调用回放。Write 覆写已有文件会高估（F1 风险），`unseen_writes` 计数暴露上界。
 3. **逐模型计价**：TokenUsage.per_model 按 message.model 分桶，混用多模型会话也精确。价表 `tcer/config/model_pricing.json`（≈160 模型）。
 4. **子代理并入父会话**：Token 与 LOC 保留真实成本，不单独计为 session。
+5. **时序分析**：`ToolOp(turn, tool, path)` 记录每个工具调用的回合序号和文件路径，支持搜索后编辑比（3 回合窗口）和先读后写率等时序指标。merge 时 rebase turn 编号保证聚合后时序连续。
 
 > 完整架构说明：[doc/architecture.md](doc/architecture.md)
 > 数据格式细节：[doc/data-format.md](doc/data-format.md)

@@ -18,17 +18,14 @@ SUCCESS = "#4ec9b0"
 WARNING = "#ce9178"
 ERROR = "#f48771"
 
-# Metric semantic levels → display color (basic white, advanced blue,
-# compound orange, ultimate red). TCER is the only ultimate metric.
+# Metric semantic levels → display color.
+# basic (white): absolute baseline values and direct calculations.
+# compound (yellow): contains magic numbers / coefficients, reference only.
 LEVEL_BASIC = "#e0e0e0"
-LEVEL_ADVANCED = "#5dade2"
 LEVEL_COMPOUND = "#f39c12"
-LEVEL_ULTIMATE = "#e74c3c"
 LEVEL_COLORS = {
     "basic": LEVEL_BASIC,
-    "advanced": LEVEL_ADVANCED,
     "compound": LEVEL_COMPOUND,
-    "ultimate": LEVEL_ULTIMATE,
 }
 
 # CTEI grade → bar/cell fill color (used by the Canvas CTEI chart).
@@ -40,14 +37,14 @@ GRADE_HEX = {
     "极端低效": "#b71c1c",
 }
 
-# Five-layer framework — header background per layer.
-LAYER_COLORS = {
-    "L0": "#2a2a2e",
-    "L1": "#1a1a1e",
-    "L2": "#1e4a6f",
-    "L3": "#1e5c2b",
-    "L4": "#6f4a1e",
-    "L5": "#5a1e6f",
+# Six-group framework — header background per group.
+GROUP_COLORS = {
+    "G1": "#2a2a2e",
+    "G2": "#1e4a6f",
+    "G3": "#1e5c5c",
+    "G4": "#1e5c2b",
+    "G5": "#6f4a1e",
+    "G6": "#5a1e6f",
 }
 
 # Fonts (named so they can be tuned in one place).

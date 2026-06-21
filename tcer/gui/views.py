@@ -14,10 +14,10 @@ from tcer.core import metrics
 from tcer.core.export import ctei_ranking
 from tcer.core.format import fmt_dt
 from . import theme
-from .metric_defs import LAYERS, report_values
+from .metric_defs import GROUPS, report_values
 from .widgets import Card, MetricCell, ScrollFrame, Tooltip
 
-_PER_ROW = 6  # metric tiles per grid row inside a layer
+_PER_ROW = 6  # metric tiles per grid row inside a group
 
 
 def _short_name(project_hash: str) -> str:
@@ -154,9 +154,8 @@ class ProjectColumn:
         self._cards: list[Card] = []
         self._selected = None
 
-        col = tk.Frame(parent, bg=theme.PANEL, width=180)
-        col.pack(side="left", fill="both", expand=False)
-        col.pack_propagate(False)
+        col = tk.Frame(parent, bg=theme.PANEL)
+        col.pack(side="left", fill="both", expand=True)
 
         header = tk.Frame(col, bg=theme.PANEL)
         header.pack(fill="x", padx=6, pady=4)
@@ -209,9 +208,8 @@ class SessionColumn:
         self._cards: list[Card] = []
         self._selected = None
 
-        col = tk.Frame(parent, bg=theme.PANEL, width=220)
-        col.pack(side="left", fill="both", expand=False)
-        col.pack_propagate(False)
+        col = tk.Frame(parent, bg=theme.PANEL)
+        col.pack(side="left", fill="both", expand=True)
 
         header = tk.Frame(col, bg=theme.PANEL)
         header.pack(fill="x", padx=6, pady=4)
@@ -271,7 +269,7 @@ class SessionColumn:
 
 
 class MetricPanel:
-    """Right-column tab 1: the L0–L5 metric grid, built from metric_defs."""
+    """Right-column tab 1: the G1–G6 metric grid, built from metric_defs."""
 
     def __init__(self, parent, controller) -> None:
         self.controller = controller
@@ -281,25 +279,27 @@ class MetricPanel:
         sf.canvas.pack(fill="both", expand=True)
         self.container = sf.inner
 
-        for layer in LAYERS:
-            self._build_layer(layer)
+        for group in GROUPS:
+            self._build_group(group)
 
-    def _build_layer(self, layer) -> None:
-        header = tk.Frame(self.container, bg=theme.LAYER_COLORS[layer.id], padx=6, pady=3)
+    def _build_group(self, group) -> None:
+        header = tk.Frame(self.container, bg=theme.GROUP_COLORS[group.id], padx=6, pady=3)
         header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text=f"▼ {layer.id} {layer.name} — {layer.desc}",
-                 bg=theme.LAYER_COLORS[layer.id], fg=theme.FG,
+        tk.Label(header, text=f"▼ {group.id} {group.name}",
+                 bg=theme.GROUP_COLORS[group.id], fg=theme.FG,
                  font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
         grid = tk.Frame(self.container, bg=theme.PANEL, padx=4, pady=4)
         grid.pack(fill="x", pady=(0, 1))
-        for i, metric in enumerate(layer.metrics):
+        for i, metric in enumerate(group.metrics):
             if metric.key == "tools":
                 on_click = self.controller.show_tool_calls
-            elif metric.key == "high_churn":
-                on_click = self.controller.show_high_churn_files
             elif metric.key == "models":
                 on_click = self.controller.show_models
+            elif metric.key == "user_msgs":
+                on_click = self.controller.show_user_msgs
+            elif metric.key == "files_touched":
+                on_click = self.controller.show_files_touched
             else:
                 on_click = None
             cell = MetricCell(grid, metric, on_click=on_click)

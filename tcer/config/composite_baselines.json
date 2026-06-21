@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Composite-layer (L5) baselines and task-type adjustment factors",
+    "description": "综合评分 (G6) baselines and task-type adjustment factors",
     "source": "Default values from the metric framework §6.3–6.5 (16-session reference dataset)",
     "last_updated": "2026-06-20"
   },

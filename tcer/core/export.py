@@ -100,7 +100,6 @@ def report_row_dict(r: SessionReport) -> dict:
         "read_write_ratio": r.read_write_ratio,
         "edit_ratio": r.edit_ratio,
         "exploration_ratio": r.exploration_ratio,
-        "subagent_density": r.subagent_density,
         # --- context efficiency ---
         "cache_efficiency": r.cache_efficiency,
         "cache_write_ratio": r.cache_write_ratio,
@@ -111,6 +110,15 @@ def report_row_dict(r: SessionReport) -> dict:
         "doc_net_loc": r.doc_net_loc,
         "test_loc_ratio": r.test_loc_ratio,
         "doc_loc_ratio": r.doc_loc_ratio,
+        # --- new quality metrics ---
+        "user_msgs": u.user_msgs,
+        "entrypoint": r.meta.entrypoint,
+        "tool_error_count": u.tool_errors,
+        "tool_error_rate": r.tool_error_rate,
+        "thinking_count": u.thinking_count,
+        "files_touched": r.files_touched,
+        "search_edit_ratio": r.search_edit_ratio,
+        "read_before_write": r.read_before_write,
         "models": sorted(u.models),
         "models_label": fmt.models_label(u),
         "cost_by_model": {m: round(c, 6) for m, c in sorted(metrics.cost_by_model(u).items())},
@@ -133,9 +141,11 @@ _CSV_FIELDS = [
     "task_type", "ta_tcer", "psac", "tcer_phase_adj", "ctei", "grade",
     "code_added", "code_deleted", "churn_ratio", "unseen_writes",
     "avg_turn_latency_sec", "session_duration_minutes",
-    "read_write_ratio", "edit_ratio", "exploration_ratio", "subagent_density",
+    "read_write_ratio", "edit_ratio", "exploration_ratio",
     "cache_efficiency", "cache_write_ratio", "non_cached_input_ratio",
     "high_churn_file_count", "test_net_loc", "doc_net_loc", "test_loc_ratio", "doc_loc_ratio",
+    "user_msgs", "entrypoint", "tool_error_count", "tool_error_rate",
+    "thinking_count", "files_touched", "search_edit_ratio", "read_before_write",
     "models", "models_label",
 ]
 

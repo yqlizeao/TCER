@@ -1,6 +1,6 @@
 """TCER core metric formulas and pricing.
 
-Basic formulas follow CLAUDE.md. The composite layer (L5) — TTAF / TA-TCER /
+Basic formulas follow CLAUDE.md. The 综合评分 group (G6) — TTAF / TA-TCER /
 PSAC / CAF / CTEI — follows the metric framework (§6.2–6.5), which is the
 authoritative original framework.
 
@@ -9,7 +9,7 @@ $/MTok rate), falling back to the Anthropic list-price ``default`` for unknown
 or mixed-model usage; see ``cost_usd``.
 
 Composite-layer constants (TTAF, CTEI baselines, PSAC regression, CHR weight)
-are loaded from ``data/composite_baselines.json`` — a hand-editable config so
+are loaded from ``config/composite_baselines.json`` — a hand-editable config so
 you can override the framework's reference-dataset defaults with your own
 accumulated data.
 """
@@ -205,6 +205,65 @@ def cache_efficiency(u: TokenUsage) -> float | None:
     return (u.cache_read_input_tokens / cw) if cw else None
 
 
+def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
+    """Temporal search-edit and read-before-write analysis.
+
+    search_edit_ratio: fraction of Grep/Glob calls (with file_path) that are
+    followed by an Edit/Write to the same file within 3 assistant turns.
+    Pure exploration (searches with no file_path) is excluded from the count.
+    read_before_write: fraction of Write/Edit targets where the same file was
+    Read in a previous turn.
+    """
+    from collections import defaultdict
+
+    _WRITE_EDIT = {"Write", "Edit", "MultiEdit"}
+    _SEARCH = {"Grep", "Glob"}
+    WINDOW = 3
+
+    # Group operations by file, preserving turn order
+    file_ops: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    for op in u.tool_ops:
+        if op.path:
+            file_ops[op.path].append((op.turn, op.tool))
+
+    # Read-before-write: for each file, was there a Read before the first Write/Edit?
+    write_edit_files = 0
+    read_first_files = 0
+    for ops in file_ops.values():
+        first_write_turn = None
+        has_prior_read = False
+        for turn, tool in ops:
+            if tool == "Read" and first_write_turn is None:
+                has_prior_read = True
+            elif tool in _WRITE_EDIT:
+                if first_write_turn is None:
+                    first_write_turn = turn
+                    write_edit_files += 1
+                    if has_prior_read:
+                        read_first_files += 1
+                    break
+    rbw = (read_first_files / write_edit_files) if write_edit_files else None
+
+    # Search-edit ratio: searches with file_path that lead to edit within WINDOW turns
+    searches_with_path = 0
+    searches_with_edit = 0
+    for op in u.tool_ops:
+        if op.tool not in _SEARCH or not op.path:
+            continue
+        searches_with_path += 1
+        edit_deadline = op.turn + WINDOW
+        for other_turn, other_tool in file_ops.get(op.path, []):
+            if other_tool in _WRITE_EDIT and op.turn < other_turn <= edit_deadline:
+                searches_with_edit += 1
+                break
+    ste = (searches_with_edit / searches_with_path) if searches_with_path else None
+
+    return {
+        "search_edit_ratio": ste,
+        "read_before_write": rbw,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Composite-layer formulas
 # --------------------------------------------------------------------------- #
@@ -250,15 +309,17 @@ def chr_factor(chr_: float | None) -> float:
 
 
 def churn_ratio(added: int | None, deleted: int | None) -> float | None:
-    """L3 code churn = deleted / added (fraction of written lines later removed).
+    """G4 code churn = deleted / added (fraction of written lines later removed).
 
     0 = pure additions (no rework); higher = more rework / lower-quality output.
-    None if no lines were added. Report §6.1 lists churn as the first L3 signal,
+    None if no lines were added. Report §6.1 lists churn as the first quality signal,
     guarding against "high-LOC low-quality" pseudo-efficiency.
     """
     if not added:
         return None
-    return (deleted or 0) / added
+    if deleted is None:
+        return None
+    return deleted / added
 
 
 def ctei(
@@ -319,7 +380,7 @@ def compute(
 ) -> SessionReport:
     """Compute the full per-session report from accumulated usage + net LOC.
 
-    Composite-layer fields (NCPI / CAF / TA-TCER / PSAC / CTEI / grade) and the L3
+    Composite fields (NCPI / CAF / TA-TCER / PSAC / CTEI / grade) and the
     churn ratio are filled in opportunistically: each is None unless its inputs
     are available.
     """
@@ -364,6 +425,18 @@ def compute(
     test_ratio = test_net_loc / net_loc if (net_loc and net_loc > 0 and test_net_loc is not None) else None
     doc_ratio = doc_net_loc / net_loc if (net_loc and net_loc > 0 and doc_net_loc is not None) else None
 
+    # --- new quality metrics ---
+    total_tools = sum(u.tool_calls.values())
+    tool_err_rate = u.tool_errors / total_tools if total_tools else None
+    # Derive files_touched from tool_ops
+    touched: set[str] = set()
+    ftd: dict[str, int] = {}
+    for op in u.tool_ops:
+        if op.path:
+            touched.add(op.path)
+            ftd[op.path] = ftd.get(op.path, 0) + 1
+    fq = file_quality_metrics(u)
+
     return SessionReport(
         meta=meta,
         usage=u,
@@ -404,4 +477,11 @@ def compute(
         doc_net_loc=doc_net_loc,
         test_loc_ratio=test_ratio,
         doc_loc_ratio=doc_ratio,
+        # --- new quality metrics ---
+        tool_error_rate=tool_err_rate,
+        files_touched=len(touched),
+        files_touched_details=ftd if ftd else None,
+        thinking_count=u.thinking_count,
+        search_edit_ratio=fq["search_edit_ratio"],
+        read_before_write=fq["read_before_write"],
     )

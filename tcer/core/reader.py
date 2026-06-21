@@ -7,10 +7,11 @@ conversations and never reads ``message.usage``).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
-from tcer.core.models import SessionMeta, TokenUsage
+from tcer.core.models import SessionMeta, ToolOp, TokenUsage
 from tcer.core.paths import projects_dir
 
 # Title-extraction noise to skip, matching cc-switch's filters.
@@ -90,13 +91,53 @@ def aggregate_usage(path: Path) -> TokenUsage:
     """
     u = TokenUsage()
     seen: set[str] = set()
+    call_id_to_name: dict[str, str] = {}  # tool_use_id → tool_name for error attribution
+    turn_idx = 0  # assistant message sequence for temporal analysis
     for obj in iter_messages(path):
         msg = obj.get("message")
         if not isinstance(msg, dict):
             continue
 
-        # Count tool calls from assistant messages
-        if msg.get("role") == "assistant":
+        role = msg.get("role")
+
+        # Count user messages and extract text
+        if role == "user":
+            content = msg.get("content")
+            # Only count real user messages (with text), not tool_result returns.
+            # In JSONL, tool results are sent as role="user" but contain only
+            # tool_result blocks — real user input has text blocks.
+            is_real_user = False
+            if isinstance(content, str) and content.strip():
+                is_real_user = True
+            elif isinstance(content, list):
+                is_real_user = any(
+                    isinstance(it, dict) and it.get("type") == "text"
+                    for it in content
+                )
+            if is_real_user:
+                u.user_msgs += 1
+                # Extract user message text for popup display
+                txt = extract_text(content).strip()
+                if txt:
+                    txt = re.sub(r'<[^>]+>', '', txt).strip()
+                if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
+                    u.user_message_texts.append(txt[:500])
+            # Count tool_result errors (from ALL user-role messages)
+            if isinstance(content, list):
+                for item in content:
+                    if (isinstance(item, dict)
+                            and item.get("type") == "tool_result"
+                            and item.get("is_error")):
+                        u.tool_errors += 1
+                        # Attribute error to specific tool via call_id mapping
+                        tid = item.get("tool_use_id")
+                        if isinstance(tid, str):
+                            tname = call_id_to_name.get(tid)
+                            if tname:
+                                u.tool_errors_by_tool[tname] = u.tool_errors_by_tool.get(tname, 0) + 1
+
+        # Process assistant messages: dedup by message.id for token counting
+        if role == "assistant":
             mid = msg.get("id")
             if isinstance(mid, str):
                 if mid in seen:
@@ -123,20 +164,37 @@ def aggregate_usage(path: Path) -> TokenUsage:
             model = msg.get("model")
             if isinstance(model, str):
                 u.models.add(model)
-            # Per-model bucket (key "" when the model isn't recorded) so mixed-model
-            # sessions can be priced at each model's own rate. Bucket sums stay equal
-            # to the scalar totals above.
             u.bucket(model if isinstance(model, str) else "").add(i, cw, cr, o)
 
-        # Extract tool_use blocks from content (only assistant messages contain them)
-        if msg.get("role") == "assistant":
+            # Extract tool_use / thinking blocks from content
             content = msg.get("content")
             if isinstance(content, list):
                 for item in content:
-                    if isinstance(item, dict) and item.get("type") == "tool_use":
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = item.get("type")
+                    if item_type == "tool_use":
                         tool_name = item.get("name")
                         if isinstance(tool_name, str):
                             u.tool_calls[tool_name] = u.tool_calls.get(tool_name, 0) + 1
+                            # Map call id → tool name for error attribution
+                            cid = item.get("id")
+                            if isinstance(cid, str):
+                                call_id_to_name[cid] = tool_name
+                            # Record tool op for temporal analysis
+                            inp = item.get("input")
+                            if isinstance(inp, dict):
+                                fp = inp.get("file_path") or inp.get("notebook_path")
+                            else:
+                                fp = None
+                            u.tool_ops.append(ToolOp(
+                                turn=turn_idx,
+                                tool=tool_name,
+                                path=fp if isinstance(fp, str) else "",
+                            ))
+                    elif item_type == "thinking":
+                        u.thinking_count += 1
+            turn_idx += 1
 
     # Compute session_duration_ms from the time window
     if u.started_at and u.ended_at:
@@ -161,6 +219,7 @@ def read_session_meta(path: Path) -> SessionMeta:
     head, tail = _read_head_tail_lines(path, head_n=20, tail_n=30)
     session_id: str | None = None
     cwd: str | None = None
+    entrypoint: str | None = None
 
     # Prefer the AI-generated title. Keep overwriting → the last (newest) non-empty
     # aiTitle wins. The latest ai-title line sits at the file's end, so the tail
@@ -181,6 +240,10 @@ def read_session_meta(path: Path) -> SessionMeta:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if obj.get("type") == "ai-title":
+            t = obj.get("aiTitle")
+            if isinstance(t, str) and t.strip():
+                title = t.strip()
         if session_id is None:
             sid = obj.get("sessionId")
             if isinstance(sid, str):
@@ -189,6 +252,10 @@ def read_session_meta(path: Path) -> SessionMeta:
             c = obj.get("cwd")
             if isinstance(c, str):
                 cwd = c
+        if entrypoint is None:
+            ep = obj.get("entrypoint")
+            if isinstance(ep, str):
+                entrypoint = ep
         # Fallback title only when no ai-title exists: first real user message.
         if title is None:
             msg = obj.get("message")
@@ -210,6 +277,7 @@ def read_session_meta(path: Path) -> SessionMeta:
         title=title,
         path=path,
         is_subagent=is_subagent(path),
+        entrypoint=entrypoint,
     )
 
 

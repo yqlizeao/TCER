@@ -63,7 +63,7 @@ class TcerGui:
         tab_m = tk.Frame(nb, bg=theme.BG)
         tab_b = tk.Frame(nb, bg=theme.PANEL)
         tab_t = tk.Frame(nb, bg=theme.PANEL)
-        nb.add(tab_m, text="五层指标")
+        nb.add(tab_m, text="指标分类")
         nb.add(tab_b, text="综合效率指数排名")
         nb.add(tab_t, text="趋势")
 
@@ -194,12 +194,19 @@ class TcerGui:
             suffix = " · 项目汇总"
         popups.ModelsPopup(self.root, usage, suffix)
 
-    def show_high_churn_files(self) -> None:
+    def show_user_msgs(self) -> None:
         report = self._rendered_report
-        if report and report.high_churn_details:
-            popups.HighChurnFilesPopup(self.root, report.high_churn_details)
+        if report and report.usage.user_message_texts:
+            popups.UserMsgsPopup(self.root, report.usage.user_message_texts)
         else:
-            messagebox.showinfo("高频改动文件", "当前会话没有被改动 ≥3 次的文件。")
+            messagebox.showinfo("用户消息", "当前会话未记录到用户消息。")
+
+    def show_files_touched(self) -> None:
+        report = self._rendered_report
+        if report and report.files_touched_details:
+            popups.FilesTouchedPopup(self.root, report.files_touched_details)
+        else:
+            messagebox.showinfo("涉及文件", "当前会话未涉及任何文件操作。")
 
     # --------------------------------------------------------------- export
     def export(self, fmt: str) -> None:

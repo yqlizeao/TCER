@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tcer.core import metrics
-from tcer.core.models import SessionMeta, TokenUsage
+from tcer.core.models import SessionMeta, ToolOp, TokenUsage
 
 META = SessionMeta(session_id="s", cwd="/tmp", title=None,
                    path=Path("/tmp/s.jsonl"), is_subagent=False)
@@ -79,7 +79,7 @@ def test_merge_sums_fields():
 
 
 # --------------------------------------------------------------------------- #
-# Composite layer (L5): CTEI / TTAF / TA-TCER / PSAC / CAF / grade
+# Composite (G6): CTEI / TTAF / TA-TCER / PSAC / CAF / grade
 # --------------------------------------------------------------------------- #
 def test_ctei_reproduces_report_excellent_session():
     # Report §6.3, session 4.22/5.3-codex: TCER=111.04, NCPI=0.189, CPE=4.45,
@@ -150,7 +150,7 @@ def test_grade_thresholds():
     assert metrics.grade(None) is None
 
 
-def test_compute_populates_composite_layer():
+def test_compute_populates_composite_fields():
     # End-to-end: compute() fills NCPI / CAF / TA-TCER / PSAC / CTEI when given
     # loc_accumulated + task_type. total = 1Mt, net_loc=500 → TCER=500.
     u = _u(i=400_000, cw=100_000, o=500_000)  # total 1,000,000
@@ -188,5 +188,112 @@ def test_compute_populates_churn():
     assert r.code_added == 1000
     assert r.code_deleted == 200
     assert r.churn_ratio == pytest_approx(0.20)
+
+
+# --------------------------------------------------------------------------- #
+# New quality metrics: tool errors, thinking, files_touched, file quality
+# --------------------------------------------------------------------------- #
+def test_tool_error_rate():
+    u = _u(i=500_000, o=500_000)
+    u.tool_calls = {"Read": 10, "Write": 5, "Bash": 5}
+    u.tool_errors = 4
+    r = metrics.compute(META, u, net_loc=100)
+    assert r.tool_error_rate == pytest_approx(4 / 20)
+
+
+def test_tool_error_rate_zero_tools():
+    u = _u(i=500_000, o=500_000)
+    u.tool_errors = 0
+    r = metrics.compute(META, u, net_loc=100)
+    assert r.tool_error_rate is None
+
+
+def test_files_touched_count():
+    u = _u(i=500_000, o=500_000)
+    u.tool_ops = [
+        ToolOp(0, "Read", "/a.py"),
+        ToolOp(0, "Read", "/b.py"),
+        ToolOp(0, "Read", "/c.py"),
+        ToolOp(1, "Write", "/a.py"),
+        ToolOp(1, "Write", "/d.py"),
+        ToolOp(2, "Edit", "/b.py"),
+    ]
+    r = metrics.compute(META, u, net_loc=100)
+    # unique files: a, b, c, d = 4
+    assert r.files_touched == 4
+    assert r.files_touched_details is not None
+    # a.py: read + write = 2 ops
+    assert r.files_touched_details["/a.py"] == 2
+
+
+def test_thinking_count_passthrough():
+    u = _u(i=500_000, o=500_000)
+    u.thinking_count = 7
+    r = metrics.compute(META, u, net_loc=100)
+    assert r.thinking_count == 7
+
+
+def test_file_quality_metrics():
+    u = _u(i=500_000, o=500_000)
+    u.tool_ops = [
+        # Turn 0: search + read
+        ToolOp(0, "Grep", "/a.py"),   # search a.py
+        ToolOp(0, "Grep", "/b.py"),   # search b.py
+        ToolOp(0, "Grep", "/c.py"),   # search c.py (no edit follows)
+        ToolOp(0, "Read", "/a.py"),
+        ToolOp(0, "Read", "/b.py"),
+        ToolOp(0, "Read", "/d.py"),
+        # Turn 1: edit within window (≤3 turns from search)
+        ToolOp(1, "Edit", "/a.py"),   # edit a.py (turn 1 ≤ 0+3) ✓
+        ToolOp(1, "Write", "/d.py"),  # write d.py (read before) ✓
+        # Turn 5: edit outside window (>3 turns from turn 0 search)
+        ToolOp(5, "Edit", "/b.py"),   # edit b.py (turn 5 > 0+3) ✗ for search, but read_before ✓
+    ]
+    r = metrics.compute(META, u, net_loc=100)
+    # search_edit_ratio: searches with path = 3 (a, b, c)
+    #   a.py: edit at turn 1, search at turn 0 → within window ✓
+    #   b.py: edit at turn 5, search at turn 0 → outside window ✗
+    #   c.py: no edit → ✗
+    # ratio = 1/3
+    assert r.search_edit_ratio == pytest_approx(1 / 3)
+    # read_before_write: files with write/edit = {a, d, b}
+    #   a.py: read turn 0, first write turn 1 → read before ✓
+    #   d.py: read turn 0, first write turn 1 → read before ✓
+    #   b.py: read turn 0, first write turn 5 → read before ✓
+    # ratio = 3/3 = 1.0
+    assert r.read_before_write == pytest_approx(1.0)
+
+
+def test_file_quality_no_searches():
+    u = _u(i=500_000, o=500_000)
+    u.tool_ops = [
+        ToolOp(0, "Edit", "/a.py"),
+    ]
+    r = metrics.compute(META, u, net_loc=0)
+    # No searches → ste = None
+    assert r.search_edit_ratio is None
+    # Write without prior read → rbw = 0/1 = 0.0
+    assert r.read_before_write == pytest_approx(0.0)
+
+
+def test_file_quality_write_before_read():
+    """Write first, Read later — should NOT count as read-before-write."""
+    u = _u(i=500_000, o=500_000)
+    u.tool_ops = [
+        ToolOp(0, "Write", "/a.py"),  # write first
+        ToolOp(1, "Read", "/a.py"),   # read after
+    ]
+    r = metrics.compute(META, u, net_loc=100)
+    # Read was NOT before Write → rbw = 0/1
+    assert r.read_before_write == pytest_approx(0.0)
+
+
+def test_user_msgs_passthrough():
+    u = _u(i=500_000, o=500_000)
+    u.user_msgs = 12
+    u.user_message_texts = ["hello", "fix the bug"]
+    r = metrics.compute(META, u, net_loc=100)
+    assert r.usage.user_msgs == 12
+    assert len(r.usage.user_message_texts) == 2
 
 

@@ -42,6 +42,14 @@ def fmt_dt(ms: int | None, fmt: str = "%Y-%m-%d %H:%M") -> str:
         return "-"
 
 
-def models_label(u: TokenUsage) -> str:
-    """Friendly comma-joined model list (e.g. 'Claude Opus 4.8'), sorted by id."""
-    return ", ".join(pricing.label(m) for m in sorted(u.models)) or "-"
+def models_label(u: TokenUsage, max_n: int = 2) -> str:
+    """Friendly comma-joined model list (e.g. 'Claude Opus 4.8'), sorted by id.
+
+    Shows at most *max_n* model names; any extra are replaced by trailing ``…``.
+    """
+    labels = [pricing.label(m) for m in sorted(u.models)]
+    if not labels:
+        return "-"
+    if len(labels) > max_n:
+        return ", ".join(labels[:max_n]) + ", …"
+    return ", ".join(labels)
