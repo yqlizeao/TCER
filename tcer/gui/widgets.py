@@ -78,16 +78,21 @@ class Card:
     also trigger selection via ``bind_to``.
     """
 
-    def __init__(self, parent, on_click, bg: str = theme.PANEL_2,
-                 padx: int = 2, pady: int = 2) -> None:
+    def __init__(self, parent, on_click, on_right_click=None,
+                 bg: str = theme.PANEL_2, padx: int = 2, pady: int = 2) -> None:
         self.frame = tk.Frame(parent, bg=bg, relief="flat", borderwidth=1,
                               highlightthickness=1, highlightbackground="#3e3e42")
         self.frame.pack(fill="x", padx=padx, pady=pady)
         self._on_click = on_click
+        self._on_right_click = on_right_click
         self.frame.bind("<Button-1>", lambda e: on_click(self))
+        if on_right_click:
+            self.frame.bind("<Button-3>", on_right_click)
 
     def bind_to(self, widget) -> None:
         widget.bind("<Button-1>", lambda e: self._on_click(self))
+        if self._on_right_click:
+            widget.bind("<Button-3>", self._on_right_click)
         return widget
 
     def set_selected(self, selected: bool) -> None:

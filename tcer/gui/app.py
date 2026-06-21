@@ -63,6 +63,7 @@ class TcerGui:
 
         nb = ttk.Notebook(right)
         nb.pack(fill="both", expand=True)
+        self._nb = nb
         tab_m = tk.Frame(nb, bg=theme.BG)
         tab_b = tk.Frame(nb, bg=theme.PANEL)
         tab_t = tk.Frame(nb, bg=theme.PANEL)

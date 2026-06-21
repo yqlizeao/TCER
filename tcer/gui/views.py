@@ -192,6 +192,7 @@ class ProjectColumn:
             card.frame.destroy()
         self._cards.clear()
         self._selected = None
+        self._projects = projects
         for idx, d in enumerate(projects):
             card = self._make_card(d, idx)
             self._cards.append(card)
@@ -201,7 +202,9 @@ class ProjectColumn:
             self._select(self._cards[0])
 
     def _make_card(self, project_dir, idx):
-        card = Card(self.container, on_click=lambda c, i=idx: self._select(c, i),
+        card = Card(self.container,
+                    on_click=lambda c, i=idx: self._select(c, i),
+                    on_right_click=lambda e, _i=idx, _d=project_dir: self._on_right_click(e, _i, _d),
                     padx=1, pady=1)
         name = _short_name(project_dir.name)
         lbl = tk.Label(card.frame, text=name, bg=theme.PANEL_2, fg=theme.FG,
@@ -217,6 +220,71 @@ class ProjectColumn:
         card.set_selected(True)
         if idx is not None:
             self.controller.on_select_project(idx)
+
+    def _on_right_click(self, event, idx, project_dir):
+        """Right-click context menu on a project card."""
+        name = _short_name(project_dir.name)
+        menu = tk.Menu(self.container, tearoff=False, bg=theme.PANEL, fg=theme.FG,
+                       activebackground=theme.ACCENT, activeforeground=theme.FG)
+
+        menu.add_command(
+            label=f"🔄 刷新此项目 · {name[:30]}",
+            command=lambda: self._select_and_refresh(idx),
+        )
+
+        menu.add_separator()
+
+        menu.add_command(
+            label="📊 查看项目概览（指标分类）",
+            command=lambda: self._select_and_view(idx, "project"),
+        )
+        menu.add_command(
+            label="📊 查看会话详情视图",
+            command=lambda: self._select_and_view(idx, "session"),
+        )
+
+        menu.add_separator()
+
+        menu.add_command(
+            label="📂 在资源管理器中打开",
+            command=lambda: self._open_in_explorer(project_dir),
+        )
+        menu.add_command(
+            label="📋 复制项目路径",
+            command=lambda: self._copy_text(str(project_dir)),
+        )
+        menu.add_command(
+            label="📋 复制项目名称",
+            command=lambda: self._copy_text(name),
+        )
+
+        menu.add_separator()
+
+        menu.add_command(
+            label="🔄 刷新全部项目列表",
+            command=lambda: self.controller.refresh_projects(),
+        )
+
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _select_and_refresh(self, idx):
+        self._select(self._cards[idx], idx)
+
+    def _select_and_view(self, idx, mode):
+        self.controller.view_mode.set(mode)
+        self._select(self._cards[idx], idx)
+        self.controller._on_view_change()
+
+    def _open_in_explorer(self, project_dir):
+        import subprocess
+        try:
+            subprocess.Popen(["explorer", str(project_dir)])
+        except Exception:
+            pass
+
+    def _copy_text(self, text):
+        self.controller.root.clipboard_clear()
+        self.controller.root.clipboard_append(text)
 
 
 class SessionColumn:
@@ -246,17 +314,20 @@ class SessionColumn:
             card.frame.destroy()
         self._cards.clear()
         self._selected = None
-        ordered = sorted(reports, key=lambda r: r.usage.ended_at or r.usage.started_at or 0,
-                         reverse=True)
-        for r in ordered:
+        self._reports = sorted(reports,
+                               key=lambda r: r.usage.ended_at or r.usage.started_at or 0,
+                               reverse=True)
+        for r in self._reports:
             self._cards.append(self._make_card(r))
-        self.count_label.config(text=f"会话（{len(ordered)}）")
+        self.count_label.config(text=f"会话（{len(self._reports)}）")
         self.scroll.update_scroll()
 
     def _make_card(self, r):
         sid = r.meta.session_id or r.meta.path.stem
         title = r.meta.title or "(无标题)"
-        card = Card(self.container, on_click=lambda c, s=sid: self._select(c, s))
+        card = Card(self.container,
+                    on_click=lambda c, s=sid: self._select(c, s),
+                    on_right_click=lambda e, _r=r, _s=sid: self._on_right_click(e, _r, _s))
         time_ms = r.usage.ended_at or r.usage.started_at
         t_lbl = tk.Label(card.frame, text=fmt_dt(time_ms, "%m-%d %H:%M") if time_ms else "-",
                          bg=theme.PANEL_2, fg="#888888", font=theme.FONT_MONO, anchor="w")
@@ -280,6 +351,95 @@ class SessionColumn:
         self._selected = card
         card.set_selected(True)
         self.controller.on_select_session(sid)
+
+    def _on_right_click(self, event, report, sid):
+        """Right-click context menu on a session card."""
+        from . import popups
+        menu = tk.Menu(self.container, tearoff=False, bg=theme.PANEL, fg=theme.FG,
+                       activebackground=theme.ACCENT, activeforeground=theme.FG)
+
+        # Session info sub-items
+        menu.add_command(
+            label=f"📋 查看详情 · {sid[:20]}…",
+            command=lambda: self.controller.show_session_detail(sid),
+        )
+        menu.add_command(
+            label="🔧 查看工具调用",
+            command=lambda: popups.ToolCallsPopup(
+                self.controller.root, report.usage, f" · {sid[:16]}…"),
+        )
+        has_user_msgs = bool(report.usage.user_message_texts)
+        menu.add_command(
+            label=f"💬 查看用户消息（{len(report.usage.user_message_texts)} 条）",
+            command=lambda: popups.UserMsgsPopup(
+                self.controller.root, report.usage.user_message_texts),
+            state="normal" if has_user_msgs else "disabled",
+        )
+        has_files = bool(report.files_touched_details)
+        menu.add_command(
+            label=f"📁 查看涉及文件（{report.files_touched} 个）",
+            command=lambda: popups.FilesTouchedPopup(
+                self.controller.root, report.files_touched_details),
+            state="normal" if has_files else "disabled",
+        )
+        menu.add_command(
+            label="🤖 查看模型使用",
+            command=lambda: popups.ModelsPopup(
+                self.controller.root, report.usage, f" · {sid[:16]}…"),
+        )
+
+        menu.add_separator()
+
+        # Analysis sub-items
+        has_ctei = report.ctei is not None
+        menu.add_command(
+            label="🎯 查看效率雷达",
+            command=lambda: popups.RadarPopup(
+                self.controller.root, report, self._reports),
+            state="normal" if has_ctei else "disabled",
+        )
+        menu.add_command(
+            label="📈 在趋势图中定位",
+            command=lambda: self._navigate_to_trend(sid),
+        )
+
+        menu.add_separator()
+
+        # Copy actions
+        menu.add_command(
+            label="📋 复制会话 ID",
+            command=lambda: self._copy_text(sid),
+        )
+        title = report.meta.title or "(无标题)"
+        menu.add_command(
+            label="📋 复制会话标题",
+            command=lambda: self._copy_text(title),
+        )
+        cost_str = f"${report.cost:.4f}" if report.cost else "$0"
+        tcer_str = f"{report.tcer:.1f}" if report.tcer is not None else "—"
+        ctei_str = f"{report.ctei:.2f}" if report.ctei is not None else "—"
+        menu.add_command(
+            label=f"📋 复制摘要（TCER={tcer_str} · CTEI={ctei_str} · {cost_str}）",
+            command=lambda: self._copy_text(
+                f"会话: {sid}\n标题: {title}\n"
+                f"TCER: {tcer_str} · CTEI: {ctei_str} · 成本: {cost_str}"),
+        )
+
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _navigate_to_trend(self, sid):
+        """Switch to trend tab and select this session's data point."""
+        self.controller.on_select_session(sid)
+        # Switch notebook to trend tab
+        try:
+            nb = self.controller._nb
+            nb.select(2)  # trend is the 3rd tab (0-indexed)
+        except Exception:
+            pass
+
+    def _copy_text(self, text):
+        self.controller.root.clipboard_clear()
+        self.controller.root.clipboard_append(text)
 
     def clear_selection(self) -> None:
         if self._selected is not None:
