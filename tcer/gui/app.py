@@ -16,6 +16,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from tcer.core import analyze, export as export_mod, metrics
+from tcer.core.calibrate import calibrate_project
 from tcer.core.paths import list_projects
 from . import popups, theme, views
 from .views import CteiBarChart, FilterBar, MetricPanel, ProjectColumn, SessionColumn, TrendChart
@@ -31,6 +32,8 @@ class TcerGui:
         self._selected_session_id: str | None = None
         self.view_mode = tk.StringVar(value="project")
         self._rendered_report = None  # last report rendered in MetricPanel (for popups)
+        self._code_dir: str | None = None
+        self._no_loc: bool = False
 
         root.title("TCER — Token 转码效率计量")
         root.geometry("1400x820")
@@ -69,7 +72,7 @@ class TcerGui:
 
         self.metric_panel = MetricPanel(tab_m, self)
         self.bar_chart = CteiBarChart(tab_b)
-        self.trend_chart = TrendChart(tab_t)
+        self.trend_chart = TrendChart(tab_t, controller=self)
 
         root.update_idletasks()
         paned.sash_place(0, 190, 0)
@@ -102,6 +105,8 @@ class TcerGui:
             task_type=params["task_type"],
             since=params["since"],
             until=params["until"],
+            code_dir=self._code_dir,
+            no_loc=self._no_loc,
         )
         threading.Thread(target=self._worker, args=(args,), daemon=True).start()
 
@@ -118,6 +123,10 @@ class TcerGui:
                 kind, payload = self._q.get_nowait()
                 if kind == "ok":
                     self._on_analysis(payload)
+                elif kind == "calibration":
+                    cals, text_report = payload
+                    self.filter.set_status("校准完成")
+                    popups.CalibratePopup(self.root, cals, text_report)
                 else:
                     self.filter.set_status("出错")
                     messagebox.showerror("TCER 分析出错", payload)
@@ -207,6 +216,52 @@ class TcerGui:
             popups.FilesTouchedPopup(self.root, report.files_touched_details)
         else:
             messagebox.showinfo("涉及文件", "当前会话未涉及任何文件操作。")
+
+    # --------------------------------------------------------------- tools
+    def run_calibration(self) -> None:
+        proj = self._selected_project()
+        if proj is None:
+            messagebox.showinfo("LOC 校准", "请先选择一个项目。")
+            return
+        self.filter.set_status("校准中…")
+        threading.Thread(target=self._calibration_worker, args=(proj.name,),
+                         daemon=True).start()
+
+    def _calibration_worker(self, project: str) -> None:
+        try:
+            cals = calibrate_project(project, code_dir=self._code_dir)
+            lines = []
+            for cal in cals:
+                lines.append(f"{cal.session_id[:38]}  "
+                             f"工具 +{cal.tcer_added} -{cal.tcer_deleted}  "
+                             f"git +{cal.git_added} -{cal.git_deleted}  "
+                             f"偏差 {cal.net_deviation:+d}")
+            self._q.put(("calibration", (cals, "\n".join(lines))))
+        except Exception as e:  # noqa: BLE001
+            self._q.put(("err", f"校准出错: {e}"))
+
+    def compute_baselines(self) -> None:
+        if not self._current:
+            messagebox.showinfo("计算基准", "请先分析一个项目。")
+            return
+        values = metrics.compute_baselines(self._current.reports)
+        if values is None:
+            messagebox.showinfo("计算基准", "没有足够数据的会话来计算基准。")
+            return
+
+        def _apply(v):
+            metrics.save_baselines(v)
+            self.reanalyze()
+
+        popups.BaselinesPopup(self.root, values, self._current.n_sessions, _apply)
+
+    def show_advanced(self) -> None:
+        def _apply(code_dir, no_loc):
+            self._code_dir = code_dir
+            self._no_loc = no_loc
+            self.reanalyze()
+
+        popups.AdvancedPopup(self.root, self._code_dir or "", self._no_loc, _apply)
 
     # --------------------------------------------------------------- export
     def export(self, fmt: str) -> None:

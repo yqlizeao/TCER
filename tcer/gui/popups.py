@@ -396,6 +396,95 @@ class FilesTouchedPopup:
             tree.insert("", "end", values=(display, cnt))
 
 
+class RadarPopup:
+    """六维效率雷达 — hexagonal radar chart for one session vs project range."""
+
+    # One representative metric per G-group.
+    _AXES = [
+        ("turns", "助手回合"),
+        ("total_tokens", "Token"),
+        ("chr", "缓存命中"),
+        ("net_loc", "净增行"),
+        ("cost", "成本"),
+        ("ctei", "CTEI"),
+    ]
+
+    def __init__(self, parent, report, all_reports) -> None:
+        import math
+        from tcer.gui.views import metric_raw_value
+
+        sid = (report.meta.session_id or report.meta.path.stem)[:16]
+        win = _new_window(parent, f"效率雷达 · {sid}…", "440x480")
+
+        canvas = tk.Canvas(win, bg=theme.PANEL, highlightthickness=0,
+                           width=400, height=400)
+        canvas.pack(padx=16, pady=16)
+
+        # Collect raw values for normalization
+        axis_data = []
+        for key, _label in self._AXES:
+            vals = [metric_raw_value(r, key) for r in all_reports]
+            valid = [v for v in vals if v is not None]
+            my_val = metric_raw_value(report, key)
+            lo = min(valid) if valid else 0
+            hi = max(valid) if valid else 1
+            norm = (my_val - lo) / (hi - lo) if hi > lo and my_val is not None else 0.5
+            axis_data.append((key, _label, my_val, max(0.0, min(1.0, norm))))
+
+        # Draw hexagonal radar
+        cx, cy, R = 200, 210, 140
+        n = len(axis_data)
+
+        # Concentric grid rings
+        for frac in (0.25, 0.5, 0.75, 1.0):
+            pts = []
+            for ai in range(n):
+                angle = math.pi / 2 + 2 * math.pi * ai / n
+                px = cx + R * frac * math.cos(angle)
+                py = cy - R * frac * math.sin(angle)
+                pts.extend([px, py])
+            canvas.create_polygon(pts, outline="#3e3e42", fill="", dash=(2, 3))
+
+        # Axes + labels
+        for ai, (key, label, raw, norm) in enumerate(axis_data):
+            angle = math.pi / 2 + 2 * math.pi * ai / n
+            ex = cx + R * math.cos(angle)
+            ey = cy - R * math.sin(angle)
+            canvas.create_line(cx, cy, ex, ey, fill="#3e3e42")
+            # Label
+            lx = cx + (R + 22) * math.cos(angle)
+            ly = cy - (R + 22) * math.sin(angle)
+            canvas.create_text(lx, ly, text=label, fill=theme.FG,
+                               font=theme.FONT_UI_SMALL)
+            # Raw value
+            raw_text = f"{raw:g}" if raw is not None else "—"
+            rx = cx + (R + 22) * math.cos(angle)
+            ry = cy - (R + 22) * math.sin(angle) + 12
+            canvas.create_text(rx, ry, text=raw_text, fill=theme.MUTED,
+                               font=theme.FONT_MONO)
+
+        # Data polygon
+        data_pts = []
+        for ai, (key, label, raw, norm) in enumerate(axis_data):
+            angle = math.pi / 2 + 2 * math.pi * ai / n
+            px = cx + R * norm * math.cos(angle)
+            py = cy - R * norm * math.sin(angle)
+            data_pts.extend([px, py])
+        canvas.create_polygon(data_pts, outline=theme.ACCENT,
+                              fill="#007acc33", width=2)
+        # Data dots
+        for ai in range(0, len(data_pts), 2):
+            px, py = data_pts[ai], data_pts[ai + 1]
+            canvas.create_oval(px - 3, py - 3, px + 3, py + 3,
+                               fill=theme.ACCENT, outline=theme.FG)
+
+        canvas.create_text(cx, 14, text="六维效率雷达（归一化到项目范围）",
+                           fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+
+        tk.Button(win, text="关闭", command=win.destroy, bg=theme.ACCENT,
+                  fg=theme.FG, relief="flat", padx=20, pady=4).pack(pady=6)
+
+
 def _copy(win, text: str) -> None:
     win.clipboard_clear()
     win.clipboard_append(text)
