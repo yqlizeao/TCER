@@ -716,7 +716,8 @@ class RadarPopup:
         head.pack(fill="x", padx=10, pady=(0, 4))
         ctei_raw = metric_raw_value(report, "ctei")
         grade = report.grade or "-"
-        tk.Label(head, text=f"{report.meta.title or sid}  CTEI {ctei_raw:.2f if ctei_raw else '-'}  评级 {grade}",
+        ctei_val = f"{ctei_raw:.2f}" if ctei_raw else "-"
+        tk.Label(head, text=f"{report.meta.title or sid}  CTEI {ctei_val}  评级 {grade}",
                  bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI).pack()
 
         # Radar canvas
