@@ -32,6 +32,47 @@ def ctei_ranking(reports: list[SessionReport]) -> list[tuple[str, float, str]]:
     return [(_chart_label(r), r.ctei, r.grade or "") for r in scored]
 
 
+def ctei_decompose(report: SessionReport) -> dict[str, float] | None:
+    """Return CTEI's 4 multiplicative factors for one session.
+
+    Each factor is normalized so 1.0 = the neutral/baseline point.
+    Returns None when the session has no CTEI score.
+    """
+    if report.ctei is None:
+        return None
+    tcer = report.tcer
+    ncpi_ = report.ncpi
+    cpe = report.cpe
+    chr_ = report.chr
+    bl_t = metrics.TCER_BASELINE
+    bl_n = metrics.NCPI_BASELINE
+    bl_c = metrics.CPE_BASELINE
+    eff = (tcer / bl_t) if (tcer is not None and bl_t) else 0.0
+    dens = (ncpi_ / bl_n) if (ncpi_ is not None and bl_n) else 0.0
+    cost = (bl_c / cpe) if cpe else 0.0
+    cache = metrics.chr_factor(chr_)
+    return {
+        "eff_factor": eff,
+        "density_factor": dens,
+        "cost_factor": cost,
+        "cache_factor": cache,
+    }
+
+
+def ctei_decompose_avg(reports: list[SessionReport]) -> dict[str, float] | None:
+    """Return the average of each CTEI factor across all scored sessions."""
+    all_factors: list[dict[str, float]] = []
+    for r in reports:
+        f = ctei_decompose(r)
+        if f is not None:
+            all_factors.append(f)
+    if not all_factors:
+        return None
+    keys = ("eff_factor", "density_factor", "cost_factor", "cache_factor")
+    n = len(all_factors)
+    return {k: sum(d[k] for d in all_factors) / n for k in keys}
+
+
 def text_ctei_chart(reports: list[SessionReport], width: int = 40) -> str:
     """Plain-ASCII CTEI bar chart (no ANSI) for embedding in Markdown exports."""
     ranking = ctei_ranking(reports)

@@ -20,7 +20,7 @@ from tcer.core.calibrate import calibrate_project
 from tcer.core.paths import list_projects
 from tcer.core.reader import discover_jsonl
 from . import popups, theme, views
-from .views import CteiBarChart, FilterBar, MetricPanel, ProjectColumn, SessionColumn, TrendChart
+from .views import CteiRankingView, FilterBar, MetricPanel, ProjectColumn, SessionColumn, TrendChart
 
 
 class TcerGui:
@@ -73,7 +73,7 @@ class TcerGui:
         nb.add(tab_t, text="趋势")
 
         self.metric_panel = MetricPanel(tab_m, self)
-        self.bar_chart = CteiBarChart(tab_b)
+        self.ranking_view = CteiRankingView(tab_b, controller=self)
         self.trend_chart = TrendChart(tab_t, controller=self)
 
         root.update_idletasks()
@@ -150,7 +150,7 @@ class TcerGui:
         self._selected_session_id = None
         self.session_col.update(a.reports)
         self.session_col.clear_selection()
-        self.bar_chart.update(a.reports)
+        self.ranking_view.update(a.reports)
         self.trend_chart.update(a.reports)
         self._render_metrics()
         self.filter.set_status(f"完成 · 共 {a.n_sessions} 个会话")

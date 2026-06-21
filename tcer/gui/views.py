@@ -2,8 +2,8 @@
 
 Each view is built from ``metric_defs`` / ``theme`` / ``widgets`` and calls back
 into the controller (passed in) — views hold no analysis state of their own.
-Chart classes draw on a ``tk.Canvas``; ``CteiBarChart`` consumes the shared
-``export.ctei_ranking`` helper.
+Chart classes draw on a ``tk.Canvas``; ``CteiRankingView`` consumes the shared
+``export.ctei_ranking`` / ``export.ctei_decompose`` helpers.
 """
 from __future__ import annotations
 
@@ -539,52 +539,403 @@ class MetricPanel:
 # --------------------------------------------------------------------------- #
 # Charts (Canvas)
 # --------------------------------------------------------------------------- #
-class CteiBarChart:
-    """Tab 2: horizontal CTEI bars per session, colored by grade."""
+class CteiRankingView:
+    """Tab 2: interactive CTEI ranking dashboard.
 
-    def __init__(self, parent) -> None:
-        self._ranking: list = []
-        self.canvas = tk.Canvas(parent, bg=theme.PANEL, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
-        self.canvas.bind("<Configure>", lambda e: self._draw())
+    Layout:
+      [Grade summary bar — clickable filter chips]
+      [Treeview table (left) | Decompose panel (right)]
+
+    Treeview columns: #, 会话, CTEI, 等级. Click header to sort.
+    Decompose panel: summary card + 4-factor waterfall bars + project avg comparison.
+    """
+
+    # Factor display names + color when above/below 1.0.
+    _FACTOR_META = {
+        "eff_factor":     ("效率因子", "TCER÷基准"),
+        "density_factor": ("产出密度", "NCPI÷基准"),
+        "cost_factor":    ("成本效率", "基准÷CPE"),
+        "cache_factor":   ("缓存因子", "1+CHR×0.5"),
+    }
+    _FACTOR_KEYS = ("eff_factor", "density_factor", "cost_factor", "cache_factor")
+    _FACTOR_GOOD = "#4ec9b0"
+    _FACTOR_BAD  = "#f48771"
+    _FACTOR_MID  = "#6B7077"
+    _MID_X       = 160  # X position of the 1.0 neutral line in factor bars
+
+    def __init__(self, parent, controller=None) -> None:
+        self._controller = controller
+        self._ranking: list[tuple] = []  # (label, ctei, grade, report)
+        self._avg_factors: dict[str, float] | None = None
+        self._current_report = None
+        self._grade_filter: str | None = None
+        self._sort_col: str = "ctei"
+        self._sort_reverse: bool = True
+
+        body = tk.Frame(parent, bg=theme.BG)
+        body.pack(fill="both", expand=True)
+
+        # -- Grade summary bar (top) --
+        self._grade_canvas = tk.Canvas(body, bg=theme.PANEL, height=38,
+                                       highlightthickness=0)
+        self._grade_canvas.pack(fill="x", padx=2, pady=(2, 0))
+        self._grade_canvas.bind("<Configure>", lambda e: self._draw_grade_bar())
+        self._grade_canvas.bind("<Button-1>", self._on_grade_click)
+        self._grade_rects: list[tuple[int, int, int, int, str]] = []
+
+        # -- Split: table (left) + decompose (right) --
+        paned = tk.PanedWindow(body, orient="horizontal", bg=theme.BG, sashwidth=3)
+        paned.pack(fill="both", expand=True, padx=2, pady=2)
+
+        table_frame = tk.Frame(paned, bg=theme.BG)
+        paned.add(table_frame, minsize=280)
+
+        decomp_frame = tk.Frame(paned, bg=theme.BG)
+        paned.add(decomp_frame, minsize=340)
+
+        # -- Treeview --
+        cols = ("rank", "session", "ctei_val", "grade")
+        self._tree = ttk.Treeview(table_frame, columns=cols, show="headings",
+                                  selectmode="browse", height=20)
+        self._tree.heading("rank",    text="#",    anchor="center",
+                           command=lambda: self._sort_by("rank"))
+        self._tree.heading("session", text="会话", anchor="w",
+                           command=lambda: self._sort_by("session"))
+        self._tree.heading("ctei_val", text="CTEI", anchor="e",
+                           command=lambda: self._sort_by("ctei"))
+        self._tree.heading("grade",   text="等级", anchor="center",
+                           command=lambda: self._sort_by("grade"))
+        self._tree.column("rank",     width=40,  minwidth=30,  stretch=False, anchor="center")
+        self._tree.column("session",  width=140, minwidth=80,  stretch=True,  anchor="w")
+        self._tree.column("ctei_val", width=70,  minwidth=50,  stretch=False, anchor="e")
+        self._tree.column("grade",    width=70,  minwidth=50,  stretch=False, anchor="center")
+
+        sb = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=sb.set)
+        self._tree.pack(fill="both", expand=True)
+        sb.pack_forget()  # hidden; mousewheel handles scrolling
+
+        # Mousewheel on enter/leave (same pattern as project/session columns)
+        self._unbind_wheel = None
+        self._tree.bind("<Enter>", self._on_tree_enter)
+        self._tree.bind("<Leave>", self._on_tree_leave)
+
+        # Grade → tag color
+        self._tree.tag_configure("grade_优秀",     foreground="#4ec9b0")
+        self._tree.tag_configure("grade_良好",     foreground="#42a5f5")
+        self._tree.tag_configure("grade_中等",     foreground="#f9a825")
+        self._tree.tag_configure("grade_低效",     foreground="#ef6c00")
+        self._tree.tag_configure("grade_极端低效", foreground="#e53935")
+
+        self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+
+        # -- Decompose panel --
+        self._decomp_canvas = tk.Canvas(decomp_frame, bg=theme.PANEL,
+                                        highlightthickness=0)
+        self._decomp_canvas.pack(fill="both", expand=True)
+        self._decomp_canvas.bind("<Configure>", lambda e: self._draw_decompose())
+
+    # -- public API -----------------------------------------------------------
 
     def update(self, reports) -> None:
-        self._ranking = ctei_ranking(reports)
-        self._draw()
+        scored = [r for r in reports if r.ctei is not None]
+        scored.sort(key=lambda r: r.ctei, reverse=True)
+        self._ranking = [(s.meta.session_id or s.meta.path.stem, s.ctei, s.grade or "", s)
+                         for s in scored]
+        self._avg_factors = ctei_decompose_avg(reports)
+        self._current_report = None
+        self._grade_filter = None
+        self._rebuild_tree()
+        self._draw_grade_bar()
+        self._draw_decompose()
 
-    def _draw(self) -> None:
-        c = self.canvas
+    # -- grade bar ------------------------------------------------------------
+
+    def _draw_grade_bar(self) -> None:
+        c = self._grade_canvas
         c.delete("all")
-        w, h = c.winfo_width(), c.winfo_height()
-        if w < 2 or h < 2:
+        self._grade_rects.clear()
+        w = c.winfo_width()
+        if w < 10:
             return
-        if not self._ranking:
-            c.create_text(w / 2, h / 2, text="暂无 CTEI 数据\n（会话无可测量的净代码，或已跳过 LOC）",
+
+        grades_in_order = ["优秀", "良好", "中等", "低效", "极端低效"]
+        counts = {g: 0 for g in grades_in_order}
+        for _, _, g, _ in self._ranking:
+            if g in counts:
+                counts[g] += 1
+        total = sum(counts.values()) or 1
+
+        x = 2
+        bar_h = 22
+        y0 = 8
+        for g in grades_in_order:
+            n = counts[g]
+            if n == 0 and self._grade_filter != g:
+                continue
+            seg_w = max(28, int((n / total) * (w - 10)))
+            if x + seg_w > w - 2:
+                seg_w = w - 2 - x
+            fill = theme.GRADE_HEX.get(g, theme.MUTED)
+            if self._grade_filter and self._grade_filter != g:
+                fill = "#3a3a3a"
+            c.create_rectangle(x, y0, x + seg_w, y0 + bar_h,
+                               fill=fill, outline="#1e1e1e", width=1)
+            if seg_w > 36:
+                c.create_text(x + seg_w / 2, y0 + bar_h / 2,
+                              text=f"{g} {n}", fill="#ffffff",
+                              font=theme.FONT_UI_SMALL, anchor="center")
+            self._grade_rects.append((x, y0, x + seg_w, y0 + bar_h, g))
+            x += seg_w + 2
+
+    def _on_grade_click(self, event) -> None:
+        for x0, y0, x1, y1, g in self._grade_rects:
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                self._grade_filter = None if self._grade_filter == g else g
+                self._rebuild_tree()
+                self._draw_grade_bar()
+                self._draw_decompose()
+                return
+
+    # -- Treeview -------------------------------------------------------------
+
+    def _rebuild_tree(self) -> None:
+        self._tree.delete(*self._tree.get_children())
+        items = [(l, c, g, r) for l, c, g, r in self._ranking
+                 if not self._grade_filter or g == self._grade_filter]
+        # Apply sort. Index into (label, ctei, grade, report) tuple.
+        col_map = {"rank": 1, "session": 0, "ctei": 1, "grade": 2}
+        if self._sort_col in col_map:
+            idx = col_map[self._sort_col]
+            items.sort(key=lambda t: t[idx], reverse=self._sort_reverse)
+        for rank, (label, ctei, grade, report) in enumerate(items, 1):
+            tag = f"grade_{grade}" if grade else ""
+            self._tree.insert("", "end",
+                              values=(rank, label, f"{ctei:.3f}", grade),
+                              tags=(tag,),
+                              iid=str(id(report)))
+        # Restore selection if report still visible
+        if self._current_report:
+            iid = str(id(self._current_report))
+            if self._tree.exists(iid):
+                self._tree.selection_set(iid)
+                self._tree.see(iid)
+
+    def _on_tree_select(self, _event=None) -> None:
+        sel = self._tree.selection()
+        if not sel:
+            return
+        iid = int(sel[0])
+        for label, ctei, grade, report in self._ranking:
+            if id(report) == iid:
+                self._current_report = report
+                self._draw_decompose()
+                if self._controller:
+                    sid = report.meta.session_id or report.meta.path.stem
+                    self._controller.on_select_session(sid)
+                return
+
+    def _on_tree_enter(self, _event=None) -> None:
+        from .platform import bind_mousewheel
+        self._unbind_wheel = bind_mousewheel(
+            self._tree, lambda units: self._tree.yview_scroll(units, "units"))
+
+    def _on_tree_leave(self, _event=None) -> None:
+        if self._unbind_wheel:
+            self._unbind_wheel()
+            self._unbind_wheel = None
+
+    def _sort_by(self, col: str) -> None:
+        if self._sort_col == col:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col
+            self._sort_reverse = (col == "ctei")  # CTEI desc by default
+        self._rebuild_tree()
+
+    # -- Decompose panel (Canvas) --------------------------------------------
+
+    def _draw_decompose(self) -> None:
+        c = self._decomp_canvas
+        c.delete("all")
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w < 10 or h < 10:
+            return
+
+        report = self._current_report
+        if report is None:
+            c.create_text(w / 2, h / 2, text="← 点击左侧排名表中的会话\n查看 CTEI 因子分解",
                           fill=theme.MUTED, font=theme.FONT_UI, justify="center")
             return
 
-        label_w, value_w, top_pad, row_gap = 130, 70, 16, 4
-        n = len(self._ranking)
-        bar_area_w = max(40, w - label_w - value_w - 20)
-        row_h = max(18, (h - top_pad) / n - row_gap)
-        top = max(r[1] for r in self._ranking)
-        scale = top if top > 0 else 1.0
-        bar_thick = min(row_h, 18)
+        factors = ctei_decompose(report)
+        if factors is None:
+            c.create_text(w / 2, h / 2, text="该会话无 CTEI 数据",
+                          fill=theme.MUTED, font=theme.FONT_UI, justify="center")
+            return
 
-        c.create_text(label_w + bar_area_w / 2, 4,
-                      text="综合效率指数排名  (优秀>2 · 良好1–2 · 中等0.5–1 · 低效0.1–0.5 · 极端低效<0.1)",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="n")
-        for i, (label, ctei, grade) in enumerate(self._ranking):
-            y = top_pad + i * (row_h + row_gap)
-            c.create_text(6, y + bar_thick / 2, text=label, anchor="w",
-                          fill=theme.FG, font=theme.FONT_MONO)
-            n_units = max(1, round(ctei / scale * bar_area_w))
-            color = theme.GRADE_HEX.get(grade, theme.FG)
-            c.create_rectangle(label_w, y, label_w + n_units, y + bar_thick,
+        y = self._draw_summary_card(c, w, report)
+        y = self._draw_factor_bars(c, w, y, factors, report)
+        self._draw_avg_comparison(c, w, y, factors)
+
+    def _draw_summary_card(self, c, w, report) -> int:
+        """Draw the session summary card. Returns Y below the card."""
+        pad = 10
+        card_h = 62
+        c.create_rectangle(pad, pad, w - pad, pad + card_h,
+                           fill=theme.PANEL_2, outline="#3e3e42")
+        sid = report.meta.session_id or report.meta.path.stem
+        c.create_text(pad + 10, pad + 12, text=sid[:40],
+                      fill=theme.ACCENT, font=theme.FONT_MONO, anchor="w")
+
+        # CTEI big number
+        ctei_val = report.ctei
+        grade = report.grade or ""
+        c.create_text(pad + 10, pad + 38, text="CTEI",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(pad + 55, pad + 38, text=f"{ctei_val:.3f}",
+                      fill=theme.GRADE_HEX.get(grade, theme.FG),
+                      font=("Consolas", 16, "bold"), anchor="w")
+
+        # Grade badge
+        if grade:
+            gx = pad + 155
+            badge_w = max(40, len(grade) * 13 + 12)
+            bc = theme.GRADE_HEX.get(grade, theme.MUTED)
+            c.create_rectangle(gx, pad + 28, gx + badge_w, pad + 50,
+                               fill=bc, outline="")
+            c.create_text(gx + badge_w / 2, pad + 39, text=grade,
+                          fill="#ffffff", font=theme.FONT_UI_SMALL_BOLD,
+                          anchor="center")
+
+        # Rank
+        rank_str = ""
+        for i, (l, cv, g, r) in enumerate(self._ranking):
+            if r is report:
+                total = len(self._ranking)
+                rank_str = f"排名 {i + 1}/{total}"
+                break
+        if rank_str:
+            c.create_text(w - pad - 10, pad + 38, text=rank_str,
+                          fill=theme.MUTED, font=theme.FONT_UI, anchor="e")
+
+        # TCER
+        if report.tcer is not None:
+            c.create_text(w - pad - 10, pad + 14,
+                          text=f"TCER {report.tcer:.1f} 行/百万",
+                          fill=theme.FG, font=theme.FONT_UI_SMALL, anchor="e")
+
+        return pad + card_h + 10
+
+    def _draw_factor_bars(self, c, w, y0, factors, report) -> int:
+        """Draw the 4-factor waterfall bars. Returns Y below the bars."""
+        pad_l = 10
+        row_h = 32
+        label_w = 55
+        mid_x = self._MID_X
+        bar_right = w - 70  # leave room for value label
+
+        c.create_text(pad_l + 4, y0, text="CTEI 因子分解",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+        y0 += 18
+
+        # 1.0 reference line
+        c.create_line(mid_x, y0, mid_x, y0 + row_h * 4 + 4,
+                      fill="#555555", dash=(2, 3))
+        c.create_text(mid_x, y0 - 4, text="1.0",
+                      fill=self._FACTOR_MID, font=theme.FONT_UI_SMALL, anchor="s")
+
+        max_val = max(
+            max(factors.get(k, 0) for k in self._FACTOR_KEYS),
+            2.0,
+        )
+
+        for ki, key in enumerate(self._FACTOR_KEYS):
+            y = y0 + ki * row_h
+            val = factors.get(key, 0.0)
+            name, _desc = self._FACTOR_META[key]
+
+            # Label
+            c.create_text(pad_l + 4, y + 10, text=name,
+                          fill=theme.FG, font=theme.FONT_UI_SMALL, anchor="w")
+
+            # Bar (extends right from mid_x; width proportional to value)
+            bar_w = max(2, (min(val, 2.5) / max_val) * (bar_right - mid_x))
+            color = self._FACTOR_GOOD if val >= 1.0 else self._FACTOR_BAD
+            c.create_rectangle(mid_x, y + 2, mid_x + bar_w, y + 18,
                                fill=color, outline="")
-            c.create_text(label_w + bar_area_w + 8, y + bar_thick / 2,
-                          text=f"{ctei:.3f} {grade}", anchor="w",
-                          fill=color, font=theme.FONT_MONO)
+
+            # 1.0 tick on the bar area
+            c.create_line(mid_x, y + 2, mid_x, y + 18,
+                          fill="#ffffff", width=1)
+
+            # Value label
+            c.create_text(bar_right + 6, y + 10, text=f"{val:.2f}",
+                          fill=color, font=theme.FONT_MONO, anchor="w")
+
+        # Cap line at 1.0
+        c.create_line(mid_x, y0 + row_h * 4 + 4, bar_right, y0 + row_h * 4 + 4,
+                      fill="#333333", width=1)
+
+        # Product line
+        y_prod = y0 + row_h * 4 + 14
+        c.create_text(pad_l + 4, y_prod, text="乘积 =",
+                      fill=theme.MUTED, font=theme.FONT_UI, anchor="w")
+        c.create_text(pad_l + 60, y_prod, text=f"CTEI  {report.ctei:.3f}",
+                      fill=theme.GRADE_HEX.get(report.grade or "", theme.FG),
+                      font=theme.FONT_VALUE, anchor="w")
+
+        return y_prod + 24
+
+    def _draw_avg_comparison(self, c, w, y0, factors) -> None:
+        """Draw factor bars vs project average."""
+        avg = self._avg_factors
+        if avg is None:
+            return
+
+        pad_l = 10
+        row_h = 28
+        bar_max = 2.0
+        bar_area_w = min(220, w - 170)
+
+        c.create_text(pad_l + 4, y0, text="与项目均值对比",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+        y0 += 16
+
+        for ki, key in enumerate(self._FACTOR_KEYS):
+            y = y0 + ki * row_h
+            name, _ = self._FACTOR_META[key]
+            sel_val = factors.get(key, 0.0)
+            avg_val = avg.get(key, 0.0)
+
+            c.create_text(pad_l + 4, y + 6, text=name,
+                          fill=theme.FG, font=theme.FONT_UI_SMALL, anchor="w")
+
+            bx = pad_l + 55
+            # Selected bar
+            sw = max(2, (sel_val / bar_max) * bar_area_w)
+            sel_color = self._FACTOR_GOOD if sel_val >= avg_val else self._FACTOR_BAD
+            c.create_rectangle(bx, y, bx + sw, y + 10,
+                               fill=sel_color, outline="")
+            # Average bar (outline only)
+            aw = max(2, (avg_val / bar_max) * bar_area_w)
+            c.create_rectangle(bx, y + 12, bx + aw, y + 22,
+                               fill="#3a3a3a", outline="#555555")
+
+            c.create_text(bx + bar_area_w + 8, y + 5,
+                          text=f"{sel_val:.2f}", fill=sel_color,
+                          font=theme.FONT_MONO, anchor="w")
+            c.create_text(bx + bar_area_w + 8, y + 17,
+                          text=f"{avg_val:.2f}", fill=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="w")
+
+        # Legend
+        y_legend = y0 + len(self._FACTOR_KEYS) * row_h + 6
+        c.create_text(pad_l + 55, y_legend, text="■ 选中会话",
+                      fill=self._FACTOR_GOOD, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(pad_l + 140, y_legend, text="□ 项目均值",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
 
 
 # --------------------------------------------------------------------------- #
