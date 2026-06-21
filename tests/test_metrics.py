@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tcer.core import metrics
 from tcer.core.models import SessionMeta, ToolOp, TokenUsage
 
@@ -79,6 +81,80 @@ def test_merge_sums_fields():
 
 
 # --------------------------------------------------------------------------- #
+# TokenUsage.merge() field guards
+# --------------------------------------------------------------------------- #
+def test_merge_tool_calls_summed():
+    """tool_calls dicts should be merged (summed by tool name)."""
+    a = _u(i=100, o=50)
+    a.tool_calls = {"Read": 5, "Write": 3, "Edit": 2}
+
+    b = _u(i=200, o=100)
+    b.tool_calls = {"Read": 3, "Grep": 10, "Bash": 1}
+
+    m = a.merge(b)
+    assert m.tool_calls == {
+        "Read": 8,    # 5 + 3
+        "Write": 3,   # only in a
+        "Edit": 2,    # only in a
+        "Grep": 10,   # only in b
+        "Bash": 1,    # only in b
+    }
+
+
+def test_merge_tool_ops_rebase_turn_numbers():
+    """tool_ops should be merged with turn numbers rebased to continue after self."""
+    a = _u(i=100, o=50)
+    a.tool_ops = [
+        ToolOp(0, "Read", "/a.py"),
+        ToolOp(1, "Write", "/a.py"),
+    ]
+
+    b = _u(i=200, o=100)
+    b.tool_ops = [
+        ToolOp(0, "Read", "/b.py"),   # turn 0 in b
+        ToolOp(1, "Edit", "/b.py"),   # turn 1 in b
+    ]
+
+    m = a.merge(b)
+
+    # a's ops: turn 0, 1 (unchanged)
+    assert m.tool_ops[0].turn == 0
+    assert m.tool_ops[1].turn == 1
+
+    # b's ops: rebased to turn 2, 3 (continue after a's max turn = 1)
+    assert m.tool_ops[2].turn == 2
+    assert m.tool_ops[3].turn == 3
+
+    # Verify tools and paths preserved
+    assert m.tool_ops[2].tool == "Read"
+    assert m.tool_ops[2].path == "/b.py"
+
+
+def test_merge_thinking_count():
+    """thinking_count should be summed during merge."""
+    a = _u(i=100, o=50)
+    a.thinking_count = 3
+
+    b = _u(i=200, o=100)
+    b.thinking_count = 5
+
+    m = a.merge(b)
+    assert m.thinking_count == 8  # 3 + 5
+
+
+def test_merge_user_message_texts():
+    """user_message_texts should be concatenated during merge."""
+    a = _u(i=100, o=50)
+    a.user_message_texts = ["hello", "fix the bug"]
+
+    b = _u(i=200, o=100)
+    b.user_message_texts = ["add feature", "write tests"]
+
+    m = a.merge(b)
+    assert m.user_message_texts == ["hello", "fix the bug", "add feature", "write tests"]
+
+
+# --------------------------------------------------------------------------- #
 # Composite (G6): CTEI / TTAF / TA-TCER / PSAC / CAF / grade
 # --------------------------------------------------------------------------- #
 def test_ctei_reproduces_report_excellent_session():
@@ -123,6 +199,33 @@ def test_ta_tcer_debug_example():
     assert metrics.ta_tcer(35.0, "debug") == pytest_approx(87.5)
     assert metrics.ta_tcer(35.0, "feature") == pytest_approx(35.0)  # TTAF 1.0
     assert metrics.ta_tcer(35.0, "unknown") is None  # unknown task type
+
+
+@pytest.mark.parametrize("task_type,expected_factor", [
+    ("feature", 1.0),
+    ("feature-ext", 0.85),
+    ("debug", 0.4),
+    ("refactor", 0.5),
+    ("review", 0.2),
+    ("test", 0.9),
+])
+def test_ta_tcer_all_ttaf_types(task_type, expected_factor):
+    """All TTAF-defined task types should produce correct TA-TCER."""
+    tcer = 50.0
+    result = metrics.ta_tcer(tcer, task_type)
+    assert result is not None, f"ta_tcer returned None for task_type={task_type}"
+    assert result == pytest_approx(tcer / expected_factor)
+
+
+def test_ttaf_table_completeness():
+    """TTAF table should contain all expected task types."""
+    expected_types = {"feature", "feature-ext", "debug", "refactor", "review", "test"}
+    actual_types = {k for k in metrics.TTAF.keys() if not k.startswith("_")}
+
+    assert expected_types == actual_types, (
+        f"TTAF table missing types: {expected_types - actual_types}, "
+        f"or has unexpected types: {actual_types - expected_types}"
+    )
 
 
 def test_psac_formula():

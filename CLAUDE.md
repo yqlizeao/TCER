@@ -12,7 +12,7 @@
 
 ```bash
 python -m tcer            # 启动 GUI
-python -m pytest tests/   # 运行测试（84 项）
+python -m pytest tests/   # 运行测试（100 项）
 ```
 
 ## 仓库结构
@@ -23,7 +23,7 @@ TCER/
 │   ├── core/              核心库（reader / loc / metrics / pricing / models / paths / analyze / export / format）
 │   ├── gui/               GUI（app / theme / metric_defs / widgets / views / popups）
 │   └── config/            配置（model_pricing.json / composite_baselines.json）
-├── tests/                 测试（84 项）
+├── tests/                 测试（100 项）
 └── doc/                   详细文档
     ├── metrics.md         指标公式与计算步骤
     ├── data-format.md     JSONL 数据格式与 LOC 原理
@@ -57,7 +57,7 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）：
 
 ## 关键注意事项
 
-1. **按 message.id 去重**：一次 API 响应被拆成多行写入 JSONL，每行重复携带 usage。必须按 id 只计一次（实测 55.9% 重复计数）。详见 [doc/data-format.md](doc/data-format.md)。
+1. **按 message.id 去重**：一次 API 响应被拆成多行写入 JSONL，每行重复携带 usage。必须按 id 只计一次（实测 55.9% 重复计数）。**边界**：空字符串 `""` 视为无 id，逐条计数。详见 [doc/data-format.md](doc/data-format.md)。
 2. **LOC 不依赖 git**：净增代码来自会话内工具调用回放。Write 覆写已有文件会高估（F1 风险），`unseen_writes` 计数暴露上界。
 3. **逐模型计价**：TokenUsage.per_model 按 message.model 分桶，混用多模型会话也精确。价表 `tcer/config/model_pricing.json`（≈160 模型）。
 4. **子代理并入父会话**：Token 与 LOC 保留真实成本，不单独计为 session。

@@ -139,7 +139,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
         # Process assistant messages: dedup by message.id for token counting
         if role == "assistant":
             mid = msg.get("id")
-            if isinstance(mid, str):
+            if isinstance(mid, str) and mid:  # skip empty string → treat as no id
                 if mid in seen:
                     continue  # same API response, already counted for usage
                 seen.add(mid)

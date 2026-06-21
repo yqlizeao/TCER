@@ -1,4 +1,6 @@
 """Tests for per-model pricing resolution (data/model_pricing.json + pricing.py)."""
+import pytest
+
 from tcer.core import metrics, pricing
 from tcer.core.models import TokenUsage
 
@@ -23,6 +25,25 @@ def test_unknown_falls_back_to_default():
     assert pricing.default_pricing() == {
         "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75,
     }
+
+
+def test_cost_zero_tokens():
+    """Zero tokens should produce zero cost."""
+    u = TokenUsage()
+    assert metrics.cost_usd(u) == 0.0
+
+
+def test_cost_single_token_precision():
+    """Single token cost should be calculated with full precision."""
+    u = TokenUsage(input_tokens=1)
+    # $3/MTok for input = $3 per 1,000,000 tokens
+    expected = 1 * 3.0 / 1_000_000  # 3e-06
+    assert metrics.cost_usd(u) == pytest.approx(expected)
+
+    u2 = TokenUsage(output_tokens=1)
+    # $15/MTok for output
+    expected2 = 1 * 15.0 / 1_000_000  # 1.5e-05
+    assert metrics.cost_usd(u2) == pytest.approx(expected2)
 
 
 def test_cost_uses_session_model():

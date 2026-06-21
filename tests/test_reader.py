@@ -24,10 +24,17 @@ def _usage(i=0, cw=0, cr=0, o=0) -> dict:
             "cache_read_input_tokens": cr, "output_tokens": o}
 
 
-def _assistant(usage, model="claude-opus-4-8", ts="2026-03-06T10:00:00Z") -> dict:
-    return {"type": "assistant", "timestamp": ts,
-            "message": {"role": "assistant", "model": model,
-                        "content": [{"type": "text", "text": "x"}], "usage": usage}}
+def _assistant(usage, model="claude-opus-4-8", ts="2026-03-06T10:00:00Z", msg_id=None) -> dict:
+    """Create an assistant message dict.
+
+    Args:
+        msg_id: None = omit field, "" = empty string edge case, "msg_X" = real id
+    """
+    msg = {"role": "assistant", "model": model,
+           "content": [{"type": "text", "text": "x"}], "usage": usage}
+    if msg_id is not None:
+        msg["id"] = msg_id
+    return {"type": "assistant", "timestamp": ts, "message": msg}
 
 
 def test_parent_session_id_main_and_subagent():
@@ -61,6 +68,64 @@ def test_aggregate_dedupes_by_message_id(tmp_path):
     assert agg.assistant_msgs == 2                       # not 4
     assert agg.output_tokens == 722 + 20                 # each response once
     assert agg.cache_creation_input_tokens == 157721     # not ×3
+
+
+# --------------------------------------------------------------------------- #
+# message.id edge-case boundary tests
+# --------------------------------------------------------------------------- #
+def test_aggregate_empty_string_id_treated_as_unique(tmp_path):
+    """Empty string id should be treated as 'no id' and counted individually.
+
+    Risk: If empty string is added to `seen` set, subsequent empty-id messages
+    would be incorrectly skipped.
+    """
+    u = _usage(i=10, cw=0, cr=0, o=5)
+    lines = [
+        _assistant(u, msg_id=""),
+        _assistant(u, msg_id=""),  # Same empty id
+        _assistant(_usage(i=20, o=10), msg_id="msg_real"),  # Different real id
+    ]
+    agg = reader.aggregate_usage(write_session(tmp_path, lines))
+
+    # Both empty-id messages should be counted (not deduped)
+    assert agg.assistant_msgs == 3
+    assert agg.input_tokens == 10 + 10 + 20  # All three counted
+    assert agg.output_tokens == 5 + 5 + 10
+
+
+def test_aggregate_none_id_fallback_to_individual(tmp_path):
+    """Messages without message.id should be counted individually (backward compat)."""
+    u = _usage(i=10, o=5)
+    lines = [
+        _assistant(u),  # No msg_id field (omitted)
+        _assistant(u),  # No msg_id field (omitted)
+        _assistant(u, msg_id="msg_real"),  # Has id
+    ]
+    agg = reader.aggregate_usage(write_session(tmp_path, lines))
+
+    # All three should be counted (no dedup for missing ids)
+    assert agg.assistant_msgs == 3
+    assert agg.input_tokens == 30
+
+
+def test_aggregate_mixed_id_and_no_id(tmp_path):
+    """Mixed scenario: messages with id dedup, without id counted individually."""
+    u = _usage(i=10, o=5)
+    lines = [
+        # Group A: Same id (should dedup)
+        _assistant(u, msg_id="msg_A"),
+        _assistant(u, msg_id="msg_A"),  # Duplicate, should skip
+        # Group B: No id (should count individually)
+        _assistant(u),  # No id
+        _assistant(u),  # No id, but no dedup (counted)
+        # Group C: Different id
+        _assistant(u, msg_id="msg_B"),
+    ]
+    agg = reader.aggregate_usage(write_session(tmp_path, lines))
+
+    # Expected: msg_A(1) + no_id(2) + msg_B(1) = 4
+    assert agg.assistant_msgs == 4
+    assert agg.input_tokens == 40  # 4 × 10
 
 
 # --------------------------------------------------------------------------- #
