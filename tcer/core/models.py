@@ -76,8 +76,12 @@ class TokenUsage:
 
     @property
     def effective_turns(self) -> int:
-        """Assistant turns that contributed actual tokens (excl. zero-usage stubs)."""
-        return self.assistant_msgs - self.empty_usage_skipped
+        """Assistant turns that contributed actual tokens (excl. zero-usage stubs).
+
+        Since zero-usage stubs are no longer counted in ``assistant_msgs``,
+        this is simply ``assistant_msgs``.
+        """
+        return self.assistant_msgs
 
     def bucket(self, model: str) -> ModelUsage:
         """Return (creating if needed) the per-model bucket for ``model``."""
@@ -198,8 +202,6 @@ class SessionReport:
     ttaf: float | None = None  # task type adjustment factor
     ntcer: float | None = None  # normalized TCER = tcer / TTAF
     ta_tcer: float | None = None  # backward compat alias for ntcer
-    recommended_task_type: str | None = None  # AI-recommended task type
-    recommendation_confidence: float | None = None  # 0..1 confidence score
     psac: float | None = None  # project-stage adjustment coefficient
     tcer_phase_adj: float | None = None  # tcer * psac
     ctei: float | None = None  # composite token efficiency index

@@ -80,10 +80,11 @@ def aggregate_usage(path: Path) -> TokenUsage:
     being counted individually. (ccusage / token-stats dedup the same way.)
 
     Turns whose usage is entirely zero (e.g. pure-thinking stubs) are counted in
-    ``empty_usage_skipped`` and their tokens are not accumulated, but they ARE
-    included in ``assistant_msgs`` (raw count from JSONL).  Use
-    ``effective_turns`` (assistant_msgs − empty_usage_skipped) for efficiency
-    metrics.
+    ``empty_usage_skipped`` and their tokens are not accumulated.  They are NOT
+    included in ``assistant_msgs`` — only turns with real token usage count as
+    assistant turns, ensuring consistent turn counts across models (one API
+    response = one turn, regardless of how many JSONL lines it spans).
+    ``effective_turns`` equals ``assistant_msgs`` (no subtraction needed).
 
     **Time window**: tracks ``started_at`` / ``ended_at`` from *all* assistant turns
     (including zero-usage ones) so sessions with only zero-usage replies still get
@@ -157,8 +158,11 @@ def aggregate_usage(path: Path) -> TokenUsage:
             cw = _as_int(usage.get("cache_creation_input_tokens"))
             cr = _as_int(usage.get("cache_read_input_tokens"))
             o = _as_int(usage.get("output_tokens"))
-            # Count every assistant turn (raw data), even zero-usage stubs.
-            u.assistant_msgs += 1
+            # Count assistant turns: only lines with real usage count as turns.
+            # Zero-usage stubs (mimo thinking blocks, synthetic stubs) are tracked
+            # separately in empty_usage_skipped and do not inflate assistant_msgs.
+            # This ensures consistent turn counts across models: one API response
+            # = one turn, regardless of how many JSONL lines it spans.
             if i + cw + cr + o == 0:
                 u.empty_usage_skipped += 1
                 # Release the id lock so a later line with the same message.id
@@ -168,6 +172,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 if isinstance(mid, str) and mid:
                     seen.discard(mid)
             else:
+                u.assistant_msgs += 1
                 u.input_tokens += i
                 u.cache_creation_input_tokens += cw
                 u.cache_read_input_tokens += cr

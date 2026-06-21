@@ -28,23 +28,6 @@
       "behavior_hints": ["极高 read_write_ratio", "极高 exploration_ratio", "极低或零 net_loc"]
     }
   },
-  "recommendation_rules": [
-    {
-      "condition": "read_write_ratio > 5 and net_loc < 10",
-      "task_type": "non_coding",
-      "confidence": 0.85
-    },
-    {
-      "condition": "exploration_ratio > 0.4 and net_loc < 50 and edit_ratio > 0.5",
-      "task_type": "code_maintenance",
-      "confidence": 0.8
-    },
-    {
-      "condition": "net_loc > 100",
-      "task_type": "code_creation",
-      "confidence": 0.7
-    }
-  ],
   "ctei_baselines": {
     "tcer": 76.59,
     "ncpi": 0.101,
