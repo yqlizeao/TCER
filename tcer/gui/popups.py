@@ -268,8 +268,8 @@ class CostBreakdownPopup:
     """成本明细 — per-model cost sorted by cost, with cost-effectiveness metric."""
 
     _COLOR = "#ce9178"  # warm orange for cost bars
-    # Top 3 efficiency medal colors
-    _MEDAL = ["#ffd700", "#c0c0c0", "#cd7f32"]  # gold, silver, bronze
+    # Top 3 efficiency — game rarity colors (Epic / Rare / Uncommon)
+    _MEDAL = ["#a335ee", "#0070dd", "#1eff00"]  # purple, blue, green
 
     def __init__(self, parent, usage, title_suffix: str = "") -> None:
         from tcer.core import metrics as metrics_mod
