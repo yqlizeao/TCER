@@ -346,7 +346,7 @@ class CostBreakdownPopup:
                 eff_color = theme.SUCCESS
             else:
                 eff_text = f"效率 {tpd:,.0f} Token/$"
-                eff_color = theme.SUCCESS if tpd > 1_000_000 else theme.MUTED
+                eff_color = theme.MUTED
             tk.Label(det, text=eff_text,
                      bg=theme.PANEL, fg=eff_color,
                      font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
