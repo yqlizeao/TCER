@@ -113,7 +113,7 @@ def sample_jsonl():
     Example:
         def test_fixture(sample_jsonl):
             result = reader.aggregate_usage(sample_jsonl)
-            assert result.assistant_msgs == 2
+            assert result.assistant_msgs == 3
     """
     return Path(__file__).parent / "fixtures" / "sample.jsonl"
 

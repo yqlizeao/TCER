@@ -149,23 +149,25 @@ def test_aggregate_skips_meta_and_empty_usage(tmp_path):
     p = write_session(tmp_path, [
         _assistant(_usage(10, 0, 0, 5)),
         {"isMeta": True, "type": "summary", "summary": "skip me"},
-        _assistant(_usage(0, 0, 0, 0)),  # all-zero → skipped + counted
+        _assistant(_usage(0, 0, 0, 0)),  # all-zero → counted in both
     ])
     u = reader.aggregate_usage(p)
-    assert u.assistant_msgs == 1
+    assert u.assistant_msgs == 2          # raw count (incl. zero-usage)
     assert u.empty_usage_skipped == 1
+    assert u.effective_turns == 1         # 2 - 1
     assert u.input_tokens == 10 and u.output_tokens == 5
 
 
 def test_aggregate_fixture_matches_expected():
     u = reader.aggregate_usage(FIXTURE)
-    # two real turns (a1: 2/43447/0/1021, a2: 2/1069/43447/1473); a3 all-zero skipped
+    # three assistant turns (a1, a2, a3); a3 has all-zero usage
     assert u.input_tokens == 4
     assert u.cache_creation_input_tokens == 43447 + 1069
     assert u.cache_read_input_tokens == 43447
     assert u.output_tokens == 1021 + 1473
-    assert u.assistant_msgs == 2
+    assert u.assistant_msgs == 3           # raw count (incl. zero-usage a3)
     assert u.empty_usage_skipped == 1
+    assert u.effective_turns == 2          # 3 - 1
     assert u.models == {"claude-opus-4-8", "claude-sonnet-4-6"}
 
 

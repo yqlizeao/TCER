@@ -57,14 +57,23 @@ class FilterBar:
         bar = tk.Frame(parent, bg=theme.BG)
         bar.pack(side="top", fill="x", padx=8, pady=6)
 
+        # 任务类型选择（只有 3 个大类，显示中文）
         tk.Label(bar, text="任务类型:", bg=theme.BG, fg=theme.FG).pack(side="left")
-        self.task_var = tk.StringVar(value="feature")
+        self.task_var = tk.StringVar(value="代码创作")  # 默认值用中文
+
+        # 中文显示映射
+        self._task_display_names = {
+            "code_creation": "代码创作",
+            "code_maintenance": "代码维护",
+            "non_coding": "非编码",
+        }
+        self._task_reverse_map = {v: k for k, v in self._task_display_names.items()}
+
         task_cb = ttk.Combobox(bar, textvariable=self.task_var, width=12,
-                               values=sorted(metrics.TTAF), state="readonly")
+                               values=list(self._task_display_names.values()), state="readonly")
         task_cb.pack(side="left", padx=(4, 4))
-        task_cb.bind("<<ComboboxSelected>>", lambda e: controller.reanalyze())
-        Tooltip(task_cb, "任务类型影响任务类型系数：调试、重构、审查等任务天然产出更少代码，"
-                         "选对类型才能公平比较效率。")
+        task_cb.bind("<<ComboboxSelected>>", self._on_task_type_change)
+        Tooltip(task_cb, self._generate_task_type_tooltip())
 
         tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left", padx=(12, 4))
         self.since_var = tk.StringVar(value="")
@@ -162,10 +171,26 @@ class FilterBar:
             self.until_var.set("")
         self.controller.reanalyze()
 
+    def _on_task_type_change(self, event) -> None:
+        """任务类型变化时的回调"""
+        # task_var 存储的是中文名称，直接触发重新分析
+        self.controller.reanalyze()
+
+    def _generate_task_type_tooltip(self) -> str:
+        """生成任务类型的简要说明"""
+        lines = []
+        for cat_key, cat_info in metrics.TASK_CATEGORIES.items():
+            display_name = self._task_display_names.get(cat_key, cat_key)
+            lines.append(f"【{display_name}】系数 {cat_info['ttaf']}，TCER {cat_info['typical_tcer_range']}")
+        return "\n".join(lines)
+
     def get_params(self) -> dict:
         """Analysis params owned by the bar (task type / time)."""
+        # 将中文名称转换回英文 key
+        display_name = self.task_var.get()
+        task_type_key = self._task_reverse_map.get(display_name, display_name)
         return {
-            "task_type": self.task_var.get(),
+            "task_type": task_type_key,
             "since": self.since_var.get().strip() or None,
             "until": self.until_var.get().strip() or None,
         }
@@ -1012,8 +1037,6 @@ def metric_raw_value(report, key: str) -> float | None:
             return float(u.cache_read_input_tokens)
         if key == "turns":
             return float(u.assistant_msgs)
-        if key == "skipped":
-            return float(u.empty_usage_skipped)
         if key == "subagent":
             return float(report.subagent_count)
         if key == "user_msgs":

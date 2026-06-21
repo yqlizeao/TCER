@@ -94,12 +94,15 @@ class SessionDetailPopup:
         tk.Label(body, text="逐模型成本", bg=theme.BG, fg="#9cdcfe",
                  font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(12, 4))
         if u.per_model:
+            from tcer.core.pricing import label as model_label
             for m, bucket in sorted(u.per_model.items()):
+                if m in ("<synthetic>", ""):
+                    continue
                 cost = metrics.cost_usd(bucket, model=m)
                 row = tk.Frame(body, bg=theme.BG)
                 row.pack(fill="x", pady=1)
-                tk.Label(row, text=m or "(未记录)", bg=theme.BG, fg=theme.FG, anchor="w",
-                         font=theme.FONT_MONO).pack(side="left")
+                tk.Label(row, text=model_label(m) if m else "(未记录)", bg=theme.BG, fg=theme.FG,
+                         anchor="w", font=theme.FONT_MONO).pack(side="left")
                 tk.Label(row, text=fmt.fmt_money(cost), bg=theme.BG, fg=theme.MUTED, anchor="e",
                          font=theme.FONT_MONO).pack(side="right")
         else:
@@ -115,10 +118,15 @@ class SessionDetailPopup:
 
 
 class ToolCallsPopup:
-    """工具调用统计 — per-tool call count with a proportional bar."""
+    """工具调用统计 — per-tool call count with stacked bar (success / error)."""
+
+    _COLORS = {
+        "success": theme.ACCENT,   # blue
+        "error":   theme.ERROR,    # red
+    }
 
     def __init__(self, parent, usage, title_suffix: str = "") -> None:
-        win = _new_window(parent, f"工具调用统计{title_suffix}", "500x600")
+        win = _new_window(parent, f"工具调用统计{title_suffix}", "520x600")
         tk.Label(win, text="工具调用详情", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
         tk.Label(win, text="Claude Code 在此会话中调用的工具及次数", bg=theme.BG,
@@ -134,40 +142,85 @@ class ToolCallsPopup:
                      font=theme.FONT_UI, pady=40).pack()
         else:
             total = sum(tc.values())
+            total_errs = usage.tool_errors
+            # Summary header
+            head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+            head.pack(fill="x", pady=10)
+            summary = f"总计 {total} 次调用 · {len(tc)} 种工具"
+            if total_errs:
+                summary += f" · {total_errs} 次错误"
+            tk.Label(head, text=summary, bg="#2a2a2e",
+                     fg=theme.ERROR if total_errs else theme.SUCCESS,
+                     font=theme.FONT_UI_BOLD).pack()
+
             for name, count in sorted(tc.items(), key=lambda x: x[1], reverse=True):
                 pct = count / total * 100 if total else 0
-                row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=6)
-                row.pack(fill="x", pady=2)
-                tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
-                         font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
                 errs = usage.tool_errors_by_tool.get(name, 0)
-                err_suffix = f"  ❌{errs}" if errs else ""
-                tk.Label(row, text=f"{count} 次（{pct:.1f}%）{err_suffix}", bg=theme.PANEL,
-                         fg=theme.ERROR if errs else theme.MUTED,
-                         anchor="e", font=theme.FONT_MONO).pack(side="right")
-                # Blue bar with red error overlay on top
-                bar = tk.Frame(inner, bg=theme.PANEL, height=4)
-                bar.pack(fill="x", padx=8, pady=(0, 8))
-                blue = tk.Frame(bar, bg=theme.ACCENT, width=int(pct * 4.5), height=4)
-                blue.pack(side="left")
+                ok = count - errs
+
+                # --- Header row: tool name + count ---
+                tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
+                hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                hdr.pack(fill="x")
+                tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
+                         font=theme.FONT_VALUE).pack(side="left")
+                tk.Label(hdr, text=f"{count} 次（{pct:.1f}%）",
+                         bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+                         font=theme.FONT_MONO).pack(side="right")
+
+                # --- Stacked bar (relwidth-based, resize-safe) ---
+                bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                bar_frame.pack(fill="x")
+                bar_bg = tk.Frame(bar_frame, bg="#333333", height=10)
+                bar_bg.pack(fill="x")
+                if count > 0:
+                    if ok > 0:
+                        tk.Frame(bar_bg, bg=self._COLORS["success"], height=10).place(
+                            relx=0, rely=0, relwidth=ok / count, relheight=1.0)
+                    if errs > 0:
+                        tk.Frame(bar_bg, bg=self._COLORS["error"], height=10).place(
+                            relx=ok / count, rely=0, relwidth=errs / count, relheight=1.0)
+
+                # --- Detail line ---
+                det = tk.Frame(inner, bg=theme.PANEL, padx=12, pady=4)
+                det.pack(fill="x")
+                tk.Label(det, text=f"成功 {ok} 次",
+                         bg=theme.PANEL, fg=self._COLORS["success"],
+                         font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
                 if errs:
-                    err_pct = errs / count if count else 0
-                    red = tk.Frame(bar, bg=theme.ERROR, height=4)
-                    red.place(in_=blue, relwidth=err_pct)
+                    tk.Label(det, text=f"错误 {errs} 次（{errs/count*100:.0f}%）",
+                             bg=theme.PANEL, fg=self._COLORS["error"],
+                             font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
 
 
 class ModelsPopup:
-    """模型使用详情 — per-model token usage, cost, and percentage breakdown."""
+    """模型使用详情 — per-model token usage with 4-type color breakdown."""
+
+    # Token type colors (stacked bar segments)
+    _COLORS = {
+        "input":          "#569cd6",  # blue
+        "output":         "#4ec9b0",  # teal
+        "cache_creation": "#dcdcaa",  # yellow
+        "cache_read":     "#6a6a6a",  # gray
+    }
+    _LABELS = {
+        "input":          "输入",
+        "output":         "输出",
+        "cache_creation": "缓存写入",
+        "cache_read":     "缓存读取",
+    }
+    # Models to hide from the popup (ccswitch synthetic stubs, always zero usage)
+    _SKIP_MODELS = {"<synthetic>"}
 
     def __init__(self, parent, usage, title_suffix: str = "") -> None:
         from tcer.core import metrics as metrics_mod
         from tcer.core.format import fmt_money
         from tcer.core.pricing import label as model_label
 
-        win = _new_window(parent, f"模型使用详情{title_suffix}", "520x560")
+        win = _new_window(parent, f"模型使用详情{title_suffix}", "560x620")
         tk.Label(win, text="模型使用详情", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
-        tk.Label(win, text="各模型的 Token 用量、成本及占比", bg=theme.BG,
+        tk.Label(win, text="各模型的 Token 用量、成本及四类 Token 构成", bg=theme.BG,
                  fg=theme.MUTED, font=theme.FONT_UI, pady=5).pack()
 
         sf = ScrollFrame(win, bg=theme.PANEL)
@@ -175,42 +228,79 @@ class ModelsPopup:
         inner = sf.inner
 
         per_model = usage.per_model
+        # Filter out synthetic / junk models
+        per_model = {k: v for k, v in per_model.items()
+                     if k not in self._SKIP_MODELS and k}
+
         if not per_model:
             tk.Label(inner, text="无逐模型数据", bg=theme.PANEL, fg=theme.MUTED,
                      font=theme.FONT_UI, pady=40).pack()
         else:
-            total_tokens = usage.total
+            total_tokens = sum(
+                mu.input_tokens + mu.cache_creation_input_tokens +
+                mu.cache_read_input_tokens + mu.output_tokens
+                for mu in per_model.values()
+            )
             total_cost = metrics_mod.cost_usd(usage)
 
             # Summary header
             head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
-            head.pack(fill="x", pady=(0, 10))
+            head.pack(fill="x", pady=10)
             tk.Label(head, text=f"总计 {total_tokens:,} Token · {fmt_money(total_cost)} · "
                                 f"{len(per_model)} 个模型",
                      bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
 
-            # Per-model rows sorted by token count descending
+            # Per-model blocks sorted by token count descending
             items = []
             for model_id, mu in per_model.items():
                 model_total = mu.input_tokens + mu.cache_creation_input_tokens + \
                               mu.cache_read_input_tokens + mu.output_tokens
                 cost = metrics_mod.cost_usd(mu, model=model_id or None)
-                items.append((model_id, model_total, cost))
-            items.sort(key=lambda x: x[1], reverse=True)
+                items.append((model_id, mu, model_total, cost))
+            items.sort(key=lambda x: x[2], reverse=True)
 
-            for model_id, tok, cost in items:
+            for model_id, mu, tok, cost in items:
                 pct = tok / total_tokens * 100 if total_tokens else 0
                 name = model_label(model_id) if model_id else "(未记录)"
-                row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=6)
-                row.pack(fill="x", pady=2)
-                tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
-                         font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
-                tk.Label(row, text=f"{tok:,} Token · {fmt_money(cost)}（{pct:.1f}%）",
+
+                # --- Header row: model name + total + cost ---
+                tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
+                hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                hdr.pack(fill="x")
+                tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
+                         font=theme.FONT_VALUE).pack(side="left")
+                tk.Label(hdr, text=f"{tok:,} Token · {fmt_money(cost)}（{pct:.1f}%）",
                          bg=theme.PANEL, fg=theme.MUTED, anchor="e",
                          font=theme.FONT_MONO).pack(side="right")
-                bar = tk.Frame(inner, bg=theme.PANEL, height=4)
-                bar.pack(fill="x", padx=8, pady=(0, 8))
-                tk.Frame(bar, bg=theme.ACCENT, width=int(pct * 4.5), height=4).pack(side="left")
+
+                # --- Stacked bar (relwidth-based, resize-safe) ---
+                vals = [mu.input_tokens, mu.output_tokens,
+                        mu.cache_creation_input_tokens, mu.cache_read_input_tokens]
+                keys = ["input", "output", "cache_creation", "cache_read"]
+                bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                bar_frame.pack(fill="x")
+                bar_bg = tk.Frame(bar_frame, bg="#333333", height=10)
+                bar_bg.pack(fill="x")
+                if tok > 0:
+                    relx = 0.0
+                    for v, k in zip(vals, keys):
+                        if v > 0:
+                            rw = v / tok
+                            seg = tk.Frame(bar_bg, bg=self._COLORS[k], height=10)
+                            seg.place(relx=relx, rely=0, relwidth=rw, relheight=1.0)
+                            relx += rw
+
+                # --- Detail line: 4 types with color (compact) ---
+                det = tk.Frame(inner, bg=theme.PANEL, padx=12, pady=4)
+                det.pack(fill="x")
+                for v, k in zip(vals, keys):
+                    sub_pct = v / tok * 100 if tok else 0
+                    # Abbreviate cache_read to save horizontal space
+                    label_text = f"{self._LABELS[k]} {v:,}（{sub_pct:.0f}%）"
+                    lbl = tk.Label(det, text=label_text,
+                                   bg=theme.PANEL, fg=self._COLORS[k],
+                                   font=(theme.FONT_MONO_NAME, 8), anchor="w")
+                    lbl.pack(side="left", padx=8)
 
 
 class CalibratePopup:
@@ -317,43 +407,62 @@ class AdvancedPopup:
 
 
 class HighChurnFilesPopup:
-    """高频改动文件 — files edited ≥3 times in this session, with counts."""
+    """高频改动文件 — files edited ≥3 times, with proportional bars."""
+
+    _COLOR = "#f39c12"  # warning orange
 
     def __init__(self, parent, details: dict[str, int]) -> None:
-        win = _new_window(parent, "高频改动文件", "520x420")
+        win = _new_window(parent, "高频改动文件", "520x480")
         tk.Label(win, text="高频改动文件（≥3 次）", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
-        tk.Label(win, text="这些文件被反复修改，可能存在需求不清或需要重构。"
-                 "「次数」包含同一个文件的 Write + Edit + MultiEdit 调用。",
+        tk.Label(win, text="这些文件被反复修改，可能存在需求不清或需要重构。",
                  bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI, wraplength=480,
-                 justify="left", padx=16).pack(pady=(0, 8))
+                 justify="left").pack()
 
-        cols = ("path", "count")
-        tree = ttk.Treeview(win, columns=cols, show="headings", height=16)
-        tree.heading("path", text="文件路径")
-        tree.heading("count", text="改动次数")
-        tree.column("path", width=400, anchor="w")
-        tree.column("count", width=80, anchor="e")
-        tree.pack(fill="both", expand=True, padx=10, pady=8)
-        for fp, cnt in details.items():
-            # Show relative path if possible, otherwise full
-            display = fp if len(fp) < 60 else "…" + fp[-57:]
-            tree.insert("", "end", values=(display, cnt))
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = sf.inner
 
-        summary = tk.Frame(win, bg=theme.BG, padx=10, pady=6)
-        summary.pack(fill="x")
-        total = sum(details.values())
-        tk.Label(summary, text=f"共 {len(details)} 个高频文件，合计 {total} 次改动",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_MONO).pack(anchor="w")
+        total_ops = sum(details.values())
+        max_cnt = max(details.values()) if details else 1
+
+        # Summary header
+        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head.pack(fill="x", pady=10)
+        tk.Label(head, text=f"共 {len(details)} 个高频文件 · 合计 {total_ops} 次改动",
+                 bg="#2a2a2e", fg=theme.WARNING, font=theme.FONT_UI_BOLD).pack()
+
+        for fp, cnt in sorted(details.items(), key=lambda x: x[1], reverse=True):
+            display = fp if len(fp) < 55 else "…" + fp[-52:]
+
+            # Header: file path + count
+            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+            hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            hdr.pack(fill="x")
+            tk.Label(hdr, text=display, bg=theme.PANEL, fg=theme.FG, anchor="w",
+                     font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
+            tk.Label(hdr, text=f"{cnt} 次", bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+                     font=theme.FONT_MONO).pack(side="right")
+
+            # Bar (relwidth-based)
+            bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            bar_frame.pack(fill="x")
+            bar_bg = tk.Frame(bar_frame, bg="#333333", height=8)
+            bar_bg.pack(fill="x")
+            tk.Frame(bar_bg, bg=self._COLOR, height=8).place(
+                relx=0, rely=0, relwidth=cnt / max_cnt, relheight=1.0)
 
 
 class UserMsgsPopup:
-    """用户消息 — all user messages in this session."""
+    """用户消息 — all user messages in this session, card-style layout."""
+
+    _ACCENT = "#569cd6"  # blue accent for badges
 
     def __init__(self, parent, messages: list[str]) -> None:
-        win = _new_window(parent, "用户消息", "600x480")
-        tk.Label(win, text=f"用户消息（共 {len(messages)} 条）", bg=theme.BG,
-                 fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
+        total_chars = sum(len(m) for m in messages)
+        win = _new_window(parent, "用户消息", "620x500")
+        tk.Label(win, text="用户消息", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING, pady=10).pack()
 
         sf = ScrollFrame(win, bg=theme.PANEL)
         sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
@@ -363,37 +472,76 @@ class UserMsgsPopup:
             tk.Label(inner, text="未记录到用户消息", bg=theme.PANEL, fg=theme.MUTED,
                      font=theme.FONT_UI, pady=40).pack()
         else:
+            # Summary header
+            head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+            head.pack(fill="x", pady=10)
+            tk.Label(head, text=f"共 {len(messages)} 条消息 · {total_chars:,} 字符",
+                     bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+
             for idx, txt in enumerate(messages, 1):
-                row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=4)
-                row.pack(fill="x", pady=2)
-                tk.Label(row, text=f"{idx}.", bg=theme.PANEL, fg=theme.MUTED,
-                         font=theme.FONT_MONO, anchor="ne", width=4).pack(side="left", anchor="n")
-                tk.Label(row, text=txt, bg=theme.PANEL, fg=theme.FG,
-                         font=theme.FONT_UI, wraplength=500, justify="left",
-                         anchor="w").pack(side="left", fill="x", expand=True)
+                # Card frame
+                card = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+                card.pack(fill="x", pady=4)
+
+                # Header row: badge + char count
+                hdr = tk.Frame(card, bg="#2a2a2e")
+                hdr.pack(fill="x")
+                badge = tk.Label(hdr, text=f"#{idx}", bg=self._ACCENT, fg="#ffffff",
+                                 font=(theme.FONT_MONO_NAME, 8, "bold"), padx=6, pady=1)
+                badge.pack(side="left")
+                tk.Label(hdr, text=f"{len(txt)} 字符", bg="#2a2a2e", fg=theme.MUTED,
+                         font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
+
+                # Message text
+                tk.Label(card, text=txt, bg="#2a2a2e", fg=theme.FG,
+                         font=theme.FONT_UI, wraplength=540, justify="left",
+                         anchor="w").pack(fill="x", pady=(4, 0))
 
 
 class FilesTouchedPopup:
-    """涉及文件 — all files read, written, or edited in this session."""
+    """涉及文件 — all files read/written/edited, with proportional bars."""
+
+    _COLOR = "#569cd6"  # blue
 
     def __init__(self, parent, details: dict[str, int]) -> None:
-        win = _new_window(parent, "涉及文件", "560x420")
+        win = _new_window(parent, "涉及文件", "560x480")
         tk.Label(win, text=f"涉及文件（共 {len(details)} 个）", bg=theme.BG,
                  fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
-        tk.Label(win, text="会话中被读取、写入或编辑过的文件，含操作次数。",
+        tk.Label(win, text="会话中被读取、写入或编辑过的文件及操作次数。",
                  bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI, wraplength=520,
-                 justify="left", padx=16).pack(pady=(0, 8))
+                 justify="left").pack()
 
-        cols = ("path", "ops")
-        tree = ttk.Treeview(win, columns=cols, show="headings", height=16)
-        tree.heading("path", text="文件路径")
-        tree.heading("ops", text="操作次数")
-        tree.column("path", width=420, anchor="w")
-        tree.column("ops", width=100, anchor="e")
-        tree.pack(fill="both", expand=True, padx=10, pady=8)
-        for fp, cnt in sorted(details.items(), key=lambda x: x[1], reverse=True):
-            display = fp if len(fp) < 60 else "…" + fp[-57:]
-            tree.insert("", "end", values=(display, cnt))
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = sf.inner
+
+        sorted_items = sorted(details.items(), key=lambda x: x[1], reverse=True)
+        total_ops = sum(details.values())
+        max_cnt = sorted_items[0][1] if sorted_items else 1
+
+        # Summary header
+        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head.pack(fill="x", pady=10)
+        tk.Label(head, text=f"共 {len(details)} 个文件 · 合计 {total_ops} 次操作",
+                 bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+
+        for fp, cnt in sorted_items:
+            display = fp if len(fp) < 55 else "…" + fp[-52:]
+
+            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+            hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            hdr.pack(fill="x")
+            tk.Label(hdr, text=display, bg=theme.PANEL, fg=theme.FG, anchor="w",
+                     font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
+            tk.Label(hdr, text=f"{cnt} 次", bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+                     font=theme.FONT_MONO).pack(side="right")
+
+            bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            bar_frame.pack(fill="x")
+            bar_bg = tk.Frame(bar_frame, bg="#333333", height=8)
+            bar_bg.pack(fill="x")
+            tk.Frame(bar_bg, bg=self._COLOR, height=8).place(
+                relx=0, rely=0, relwidth=cnt / max_cnt, relheight=1.0)
 
 
 class RadarPopup:

@@ -38,20 +38,50 @@ def default_pricing() -> dict[str, float]:
 
 @lru_cache(maxsize=512)
 def _match_id(model: str) -> str | None:
-    """Resolve a model string to a table key: exact id, else longest-prefix id.
+    """Resolve a model string to a table key, with bidirectional prefix matching.
 
-    Claude Code appends dated / ``[1m]`` suffixes to the base id (e.g.
-    ``claude-opus-4-8[1m]``); a prefix match maps those onto the base entry.
-    Returns None if nothing in the table matches.
+    Three resolution strategies in priority order:
+    1. Exact match: ``model`` is a table key.
+    2. Forward prefix: ``model.startswith(mid)`` — handles date/``[1m]`` suffixes
+       appended by Claude Code (e.g. ``claude-opus-4-8[1m]`` → ``claude-opus-4-8``).
+    3. Reverse prefix: ``mid.startswith(model)`` — handles shortened ids written
+       by JSONL (e.g. ``claude-opus-4-6`` → ``claude-opus-4-6-20260206``).
+       When multiple table keys share the same prefix, the **shortest** match wins
+       (closest to the caller's string, least ambiguous).
+
+    Returns ``None`` if nothing in the table matches, or if *model* is empty.
     """
+    if not model:
+        return None
     models = _load()["models"]
+    # 1. Exact
     if model in models:
         return model
-    best_id: str | None = None
+    # 2. Forward prefix (model is longer than table key)
+    best_fwd: str | None = None
     for mid in models:
-        if model.startswith(mid) and (best_id is None or len(mid) > len(best_id)):
-            best_id = mid
-    return best_id
+        if model.startswith(mid) and (best_fwd is None or len(mid) > len(best_fwd)):
+            best_fwd = mid
+    if best_fwd is not None:
+        return best_fwd
+    # 3. Reverse prefix (table key is longer than model)
+    best_rev: str | None = None
+    for mid in models:
+        if mid.startswith(model) and (best_rev is None or len(mid) < len(best_rev)):
+            best_rev = mid
+    return best_rev
+
+
+@lru_cache(maxsize=512)
+def normalize(model: str) -> str:
+    """Return the canonical table key for *model*, or *model* itself if unknown.
+
+    Use this to deduplicate per_model buckets (e.g. merge ``claude-opus-4-6`` into
+    ``claude-opus-4-6-20260206``).  The returned string is always a valid table key
+    when a match exists, so ``label()`` and ``resolve()`` will find it directly.
+    """
+    mid = _match_id(model)
+    return mid if mid is not None else model
 
 
 @lru_cache(maxsize=512)

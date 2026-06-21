@@ -137,9 +137,9 @@ def analyze_project(
                     details[fp] = details.get(fp, 0) + cnt
             if details:
                 rep.high_churn_details = dict(sorted(details.items(), key=lambda x: -x[1]))
-        # Fill subagent_density (subagent_count / assistant_msgs)
-        if u.assistant_msgs:
-            rep.subagent_density = n_sub / u.assistant_msgs
+        # Fill subagent_density (subagent_count / effective_turns)
+        if u.effective_turns:
+            rep.subagent_density = n_sub / u.effective_turns
         return rep
 
     # Second pass: merge usage + LOC per group, build one report per session.

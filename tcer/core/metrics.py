@@ -1,6 +1,6 @@
 """TCER core metric formulas and pricing.
 
-Basic formulas follow CLAUDE.md. The 综合评分 group (G6) — TTAF / TA-TCER /
+Basic formulas follow CLAUDE.md. The 综合评分 group (G6) — TTAF / NTCER /
 PSAC / CAF / CTEI — follows the metric framework (§6.2–6.5), which is the
 authoritative original framework.
 
@@ -33,6 +33,150 @@ PRICING = pricing.default_pricing()
 _COMPOSITE_CONFIG_PATH = Path(__file__).parent.parent / "config" / "composite_baselines.json"
 
 
+# ============================================================
+# 任务类型体系（只保留 3 个大类）
+# ============================================================
+
+TASK_CATEGORIES = {
+    "code_creation": {
+        "name": "代码创作",
+        "description": "产生新代码的任务（新功能开发、功能扩展、测试编写等）",
+        "ttaf": 1.0,
+        "typical_tcer_range": "60-120",
+        "behavior_hints": ["高 net_loc", "低 exploration_ratio", "低 edit_ratio（多用 Write）"],
+    },
+    "code_maintenance": {
+        "name": "代码维护",
+        "description": "修改/优化现有代码（调试排查、代码重构等）",
+        "ttaf": 0.45,
+        "typical_tcer_range": "25-65",
+        "behavior_hints": ["高 exploration_ratio", "高 edit_ratio", "低 net_loc"],
+    },
+    "non_coding": {
+        "name": "非编码",
+        "description": "不以代码产出为主要目标（代码审查、调研研究等）",
+        "ttaf": 0.2,
+        "typical_tcer_range": "0-30",
+        "behavior_hints": ["极高 read_write_ratio", "极高 exploration_ratio", "极低或零 net_loc"],
+    },
+}
+
+# 向后兼容：TASK_TYPES 映射到 TASK_CATEGORIES
+TASK_TYPES = TASK_CATEGORIES
+
+
+def get_task_category(task_type: str) -> str | None:
+    """获取任务类型所属的大类（现在 task_type 本身就是大类）"""
+    return task_type if task_type in TASK_CATEGORIES else None
+
+
+def get_task_ttaf(task_type: str) -> float | None:
+    """获取任务类型的 TTAF 系数"""
+    category_info = TASK_CATEGORIES.get(task_type)
+    return category_info["ttaf"] if category_info else None
+
+
+# ============================================================
+# 智能推荐算法（只推荐 3 个大类）
+# ============================================================
+
+RECOMMENDATION_RULES = [
+    # 规则 1: 非编码任务（高读写比 + 低净增行）
+    {
+        "condition": lambda f: f["read_write_ratio"] > 5 and f["net_loc"] < 10,
+        "task_type": "non_coding",
+        "confidence": 0.85,
+        "reason": "读写比 > 5 且净增行 < 10",
+    },
+    # 规则 2: 代码维护（高探索率 + 低净增行 + 高编辑占比）
+    {
+        "condition": lambda f: (
+            f["exploration_ratio"] > 0.4 and
+            f["net_loc"] < 50 and
+            f["edit_ratio"] > 0.5
+        ),
+        "task_type": "code_maintenance",
+        "confidence": 0.8,
+        "reason": "高探索率 + 低净增行 + 高编辑占比",
+    },
+    # 规则 3: 代码创作（高净增行）
+    {
+        "condition": lambda f: f["net_loc"] > 100,
+        "task_type": "code_creation",
+        "confidence": 0.7,
+        "reason": "高净增行 > 100",
+    },
+]
+
+
+def extract_behavior_features(report: SessionReport) -> dict:
+    """提取会话的行为特征用于智能推荐"""
+    usage = report.usage
+
+    # 计算关键比率
+    total_tools = sum(usage.tool_calls.values())
+    exploration_ratio = (
+        (usage.tool_calls.get("Grep", 0) + usage.tool_calls.get("Glob", 0)) / total_tools
+        if total_tools > 0
+        else 0.0
+    )
+
+    edit_count = usage.tool_calls.get("Edit", 0) + usage.tool_calls.get("MultiEdit", 0)
+    write_count = usage.tool_calls.get("Write", 0)
+    read_count = usage.tool_calls.get("Read", 0)
+
+    edit_ratio = edit_count / (edit_count + write_count) if (edit_count + write_count) > 0 else 0.0
+    read_write_ratio = read_count / (edit_count + write_count) if (edit_count + write_count) > 0 else 0.0
+
+    # 计算净增行相关
+    net_loc = (report.code_added or 0) - (report.code_deleted or 0)
+    deletion_ratio = report.code_deleted / report.code_added if report.code_added and report.code_added > 0 else 0.0
+
+    # 计算测试代码占比
+    test_loc_ratio = report.test_net_loc / net_loc if net_loc and net_loc > 0 and report.test_net_loc else 0.0
+
+    return {
+        "exploration_ratio": exploration_ratio,
+        "edit_ratio": edit_ratio,
+        "read_write_ratio": read_write_ratio,
+        "net_loc": net_loc,
+        "deletion_ratio": deletion_ratio,
+        "test_loc_ratio": test_loc_ratio,
+        "turns": usage.effective_turns,
+    }
+
+
+def recommend_task_type(features: dict) -> dict:
+    """推荐任务类型（返回最佳匹配）"""
+    best_match = None
+
+    for rule in RECOMMENDATION_RULES:
+        try:
+            if rule["condition"](features):
+                if best_match is None or rule["confidence"] > best_match["confidence"]:
+                    best_match = {
+                        "task_type": rule["task_type"],
+                        "confidence": rule["confidence"],
+                        "reason": rule["reason"],
+                    }
+        except (KeyError, ZeroDivisionError):
+            continue
+
+    # 如果没有匹配，默认推荐 code_creation
+    if best_match is None:
+        best_match = {
+            "task_type": "code_creation",
+            "confidence": 0.5,
+            "reason": "无明显特征，默认推荐代码创作",
+        }
+
+    return best_match
+
+
+# ============================================================
+# Composite-layer config (backward compat)
+# ============================================================
+
 @lru_cache(maxsize=1)
 def _load_composite_config() -> dict:
     """Load composite-layer config (TTAF / baselines / PSAC / CHR weight)."""
@@ -42,7 +186,18 @@ def _load_composite_config() -> dict:
 
 # Composite-layer constants (loaded from config; expose module-level for backward compat).
 def _get_ttaf() -> dict[str, float]:
-    return _load_composite_config()["ttaf"]
+    # 兼容旧配置（直接读 ttaf）和新配置（读 task_categories 中的 ttaf）
+    config = _load_composite_config()
+    if "ttaf" in config:
+        # 旧格式
+        return {k: v for k, v in config["ttaf"].items() if not k.startswith("_")}
+    elif "task_types" in config:
+        # 中间格式
+        return {k: v["ttaf"] for k, v in config["task_types"].items()}
+    elif "task_categories" in config:
+        # 新格式（3 个大类）
+        return {k: v["ttaf"] for k, v in config["task_categories"].items() if isinstance(v, dict) and "ttaf" in v}
+    return {}
 
 
 def _get_baselines() -> dict[str, float]:
@@ -58,7 +213,9 @@ def _get_chr_weight() -> float:
 
 
 # Module-level read-only views (for backward compat with existing callers that read these).
-TTAF = {k: v for k, v in _get_ttaf().items() if not k.startswith("_")}
+# Force reload from new config structure
+_load_composite_config.cache_clear()
+TTAF = _get_ttaf()
 TCER_BASELINE = _get_baselines()["tcer"]
 NCPI_BASELINE = _get_baselines()["ncpi"]
 CPE_BASELINE = _get_baselines()["cpe"]
@@ -177,9 +334,9 @@ def cost_usd(u: TokenUsage, model: str | None = None) -> float:
 # New metrics: timing, tool usage, context efficiency
 # --------------------------------------------------------------------------- #
 def avg_turn_latency_sec(u: TokenUsage) -> float | None:
-    """Average latency per assistant turn (seconds). Includes user pauses."""
-    if u.started_at and u.ended_at and u.assistant_msgs:
-        return (u.ended_at - u.started_at) / 1000 / u.assistant_msgs
+    """Average latency per effective assistant turn (seconds). Includes user pauses."""
+    if u.started_at and u.ended_at and u.effective_turns:
+        return (u.ended_at - u.started_at) / 1000 / u.effective_turns
     return None
 
 
@@ -283,12 +440,23 @@ def ncpi(net_loc: int | None, loc_accumulated: int | None) -> float | None:
     return net_loc / loc_accumulated
 
 
-def ta_tcer(tcer: float | None, task_type: str | None) -> float | None:
-    """Task-adjusted TCER = TCER / TTAF_task (framework §6.4)."""
-    factor = TTAF.get(task_type or "")
-    if tcer is None or not factor:
+def normalized_tcer(tcer: float | None, task_type: str | None) -> float | None:
+    """Normalized TCER (NTCER) = TCER / TTAF_task.
+
+    Removes the task-type bias so different task types can be compared fairly.
+    For example: debug TCER=30, TTAF=0.4, NTCER=75 — showing the efficiency
+    is actually good for a debugging task.
+    """
+    if tcer is None or not task_type:
+        return None
+    factor = TASK_TYPES.get(task_type, {}).get("ttaf")
+    if not factor:
         return None
     return tcer / factor
+
+
+# Backward compat alias
+ta_tcer = normalized_tcer
 
 
 def psac(loc_accumulated: int | None) -> float | None:
@@ -380,7 +548,7 @@ def compute(
 ) -> SessionReport:
     """Compute the full per-session report from accumulated usage + net LOC.
 
-    Composite fields (NCPI / CAF / TA-TCER / PSAC / CTEI / grade) and the
+    Composite fields (NCPI / CAF / NTCER / PSAC / CTEI / grade) and the
     churn ratio are filled in opportunistically: each is None unless its inputs
     are available.
     """
@@ -402,11 +570,15 @@ def compute(
     # --- composite layer ---
     ncpi_ = ncpi(net_loc, loc_accumulated)
     caf_ = caf(u)
-    ta = ta_tcer(tcer, task_type)
+    ta = normalized_tcer(tcer, task_type)
     psac_ = psac(loc_accumulated)
     tcer_phase = (tcer * psac_) if (tcer is not None and psac_ is not None) else None
     ctei_ = ctei(tcer, ncpi_, cpe, chr_, tcer_baseline=tcer_baseline,
                  ncpi_baseline=ncpi_baseline, cpe_baseline=cpe_baseline)
+
+    # --- task type info ---
+    task_category = get_task_category(task_type) if task_type else None
+    ttaf_value = get_task_ttaf(task_type) if task_type else None
 
     # --- timing metrics ---
     avg_turn_lat = avg_turn_latency_sec(u)
@@ -451,7 +623,10 @@ def compute(
         ncpi=ncpi_,
         caf=caf_,
         task_type=task_type,
-        ta_tcer=ta,
+        task_category=task_category,
+        ttaf=ttaf_value,
+        ntcer=ta,
+        ta_tcer=ta,  # backward compat
         psac=psac_,
         tcer_phase_adj=tcer_phase,
         ctei=ctei_,

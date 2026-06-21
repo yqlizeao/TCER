@@ -28,7 +28,7 @@ cost = (input × r["input"] + cache_write × r["cache_write"] + cache_read × r[
 ## 高级指标
 
 - **CAF**：`TotalInput / (input + cache_write)`，消除缓存对效率比较的影响
-- **TTAF / TA-TCER**：任务类型调整系数。TA-TCER = TCER / TTAF。取值：新功能 1.00 / 功能扩展 0.85 / 调试 0.40 / 重构 0.50 / 审查 0.20 / 测试 0.90
+- **TTAF / NTCER**：任务类型调整系数。NTCER = TCER / TTAF。取值：代码创作 1.00 / 代码维护 0.45 / 非编码 0.20
 - **PSAC**：`83.64 / (83.64 − 0.000866 × loc_accumulated)`，抵消大代码库的结构性 TCER 下降
 - **CTEI**：`(TCER/TCER_baseline) × (NCPI/NCPI_baseline) × (CPE_baseline/CPE) × (1 + CHR × 0.5)`
 - **评级**：优秀 >2 · 良好 1~2 · 中等 0.5~1 · 低效 0.1~0.5 · 极端低效 <0.1
@@ -73,7 +73,7 @@ NCPI, CAF, churn, TA-TCER, PSAC。
 
 ## 数值算例
 
-假设某会话：input=20,000 / cache_write=180,000 / cache_read=4,700,000 / output=100,000；工具调用净增 added=420 / deleted=20；代码库累计 loc_accumulated=10,000；任务类型 feature。
+假设某会话：input=20,000 / cache_write=180,000 / cache_read=4,700,000 / output=100,000；工具调用净增 added=420 / deleted=20；代码库累计 loc_accumulated=10,000；任务类型 code_creation。
 
 | 步骤 | 计算 | 结果 |
 |------|------|------|

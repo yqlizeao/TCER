@@ -187,39 +187,35 @@ def test_ctei_none_when_inputs_missing():
 
 
 def test_ttaf_table_matches_report():
-    # Report §6.4 authoritative values (differ from CLAUDE.md for refactor/review).
-    assert metrics.TTAF["feature"] == 1.00
-    assert metrics.TTAF["debug"] == 0.40
-    assert metrics.TTAF["refactor"] == 0.50
-    assert metrics.TTAF["review"] == 0.20
+    # Report §6.4 authoritative values (now only 3 task categories).
+    assert metrics.TTAF["code_creation"] == 1.00
+    assert metrics.TTAF["code_maintenance"] == 0.45
+    assert metrics.TTAF["non_coding"] == 0.20
 
 
 def test_ta_tcer_debug_example():
-    # Report §6.4 worked example: debug TCER=35.0 → TA-TCER = 35.0/0.40 = 87.5.
-    assert metrics.ta_tcer(35.0, "debug") == pytest_approx(87.5)
-    assert metrics.ta_tcer(35.0, "feature") == pytest_approx(35.0)  # TTAF 1.0
-    assert metrics.ta_tcer(35.0, "unknown") is None  # unknown task type
+    # Report §6.4 worked example: code_maintenance TCER=35.0 → NTCER = 35.0/0.45 ≈ 77.78.
+    assert metrics.normalized_tcer(35.0, "code_maintenance") == pytest_approx(35.0 / 0.45)
+    assert metrics.normalized_tcer(35.0, "code_creation") == pytest_approx(35.0)  # TTAF 1.0
+    assert metrics.normalized_tcer(35.0, "unknown") is None  # unknown task type
 
 
 @pytest.mark.parametrize("task_type,expected_factor", [
-    ("feature", 1.0),
-    ("feature-ext", 0.85),
-    ("debug", 0.4),
-    ("refactor", 0.5),
-    ("review", 0.2),
-    ("test", 0.9),
+    ("code_creation", 1.0),
+    ("code_maintenance", 0.45),
+    ("non_coding", 0.2),
 ])
 def test_ta_tcer_all_ttaf_types(task_type, expected_factor):
-    """All TTAF-defined task types should produce correct TA-TCER."""
+    """All TTAF-defined task types should produce correct NTCER."""
     tcer = 50.0
-    result = metrics.ta_tcer(tcer, task_type)
-    assert result is not None, f"ta_tcer returned None for task_type={task_type}"
+    result = metrics.normalized_tcer(tcer, task_type)
+    assert result is not None, f"normalized_tcer returned None for task_type={task_type}"
     assert result == pytest_approx(tcer / expected_factor)
 
 
 def test_ttaf_table_completeness():
-    """TTAF table should contain all expected task types."""
-    expected_types = {"feature", "feature-ext", "debug", "refactor", "review", "test"}
+    """TTAF table should contain all expected task types (3 categories)."""
+    expected_types = {"code_creation", "code_maintenance", "non_coding"}
     actual_types = {k for k in metrics.TTAF.keys() if not k.startswith("_")}
 
     assert expected_types == actual_types, (
@@ -257,24 +253,30 @@ def test_compute_populates_composite_fields():
     # End-to-end: compute() fills NCPI / CAF / TA-TCER / PSAC / CTEI when given
     # loc_accumulated + task_type. total = 1Mt, net_loc=500 → TCER=500.
     u = _u(i=400_000, cw=100_000, o=500_000)  # total 1,000,000
-    r = metrics.compute(META, u, net_loc=500, loc_accumulated=10_000, task_type="debug")
+    r = metrics.compute(META, u, net_loc=500, loc_accumulated=10_000, task_type="code_maintenance")
     assert r.tcer == pytest_approx(500.0)
     assert r.ncpi == pytest_approx(500 / 10_000)
-    assert r.ta_tcer == pytest_approx(500.0 / 0.40)
+    assert r.ntcer == pytest_approx(500.0 / 0.45)
+    assert r.ta_tcer == pytest_approx(500.0 / 0.45)  # backward compat
     assert r.psac is not None and r.tcer_phase_adj == pytest_approx(r.tcer * r.psac)
     assert r.caf == pytest_approx(500_000 / 500_000)  # total_input / (input+cacheW)
     assert r.ctei is not None and r.grade is not None
-    assert r.task_type == "debug"
+    assert r.task_type == "code_maintenance"
+    assert r.task_category == "code_maintenance"
+    assert r.ttaf == 0.45
 
 
 def test_compute_composite_none_without_loc_accumulated():
     # No loc_accumulated → NCPI/PSAC/CTEI stay None, but CAF (token-only) still set.
     u = _u(i=400_000, cw=100_000, o=500_000)
-    r = metrics.compute(META, u, net_loc=500, task_type="feature")
+    r = metrics.compute(META, u, net_loc=500, task_type="code_creation")
     assert r.ncpi is None
     assert r.psac is None
     assert r.ctei is None
     assert r.caf is not None  # CAF needs only token usage
+    assert r.task_type == "code_creation"
+    assert r.task_category == "code_creation"
+    assert r.ttaf == 1.0
 
 
 def test_churn_ratio_formula():

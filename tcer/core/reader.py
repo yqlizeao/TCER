@@ -13,6 +13,7 @@ from pathlib import Path
 
 from tcer.core.models import SessionMeta, ToolOp, TokenUsage
 from tcer.core.paths import projects_dir
+from tcer.core import pricing
 
 # Title-extraction noise to skip, matching cc-switch's filters.
 _TITLE_NOISE_PREFIXES = ("<local-command-caveat", "<command-name>", "<ide_opened_file>",
@@ -78,8 +79,11 @@ def aggregate_usage(path: Path) -> TokenUsage:
     sessions). We count each ``message.id`` once. Lines without an id fall back to
     being counted individually. (ccusage / token-stats dedup the same way.)
 
-    Turns whose usage is entirely zero (e.g. pure-thinking stubs) are skipped and
-    counted in ``empty_usage_skipped`` per CLAUDE.md note 7.
+    Turns whose usage is entirely zero (e.g. pure-thinking stubs) are counted in
+    ``empty_usage_skipped`` and their tokens are not accumulated, but they ARE
+    included in ``assistant_msgs`` (raw count from JSONL).  Use
+    ``effective_turns`` (assistant_msgs − empty_usage_skipped) for efficiency
+    metrics.
 
     **Time window**: tracks ``started_at`` / ``ended_at`` from *all* assistant turns
     (including zero-usage ones) so sessions with only zero-usage replies still get
@@ -153,18 +157,30 @@ def aggregate_usage(path: Path) -> TokenUsage:
             cw = _as_int(usage.get("cache_creation_input_tokens"))
             cr = _as_int(usage.get("cache_read_input_tokens"))
             o = _as_int(usage.get("output_tokens"))
+            # Count every assistant turn (raw data), even zero-usage stubs.
+            u.assistant_msgs += 1
             if i + cw + cr + o == 0:
                 u.empty_usage_skipped += 1
-                continue
-            u.input_tokens += i
-            u.cache_creation_input_tokens += cw
-            u.cache_read_input_tokens += cr
-            u.output_tokens += o
-            u.assistant_msgs += 1
+                # Release the id lock so a later line with the same message.id
+                # can contribute real tokens.  ccswitch writes mimo messages as
+                # two JSONL lines: first a thinking-only stub (usage=0), then
+                # the real response with actual token counts — same id.
+                if isinstance(mid, str) and mid:
+                    seen.discard(mid)
+            else:
+                u.input_tokens += i
+                u.cache_creation_input_tokens += cw
+                u.cache_read_input_tokens += cr
+                u.output_tokens += o
             model = msg.get("model")
-            if isinstance(model, str):
+            # Skip synthetic stubs (ccswitch 429 errors, "No response requested")
+            # — they use the same message.model field but are not real model turns.
+            if isinstance(model, str) and model and model != "<synthetic>":
                 u.models.add(model)
-            u.bucket(model if isinstance(model, str) else "").add(i, cw, cr, o)
+                bucket_key = pricing.normalize(model)
+            else:
+                bucket_key = ""
+            u.bucket(bucket_key).add(i, cw, cr, o)
 
             # Extract tool_use / thinking blocks from content
             content = msg.get("content")

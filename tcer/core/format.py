@@ -46,8 +46,10 @@ def models_label(u: TokenUsage, max_n: int = 2) -> str:
     """Friendly comma-joined model list (e.g. 'Claude Opus 4.8'), sorted by id.
 
     Shows at most *max_n* model names; any extra are replaced by trailing ``…``.
+    Filters out non-real models like ``<synthetic>`` and empty strings.
     """
-    labels = [pricing.label(m) for m in sorted(u.models)]
+    _SKIP = {"<synthetic>", ""}
+    labels = [pricing.label(m) for m in sorted(u.models) if m not in _SKIP]
     if not labels:
         return "-"
     if len(labels) > max_n:

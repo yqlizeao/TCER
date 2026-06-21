@@ -52,8 +52,8 @@ class TokenUsage:
     output_tokens: int = 0
     models: set[str] = field(default_factory=set)
     per_model: dict[str, ModelUsage] = field(default_factory=dict)
-    assistant_msgs: int = 0  # assistant turns counted toward the totals
-    empty_usage_skipped: int = 0  # assistant turns with all-zero usage (skipped)
+    assistant_msgs: int = 0  # total assistant turns (incl. zero-usage stubs)
+    empty_usage_skipped: int = 0  # assistant turns with all-zero usage
     started_at: int | None = None  # epoch ms of first counted assistant turn
     ended_at: int | None = None  # epoch ms of last counted assistant turn
     tool_calls: dict[str, int] = field(default_factory=dict)  # tool_name → call count
@@ -73,6 +73,11 @@ class TokenUsage:
     @property
     def total(self) -> int:
         return self.total_input + self.output_tokens
+
+    @property
+    def effective_turns(self) -> int:
+        """Assistant turns that contributed actual tokens (excl. zero-usage stubs)."""
+        return self.assistant_msgs - self.empty_usage_skipped
 
     def bucket(self, model: str) -> ModelUsage:
         """Return (creating if needed) the per-model bucket for ``model``."""
@@ -188,8 +193,13 @@ class SessionReport:
     loc_accumulated: int | None = None  # current codebase size (for NCPI / PSAC)
     ncpi: float | None = None  # net code production index = net_loc / loc_accumulated
     caf: float | None = None  # cache adjustment factor
-    task_type: str | None = None  # one of metrics.TTAF keys
-    ta_tcer: float | None = None  # task-adjusted TCER = tcer / TTAF
+    task_type: str | None = None  # one of metrics.TASK_TYPES keys
+    task_category: str | None = None  # one of metrics.TASK_CATEGORIES keys
+    ttaf: float | None = None  # task type adjustment factor
+    ntcer: float | None = None  # normalized TCER = tcer / TTAF
+    ta_tcer: float | None = None  # backward compat alias for ntcer
+    recommended_task_type: str | None = None  # AI-recommended task type
+    recommendation_confidence: float | None = None  # 0..1 confidence score
     psac: float | None = None  # project-stage adjustment coefficient
     tcer_phase_adj: float | None = None  # tcer * psac
     ctei: float | None = None  # composite token efficiency index
@@ -202,13 +212,13 @@ class SessionReport:
     unseen_writes: int = 0  # Write calls whose target file hadn't been touched yet
                             # in this session (F1 exposure: prior size assumed 0)
     # --- timing metrics ---
-    avg_turn_latency_sec: float | None = None  # (ended_at - started_at) / assistant_msgs in seconds
+    avg_turn_latency_sec: float | None = None  # (ended_at - started_at) / effective_turns in seconds
     session_duration_minutes: float | None = None  # session_duration_ms / 60000
     # --- tool usage pattern ---
     read_write_ratio: float | None = None  # Read / (Write + Edit)
     edit_ratio: float | None = None  # Edit / (Edit + Write)
     exploration_ratio: float | None = None  # (Grep + Glob) / total_tools
-    subagent_density: float | None = None  # subagent_count / assistant_msgs
+    subagent_density: float | None = None  # subagent_count / effective_turns
     # --- context efficiency ---
     cache_efficiency: float | None = None  # cache_read / cache_write (>1 means cache paid off)
     cache_write_ratio: float | None = None  # cache_write / total_input

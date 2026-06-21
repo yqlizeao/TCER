@@ -1,23 +1,55 @@
 {
   "_meta": {
-    "description": "综合评分 (G6) baselines and task-type adjustment factors",
+    "description": "任务类型体系、综合评分基准",
+    "version": "2.0",
     "source": "Default values from the metric framework §6.3–6.5 (16-session reference dataset)",
-    "last_updated": "2026-06-20"
+    "last_updated": "2026-06-22"
   },
+  "task_categories": {
+    "code_creation": {
+      "name": "代码创作",
+      "description": "产生新代码的任务（新功能开发、功能扩展、测试编写等）",
+      "ttaf": 1.0,
+      "typical_tcer_range": "60-120",
+      "behavior_hints": ["高 net_loc", "低 exploration_ratio", "低 edit_ratio（多用 Write）"]
+    },
+    "code_maintenance": {
+      "name": "代码维护",
+      "description": "修改/优化现有代码（调试排查、代码重构等）",
+      "ttaf": 0.45,
+      "typical_tcer_range": "25-65",
+      "behavior_hints": ["高 exploration_ratio", "高 edit_ratio", "低 net_loc"]
+    },
+    "non_coding": {
+      "name": "非编码",
+      "description": "不以代码产出为主要目标（代码审查、调研研究等）",
+      "ttaf": 0.2,
+      "typical_tcer_range": "0-30",
+      "behavior_hints": ["极高 read_write_ratio", "极高 exploration_ratio", "极低或零 net_loc"]
+    }
+  },
+  "recommendation_rules": [
+    {
+      "condition": "read_write_ratio > 5 and net_loc < 10",
+      "task_type": "non_coding",
+      "confidence": 0.85
+    },
+    {
+      "condition": "exploration_ratio > 0.4 and net_loc < 50 and edit_ratio > 0.5",
+      "task_type": "code_maintenance",
+      "confidence": 0.8
+    },
+    {
+      "condition": "net_loc > 100",
+      "task_type": "code_creation",
+      "confidence": 0.7
+    }
+  ],
   "ctei_baselines": {
     "tcer": 76.59,
     "ncpi": 0.101,
     "cpe": 8.22,
     "_note": "Medians (TCER, CPE) and mean (NCPI) from the framework's reference dataset. Override these once you have your own accumulated data."
-  },
-  "ttaf": {
-    "feature": 1.0,
-    "feature-ext": 0.85,
-    "debug": 0.4,
-    "refactor": 0.5,
-    "review": 0.2,
-    "test": 0.9,
-    "_note": "Task Type Adjustment Factor (framework §6.4). Values represent relative difficulty: feature (greenfield) is the baseline 1.0."
   },
   "psac": {
     "intercept": 83.64,
