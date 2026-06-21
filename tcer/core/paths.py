@@ -12,7 +12,7 @@ from pathlib import Path
 _HASH_REPLACE = ("\\", "/", ".", ":")
 
 
-def claude_dir() -> Path:
+def _claude_dir() -> Path:
     """Return the Claude Code config directory (``~/.claude`` by default).
 
     Honors the ``CLAUDE_CONFIG_DIR`` env override if set.
@@ -25,7 +25,7 @@ def claude_dir() -> Path:
 
 def projects_dir() -> Path:
     """Return ``<claude_dir>/projects`` where per-project session JSONL lives."""
-    return claude_dir() / "projects"
+    return _claude_dir() / "projects"
 
 
 def encode_hash(cwd: str | Path) -> str:

@@ -51,39 +51,6 @@ def test_session_calibration_properties():
     assert cal.net_deviation == 15  # net overestimation
 
 
-def test_format_calibration_report_empty():
-    """Test report formatting with no calibrations."""
-    report = calibrate.format_calibration_report([])
-    assert "No sessions to calibrate" in report
-
-
-def test_format_calibration_report():
-    """Test report formatting with sample data."""
-    calibrations = [
-        calibrate.SessionCalibration("session1", 100, 10, 100, 10),
-        calibrate.SessionCalibration("session2", 200, 20, 180, 15),
-        calibrate.SessionCalibration("session3", 50, 5, 60, 8),
-    ]
-
-    report = calibrate.format_calibration_report(calibrations)
-
-    # Check structure
-    assert "TCER LOC Calibration Report" in report
-    assert "session1" in report
-    assert "session2" in report
-    assert "session3" in report
-    assert "Summary" in report
-    assert "Calibration Factor" in report
-    assert "Total TCER net LOC" in report
-    assert "Total Git net LOC" in report
-
-    # Check calculations
-    total_tcer_net = (100 - 10) + (200 - 20) + (50 - 5)  # 90 + 180 + 45 = 315
-    total_git_net = (100 - 10) + (180 - 15) + (60 - 8)  # 90 + 165 + 52 = 307
-    assert "+315" in report or "315" in report
-    assert "+307" in report or "307" in report
-
-
 def test_calibrate_project_no_project(tmp_path: Path):
     """Test calibrate_project with non-existent project."""
     result = calibrate.calibrate_project("nonexistent-project-xyz")
@@ -115,8 +82,3 @@ def test_integration_calibrate_real_project():
             assert cal.tcer_deleted >= 0
             assert cal.git_added >= 0
             assert cal.git_deleted >= 0
-
-        # Format report should work
-        report = calibrate.format_calibration_report(results)
-        assert len(report) > 100  # Should be substantial
-        assert "TCER LOC Calibration Report" in report

@@ -61,9 +61,6 @@ TASK_CATEGORIES = {
     },
 }
 
-# 向后兼容：TASK_TYPES 映射到 TASK_CATEGORIES
-TASK_TYPES = TASK_CATEGORIES
-
 
 def get_task_category(task_type: str) -> str | None:
     """获取任务类型所属的大类（现在 task_type 本身就是大类）"""
@@ -89,18 +86,9 @@ def _load_composite_config() -> dict:
 
 # Composite-layer constants (loaded from config; expose module-level for backward compat).
 def _get_ttaf() -> dict[str, float]:
-    # 兼容旧配置（直接读 ttaf）和新配置（读 task_categories 中的 ttaf）
     config = _load_composite_config()
-    if "ttaf" in config:
-        # 旧格式
-        return {k: v for k, v in config["ttaf"].items() if not k.startswith("_")}
-    elif "task_types" in config:
-        # 中间格式
-        return {k: v["ttaf"] for k, v in config["task_types"].items()}
-    elif "task_categories" in config:
-        # 新格式（3 个大类）
-        return {k: v["ttaf"] for k, v in config["task_categories"].items() if isinstance(v, dict) and "ttaf" in v}
-    return {}
+    return {k: v["ttaf"] for k, v in config["task_categories"].items()
+            if isinstance(v, dict) and "ttaf" in v}
 
 
 def _get_baselines() -> dict[str, float]:
@@ -352,14 +340,10 @@ def normalized_tcer(tcer: float | None, task_type: str | None) -> float | None:
     """
     if tcer is None or not task_type:
         return None
-    factor = TASK_TYPES.get(task_type, {}).get("ttaf")
+    factor = TASK_CATEGORIES.get(task_type, {}).get("ttaf")
     if not factor:
         return None
     return tcer / factor
-
-
-# Backward compat alias
-ta_tcer = normalized_tcer
 
 
 def psac(loc_accumulated: int | None) -> float | None:

@@ -197,7 +197,7 @@ class SessionReport:
     loc_accumulated: int | None = None  # current codebase size (for NCPI / PSAC)
     ncpi: float | None = None  # net code production index = net_loc / loc_accumulated
     caf: float | None = None  # cache adjustment factor
-    task_type: str | None = None  # one of metrics.TASK_TYPES keys
+    task_type: str | None = None  # one of metrics.TASK_CATEGORIES keys
     task_category: str | None = None  # one of metrics.TASK_CATEGORIES keys
     ttaf: float | None = None  # task type adjustment factor
     ntcer: float | None = None  # normalized TCER = tcer / TTAF

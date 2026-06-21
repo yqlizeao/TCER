@@ -14,7 +14,6 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from tcer.core import analyze, loc, paths, reader
 
@@ -245,76 +244,3 @@ def calibrate_project(
         ))
 
     return results
-
-
-def format_calibration_report(calibrations: list[SessionCalibration]) -> str:
-    """Format a human-readable calibration report."""
-    if not calibrations:
-        return "No sessions to calibrate."
-
-    lines = [
-        "TCER LOC Calibration Report",
-        "=" * 80,
-        "",
-        "Comparing git-free LOC (tool-call replay) vs git ground truth (git log --numstat)",
-        "",
-        f"{'Session':<40} {'TCER +/-':<15} {'Git +/-':<15} {'Net Δ':>10}",
-        "-" * 80,
-    ]
-
-    total_tcer_net = 0
-    total_git_net = 0
-    total_added_dev = 0
-    total_deleted_dev = 0
-
-    for cal in calibrations:
-        tcer_net = cal.tcer_added - cal.tcer_deleted
-        git_net = cal.git_added - cal.git_deleted
-        total_tcer_net += tcer_net
-        total_git_net += git_net
-        total_added_dev += cal.added_deviation
-        total_deleted_dev += cal.deleted_deviation
-
-        sid = cal.session_id[:38]
-        tcer_str = f"+{cal.tcer_added} -{cal.tcer_deleted}"
-        git_str = f"+{cal.git_added} -{cal.git_deleted}"
-        dev_str = f"{cal.net_deviation:+d}"
-
-        lines.append(f"{sid:<40} {tcer_str:<15} {git_str:<15} {dev_str:>10}")
-
-    lines += [
-        "-" * 80,
-        "",
-        "Summary",
-        "-------",
-        f"Total TCER net LOC    : {total_tcer_net:+,d}",
-        f"Total Git net LOC     : {total_git_net:+,d}",
-        f"Net deviation         : {total_tcer_net - total_git_net:+,d} ({((total_tcer_net / total_git_net - 1) * 100) if total_git_net else 0:.1f}%)",
-        "",
-        f"Total added deviation : {total_added_dev:+,d}",
-        f"Total deleted deviation: {total_deleted_dev:+,d}",
-        "",
-    ]
-
-    # Calibration factor suggestion
-    if total_git_net != 0:
-        factor = total_tcer_net / total_git_net
-        lines += [
-            "Calibration Factor",
-            "------------------",
-            f"TCER / Git ratio      : {factor:.4f}",
-            "",
-            "To adjust TCER values to match git:",
-            f"  adjusted_tcer = tcer / {factor:.4f}",
-            f"  adjusted_net_loc = net_loc / {factor:.4f}",
-            "",
-        ]
-
-    # Per-session accuracy
-    accurate = sum(1 for c in calibrations if abs(c.net_deviation) <= 10)
-    lines += [
-        f"Sessions within ±10 LOC: {accurate}/{len(calibrations)} ({accurate/len(calibrations)*100:.1f}%)",
-        "",
-    ]
-
-    return "\n".join(lines)

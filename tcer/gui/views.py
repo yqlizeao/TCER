@@ -12,17 +12,13 @@ import statistics
 import tkinter as tk
 from dataclasses import dataclass, field
 from tkinter import ttk
-from typing import TYPE_CHECKING
 
 from tcer.core import metrics
-from tcer.core.export import ctei_decompose, ctei_decompose_avg, ctei_ranking
+from tcer.core.export import ctei_decompose, ctei_decompose_avg
 from tcer.core.format import fmt_dt
 from . import theme
 from .metric_defs import GROUPS, report_values
 from .widgets import Card, MetricCell, ScrollFrame, Tooltip
-
-if TYPE_CHECKING:  # avoid circular import for type hints only
-    pass
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
 

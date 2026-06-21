@@ -24,45 +24,6 @@ def _new_window(parent, title, size, bg=theme.BG) -> tk.Toplevel:
     return win
 
 
-class GlossaryPopup:
-    """指标说明 — renders every metric's tip from metric_defs + concept notes."""
-
-    def __init__(self, parent) -> None:
-        win = _new_window(parent, "指标说明", "580x720")
-        frame = tk.Frame(win, bg=theme.BG)
-        frame.pack(fill="both", expand=True, padx=4, pady=4)
-        scrollbar = tk.Scrollbar(frame, orient="vertical")
-        scrollbar.pack(side="right", fill="y")
-        txt = tk.Text(frame, bg=theme.PANEL, fg=theme.FG, wrap="word",
-                      font=theme.FONT_UI, padx=12, pady=10, borderwidth=0,
-                      yscrollcommand=scrollbar.set)
-        txt.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=txt.yview)
-        txt.tag_configure("h", foreground="#9cdcfe", font=theme.FONT_HEADING)
-        for level, color in theme.LEVEL_COLORS.items():
-            txt.tag_configure(level, foreground=color, font=theme.FONT_UI_BOLD)
-
-        label = {"basic": "白色=基准值", "compound": "黄色=含magic number"}
-        txt.insert("end", "TCER 指标速查\n\n", "h")
-        txt.insert("end", "颜色说明: ", "h")
-        for level in ("compound", "basic"):
-            txt.insert("end", f"● {label[level]} ", level)
-        txt.insert("end", "\n\n")
-
-        for group in GROUPS:
-            txt.insert("end", f"{group.id} {group.name}\n", "h")
-            for m in group.metrics:
-                txt.insert("end", f"{m.name}" + (f"（{m.unit}）" if m.unit else "") + "\n", m.level)
-                txt.insert("end", m.tip + "\n\n")
-        txt.insert("end", "补充说明\n\n", "h")
-        for name, tip, level in CONCEPT_NOTES:
-            txt.insert("end", name + "\n", level)
-            txt.insert("end", tip + "\n\n")
-        txt.configure(state="disabled")
-        tk.Button(win, text="关闭", command=win.destroy, bg=theme.ACCENT, fg=theme.FG,
-                  relief="flat", padx=20, pady=4).pack(pady=6)
-
-
 class SessionDetailPopup:
     """会话详情 — metadata + per-model cost breakdown (the grid covers the rest)."""
 
@@ -404,53 +365,6 @@ class AdvancedPopup:
         tk.Button(win, text="应用并重算",
                   command=lambda: (on_apply(code_var.get().strip() or None, no_loc_var.get()), win.destroy()),
                   bg=theme.ACCENT, fg=theme.FG, relief="flat", padx=16, pady=4).pack(pady=8)
-
-
-class HighChurnFilesPopup:
-    """高频改动文件 — files edited ≥3 times, with proportional bars."""
-
-    _COLOR = "#f39c12"  # warning orange
-
-    def __init__(self, parent, details: dict[str, int]) -> None:
-        win = _new_window(parent, "高频改动文件", "520x480")
-        tk.Label(win, text="高频改动文件（≥3 次）", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
-        tk.Label(win, text="这些文件被反复修改，可能存在需求不清或需要重构。",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI, wraplength=480,
-                 justify="left").pack()
-
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
-        inner = sf.inner
-
-        total_ops = sum(details.values())
-        max_cnt = max(details.values()) if details else 1
-
-        # Summary header
-        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
-        head.pack(fill="x", pady=10)
-        tk.Label(head, text=f"共 {len(details)} 个高频文件 · 合计 {total_ops} 次改动",
-                 bg="#2a2a2e", fg=theme.WARNING, font=theme.FONT_UI_BOLD).pack()
-
-        for fp, cnt in sorted(details.items(), key=lambda x: x[1], reverse=True):
-            display = fp if len(fp) < 55 else "…" + fp[-52:]
-
-            # Header: file path + count
-            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-            hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
-            hdr.pack(fill="x")
-            tk.Label(hdr, text=display, bg=theme.PANEL, fg=theme.FG, anchor="w",
-                     font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
-            tk.Label(hdr, text=f"{cnt} 次", bg=theme.PANEL, fg=theme.MUTED, anchor="e",
-                     font=theme.FONT_MONO).pack(side="right")
-
-            # Bar (relwidth-based)
-            bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
-            bar_frame.pack(fill="x")
-            bar_bg = tk.Frame(bar_frame, bg="#333333", height=8)
-            bar_bg.pack(fill="x")
-            tk.Frame(bar_bg, bg=self._COLOR, height=8).place(
-                relx=0, rely=0, relwidth=cnt / max_cnt, relheight=1.0)
 
 
 class UserMsgsPopup:

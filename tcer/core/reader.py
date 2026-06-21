@@ -22,6 +22,13 @@ _TITLE_NOISE_PREFIXES = ("<local-command-caveat", "<command-name>", "<ide_opened
 _TITLE_NOISE_AFTER_CLEAN = ("The user opened the file", "You are an expert")
 TITLE_MAX_CHARS = 80
 
+_TAG_RE = re.compile(r'<[^>]+>')
+
+
+def _strip_tags(txt: str) -> str:
+    """Remove XML/HTML-like tags (e.g. ``<ide_opened_file>…</ide_opened_file>``)."""
+    return _TAG_RE.sub('', txt).strip()
+
 
 def discover_jsonl(project_hash: str | None = None) -> list[Path]:
     """Recursively collect every ``*.jsonl`` under a project (or all projects)."""
@@ -124,7 +131,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 # Extract user message text for popup display
                 txt = extract_text(content).strip()
                 if txt:
-                    txt = re.sub(r'<[^>]+>', '', txt).strip()
+                    txt = _strip_tags(txt)
                 if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
                     u.user_message_texts.append(txt[:500])
             # Count tool_result errors (from ALL user-role messages)
@@ -284,8 +291,7 @@ def read_session_meta(path: Path) -> SessionMeta:
                 txt = extract_text(msg.get("content")).strip()
                 if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
                     # Remove all XML-like tags (e.g. <ide_opened_file>...</ide_opened_file>)
-                    import re
-                    txt = re.sub(r'<[^>]+>', '', txt).strip()
+                    txt = _strip_tags(txt)
                     # Skip system-generated phrases after cleaning
                     if txt and not txt.startswith(_TITLE_NOISE_AFTER_CLEAN):
                         title = txt

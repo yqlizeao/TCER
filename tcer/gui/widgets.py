@@ -126,9 +126,9 @@ class MetricCell:
         self.title.pack(anchor="w")
 
         self.var = tk.StringVar(value="-")
-        self._value_fg = theme.VALUE_NEUTRAL
+        value_fg = theme.VALUE_NEUTRAL
         self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
-                              fg=self._value_fg, font=theme.FONT_VALUE, anchor="w")
+                              fg=value_fg, font=theme.FONT_VALUE, anchor="w")
         self.value.pack(anchor="w", pady=(1, 0))
 
         if on_click:
