@@ -268,6 +268,8 @@ class CostBreakdownPopup:
     """成本明细 — per-model cost sorted by cost, with cost-effectiveness metric."""
 
     _COLOR = "#ce9178"  # warm orange for cost bars
+    # Top 3 efficiency medal colors
+    _MEDAL = ["#ffd700", "#c0c0c0", "#cd7f32"]  # gold, silver, bronze
 
     def __init__(self, parent, usage, title_suffix: str = "") -> None:
         from tcer.core import metrics as metrics_mod
@@ -302,6 +304,15 @@ class CostBreakdownPopup:
             cost = metrics_mod.cost_usd(mu, model=model_id or None)
             tpd = tok / cost if cost > 0 else float("inf")
             items.append((model_id, cost, tok, tpd))
+
+        # Rank by efficiency (top 3 get medals)
+        ranked = sorted(items, key=lambda x: x[3], reverse=True)
+        medal_map: dict[str, int] = {}
+        for rank, (mid, *_) in enumerate(ranked):
+            if rank < 3:
+                medal_map[mid] = rank
+
+        # Sort display by cost descending
         items.sort(key=lambda x: x[1], reverse=True)
 
         # Summary header
@@ -335,7 +346,7 @@ class CostBreakdownPopup:
                 tk.Frame(bar_bg, bg=self._COLOR, height=10).place(
                     relx=0, rely=0, relwidth=cost / max_cost, relheight=1.0)
 
-            # Detail line: tokens + cost-effectiveness
+            # Detail line: tokens + cost-effectiveness + medal
             det = tk.Frame(inner, bg=theme.PANEL, padx=12, pady=4)
             det.pack(fill="x")
             tk.Label(det, text=f"Token {tok:,}",
@@ -346,7 +357,8 @@ class CostBreakdownPopup:
                 eff_color = theme.SUCCESS
             else:
                 eff_text = f"效率 {tpd:,.0f} Token/$"
-                eff_color = theme.MUTED
+                rank = medal_map.get(model_id)
+                eff_color = self._MEDAL[rank] if rank is not None else theme.MUTED
             tk.Label(det, text=eff_text,
                      bg=theme.PANEL, fg=eff_color,
                      font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
