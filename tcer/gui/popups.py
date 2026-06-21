@@ -25,57 +25,108 @@ def _new_window(parent, title, size, bg=theme.BG) -> tk.Toplevel:
 
 
 class SessionDetailPopup:
-    """会话详情 — metadata + per-model cost breakdown (the grid covers the rest)."""
+    """会话详情 — metadata + per-model cost breakdown, unified card style."""
+
+    _COST_COLOR = "#ce9178"  # warm orange for cost bars
 
     def __init__(self, parent, report) -> None:
+        from tcer.core import metrics as metrics_mod
+        from tcer.core.pricing import label as model_label
+
         r = report
         u = r.usage
         sid = (r.meta.session_id or r.meta.path.stem)[:16]
-        win = _new_window(parent, f"会话详情 · {sid}…", "560x520")
-        body = tk.Frame(win, bg=theme.BG, padx=12, pady=12)
-        body.pack(fill="both", expand=True)
+        win = _new_window(parent, f"会话详情 · {sid}…", "580x600")
+        tk.Label(win, text="会话详情", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING, pady=10).pack()
 
-        def line(k, v):
-            row = tk.Frame(body, bg=theme.BG)
-            row.pack(fill="x", pady=1)
-            tk.Label(row, text=k, bg=theme.BG, fg=theme.MUTED, width=12, anchor="w",
-                     font=theme.FONT_UI).pack(side="left")
-            tk.Label(row, text=str(v), bg=theme.BG, fg=theme.FG, anchor="w",
-                     justify="left", font=theme.FONT_UI).pack(side="left", fill="x")
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = sf.inner
 
-        line("会话 ID", r.meta.session_id or "(无)")
-        line("标题", r.meta.title or "(无标题)")
-        line("工作目录", r.meta.cwd or "(未知)")
-        line("路径", r.meta.path)
-        line("开始", fmt.fmt_dt(u.started_at, "%Y-%m-%d %H:%M:%S"))
-        line("结束", fmt.fmt_dt(u.ended_at, "%Y-%m-%d %H:%M:%S"))
-        line("模型", fmt.models_label(u))
-        line("Token 总量", f"{u.total:,}")
+        # Summary header
+        total_cost = metrics_mod.cost_usd(u)
+        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head.pack(fill="x", pady=10)
+        tk.Label(head, text=f"{r.meta.title or '(无标题)'} · {fmt.models_label(u)}",
+                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
+        tk.Label(head, text=f"{u.total:,} Token · {fmt.fmt_money(total_cost)}",
+                 bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI).pack()
 
-        tk.Label(body, text="逐模型成本", bg=theme.BG, fg="#9cdcfe",
-                 font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(12, 4))
-        if u.per_model:
-            from tcer.core.pricing import label as model_label
-            for m, bucket in sorted(u.per_model.items()):
-                if m in ("<synthetic>", ""):
-                    continue
-                cost = metrics.cost_usd(bucket, model=m)
-                row = tk.Frame(body, bg=theme.BG)
-                row.pack(fill="x", pady=1)
-                tk.Label(row, text=model_label(m) if m else "(未记录)", bg=theme.BG, fg=theme.FG,
-                         anchor="w", font=theme.FONT_MONO).pack(side="left")
-                tk.Label(row, text=fmt.fmt_money(cost), bg=theme.BG, fg=theme.MUTED, anchor="e",
+        # Metadata card
+        def meta_row(key, val):
+            row = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=2)
+            row.pack(fill="x")
+            tk.Label(row, text=key, bg=theme.PANEL, fg=theme.MUTED, width=10,
+                     anchor="w", font=theme.FONT_UI).pack(side="left")
+            tk.Label(row, text=str(val), bg=theme.PANEL, fg=theme.FG,
+                     anchor="w", font=theme.FONT_UI, wraplength=400,
+                     justify="left").pack(side="left", fill="x", expand=True)
+
+        tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+        meta_row("会话 ID", r.meta.session_id or "(无)")
+        meta_row("工作目录", r.meta.cwd or "(未知)")
+        meta_row("开始", fmt.fmt_dt(u.started_at, "%Y-%m-%d %H:%M:%S"))
+        meta_row("结束", fmt.fmt_dt(u.ended_at, "%Y-%m-%d %H:%M:%S"))
+
+        # Per-model cost section
+        _SKIP = {"<synthetic>", ""}
+        per_model = {k: v for k, v in u.per_model.items() if k not in _SKIP and k}
+
+        if per_model:
+            # Section header
+            tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
+            sec = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=4)
+            sec.pack(fill="x")
+            tk.Label(sec, text="逐模型成本", bg=theme.PANEL, fg="#9cdcfe",
+                     font=theme.FONT_UI_BOLD).pack(anchor="w")
+
+            # Build sorted items
+            cost_items = []
+            for m, bucket in per_model.items():
+                cost = metrics_mod.cost_usd(bucket, model=m)
+                tok = bucket.input_tokens + bucket.output_tokens + bucket.cache_creation_input_tokens + bucket.cache_read_input_tokens
+                cost_items.append((m, cost, tok))
+            cost_items.sort(key=lambda x: x[1], reverse=True)
+            max_cost = cost_items[0][1] if cost_items else 1
+
+            for m, cost, tok in cost_items:
+                pct = cost / total_cost * 100 if total_cost else 0
+                name = model_label(m) if m else "(未记录)"
+
+                tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+                hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                hdr.pack(fill="x")
+                tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
+                         font=theme.FONT_VALUE).pack(side="left")
+                tk.Label(hdr, text=f"{fmt.fmt_money(cost)}（{pct:.1f}%）",
+                         bg=theme.PANEL, fg=theme.MUTED, anchor="e",
                          font=theme.FONT_MONO).pack(side="right")
-        else:
-            tk.Label(body, text="(无逐模型分桶)", bg=theme.BG, fg=theme.MUTED,
-                     font=theme.FONT_UI).pack(anchor="w")
 
+                bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                bar_frame.pack(fill="x")
+                bar_bg = tk.Frame(bar_frame, bg="#333333", height=8)
+                bar_bg.pack(fill="x")
+                if max_cost > 0:
+                    tk.Frame(bar_bg, bg=self._COST_COLOR, height=8).place(
+                        relx=0, rely=0, relwidth=cost / max_cost, relheight=1.0)
+
+                det = tk.Frame(inner, bg=theme.PANEL, padx=12, pady=4)
+                det.pack(fill="x")
+                tk.Label(det, text=f"Token {tok:,}",
+                         bg=theme.PANEL, fg=theme.MUTED,
+                         font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
+
+        # Warning for unseen writes
         if r.unseen_writes:
-            tk.Label(body,
+            tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
+            warn = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=6)
+            warn.pack(fill="x")
+            tk.Label(warn,
                      text=f"⚠ {r.unseen_writes} 个「未见文件的 Write」（LOC 假设为新文件，"
                           "若覆写已有文件会高估 added）",
-                     bg=theme.BG, fg=theme.WARNING, justify="left",
-                     font=theme.FONT_UI).pack(anchor="w", pady=(12, 0))
+                     bg=theme.PANEL, fg=theme.WARNING, justify="left",
+                     font=theme.FONT_UI, wraplength=520).pack(anchor="w")
 
 
 class ToolCallsPopup:
@@ -365,106 +416,182 @@ class CostBreakdownPopup:
 
 
 class CalibratePopup:
-    """校准结果 — tcer LOC vs git ground truth, per session + summary."""
+    """校准结果 — tcer LOC vs git ground truth, unified card style."""
+
+    _TCER_COLOR = "#569cd6"   # blue for tcer
+    _GIT_COLOR = "#4ec9b0"    # teal for git
+    _DEV_COLOR = "#f48771"    # red for deviation
 
     def __init__(self, parent, calibrations, text_report: str) -> None:
-        win = _new_window(parent, "LOC 精度校准（对照 git）", "720x560")
-        tk.Label(win, text="工具调用 LOC vs git 真实净增", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=8).pack()
+        win = _new_window(parent, "LOC 精度校准（对照 git）", "600x580")
+        tk.Label(win, text="LOC 精度校准", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING, pady=10).pack()
 
-        cols = ("session", "tcer", "git", "net")
-        tree = ttk.Treeview(win, columns=cols, show="headings", height=14)
-        for c, t, w in (("session", "会话", 320), ("tcer", "工具调用 ±", 130),
-                        ("git", "git ±", 130), ("net", "净偏差", 110)):
-            tree.heading(c, text=t)
-            tree.column(c, width=w, anchor="w" if c == "session" else "e")
-        tree.pack(fill="both", expand=True, padx=10, pady=8)
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = sf.inner
 
+        # Compute totals
         tot_tcer = tot_git = 0
+        for cal in calibrations:
+            tot_tcer += cal.tcer_added - cal.tcer_deleted
+            tot_git += cal.git_added - cal.git_deleted
+        factor = (tot_tcer / tot_git) if tot_git else 0
+        ratio = ((tot_tcer / tot_git - 1) * 100) if tot_git else 0
+
+        # Summary header
+        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head.pack(fill="x", pady=10)
+        tk.Label(head, text=f"{len(calibrations)} 个会话",
+                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
+        tk.Label(head, text=f"工具调用净增 {tot_tcer:+,}  git 净增 {tot_git:+,}  "
+                            f"偏差 {tot_tcer - tot_git:+,}（{ratio:+.1f}%）",
+                 bg="#2a2a2e", fg=self._DEV_COLOR, font=theme.FONT_UI).pack()
+        tk.Label(head, text=f"校准系数: {factor:.4f}",
+                 bg="#2a2a2e", fg=theme.MUTED, font=theme.FONT_UI).pack()
+
+        # Per-session cards
         for cal in calibrations:
             tcer_net = cal.tcer_added - cal.tcer_deleted
             git_net = cal.git_added - cal.git_deleted
-            tot_tcer += tcer_net
-            tot_git += git_net
-            tree.insert("", "end", values=(
-                cal.session_id[:38],
-                f"+{cal.tcer_added} -{cal.tcer_deleted}",
-                f"+{cal.git_added} -{cal.git_deleted}",
-                f"{cal.net_deviation:+d}",
-            ))
+            dev = cal.net_deviation
 
-        summary = tk.Frame(win, bg=theme.BG, padx=10, pady=6)
-        summary.pack(fill="x")
-        factor = (tot_tcer / tot_git) if tot_git else 0
-        ratio = ((tot_tcer / tot_git - 1) * 100) if tot_git else 0
-        for text in (f"工具调用净增: {tot_tcer:+,}",
-                     f"git 净增: {tot_git:+,}",
-                     f"净偏差: {tot_tcer - tot_git:+,}（{ratio:+.1f}%）",
-                     f"校准系数: {factor:.4f}"):
-            tk.Label(summary, text=text, bg=theme.BG, fg=theme.FG, anchor="w",
-                     font=theme.FONT_MONO).pack(anchor="w")
+            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+            card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=6)
+            card.pack(fill="x")
 
-        tk.Button(win, text="复制文本报告", command=lambda: _copy(win, text_report),
-                  bg=theme.PANEL, fg=theme.FG, relief="flat", padx=12, pady=4).pack(side="left",
-                                                                                   padx=(10, 4), pady=8)
-        tk.Button(win, text="关闭", command=win.destroy, bg=theme.ACCENT, fg=theme.FG,
-                  relief="flat", padx=20, pady=4).pack(side="left", pady=8)
+            # Session ID + deviation
+            hdr = tk.Frame(card, bg=theme.PANEL)
+            hdr.pack(fill="x")
+            tk.Label(hdr, text=cal.session_id[:38], bg=theme.PANEL, fg=theme.FG,
+                     anchor="w", font=theme.FONT_MONO).pack(side="left")
+            dev_color = self._DEV_COLOR if abs(dev) > 100 else theme.MUTED
+            tk.Label(hdr, text=f"{dev:+d}", bg=theme.PANEL, fg=dev_color,
+                     anchor="e", font=theme.FONT_MONO).pack(side="right")
+
+            # Detail line: tcer vs git
+            det = tk.Frame(card, bg=theme.PANEL)
+            det.pack(fill="x", pady=2)
+            tk.Label(det, text=f"工具调用 +{cal.tcer_added} -{cal.tcer_deleted}",
+                     bg=theme.PANEL, fg=self._TCER_COLOR,
+                     font=(theme.FONT_MONO_NAME, 8)).pack(side="left", padx=(0, 12))
+            tk.Label(det, text=f"git +{cal.git_added} -{cal.git_deleted}",
+                     bg=theme.PANEL, fg=self._GIT_COLOR,
+                     font=(theme.FONT_MONO_NAME, 8)).pack(side="left")
+
+        # Bottom buttons
+        btn_bar = tk.Frame(win, bg=theme.BG)
+        btn_bar.pack(pady=8)
+        tk.Button(btn_bar, text="复制文本报告", command=lambda: _copy(win, text_report),
+                  bg=theme.PANEL, fg=theme.FG, relief="flat", padx=12, pady=4).pack(side="left", padx=4)
+        tk.Button(btn_bar, text="关闭", command=win.destroy, bg=theme.ACCENT, fg=theme.FG,
+                  relief="flat", padx=20, pady=4).pack(side="left", padx=4)
 
 
 class BaselinesPopup:
-    """计算出的个人基准 + 应用按钮（写回 composite_baselines.json）。"""
+    """计算出的个人基准 + 应用按钮，统一卡片风格。"""
+
+    _COLOR = "#dcdcaa"  # yellow for baseline values
 
     def __init__(self, parent, values: dict, n_sessions: int, on_apply) -> None:
-        win = _new_window(parent, "计算个人基准", "420x320")
-        tk.Label(win, text=f"基于 {n_sessions} 个会话计算的基准", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=12).pack()
+        win = _new_window(parent, "计算个人基准", "440x360")
+        tk.Label(win, text="计算个人基准", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING, pady=10).pack()
 
-        body = tk.Frame(win, bg=theme.BG, padx=16)
-        body.pack(fill="both", expand=True)
-        for k, v, method in (("tcer", values["tcer"], "中位数"),
-                             ("ncpi", values["ncpi"], "均值"),
-                             ("cpe", values["cpe"], "中位数")):
-            row = tk.Frame(body, bg=theme.BG)
-            row.pack(fill="x", pady=4)
-            tk.Label(row, text=f"TCER/{k.upper()}" if k != "tcer" else "TCER", bg=theme.BG,
-                     fg=theme.MUTED, width=10, anchor="w", font=theme.FONT_UI).pack(side="left")
-            tk.Label(row, text=f"{v:.3f}（{method}）", bg=theme.BG, fg=theme.FG, anchor="w",
-                     font=theme.FONT_MONO).pack(side="left")
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = sf.inner
 
-        tk.Label(win, text="应用后将写入配置并立即重算综合效率指数刻度。",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI, pady=10).pack()
-        bar = tk.Frame(win, bg=theme.BG)
-        bar.pack(pady=8)
-        tk.Button(bar, text="应用为基准", command=lambda: (on_apply(values), win.destroy()),
+        # Summary header
+        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head.pack(fill="x", pady=10)
+        tk.Label(head, text=f"基于 {n_sessions} 个会话计算",
+                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
+
+        # Baseline cards
+        for key, method in [("tcer", "中位数"), ("ncpi", "均值"), ("cpe", "中位数")]:
+            val = values[key]
+            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+            card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
+            card.pack(fill="x")
+
+            hdr = tk.Frame(card, bg=theme.PANEL)
+            hdr.pack(fill="x")
+            name = {"tcer": "TCER（行/百万Token）", "ncpi": "NCPI（净产出指数）",
+                    "cpe": "CPE（千行成本 $）"}[key]
+            tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG,
+                     anchor="w", font=theme.FONT_VALUE).pack(side="left")
+            tk.Label(hdr, text=f"{val:.3f}", bg=theme.PANEL, fg=self._COLOR,
+                     anchor="e", font=theme.FONT_MONO).pack(side="right")
+
+            tk.Label(card, text=f"计算方式: {method}", bg=theme.PANEL, fg=theme.MUTED,
+                     font=(theme.FONT_MONO_NAME, 8)).pack(anchor="w")
+
+        # Note
+        tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
+        tk.Label(inner, text="应用后将写入配置并立即重算综合效率指数刻度。",
+                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
+                 wraplength=380, justify="left").pack(padx=10, pady=4)
+
+        # Buttons
+        btn_bar = tk.Frame(win, bg=theme.BG)
+        btn_bar.pack(pady=8)
+        tk.Button(btn_bar, text="应用为基准", command=lambda: (on_apply(values), win.destroy()),
                   bg=theme.ACCENT, fg=theme.FG, relief="flat", padx=16, pady=4).pack(side="left", padx=4)
-        tk.Button(bar, text="取消", command=win.destroy, bg=theme.PANEL, fg=theme.FG,
+        tk.Button(btn_bar, text="取消", command=win.destroy, bg=theme.PANEL, fg=theme.FG,
                   relief="flat", padx=16, pady=4).pack(side="left", padx=4)
 
 
 class AdvancedPopup:
-    """高级选项 — code-dir 覆盖 + 跳过 LOC。读取/写回控制器状态。"""
+    """高级选项 — code-dir 覆盖 + 跳过 LOC，统一卡片风格。"""
 
     def __init__(self, parent, code_dir: str, no_loc: bool, on_apply) -> None:
-        win = _new_window(parent, "高级选项", "460x240")
+        win = _new_window(parent, "高级选项", "480x300")
         tk.Label(win, text="高级选项", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=12).pack()
+                 font=theme.FONT_HEADING, pady=10).pack()
 
-        body = tk.Frame(win, bg=theme.BG, padx=16)
-        body.pack(fill="both", expand=True)
-        tk.Label(body, text="工作目录（累计 LOC 扫描目录，留空=用会话 cwd）:",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI).pack(anchor="w", pady=(8, 2))
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = sf.inner
+
+        # Summary header
+        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head.pack(fill="x", pady=10)
+        tk.Label(head, text="自定义分析参数",
+                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
+
+        # Code dir card
+        tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+        card1 = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
+        card1.pack(fill="x")
+        tk.Label(card1, text="工作目录", bg=theme.PANEL, fg=theme.FG,
+                 font=theme.FONT_VALUE).pack(anchor="w")
+        tk.Label(card1, text="累计 LOC 扫描目录，留空则使用会话 cwd",
+                 bg=theme.PANEL, fg=theme.MUTED,
+                 font=(theme.FONT_MONO_NAME, 8)).pack(anchor="w", pady=(0, 4))
         code_var = tk.StringVar(value=code_dir)
-        tk.Entry(body, textvariable=code_var, width=52, bg=theme.PANEL, fg=theme.FG,
+        tk.Entry(card1, textvariable=code_var, width=48, bg="#1e1e1e", fg=theme.FG,
                  insertbackground=theme.FG, relief="flat", highlightthickness=1,
                  highlightbackground="#3e3e42").pack(anchor="w")
-        no_loc_var = tk.BooleanVar(value=no_loc)
-        tk.Checkbutton(body, text="跳过 LOC（仅 Token 指标，不算 TCER/CPE/CTEI）",
-                       variable=no_loc_var, bg=theme.BG, fg=theme.FG, selectcolor=theme.PANEL,
-                       activebackground=theme.BG, activeforeground=theme.FG).pack(anchor="w", pady=12)
 
-        tk.Button(win, text="应用并重算",
+        # No-LOC card
+        tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+        card2 = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
+        card2.pack(fill="x")
+        no_loc_var = tk.BooleanVar(value=no_loc)
+        tk.Checkbutton(card2, text="跳过 LOC（仅 Token 指标，不算 TCER/CPE/CTEI）",
+                       variable=no_loc_var, bg=theme.PANEL, fg=theme.FG, selectcolor="#1e1e1e",
+                       activebackground=theme.PANEL, activeforeground=theme.FG,
+                       font=theme.FONT_UI).pack(anchor="w")
+
+        # Buttons
+        btn_bar = tk.Frame(win, bg=theme.BG)
+        btn_bar.pack(pady=8)
+        tk.Button(btn_bar, text="应用并重算",
                   command=lambda: (on_apply(code_var.get().strip() or None, no_loc_var.get()), win.destroy()),
-                  bg=theme.ACCENT, fg=theme.FG, relief="flat", padx=16, pady=4).pack(pady=8)
+                  bg=theme.ACCENT, fg=theme.FG, relief="flat", padx=16, pady=4).pack(side="left", padx=4)
+        tk.Button(btn_bar, text="取消", command=win.destroy, bg=theme.PANEL, fg=theme.FG,
+                  relief="flat", padx=16, pady=4).pack(side="left", padx=4)
 
 
 class UserMsgsPopup:
@@ -566,13 +693,6 @@ class RadarPopup:
     """
 
     # (key, label, norm_type, ref)
-    # norm_type:
-    #   "grade"     = val/ref (越高越好, ref=优秀阈值)
-    #   "grade_inv" = ref/val (越低越好, ref=优秀阈值)
-    #   "pct"       = 0-1 比率, 直接使用
-    #   "pct100"    = 0-100 百分比, /100 后使用
-    #   "pct_inv"   = 1-val (越低越好, 0-1 比率)
-    #   "ratio"     = val/ref (有参考值)
     _AXES = [
         ("ctei",  "综合效率", "grade",     2.0),
         ("chr",   "缓存命中", "pct100",    1.0),
@@ -587,11 +707,22 @@ class RadarPopup:
         from tcer.gui.views import metric_raw_value
 
         sid = (report.meta.session_id or report.meta.path.stem)[:16]
-        win = _new_window(parent, f"效率雷达 · {sid}…", "440x480")
+        win = _new_window(parent, f"效率雷达 · {sid}…", "460x560")
+        tk.Label(win, text="六维效率雷达", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING, pady=8).pack()
 
+        # Summary header
+        head = tk.Frame(win, bg="#2a2a2e", padx=10, pady=6)
+        head.pack(fill="x", padx=10, pady=(0, 4))
+        ctei_raw = metric_raw_value(report, "ctei")
+        grade = report.grade or "-"
+        tk.Label(head, text=f"{report.meta.title or sid}  CTEI {ctei_raw:.2f if ctei_raw else '-'}  评级 {grade}",
+                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI).pack()
+
+        # Radar canvas
         canvas = tk.Canvas(win, bg=theme.PANEL, highlightthickness=0,
                            width=400, height=400)
-        canvas.pack(padx=16, pady=16)
+        canvas.pack(padx=16, pady=8)
 
         # Normalize each axis to 0-1 using absolute scales
         axis_data = []
@@ -601,7 +732,7 @@ class RadarPopup:
             axis_data.append((key, label, raw, norm))
 
         # Draw hexagonal radar
-        cx, cy, R = 200, 210, 140
+        cx, cy, R = 200, 200, 140
         n = len(axis_data)
 
         # Concentric grid rings
@@ -646,7 +777,7 @@ class RadarPopup:
             canvas.create_oval(px - 3, py - 3, px + 3, py + 3,
                                fill=theme.ACCENT, outline=theme.FG)
 
-        canvas.create_text(cx, 14, text="六维效率雷达（绝对刻度，外圈=100%）",
+        canvas.create_text(cx, 14, text="绝对刻度，外圈 = 100%",
                            fill=theme.MUTED, font=theme.FONT_UI_SMALL)
 
         tk.Button(win, text="关闭", command=win.destroy, bg=theme.ACCENT,
