@@ -241,11 +241,11 @@ def _tools_summary(report: SessionReport) -> str:
 
 
 def _turns_display(u) -> str:
-    """助手回合：总数 (跳过数) 或仅总数"""
+    """助手回合：真实回合数，有跳过时追加 (+N 跳过)"""
     total = u.assistant_msgs
     skipped = u.empty_usage_skipped
     if skipped:
-        return f"{fmt.fmt_int(total)} ({skipped} 跳过)"
+        return f"{fmt.fmt_int(total)}（+{skipped} 跳过）"
     return fmt.fmt_int(total)
 
 
