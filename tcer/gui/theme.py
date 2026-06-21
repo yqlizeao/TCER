@@ -28,6 +28,11 @@ LEVEL_COLORS = {
     "compound": LEVEL_COMPOUND,
 }
 
+# Value sentiment colors (applied to the metric VALUE, not the name).
+VALUE_GOOD = "#4ec9b0"   # green  — good direction
+VALUE_BAD = "#f48771"    # red    — bad direction
+VALUE_NEUTRAL = "#e0e0e0"  # default gray
+
 # CTEI grade → bar/cell fill color (used by the Canvas CTEI chart).
 GRADE_HEX = {
     "优秀": "#2e7d32",

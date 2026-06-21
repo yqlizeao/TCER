@@ -330,7 +330,7 @@ class MetricPanel:
     def update(self, report) -> None:
         vals = report_values(report)
         for key, cell in self._cells.items():
-            cell.var.set(vals.get(key, "-"))
+            cell.set_value(vals.get(key, "-"))
 
 
 # --------------------------------------------------------------------------- #

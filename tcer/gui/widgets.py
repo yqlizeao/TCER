@@ -99,6 +99,7 @@ class MetricCell:
     """One metric tile: colored title + value (StringVar) + unit + tooltip.
 
     Holds ``self.var`` so the panel can update the value without rebuilding.
+    Value color reflects sentiment: green=good direction, red=bad, gray=neutral.
     """
 
     def __init__(self, parent, metric: Metric, on_click=None) -> None:
@@ -113,8 +114,9 @@ class MetricCell:
         self.title.pack(anchor="w")
 
         self.var = tk.StringVar(value="-")
+        self._value_fg = theme.VALUE_NEUTRAL
         self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
-                              fg=theme.FG, font=theme.FONT_VALUE, anchor="w")
+                              fg=self._value_fg, font=theme.FONT_VALUE, anchor="w")
         self.value.pack(anchor="w", pady=(1, 0))
 
         if on_click:
@@ -126,3 +128,23 @@ class MetricCell:
         tip = f"{metric.name}\n{metric.tip}"
         for w in (self.frame, self.title, self.value):
             Tooltip(w, tip)
+
+    def set_value(self, text: str) -> None:
+        """Update displayed value and apply sentiment-based coloring."""
+        self.var.set(text)
+        sentiment = self.metric.sentiment
+        if not sentiment or text in ("-", "0", "0.0", "0.00", "0.000"):
+            fg = theme.VALUE_NEUTRAL
+        else:
+            # Try to parse numeric value for directional coloring
+            try:
+                num = float(text.replace(",", "").replace("%", "").replace("$", ""))
+                if sentiment == "up":
+                    fg = theme.VALUE_GOOD if num > 0 else theme.VALUE_BAD
+                elif sentiment == "down":
+                    fg = theme.VALUE_BAD if num > 0 else theme.VALUE_GOOD
+                else:
+                    fg = theme.VALUE_NEUTRAL
+            except (ValueError, TypeError):
+                fg = theme.VALUE_NEUTRAL
+        self.value.config(fg=fg)
