@@ -19,8 +19,17 @@ from .widgets import ScrollFrame
 def _new_window(parent, title, size, bg=theme.BG) -> tk.Toplevel:
     win = tk.Toplevel(parent)
     win.title(title)
-    win.geometry(size)
     win.configure(bg=bg)
+    # Center relative to parent window
+    parent.update_idletasks()
+    pw = parent.winfo_width()
+    ph = parent.winfo_height()
+    px = parent.winfo_rootx()
+    py = parent.winfo_rooty()
+    w, h = (int(x) for x in size.split("x"))
+    x = px + (pw - w) // 2
+    y = py + (ph - h) // 2
+    win.geometry(f"{w}x{h}+{x}+{y}")
     return win
 
 
