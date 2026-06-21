@@ -82,14 +82,17 @@ class TcerGui:
 
     # --------------------------------------------------------------- projects
     def refresh_projects(self) -> None:
-        all_projects = list_projects()
-        # 过滤掉没有会话 JSONL 文件的空目录（如纯 memory 目录）
-        self._projects = [p for p in all_projects if discover_jsonl(p.name)]
-        self.project_col.update(self._projects)
-        skipped = len(all_projects) - len(self._projects)
+        self._projects = list_projects()
+        # 标记哪些项目没有会话数据（置灰显示）
+        self._empty_projects = {
+            i for i, p in enumerate(self._projects)
+            if not discover_jsonl(p.name)
+        }
+        self.project_col.update(self._projects, self._empty_projects)
+        n_empty = len(self._empty_projects)
         status = f"发现 {len(self._projects)} 个项目"
-        if skipped:
-            status += f"（跳过 {skipped} 个空目录）"
+        if n_empty:
+            status += f"（{n_empty} 个无会话数据）"
         self.filter.set_status(status)
 
     def on_select_project(self, idx: int) -> None:

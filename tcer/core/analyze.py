@@ -100,7 +100,9 @@ def analyze_project(
             cwd = Path(meta.cwd)
 
     code_path = Path(code_dir) if code_dir else cwd
-    loc_total = None if no_loc else (loc.tree_loc(code_path) if code_path else None)
+    loc_total = None if no_loc else (
+        loc.tree_loc(code_path) if code_path and _is_project_dir(code_path) else None
+    )
 
     def _mk(meta, u, net, added, deleted, n_sub, unseen, sloc=None) -> SessionReport:
         # Extract file-level quality metrics from SessionLoc if available
@@ -219,6 +221,69 @@ def _synth_meta(session_id: str, sample: Path) -> SessionMeta:
     """Metadata for a session whose main file is missing (orphan subagents only)."""
     return SessionMeta(session_id=session_id, cwd=None, title=None,
                        path=sample, is_subagent=False)
+
+
+# Project marker files that indicate a real project root.
+_PROJECT_MARKERS = frozenset({
+    ".git", ".hg", ".svn",
+    "package.json", "pyproject.toml", "setup.py", "setup.cfg",
+    "Cargo.toml", "go.mod", "go.sum",
+    "pom.xml", "build.gradle", "build.gradle.kts",
+    "Makefile", "CMakeLists.txt", "meson.build",
+    "Gemfile", "composer.json", "mix.exs",
+    ".claude",  # Claude Code project directory
+})
+
+
+def _is_project_dir(path: Path) -> bool:
+    """True if *path* looks like an actual project directory worth scanning for LOC.
+
+    Returns False for home directories, drive roots, and system directories —
+    places where a Claude Code session might happen to run (``cd ~``) but that
+    are not themselves a codebase.  The heuristic is: any directory containing a
+    project marker file (``.git``, ``package.json``, ``pyproject.toml``, etc.)
+    is accepted; directories that match known non-project patterns are rejected.
+    """
+    resolved = path.resolve()
+
+    # Home directory (e.g. C:\Users\Administrator, /home/alice)
+    try:
+        if resolved == Path.home().resolve():
+            return False
+    except Exception:
+        pass
+
+    # Drive roots: C:\, D:\, /, etc.
+    if resolved == resolved.root or resolved == resolved.anchor.rstrip("\\/"):
+        return False
+
+    # Windows system directories
+    parts_lower = [p.lower() for p in resolved.parts]
+    if "c:\\" in str(resolved).lower():
+        if any(s in parts_lower for s in ("windows", "program files", "program files (x86)")):
+            return False
+
+    # Linux/macOS top-level directories
+    if len(resolved.parts) <= 2 and resolved.parts[0] == "/":
+        if resolved.name in ("usr", "tmp", "var", "etc", "opt", "root", "proc", "sys"):
+            return False
+
+    # Positive check: project marker present → definitely a project
+    try:
+        children = set(entry.name for entry in resolved.iterdir())
+    except OSError:
+        return False
+    if children & _PROJECT_MARKERS:
+        return True
+
+    # No markers found and path is very shallow (e.g. C:\Users\Administrator
+    # which has only user-profile subdirs) → treat as non-project.
+    # Real projects without markers are still accepted if they have code files.
+    return any(
+        loc._is_code(fn)
+        for fn in children
+        if "." in fn
+    )
 
 
 def _parse_date_to_ms(date_str: str, end_of_day: bool = False) -> int:
