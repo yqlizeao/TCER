@@ -271,8 +271,12 @@ class ProjectColumn:
         self._select(self._cards[idx], idx)
 
     def _select_and_view(self, idx, mode):
+        # First ensure this project is selected (loads data if needed)
+        already_selected = (self._selected is self._cards[idx])
+        if not already_selected:
+            self._select(self._cards[idx], idx)
+        # Switch view mode
         self.controller.view_mode.set(mode)
-        self._select(self._cards[idx], idx)
         self.controller._on_view_change()
 
     def _open_in_explorer(self, project_dir):
@@ -428,14 +432,17 @@ class SessionColumn:
         menu.tk_popup(event.x_root, event.y_root)
 
     def _navigate_to_trend(self, sid):
-        """Switch to trend tab and select this session's data point."""
-        self.controller.on_select_session(sid)
-        # Switch notebook to trend tab
+        """Switch to trend tab and highlight this session's data point."""
+        # Switch notebook to trend tab (3rd tab, 0-indexed)
         try:
             nb = self.controller._nb
-            nb.select(2)  # trend is the 3rd tab (0-indexed)
+            nb.select(2)
         except Exception:
             pass
+        # Highlight the session in the trend chart
+        self.controller.trend_chart.select_session_by_sid(sid)
+        # Also select in the session column for consistency
+        self.controller.on_select_session(sid)
 
     def _copy_text(self, text):
         self.controller.root.clipboard_clear()
@@ -1109,6 +1116,14 @@ class TrendChart:
             sid = r.meta.session_id or r.meta.path.stem
             self._controller.on_select_session(sid)
 
+    def select_session_by_sid(self, sid: str) -> None:
+        """Public API: find and highlight a session by its ID."""
+        for i, r in enumerate(self._reports):
+            if (r.meta.session_id or r.meta.path.stem) == sid:
+                self._selected_idx = i
+                self._draw()
+                return
+
     def _on_key_prev(self, _event=None) -> None:
         """Left arrow: select previous data point."""
         if not self._overlay:
@@ -1426,8 +1441,15 @@ class TrendChart:
             for j, ri in enumerate(ol.report_indices):
                 if ri == self._selected_idx:
                     px, py = ol.screen_pts[j]
-                    c.create_oval(px - 6, py - 6, px + 6, py + 6,
+                    # Vertical crosshair line
+                    c.create_line(px, self._PAD_T, px,
+                                  c.winfo_height() - self._PAD_B,
+                                  fill=theme.ACCENT, dash=(3, 3), width=1)
+                    # Selection ring (larger and more visible)
+                    c.create_oval(px - 8, py - 8, px + 8, py + 8,
                                   outline=theme.FG, width=2)
+                    c.create_oval(px - 8, py - 8, px + 8, py + 8,
+                                  outline=theme.ACCENT, width=1)
                     break
 
     def _draw_prediction(self, c, ol, xv, yv, pad_l, plot_w) -> None:
