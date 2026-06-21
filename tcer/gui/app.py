@@ -40,11 +40,11 @@ class TcerGui:
         root.configure(bg=theme.BG)
         theme.setup_style(ttk)
 
-        # Center window on screen
+        # Center window on screen (shifted up slightly to account for taskbar)
         w, h = 1600, 900
         sx = root.winfo_screenwidth()
         sy = root.winfo_screenheight()
-        root.geometry(f"{w}x{h}+{(sx - w) // 2}+{(sy - h) // 2}")
+        root.geometry(f"{w}x{h}+{(sx - w) // 2}+{(sy - h) // 2 - 40}")
 
         self.filter = FilterBar(root, self)
         self._build_body(root)
