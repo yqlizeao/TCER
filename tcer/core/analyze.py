@@ -8,6 +8,7 @@ per-session + aggregate reports. The CLI and Tkinter GUI both call ``analyze_pro
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
@@ -259,7 +260,7 @@ def _is_project_dir(path: Path) -> bool:
 
     # Windows system directories
     parts_lower = [p.lower() for p in resolved.parts]
-    if "c:\\" in str(resolved).lower():
+    if sys.platform == "win32":
         if any(s in parts_lower for s in ("windows", "program files", "program files (x86)")):
             return False
 

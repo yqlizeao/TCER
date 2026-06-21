@@ -7,6 +7,8 @@ by rating. No business logic lives here.
 """
 from __future__ import annotations
 
+from .platform import FONT_CJK, FONT_MONO_NAME
+
 # Base palette (dark, VS Code-ish).
 BG = "#1e1e1e"
 FG = "#e0e0e0"
@@ -53,13 +55,13 @@ GROUP_COLORS = {
 }
 
 # Fonts (named so they can be tuned in one place).
-FONT_UI = ("Microsoft YaHei", 9)
-FONT_UI_BOLD = ("Microsoft YaHei", 9, "bold")
-FONT_UI_SMALL = ("Microsoft YaHei", 8)
-FONT_UI_SMALL_BOLD = ("Microsoft YaHei", 8, "bold")
-FONT_HEADING = ("Microsoft YaHei", 10, "bold")
-FONT_VALUE = ("Consolas", 11, "bold")
-FONT_MONO = ("Consolas", 9)
+FONT_UI = (FONT_CJK, 9)
+FONT_UI_BOLD = (FONT_CJK, 9, "bold")
+FONT_UI_SMALL = (FONT_CJK, 8)
+FONT_UI_SMALL_BOLD = (FONT_CJK, 8, "bold")
+FONT_HEADING = (FONT_CJK, 10, "bold")
+FONT_VALUE = (FONT_MONO_NAME, 11, "bold")
+FONT_MONO = (FONT_MONO_NAME, 9)
 
 
 def setup_style(ttk) -> None:

@@ -15,7 +15,7 @@ from tkinter import ttk
 from typing import TYPE_CHECKING
 
 from tcer.core import metrics
-from tcer.core.export import ctei_ranking
+from tcer.core.export import ctei_decompose, ctei_decompose_avg, ctei_ranking
 from tcer.core.format import fmt_dt
 from . import theme
 from .metric_defs import GROUPS, report_values
@@ -31,13 +31,22 @@ def _short_name(project_hash: str) -> str:
     """Friendlier label for a project-hash folder: strip a leading drive token.
 
     Hash folders encode a full cwd with separators replaced by '-', so there is
-    no reliable project-name delimiter. We only drop a leading ``c--`` style
-    drive token and keep the rest intact.
+    no reliable project-name delimiter.  Windows: drop a leading ``c--`` style
+    drive token.  Unix: strip the leading ``-`` produced by the root ``/``.
     """
     for i in range(1, len(project_hash) - 2):
         if project_hash[i:i + 2] == "--":
             return project_hash[i + 2:]
+    # Unix: "/" → "-", strip only the single leading dash for root
+    if project_hash.startswith("-"):
+        return project_hash[1:]
     return project_hash
+
+
+def _file_manager_label() -> str:
+    """Platform-appropriate file manager name for menu labels."""
+    from .platform import FILE_MANAGER_NAME
+    return FILE_MANAGER_NAME
 
 
 class FilterBar:
@@ -266,7 +275,7 @@ class ProjectColumn:
         menu.add_separator()
 
         menu.add_command(
-            label="📂 在资源管理器中打开",
+            label=f"📂 在{_file_manager_label()}中打开",
             command=lambda: self._open_in_explorer(project_dir),
         )
         menu.add_command(
@@ -302,11 +311,8 @@ class ProjectColumn:
             self._select(self._cards[idx], idx)
 
     def _open_in_explorer(self, project_dir):
-        import subprocess
-        try:
-            subprocess.Popen(["explorer", str(project_dir)])
-        except Exception:
-            pass
+        from .platform import open_in_file_manager
+        open_in_file_manager(str(project_dir))
 
     def _copy_text(self, text):
         self.controller.root.clipboard_clear()

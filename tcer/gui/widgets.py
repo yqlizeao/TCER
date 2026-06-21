@@ -55,16 +55,23 @@ class ScrollFrame:
         self.inner.bind("<Configure>",
                         lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", self._on_resize)
-        self.canvas.bind("<Enter>",
-                         lambda e: self.canvas.bind_all("<MouseWheel>", self._on_wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+        self._unbind_wheel = None
+        self.canvas.bind("<Enter>", self._on_enter)
+        self.canvas.bind("<Leave>", self._on_leave)
         self.canvas.pack(side="left", fill="both", expand=True)
 
     def _on_resize(self, event) -> None:
         self.canvas.itemconfig(self._win, width=event.width)
 
-    def _on_wheel(self, event) -> None:
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    def _on_enter(self, _event=None) -> None:
+        from .platform import bind_mousewheel
+        self._unbind_wheel = bind_mousewheel(
+            self.canvas, lambda units: self.canvas.yview_scroll(units, "units"))
+
+    def _on_leave(self, _event=None) -> None:
+        if self._unbind_wheel:
+            self._unbind_wheel()
+            self._unbind_wheel = None
 
     def update_scroll(self) -> None:
         self.inner.update_idletasks()
