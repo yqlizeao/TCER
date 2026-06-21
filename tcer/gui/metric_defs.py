@@ -41,9 +41,10 @@ GROUPS: list[Group] = [
                "并入该会话的子代理（subagent）数量。Claude Code 的子代理是模型为完成复杂任务自动拆出的并行助手，"
                "它们的 Token 和代码行会合并计入父会话，不单独计为一个会话。", "basic"),
         Metric("turns", "助手回合", "",
-               "Claude 助手回复的总条数（含 usage 全为 0 的 thinking stub）。"
+               "Claude 助手回复的总条数（仅计有真实 token 消耗的回合）。"
                "每条回复可能包含一次或多次工具调用。"
-               "括号内为其中零 usage 的跳过回合数，效率指标使用有效回合（= 总数 − 跳过）计算。", "basic"),
+               "括号内为零 usage 的跳过回合数（thinking stub 等）。"
+               "有效回合 = 总数（无需减去跳过）。", "basic"),
         Metric("started", "开始时间", "", "会话中第一条助手回复的时间戳。", "basic"),
         Metric("last_time", "最后时间", "", "会话中最后一条助手回复的时间戳。配合「开始时间」可判断会话活跃时段。", "basic"),
         Metric("duration", "持续时长", "小时",
