@@ -239,8 +239,8 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
                             mc.cache_creation_tokens, mc.cache_read_tokens),
             model=mc.model_id)
         grand_cost += mc.cost
-        denom = mc.input_tokens + mc.cache_creation_tokens
-        mc.cache_hit_ratio = mc.cache_read_tokens / denom if denom > 0 else None
+        total_input = mc.input_tokens + mc.cache_creation_tokens + mc.cache_read_tokens
+        mc.cache_hit_ratio = mc.cache_read_tokens / total_input if total_input > 0 else None
         mc.tokens_per_dollar = mc.total_tokens / mc.cost if mc.cost > 0 else None
         mc.token_share = mc.total_tokens / grand_tokens * 100 if grand_tokens else 0
     for mc in buckets.values():

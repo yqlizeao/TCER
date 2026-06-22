@@ -595,19 +595,21 @@ class CteiRankingView:
         self._sort_col: str = "ctei"
         self._sort_reverse: bool = True
 
-        body = tk.Frame(parent, bg=theme.BG)
-        body.pack(fill="both", expand=True)
+        # -- Grade summary bar (top, wrapped in group header) --
+        grade_header = tk.Frame(parent, bg=theme.GROUP_COLORS["G5"], padx=6, pady=3)
+        grade_header.pack(fill="x", pady=(1, 0))
+        tk.Label(grade_header, text="▼ 评级分布", bg=theme.GROUP_COLORS["G5"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
-        # -- Grade summary bar (top) --
-        self._grade_canvas = tk.Canvas(body, bg=theme.PANEL, height=38,
+        self._grade_canvas = tk.Canvas(parent, bg=theme.PANEL, height=38,
                                        highlightthickness=0)
-        self._grade_canvas.pack(fill="x", padx=2, pady=(2, 0))
+        self._grade_canvas.pack(fill="x", padx=2, pady=(0, 1))
         self._grade_canvas.bind("<Configure>", lambda e: self._draw_grade_bar())
         self._grade_canvas.bind("<Button-1>", self._on_grade_click)
         self._grade_rects: list[tuple[int, int, int, int, str]] = []
 
         # -- Split: table (left) + decompose (right) --
-        paned = tk.PanedWindow(body, orient="horizontal", bg=theme.BG, sashwidth=3)
+        paned = tk.PanedWindow(parent, orient="horizontal", bg=theme.BG, sashwidth=3)
         paned.pack(fill="both", expand=True, padx=2, pady=2)
 
         table_frame = tk.Frame(paned, bg=theme.BG)
@@ -616,7 +618,12 @@ class CteiRankingView:
         decomp_frame = tk.Frame(paned, bg=theme.BG)
         paned.add(decomp_frame, minsize=340)
 
-        # -- Treeview --
+        # -- Treeview with group header --
+        tree_header = tk.Frame(table_frame, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
+        tree_header.pack(fill="x", pady=(1, 0))
+        tk.Label(tree_header, text="▼ 会话排名", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+
         cols = ("rank", "session", "ctei_val", "grade")
         self._tree = ttk.Treeview(table_frame, columns=cols, show="headings",
                                   selectmode="browse", height=20)
@@ -652,11 +659,11 @@ class CteiRankingView:
 
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
-        # -- Decompose panel --
-        self._decomp_canvas = tk.Canvas(decomp_frame, bg=theme.PANEL,
-                                        highlightthickness=0)
-        self._decomp_canvas.pack(fill="both", expand=True)
-        self._decomp_canvas.bind("<Configure>", lambda e: self._draw_decompose())
+        # -- Decompose panel (ScrollFrame with group headers) --
+        decomp_sf = ScrollFrame(decomp_frame, bg=theme.BG)
+        decomp_sf.canvas.pack(fill="both", expand=True)
+        self._decomp_inner = decomp_sf.inner
+        self._build_decompose_empty()
 
     # -- public API -----------------------------------------------------------
 
@@ -776,189 +783,161 @@ class CteiRankingView:
             self._sort_reverse = (col == "ctei")  # CTEI desc by default
         self._rebuild_tree()
 
-    # -- Decompose panel (Canvas) --------------------------------------------
+    # -- Decompose panel (ScrollFrame with group headers) ----------------------
+
+    def _build_decompose_empty(self) -> None:
+        for w in self._decomp_inner.winfo_children():
+            w.destroy()
+        tk.Label(self._decomp_inner, text="← 点击左侧排名表中的会话\n查看 CTEI 因子分解",
+                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
+                 justify="center", pady=40).pack()
 
     def _draw_decompose(self) -> None:
-        c = self._decomp_canvas
-        c.delete("all")
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w < 10 or h < 10:
-            return
+        for w in self._decomp_inner.winfo_children():
+            w.destroy()
 
         report = self._current_report
         if report is None:
-            c.create_text(w / 2, h / 2, text="← 点击左侧排名表中的会话\n查看 CTEI 因子分解",
-                          fill=theme.MUTED, font=theme.FONT_UI, justify="center")
+            self._build_decompose_empty()
             return
 
         factors = ctei_decompose(report)
         if factors is None:
-            c.create_text(w / 2, h / 2, text="该会话无 CTEI 数据",
-                          fill=theme.MUTED, font=theme.FONT_UI, justify="center")
+            tk.Label(self._decomp_inner, text="该会话无 CTEI 数据",
+                     bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
+                     pady=40).pack()
             return
 
-        y = self._draw_summary_card(c, w, report)
-        y = self._draw_factor_bars(c, w, y, factors, report)
-        self._draw_avg_comparison(c, w, y, factors)
+        self._build_summary_card(report)
+        self._build_factor_section(factors, report)
+        self._build_avg_section(factors)
 
-    def _draw_summary_card(self, c, w, report) -> int:
-        """Draw the session summary card. Returns Y below the card."""
-        pad = 10
-        card_h = 62
-        c.create_rectangle(pad, pad, w - pad, pad + card_h,
-                           fill=theme.PANEL_2, outline="#3e3e42")
+    def _build_summary_card(self, report) -> None:
+        """Summary card: CTEI + grade + rank, matching group header style."""
+        header = tk.Frame(self._decomp_inner, bg=theme.GROUP_COLORS["G6"], padx=6, pady=3)
+        header.pack(fill="x", pady=(1, 0))
+        tk.Label(header, text="▼ CTEI 概览", bg=theme.GROUP_COLORS["G6"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+
+        card = tk.Frame(self._decomp_inner, bg=theme.PANEL, padx=10, pady=8)
+        card.pack(fill="x", pady=(0, 1))
+
         sid = report.meta.session_id or report.meta.path.stem
-        c.create_text(pad + 10, pad + 12, text=sid[:40],
-                      fill=theme.ACCENT, font=theme.FONT_MONO, anchor="w")
+        tk.Label(card, text=sid[:40], bg=theme.PANEL, fg=theme.ACCENT,
+                 font=theme.FONT_MONO, anchor="w").pack(anchor="w")
 
-        # CTEI big number
+        # CTEI + grade + rank row
+        row = tk.Frame(card, bg=theme.PANEL)
+        row.pack(fill="x", pady=(4, 0))
+
         ctei_val = report.ctei
         grade = report.grade or ""
-        c.create_text(pad + 10, pad + 38, text="CTEI",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_text(pad + 55, pad + 38, text=f"{ctei_val:.3f}",
-                      fill=theme.GRADE_HEX.get(grade, theme.FG),
-                      font=("Consolas", 16, "bold"), anchor="w")
+        tk.Label(row, text="CTEI", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL).pack(side="left")
+        tk.Label(row, text=f"{ctei_val:.3f}", bg=theme.PANEL,
+                 fg=theme.GRADE_HEX.get(grade, theme.FG),
+                 font=("Consolas", 16, "bold")).pack(side="left", padx=(4, 8))
 
-        # Grade badge
         if grade:
-            gx = pad + 155
-            badge_w = max(40, len(grade) * 13 + 12)
-            bc = theme.GRADE_HEX.get(grade, theme.MUTED)
-            c.create_rectangle(gx, pad + 28, gx + badge_w, pad + 50,
-                               fill=bc, outline="")
-            c.create_text(gx + badge_w / 2, pad + 39, text=grade,
-                          fill="#ffffff", font=theme.FONT_UI_SMALL_BOLD,
-                          anchor="center")
+            badge = tk.Label(row, text=grade, bg=theme.GRADE_HEX.get(grade, theme.MUTED),
+                             fg="#ffffff", font=theme.FONT_UI_SMALL_BOLD, padx=6, pady=1)
+            badge.pack(side="left", padx=(0, 8))
 
         # Rank
-        rank_str = ""
         for i, (l, cv, g, r) in enumerate(self._ranking):
             if r is report:
                 total = len(self._ranking)
-                rank_str = f"排名 {i + 1}/{total}"
+                tk.Label(row, text=f"排名 {i + 1}/{total}", bg=theme.PANEL,
+                         fg=theme.MUTED, font=theme.FONT_UI).pack(side="right")
                 break
-        if rank_str:
-            c.create_text(w - pad - 10, pad + 38, text=rank_str,
-                          fill=theme.MUTED, font=theme.FONT_UI, anchor="e")
 
         # TCER
         if report.tcer is not None:
-            c.create_text(w - pad - 10, pad + 14,
-                          text=f"TCER {report.tcer:.1f} 行/百万",
-                          fill=theme.FG, font=theme.FONT_UI_SMALL, anchor="e")
+            tk.Label(card, text=f"TCER {report.tcer:.1f} 行/百万", bg=theme.PANEL,
+                     fg=theme.FG, font=theme.FONT_UI_SMALL, anchor="e").pack(anchor="e")
 
-        return pad + card_h + 10
+    def _build_factor_section(self, factors, report) -> None:
+        """Factor bars: 4 CTEI factors with visual bars."""
+        header = tk.Frame(self._decomp_inner, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
+        header.pack(fill="x", pady=(1, 0))
+        tk.Label(header, text="▼ CTEI 因子分解", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
-    def _draw_factor_bars(self, c, w, y0, factors, report) -> int:
-        """Draw the 4-factor waterfall bars. Returns Y below the bars."""
-        pad_l = 10
-        row_h = 32
-        label_w = 55
-        mid_x = self._MID_X
-        bar_right = w - 70  # leave room for value label
+        grid = tk.Frame(self._decomp_inner, bg=theme.PANEL, padx=4, pady=4)
+        grid.pack(fill="x", pady=(0, 1))
 
-        c.create_text(pad_l + 4, y0, text="CTEI 因子分解",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        y0 += 18
-
-        # 1.0 reference line
-        c.create_line(mid_x, y0, mid_x, y0 + row_h * 4 + 4,
-                      fill="#555555", dash=(2, 3))
-        c.create_text(mid_x, y0 - 4, text="1.0",
-                      fill=self._FACTOR_MID, font=theme.FONT_UI_SMALL, anchor="s")
-
-        max_val = max(
-            max(factors.get(k, 0) for k in self._FACTOR_KEYS),
-            2.0,
-        )
-
-        for ki, key in enumerate(self._FACTOR_KEYS):
-            y = y0 + ki * row_h
+        # Factor rows
+        for i, key in enumerate(self._FACTOR_KEYS):
             val = factors.get(key, 0.0)
-            name, _desc = self._FACTOR_META[key]
+            name, desc = self._FACTOR_META[key]
 
-            # Label
-            c.create_text(pad_l + 4, y + 10, text=name,
-                          fill=theme.FG, font=theme.FONT_UI_SMALL, anchor="w")
+            row = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=4)
+            row.pack(fill="x")
 
-            # Bar (extends right from mid_x; width proportional to value)
-            bar_w = max(2, (min(val, 2.5) / max_val) * (bar_right - mid_x))
+            # Label + value
+            tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG,
+                     font=theme.FONT_UI_SMALL, width=10, anchor="w").pack(side="left")
             color = self._FACTOR_GOOD if val >= 1.0 else self._FACTOR_BAD
-            c.create_rectangle(mid_x, y + 2, mid_x + bar_w, y + 18,
-                               fill=color, outline="")
+            tk.Label(row, text=f"{val:.2f}", bg=theme.PANEL, fg=color,
+                     font=theme.FONT_VALUE, width=6, anchor="e").pack(side="left", padx=4)
 
-            # 1.0 tick on the bar area
-            c.create_line(mid_x, y + 2, mid_x, y + 18,
-                          fill="#ffffff", width=1)
+            # Bar
+            bar_bg = tk.Frame(row, bg="#333333", height=8)
+            bar_bg.pack(side="left", fill="x", expand=True, padx=4)
+            bar_w = min(1.0, val / 2.0)  # normalize to 0-1 (max ~2.0)
+            if bar_w > 0:
+                tk.Frame(bar_bg, bg=color, height=8).place(
+                    relx=0, rely=0, relwidth=bar_w, relheight=1.0)
+            # 1.0 reference line
+            tk.Frame(bar_bg, bg="#555555", width=1, height=8).place(
+                    relx=0.5, rely=0, relheight=1.0)
 
-            # Value label
-            c.create_text(bar_right + 6, y + 10, text=f"{val:.2f}",
-                          fill=color, font=theme.FONT_MONO, anchor="w")
-
-        # Cap line at 1.0
-        c.create_line(mid_x, y0 + row_h * 4 + 4, bar_right, y0 + row_h * 4 + 4,
-                      fill="#333333", width=1)
+            # Description
+            tk.Label(row, text=desc, bg=theme.PANEL, fg=theme.MUTED,
+                     font=(theme.FONT_MONO_NAME, 7)).pack(side="left", padx=4)
 
         # Product line
-        y_prod = y0 + row_h * 4 + 14
-        c.create_text(pad_l + 4, y_prod, text="乘积 =",
-                      fill=theme.MUTED, font=theme.FONT_UI, anchor="w")
-        c.create_text(pad_l + 60, y_prod, text=f"CTEI  {report.ctei:.3f}",
-                      fill=theme.GRADE_HEX.get(report.grade or "", theme.FG),
-                      font=theme.FONT_VALUE, anchor="w")
+        prod_frame = tk.Frame(self._decomp_inner, bg=theme.PANEL, padx=10, pady=6)
+        prod_frame.pack(fill="x", pady=(0, 1))
+        tk.Label(prod_frame, text="乘积 =", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI).pack(side="left")
+        tk.Label(prod_frame, text=f"CTEI  {report.ctei:.3f}", bg=theme.PANEL,
+                 fg=theme.GRADE_HEX.get(report.grade or "", theme.FG),
+                 font=theme.FONT_VALUE).pack(side="left", padx=4)
 
-        return y_prod + 24
-
-    def _draw_avg_comparison(self, c, w, y0, factors) -> None:
-        """Draw factor bars vs project average."""
+    def _build_avg_section(self, factors) -> None:
+        """Factor bars vs project average."""
         avg = self._avg_factors
         if avg is None:
             return
 
-        pad_l = 10
-        row_h = 28
-        bar_max = 2.0
-        bar_area_w = min(220, w - 170)
+        header = tk.Frame(self._decomp_inner, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
+        header.pack(fill="x", pady=(1, 0))
+        tk.Label(header, text="▼ 与项目均值对比", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
-        c.create_text(pad_l + 4, y0, text="与项目均值对比",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        y0 += 16
+        grid = tk.Frame(self._decomp_inner, bg=theme.PANEL, padx=4, pady=4)
+        grid.pack(fill="x", pady=(0, 1))
 
-        for ki, key in enumerate(self._FACTOR_KEYS):
-            y = y0 + ki * row_h
+        for i, key in enumerate(self._FACTOR_KEYS):
             name, _ = self._FACTOR_META[key]
             sel_val = factors.get(key, 0.0)
             avg_val = avg.get(key, 0.0)
 
-            c.create_text(pad_l + 4, y + 6, text=name,
-                          fill=theme.FG, font=theme.FONT_UI_SMALL, anchor="w")
+            row = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=3)
+            row.pack(fill="x")
 
-            bx = pad_l + 55
-            # Selected bar
-            sw = max(2, (sel_val / bar_max) * bar_area_w)
+            tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG,
+                     font=theme.FONT_UI_SMALL, width=10, anchor="w").pack(side="left")
+
+            # Selected value
             sel_color = self._FACTOR_GOOD if sel_val >= avg_val else self._FACTOR_BAD
-            c.create_rectangle(bx, y, bx + sw, y + 10,
-                               fill=sel_color, outline="")
-            # Average bar (outline only)
-            aw = max(2, (avg_val / bar_max) * bar_area_w)
-            c.create_rectangle(bx, y + 12, bx + aw, y + 22,
-                               fill="#3a3a3a", outline="#555555")
+            tk.Label(row, text=f"{sel_val:.2f}", bg=theme.PANEL, fg=sel_color,
+                     font=theme.FONT_VALUE, width=6, anchor="e").pack(side="left", padx=2)
 
-            c.create_text(bx + bar_area_w + 8, y + 5,
-                          text=f"{sel_val:.2f}", fill=sel_color,
-                          font=theme.FONT_MONO, anchor="w")
-            c.create_text(bx + bar_area_w + 8, y + 17,
-                          text=f"{avg_val:.2f}", fill=theme.MUTED,
-                          font=theme.FONT_UI_SMALL, anchor="w")
-
-        # Legend
-        y_legend = y0 + len(self._FACTOR_KEYS) * row_h + 6
-        c.create_text(pad_l + 55, y_legend, text="■ 选中会话",
-                      fill=self._FACTOR_GOOD, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_text(pad_l + 140, y_legend, text="□ 项目均值",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+            # Average value
+            tk.Label(row, text=f"均值 {avg_val:.2f}", bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL).pack(side="left", padx=4)
 
 
 # --------------------------------------------------------------------------- #
@@ -1312,13 +1291,22 @@ class TrendChart:
         right = tk.Frame(self._content, bg=theme.BG)
         right.pack(side="left", fill="both", expand=True)
 
-        top = tk.Frame(right, bg=theme.BG)
-        top.pack(fill="x", padx=4, pady=2)
-        self._add_mode_buttons(top)
-        self._legend_frame = tk.Frame(top, bg=theme.BG)
+        # Mode buttons in group header
+        mode_header = tk.Frame(right, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
+        mode_header.pack(fill="x", pady=(1, 0))
+        tk.Label(mode_header, text="▼ 趋势分析", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
+            tk.Radiobutton(mode_header, text=label, variable=self._mode, value=val,
+                           bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
+                           selectcolor=theme.GROUP_COLORS["G2"],
+                           activebackground=theme.GROUP_COLORS["G2"],
+                           activeforeground=theme.ACCENT,
+                           font=theme.FONT_UI, command=self._switch_mode).pack(side="left", padx=4)
+        self._legend_frame = tk.Frame(mode_header, bg=theme.GROUP_COLORS["G2"])
         self._legend_frame.pack(side="right")
         self._zoom_reset_btn = tk.Button(
-            top, text="重置缩放", command=self._reset_zoom,
+            mode_header, text="重置缩放", command=self._reset_zoom,
             bg=theme.PANEL, fg=theme.WARNING, relief="flat",
             font=theme.FONT_UI_SMALL, padx=6,
         )
@@ -1340,7 +1328,12 @@ class TrendChart:
         self.canvas.bind("<Right>", self._on_key_next)
         self.canvas.focus_set()
 
-        self._stats_frame = tk.Frame(right, bg=theme.PANEL_2, padx=6, pady=3)
+        # Stats in group header
+        stats_header = tk.Frame(right, bg=theme.GROUP_COLORS["G6"], padx=6, pady=3)
+        stats_header.pack(fill="x", pady=(1, 0))
+        tk.Label(stats_header, text="▼ 统计", bg=theme.GROUP_COLORS["G6"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        self._stats_frame = tk.Frame(right, bg=theme.PANEL, padx=6, pady=3)
         self._stats_frame.pack(fill="x")
         self._stats_labels = []
 
@@ -2445,145 +2438,148 @@ class DashboardChart:
 
 
 # ============================================================
-# 模型对比 (Apple-style side-by-side comparison)
+# 模型对比 (Apple-style, matching MetricPanel layout)
 # ============================================================
 
 class ModelCompareView:
-    """模型对比 — Apple-style column comparison, one column per model.
+    """模型对比 — per-model stats in group/grid layout matching MetricPanel style."""
 
-    Each row shows one metric across all models with visual bars for comparison.
-    """
-
-    _TOK_COLORS = {
-        "input":          "#569cd6",
-        "output":         "#4ec9b0",
-        "cache_creation": "#dcdcaa",
-        "cache_read":     "#6a6a6a",
-    }
     _COL_COLORS = ["#569cd6", "#4ec9b0", "#dcdcaa", "#ce9178", "#9cdcfe", "#c586c0"]
 
     def __init__(self, parent, controller=None):
         self.parent = parent
         self._models: list = []
+        self._value_labels: list[tk.Label] = []  # (section_idx, metric_idx, model_idx)
 
-        # Header (taller: bar + model names)
-        self._header = tk.Canvas(parent, bg=theme.PANEL, height=64, highlightthickness=0)
-        self._header.pack(fill="x", padx=4, pady=(4, 0))
-
-        # Scrollable body
-        from tcer.gui.widgets import ScrollFrame
-        self._sf = ScrollFrame(parent, bg=theme.PANEL)
-        self._sf.canvas.pack(fill="both", expand=True, padx=4, pady=4)
-        self._body = self._sf.inner
+        sf = ScrollFrame(parent, bg=theme.BG)
+        sf.canvas.pack(fill="both", expand=True)
+        self._container = sf.inner
 
     def update(self, reports) -> None:
         from tcer.core.metrics import compare_models
         self._models = compare_models(reports)
-        self._draw_header()
-        self._draw_body()
-
-    def _draw_header(self) -> None:
-        c = self._header
-        c.delete("all")
-        c.update_idletasks()
-        cw = c.winfo_width()
-        if not self._models or cw < 10:
-            return
-        n = len(self._models)
-        col_w = (cw - 140) // n
-        x0 = 140  # label column width
-
-        # Cost distribution bar (top)
-        total_cost = sum(mc.cost for mc in self._models)
-        bar_x = x0
-        bar_w = cw - x0 - 8
-        bar_y0, bar_y1 = 4, 18
-        if total_cost > 0:
-            rx = 0.0
-            for i, mc in enumerate(self._models):
-                rw = mc.cost / total_cost
-                color = self._COL_COLORS[i % len(self._COL_COLORS)]
-                x1 = bar_x + int(rx * bar_w)
-                x2 = bar_x + int((rx + rw) * bar_w)
-                c.create_rectangle(x1, bar_y0, x2, bar_y1, fill=color, outline="")
-                rx += rw
-
-        # Model names + costs (below bar)
-        for i, mc in enumerate(self._models):
-            x = x0 + i * col_w + col_w // 2
-            color = self._COL_COLORS[i % len(self._COL_COLORS)]
-            c.create_text(x, 34, text=mc.display_name, fill=color,
-                          font=theme.FONT_UI_BOLD, anchor="center")
-            cost_str = f"${mc.cost:.2f}" if mc.cost > 0 else "免费"
-            c.create_text(x, 52, text=cost_str, fill=theme.MUTED,
-                          font=theme.FONT_MONO, anchor="center")
-
-    def _draw_body(self) -> None:
-        for w in self._body.winfo_children():
+        # Rebuild entire grid
+        for w in self._container.winfo_children():
             w.destroy()
+        self._value_labels = []
         if not self._models:
-            tk.Label(self._body, text="无模型数据", bg=theme.PANEL, fg=theme.MUTED,
+            tk.Label(self._container, text="无模型数据", bg=theme.BG, fg=theme.MUTED,
                      font=theme.FONT_UI, pady=40).pack()
             return
+        self._build_header()
+        self._build_group("Token 用量", [
+            ("总 Token", lambda mc: _fmt_tok(mc.total_tokens)),
+            ("输入", lambda mc: _fmt_tok(mc.input_tokens)),
+            ("输出", lambda mc: _fmt_tok(mc.output_tokens)),
+            ("缓存写入", lambda mc: _fmt_tok(mc.cache_creation_tokens)),
+            ("缓存读取", lambda mc: _fmt_tok(mc.cache_read_tokens)),
+        ])
+        self._build_group("成本", [
+            ("成本 (USD)", lambda mc: f"${mc.cost:.2f}" if mc.cost > 0 else "免费"),
+            ("成本占比", lambda mc: f"{mc.cost_share:.1f}%"),
+            ("Token 效率", lambda mc: f"{_fmt_tok(mc.tokens_per_dollar)}/$" if mc.tokens_per_dollar else ("∞" if mc.cost == 0 else "-")),
+        ])
+        self._build_group("效率", [
+            ("Token 占比", lambda mc: f"{mc.token_share:.1f}%"),
+            ("缓存命中率", lambda mc: f"{mc.cache_hit_ratio:.1%}" if mc.cache_hit_ratio is not None else "-"),
+            ("会话数", lambda mc: str(mc.session_count)),
+        ])
 
-        n = len(self._models)
-        col_w = max(100, (700 - 160) // n)  # approx column width
+    def _build_header(self) -> None:
+        """Cost distribution bar + model summary, matching group header style."""
+        # Group header with title
+        header = tk.Frame(self._container, bg=theme.GROUP_COLORS["G5"], padx=6, pady=3)
+        header.pack(fill="x", pady=(1, 0))
+        tk.Label(header, text="▼ 模型对比", bg=theme.GROUP_COLORS["G5"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
-        # Summary row: token counts
-        self._add_section("Token 用量")
-        for label, attr in [("总 Token", "total_tokens"), ("输入", "input_tokens"),
-                            ("输出", "output_tokens"), ("缓存写入", "cache_creation_tokens"),
-                            ("缓存读取", "cache_read_tokens")]:
-            vals = [getattr(mc, attr) for mc in self._models]
-            self._add_metric_row(label, vals, col_w, fmt=_fmt_tok)
+        # Cost distribution bar
+        total_cost = sum(mc.cost for mc in self._models)
+        if total_cost > 0:
+            bar = tk.Frame(self._container, bg=theme.PANEL, padx=4, pady=4)
+            bar.pack(fill="x")
+            canvas = tk.Canvas(bar, bg=theme.PANEL, height=20, highlightthickness=0)
+            canvas.pack(fill="x")
 
-        # Cost row
-        self._add_section("成本")
-        vals = [mc.cost for mc in self._models]
-        self._add_metric_row("成本 (USD)", vals, col_w, fmt=lambda v: f"${v:.2f}" if v > 0 else "免费")
+            def draw_bar(_e=None):
+                canvas.delete("all")
+                w = canvas.winfo_width()
+                if w < 10:
+                    return
+                # Draw colored segments
+                rx = 0.0
+                for i, mc in enumerate(self._models):
+                    rw = mc.cost / total_cost
+                    color = self._COL_COLORS[i % len(self._COL_COLORS)]
+                    x1 = int(rx * w)
+                    x2 = int((rx + rw) * w)
+                    canvas.create_rectangle(x1, 0, x2, 20, fill=color, outline="")
+                    rx += rw
+                # Draw model names on top (always visible)
+                rx = 0.0
+                for i, mc in enumerate(self._models):
+                    rw = mc.cost / total_cost
+                    x1 = int(rx * w)
+                    x2 = int((rx + rw) * w)
+                    cx = (x1 + x2) / 2
+                    if x2 - x1 > 20:
+                        canvas.create_text(cx, 10, text=mc.display_name,
+                                           fill="#1e1e1e",
+                                           font=(theme.FONT_MONO_NAME, 7))
+                    rx += rw
 
-        # Efficiency rows
-        self._add_section("效率")
-        vals = [mc.token_share for mc in self._models]
-        self._add_metric_row("Token 占比", vals, col_w, fmt=lambda v: f"{v:.1f}%")
-        vals = [mc.cost_share for mc in self._models]
-        self._add_metric_row("成本占比", vals, col_w, fmt=lambda v: f"{v:.1f}%")
-        vals = [mc.cache_hit_ratio for mc in self._models]
-        self._add_metric_row("缓存命中率", vals, col_w, fmt=lambda v: f"{v:.1%}" if v is not None else "-")
-        vals = [mc.tokens_per_dollar for mc in self._models]
-        self._add_metric_row("Token 效率", vals, col_w,
-                             fmt=lambda v: f"{_fmt_tok(v)}/$" if v else ("∞" if v == 0 else "-"))
-        vals = [mc.session_count for mc in self._models]
-        self._add_metric_row("会话数", vals, col_w, fmt=lambda v: str(v))
+            canvas.bind("<Configure>", draw_bar)
+            canvas.after(10, draw_bar)
 
-    def _add_section(self, title: str) -> None:
-        tk.Label(self._body, text=title, bg=theme.PANEL, fg="#9cdcfe",
-                 font=theme.FONT_UI_BOLD, anchor="w").pack(fill="x", padx=8, pady=(12, 4))
+        # Summary grid: model names + cost + sessions
+        grid = tk.Frame(self._container, bg=theme.PANEL, padx=4, pady=4)
+        grid.pack(fill="x", pady=(0, 1))
+        for j, mc in enumerate(self._models):
+            color = self._COL_COLORS[j % len(self._COL_COLORS)]
+            cell = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=2)
+            cell.grid(row=0, column=j, sticky="nsew", padx=2)
+            tk.Label(cell, text=mc.display_name, bg=theme.PANEL, fg=color,
+                     font=theme.FONT_VALUE, anchor="w").pack(anchor="w")
+            cost_str = f"${mc.cost:.2f}" if mc.cost > 0 else "免费"
+            tk.Label(cell, text=f"{cost_str} · {mc.session_count} 会话",
+                     bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL, anchor="w").pack(anchor="w")
+        for j in range(len(self._models)):
+            grid.grid_columnconfigure(j, weight=1)
 
-    def _add_metric_row(self, label: str, vals: list, col_w: int, fmt=None) -> None:
-        row = tk.Frame(self._body, bg=theme.PANEL, padx=8, pady=3)
-        row.pack(fill="x")
-        # Label
-        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
-                 font=theme.FONT_UI, width=14, anchor="w").pack(side="left")
-        # Values
-        max_val = max((v for v in vals if v is not None and v > 0), default=1)
-        for i, mc in enumerate(self._models):
-            v = vals[i]
-            cell = tk.Frame(row, bg=theme.PANEL)
-            cell.pack(side="left", padx=2)
-            # Value text
-            text = fmt(v) if fmt else str(v)
-            tk.Label(cell, text=text, bg=theme.PANEL, fg=theme.FG,
-                     font=theme.FONT_MONO, width=10, anchor="e").pack()
-            # Mini bar
-            bar_bg = tk.Frame(cell, bg="#333333", height=4, width=col_w - 20)
-            bar_bg.pack(fill="x", pady=(1, 0))
-            if v and v > 0 and max_val > 0:
-                rw = min(1.0, v / max_val)
-                color = self._COL_COLORS[i % len(self._COL_COLORS)]
-                tk.Frame(bar_bg, bg=color, height=4).place(
-                    relx=0, rely=0, relwidth=rw, relheight=1.0)
+    def _build_group(self, title: str, metrics: list) -> None:
+        """Build a group section matching MetricPanel style."""
+        header = tk.Frame(self._container, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
+        header.pack(fill="x", pady=(1, 0))
+        tk.Label(header, text=f"▼ {title}", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+
+        grid = tk.Frame(self._container, bg=theme.PANEL, padx=4, pady=4)
+        grid.pack(fill="x", pady=(0, 1))
+
+        # Column headers (model names)
+        tk.Label(grid, text="", bg=theme.PANEL, width=14).grid(row=0, column=0)
+        for j, mc in enumerate(self._models):
+            color = self._COL_COLORS[j % len(self._COL_COLORS)]
+            tk.Label(grid, text=mc.display_name, bg=theme.PANEL, fg=color,
+                     font=theme.FONT_UI_SMALL_BOLD, anchor="e").grid(
+                         row=0, column=j + 1, sticky="e", padx=2)
+
+        # Metric rows
+        for i, (name, fmt_fn) in enumerate(metrics):
+            tk.Label(grid, text=name, bg=theme.PANEL, fg=theme.FG,
+                     font=theme.FONT_UI_SMALL, anchor="w").grid(
+                         row=i + 1, column=0, sticky="w")
+            for j, mc in enumerate(self._models):
+                val = fmt_fn(mc)
+                lbl = tk.Label(grid, text=val, bg=theme.PANEL,
+                               fg=theme.VALUE_NEUTRAL, font=theme.FONT_VALUE,
+                               anchor="e")
+                lbl.grid(row=i + 1, column=j + 1, sticky="e", padx=2)
+
+        # Make columns expandable
+        for j in range(len(self._models) + 1):
+            grid.grid_columnconfigure(j, weight=1)
 
 
 def _fmt_tok(n: float) -> str:
