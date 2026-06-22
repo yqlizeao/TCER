@@ -81,3 +81,11 @@ def setup_style(ttk) -> None:
               background=[("active", "#3d3d3d"), ("pressed", "#2b2b2b")],
               foreground=[("active", FG)],
               relief=[("active", "flat"), ("pressed", "flat")])
+
+    # Notebook (tab) styling — dark theme matching left panel
+    style.configure("TNotebook", background=BG, borderwidth=0)
+    style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED,
+                    padding=[12, 4], font=(FONT_CJK, 9))
+    style.map("TNotebook.Tab",
+              background=[("selected", PANEL_2), ("active", "#333333")],
+              foreground=[("selected", FG), ("active", FG)])
