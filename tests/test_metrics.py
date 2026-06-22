@@ -157,25 +157,31 @@ def test_merge_user_message_texts():
 # --------------------------------------------------------------------------- #
 # Composite (G6): CTEI / TTAF / TA-TCER / PSAC / CAF / grade
 # --------------------------------------------------------------------------- #
+# Framework reference baselines (§6.3, 16-session dataset). Hardcoded here so the
+# formula-reproduction tests stay valid even when a user has overwritten
+# composite_baselines.json with their own personal baselines.
+_FW = {"tcer_baseline": 76.59, "ncpi_baseline": 0.101, "cpe_baseline": 8.22}
+
+
 def test_ctei_reproduces_report_excellent_session():
     # Report §6.3, session 4.22/5.3-codex: TCER=111.04, NCPI=0.189, CPE=4.45,
     # CHR≈0 → published CTEI = 5.017. Validates the formula + baselines.
-    c = metrics.ctei(111.04, 0.189, 4.45, 0.0)
+    c = metrics.ctei(111.04, 0.189, 4.45, 0.0, **_FW)
     assert c == pytest_approx(5.017, rel=0.01)
     assert metrics.grade(c) == "优秀"
 
 
 def test_ctei_reproduces_report_extreme_low_session():
     # Report §6.3, session 5.13/5.4: TCER=28.62, NCPI=0.051, CPE=28.40 → CTEI=0.055.
-    c = metrics.ctei(28.62, 0.051, 28.40, 0.0)
+    c = metrics.ctei(28.62, 0.051, 28.40, 0.0, **_FW)
     assert c == pytest_approx(0.055, rel=0.02)
     assert metrics.grade(c) == "极端低效"
 
 
 def test_ctei_chr_factor_rewards_cache():
     # CHR factor = 1 + CHR*0.5: 40% CHR → +20% CTEI vs CHR=0.
-    base = metrics.ctei(76.59, 0.101, 8.22, 0.0)
-    with_chr = metrics.ctei(76.59, 0.101, 8.22, 0.40)
+    base = metrics.ctei(76.59, 0.101, 8.22, 0.0, **_FW)
+    with_chr = metrics.ctei(76.59, 0.101, 8.22, 0.40, **_FW)
     assert base == pytest_approx(1.0, rel=0.01)  # all-baseline session scores ~1.0
     assert with_chr == pytest_approx(base * 1.20, rel=0.01)
 
@@ -295,6 +301,51 @@ def test_compute_populates_churn():
     assert r.churn_ratio == pytest_approx(0.20)
 
 
+def _single_model_report(model, *, added, deleted, reworked=None,
+                         net_loc=200, i=600_000, o=400_000):
+    """A SessionReport whose usage is entirely one model (primary), for
+    compare_models tests."""
+    u = _u(i=i, o=o)
+    mu = u.bucket(model)
+    mu.input_tokens = i
+    mu.output_tokens = o
+    u.models.add(model)
+    return metrics.compute(META, u, net_loc=net_loc, loc_accumulated=100_000,
+                           code_added=added, code_deleted=deleted,
+                           code_reworked=reworked)
+
+
+def test_compare_models_churn_uses_self_rework():
+    # Per-model 返工率 must match SessionReport.churn_ratio: self-rework
+    # (reworked / added), NOT gross deleted / added. Regression guard for the
+    # model-comparison tab diverging from the ranking/panel tabs.
+    r = _single_model_report("model-x", added=1000, deleted=800, reworked=100)
+    comps = metrics.compare_models([r])
+    assert len(comps) == 1
+    mc = comps[0]
+    assert mc.model_id == "model-x"
+    assert mc.churn_ratio == pytest_approx(0.10)   # gross would be 0.80
+
+
+def test_compare_models_churn_falls_back_to_deleted():
+    # Sessions predating code_reworked (None) fall back to gross deletions,
+    # consistent with compute().
+    r = _single_model_report("model-y", added=1000, deleted=300, reworked=None)
+    mc = metrics.compare_models([r])[0]
+    assert mc.churn_ratio == pytest_approx(0.30)
+
+
+def test_compare_models_aggregates_per_model_fields():
+    # Two distinct models → two buckets; derived per-model fields populate.
+    rx = _single_model_report("model-x", added=400, deleted=40, reworked=40, net_loc=360)
+    ry = _single_model_report("model-y", added=100, deleted=10, reworked=10, net_loc=90)
+    comps = {mc.model_id: mc for mc in metrics.compare_models([rx, ry])}
+    assert set(comps) == {"model-x", "model-y"}
+    assert comps["model-x"].churn_ratio == pytest_approx(0.10)
+    assert comps["model-x"].net_loc_per_session == pytest_approx(360)
+    assert comps["model-y"].net_loc_per_session == pytest_approx(90)
+
+
 # --------------------------------------------------------------------------- #
 # New quality metrics: tool errors, thinking, files_touched, file quality
 # --------------------------------------------------------------------------- #
@@ -355,18 +406,39 @@ def test_file_quality_metrics():
         ToolOp(5, "Edit", "/b.py"),   # edit b.py (turn 5 > 0+3) ✗ for search, but read_before ✓
     ]
     r = metrics.compute(META, u, net_loc=100)
-    # search_edit_ratio: searches with path = 3 (a, b, c)
-    #   a.py: edit at turn 1, search at turn 0 → within window ✓
-    #   b.py: edit at turn 5, search at turn 0 → outside window ✗
-    #   c.py: no edit → ✗
-    # ratio = 1/3
-    assert r.search_edit_ratio == pytest_approx(1 / 3)
+    # search_edit_ratio (turn-based): 3 searches at turn 0; an Edit/Write occurs at
+    # turn 1 (within 0+3 window) → all 3 searches are "productive" → 3/3 = 1.0.
+    assert r.search_edit_ratio == pytest_approx(1.0)
     # read_before_write: files with write/edit = {a, d, b}
     #   a.py: read turn 0, first write turn 1 → read before ✓
     #   d.py: read turn 0, first write turn 1 → read before ✓
     #   b.py: read turn 0, first write turn 5 → read before ✓
     # ratio = 3/3 = 1.0
     assert r.read_before_write == pytest_approx(1.0)
+
+
+def test_search_edit_ratio_real_shape_no_path():
+    """Real Grep/Glob carry no file_path → op.path is "". The turn-based
+    search_edit_ratio must still work (the old path-based version returned None)."""
+    u = _u(i=500_000, o=500_000)
+    u.tool_ops = [
+        ToolOp(0, "Grep", ""),        # repo-wide search, no path (real shape)
+        ToolOp(1, "Edit", "/x.py"),   # follow-up edit within window ✓
+        ToolOp(8, "Glob", ""),        # late search, no edit follows ✗
+    ]
+    r = metrics.compute(META, u, net_loc=10)
+    # 2 searches; 1 followed by an edit within 3 turns → 1/2
+    assert r.search_edit_ratio == pytest_approx(0.5)
+
+
+def test_search_edit_ratio_outside_window():
+    u = _u(i=500_000, o=500_000)
+    u.tool_ops = [
+        ToolOp(0, "Grep", ""),
+        ToolOp(9, "Edit", "/x.py"),   # 9 > 0+3 → not productive
+    ]
+    r = metrics.compute(META, u, net_loc=10)
+    assert r.search_edit_ratio == pytest_approx(0.0)
 
 
 def test_file_quality_no_searches():

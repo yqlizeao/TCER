@@ -209,6 +209,8 @@ class SessionReport:
     # --- 代码产出与质量 (G4) ---
     code_added: int | None = None  # gross code lines added (from tool calls)
     code_deleted: int | None = None  # gross code lines deleted (from tool calls)
+    code_reworked: int | None = None  # deleted lines the session itself had written
+                                      # earlier (self-rework); churn = reworked / added
     subagent_count: int = 0  # number of subagent sessions folded into this one
     churn_ratio: float | None = None  # deleted / added (rework fraction)
     unseen_writes: int = 0  # Write calls whose target file hadn't been touched yet

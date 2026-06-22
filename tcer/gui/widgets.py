@@ -32,7 +32,7 @@ class Tooltip:
         self.tip.wm_geometry(f"+{x}+{y}")
         lbl = tk.Label(self.tip, text=self.text, justify="left", bg="#fff8e1",
                        fg="#222222", relief="solid", borderwidth=1,
-                       wraplength=360, font=theme.FONT_UI, padx=8, pady=5)
+                       wraplength=460, font=theme.FONT_UI, padx=8, pady=5)
         lbl.pack()
 
     def _hide(self, _event=None) -> None:
@@ -116,7 +116,7 @@ class MetricCell:
 
     def __init__(self, parent, metric: Metric, on_click=None) -> None:
         self.metric = metric
-        self.frame = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=2)
+        self.frame = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=1)
         color = theme.LEVEL_COLORS.get(metric.level, theme.LEVEL_BASIC)
 
         # Title with unit inlined: "TCER（行/百万）" or just "缓存命中率"
@@ -129,7 +129,7 @@ class MetricCell:
         value_fg = theme.VALUE_NEUTRAL
         self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
                               fg=value_fg, font=theme.FONT_VALUE, anchor="w")
-        self.value.pack(anchor="w", pady=(1, 0))
+        self.value.pack(anchor="w")
 
         if on_click:
             self.value.config(cursor="hand2")

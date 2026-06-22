@@ -98,6 +98,9 @@ class SessionLoc:
     added: int
     deleted: int
     unseen_writes: int = 0
+    rework_deleted: int = 0  # deleted lines that this session had itself written
+                             # earlier (true self-rework); deletions of pre-existing
+                             # code are excluded. Feeds the churn (返工率) metric.
     # --- file-level quality metrics ---
     high_churn_files: int = 0  # files edited ≥3 times
     test_added: int = 0
@@ -116,6 +119,7 @@ def session_loc_full(path: Path) -> SessionLoc:
     file_lines: dict[str, int] = {}  # intra-session current line count per file
     file_edits: dict[str, int] = {}  # edit count per file
     added = deleted = unseen = 0
+    rework = 0
     test_added = test_deleted = 0
     doc_added = doc_deleted = 0
 
@@ -145,9 +149,15 @@ def session_loc_full(path: Path) -> SessionLoc:
             # don't count here.)
             if name == "Write" and fp not in file_lines:
                 unseen += 1
+            # ``file_lines[fp]`` before this op = how many lines *this session* has
+            # already written into the file. A deletion only counts as rework up to
+            # that amount — deleting more means deleting pre-existing code, which is
+            # a normal edit, not the model reworking its own output.
+            authored_before = file_lines.get(fp, 0)
             a, d = _delta_for_tool(name, inp, file_lines, fp)
             added += a
             deleted += d
+            rework += min(d, authored_before)
 
             # Classify by file type
             if _is_test_file(fp):
@@ -164,6 +174,7 @@ def session_loc_full(path: Path) -> SessionLoc:
         added=added,
         deleted=deleted,
         unseen_writes=unseen,
+        rework_deleted=rework,
         high_churn_files=high_churn,
         test_added=test_added,
         test_deleted=test_deleted,

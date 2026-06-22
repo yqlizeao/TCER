@@ -185,18 +185,46 @@ class ModelComparison:
     """Aggregated stats for one model across sessions."""
     model_id: str
     display_name: str
+    # Token counts
     input_tokens: int = 0
     output_tokens: int = 0
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
+    # Cost
     cost: float = 0.0
     session_count: int = 0
+    # Efficiency
     cache_hit_ratio: float | None = None
     tokens_per_dollar: float | None = None
-    avg_ctei: float | None = None
-    avg_tcer: float | None = None
+    code_per_dollar: float | None = None  # net_loc / cost — 每美元换来多少行净代码
     token_share: float = 0.0
     cost_share: float = 0.0
+    # 产出效率
+    net_loc_per_session: float | None = None
+    # 行为特征
+    tool_error_rate: float | None = None
+    exploration_ratio: float | None = None
+    edit_ratio: float | None = None
+    read_write_ratio: float | None = None
+    # 代码质量
+    churn_ratio: float | None = None
+    read_before_write: float | None = None
+    files_per_session: float | None = None
+    # 内部累加器
+    _primary_count: int = 0  # 主模型会话数（>50% token），作产出/行为/质量指标的分母
+    _rbw_sum: float = 0.0
+    _rbw_count: int = 0
+    _tool_calls: dict = None
+    _tool_errors: int = 0
+    _code_added: int = 0
+    _code_deleted: int = 0
+    _code_reworked: int = 0
+    _net_loc: int = 0
+    _files_touched: int = 0
+
+    def __post_init__(self):
+        if self._tool_calls is None:
+            self._tool_calls = {}
 
     @property
     def total_tokens(self) -> int:
@@ -222,13 +250,26 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
             mc.cache_creation_tokens += mu.cache_creation_input_tokens
             mc.cache_read_tokens += mu.cache_read_input_tokens
             mc.session_count += 1
-            # Track CTEI/TCER for sessions where model is primary (>50% tokens)
+            # 主模型会话（该模型占该会话 >50% token）才统计产出/行为/质量
             mu_total = mu.input_tokens + mu.output_tokens + mu.cache_creation_input_tokens + mu.cache_read_input_tokens
-            if u.total > 0 and mu_total / u.total > 0.5:
-                if r.ctei is not None:
-                    mc.avg_ctei = r.ctei if mc.avg_ctei is None else (mc.avg_ctei + r.ctei) / 2
-                if r.tcer is not None:
-                    mc.avg_tcer = r.tcer if mc.avg_tcer is None else (mc.avg_tcer + r.tcer) / 2
+            is_primary = u.total > 0 and mu_total / u.total > 0.5
+            if is_primary:
+                mc._primary_count += 1
+                # 行为特征 (仅按主模型会话统计)
+                for tool, cnt in u.tool_calls.items():
+                    mc._tool_calls[tool] = mc._tool_calls.get(tool, 0) + cnt
+                mc._tool_errors += u.tool_errors
+                mc._code_added += r.code_added or 0
+                mc._code_deleted += r.code_deleted or 0
+                # Mirror compute(): self-rework count, falling back to gross
+                # deletions when a session predates the code_reworked field.
+                reworked = r.code_reworked if r.code_reworked is not None else r.code_deleted
+                mc._code_reworked += reworked or 0
+                mc._net_loc += r.net_loc or 0
+                mc._files_touched += r.files_touched or 0
+                if r.read_before_write is not None:
+                    mc._rbw_sum += r.read_before_write
+                    mc._rbw_count += 1
 
     # Compute derived metrics
     grand_tokens = sum(mc.total_tokens for mc in buckets.values())
@@ -242,7 +283,23 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
         total_input = mc.input_tokens + mc.cache_creation_tokens + mc.cache_read_tokens
         mc.cache_hit_ratio = mc.cache_read_tokens / total_input if total_input > 0 else None
         mc.tokens_per_dollar = mc.total_tokens / mc.cost if mc.cost > 0 else None
+        mc.code_per_dollar = mc._net_loc / mc.cost if mc.cost > 0 else None
         mc.token_share = mc.total_tokens / grand_tokens * 100 if grand_tokens else 0
+        # 产出效率
+        mc.net_loc_per_session = mc._net_loc / mc._primary_count if mc._primary_count > 0 else None
+        # 行为特征
+        total_tools = sum(mc._tool_calls.values())
+        if total_tools > 0:
+            grep_glob = mc._tool_calls.get("Grep", 0) + mc._tool_calls.get("Glob", 0)
+            mc.exploration_ratio = grep_glob / total_tools
+            edit_write = mc._tool_calls.get("Edit", 0) + mc._tool_calls.get("Write", 0)
+            mc.edit_ratio = mc._tool_calls.get("Edit", 0) / edit_write if edit_write > 0 else None
+            mc.read_write_ratio = mc._tool_calls.get("Read", 0) / edit_write if edit_write > 0 else None
+            mc.tool_error_rate = mc._tool_errors / total_tools
+        # 代码质量 (self-rework, consistent with compute()/SessionReport.churn_ratio)
+        mc.churn_ratio = mc._code_reworked / mc._code_added if mc._code_added > 0 else None
+        mc.read_before_write = mc._rbw_sum / mc._rbw_count if mc._rbw_count > 0 else None
+        mc.files_per_session = mc._files_touched / mc._primary_count if mc._primary_count > 0 else None
     for mc in buckets.values():
         mc.cost_share = mc.cost / grand_cost * 100 if grand_cost else 0
 
@@ -345,9 +402,13 @@ def cache_efficiency(u: TokenUsage) -> float | None:
 def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
     """Temporal search-edit and read-before-write analysis.
 
-    search_edit_ratio: fraction of Grep/Glob calls (with file_path) that are
-    followed by an Edit/Write to the same file within 3 assistant turns.
-    Pure exploration (searches with no file_path) is excluded from the count.
+    search_edit_ratio: fraction of Grep/Glob calls that are *followed* by a
+    Write/Edit/MultiEdit within ``WINDOW`` assistant turns. This is turn-based,
+    not file-based: real Grep/Glob carry a ``path`` that is usually a directory
+    (or no path at all for a repo-wide search), so matching a search to the exact
+    file later edited is unreliable. Measuring follow-through in *time* captures
+    the intended workflow signal — "did searching lead to a change soon after, or
+    was it dead-end exploration?" — and works on real Claude Code data.
     read_before_write: fraction of Write/Edit targets where the same file was
     Read in a previous turn.
     """
@@ -381,19 +442,18 @@ def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
                     break
     rbw = (read_first_files / write_edit_files) if write_edit_files else None
 
-    # Search-edit ratio: searches with file_path that lead to edit within WINDOW turns
-    searches_with_path = 0
+    # Search-edit ratio: a search (Grep/Glob) is "productive" if any Write/Edit
+    # happens within WINDOW turns after it. Path-agnostic (see docstring).
+    edit_turns = sorted({op.turn for op in u.tool_ops if op.tool in _WRITE_EDIT})
+    searches = 0
     searches_with_edit = 0
     for op in u.tool_ops:
-        if op.tool not in _SEARCH or not op.path:
+        if op.tool not in _SEARCH:
             continue
-        searches_with_path += 1
-        edit_deadline = op.turn + WINDOW
-        for other_turn, other_tool in file_ops.get(op.path, []):
-            if other_tool in _WRITE_EDIT and op.turn < other_turn <= edit_deadline:
-                searches_with_edit += 1
-                break
-    ste = (searches_with_edit / searches_with_path) if searches_with_path else None
+        searches += 1
+        if any(op.turn < et <= op.turn + WINDOW for et in edit_turns):
+            searches_with_edit += 1
+    ste = (searches_with_edit / searches) if searches else None
 
     return {
         "search_edit_ratio": ste,
@@ -452,18 +512,23 @@ def chr_factor(chr_: float | None) -> float:
     return 1.0 + (chr_ or 0.0) * CHR_WEIGHT
 
 
-def churn_ratio(added: int | None, deleted: int | None) -> float | None:
-    """G4 code churn = deleted / added (fraction of written lines later removed).
+def churn_ratio(added: int | None, reworked: int | None) -> float | None:
+    """G4 self-rework rate = reworked / added.
 
-    0 = pure additions (no rework); higher = more rework / lower-quality output.
+    ``reworked`` is the count of written lines the model later deleted *within the
+    same session* — i.e. it wrote them and then removed/replaced them. Deleting
+    pre-existing code (a normal edit) is NOT rework and is excluded by the caller
+    (see ``loc.session_loc_full``'s ``rework_deleted``). 0 = wrote it right the
+    first time; higher = more churning on its own output.
+
     None if no lines were added. Report §6.1 lists churn as the first quality signal,
     guarding against "high-LOC low-quality" pseudo-efficiency.
     """
     if not added:
         return None
-    if deleted is None:
+    if reworked is None:
         return None
-    return deleted / added
+    return reworked / added
 
 
 def ctei(
@@ -515,6 +580,7 @@ def compute(
     task_type: str | None = None,
     code_added: int | None = None,
     code_deleted: int | None = None,
+    code_reworked: int | None = None,
     high_churn_files: int = 0,
     test_net_loc: int | None = None,
     doc_net_loc: int | None = None,
@@ -609,7 +675,11 @@ def compute(
         grade=grade(ctei_),
         code_added=code_added,
         code_deleted=code_deleted,
-        churn_ratio=churn_ratio(code_added, code_deleted),
+        code_reworked=code_reworked,
+        churn_ratio=churn_ratio(
+            code_added,
+            code_reworked if code_reworked is not None else code_deleted,
+        ),
         # --- timing ---
         avg_turn_latency_sec=avg_turn_lat,
         session_duration_minutes=session_dur_min,

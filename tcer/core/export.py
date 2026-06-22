@@ -226,7 +226,7 @@ def to_markdown(reports: list[SessionReport], agg: SessionReport, n_sessions: in
         f"| **TCER** | {fmt.fmt_float(agg.tcer, '0.00')} LOC/Mt | Token → Code efficiency |",
         f"| **CPE** | {fmt.fmt_money(agg.cpe)}/kLOC | Cost per 1000 lines |",
         f"| **CHR** | {fmt.fmt_pct(agg.chr)} | Cache hit ratio (lower cost) |",
-        f"| **Churn** | {fmt.fmt_pct(agg.churn_ratio)} | Rework fraction (deleted/added) |",
+        f"| **Churn** | {fmt.fmt_pct(agg.churn_ratio)} | Self-rework fraction (reworked/added) |",
         f"| **CTEI** | {fmt.fmt_float(agg.ctei, '0.000')} | Composite efficiency index |",
         f"| **Grade** | {agg.grade or '-'} | CTEI rating |",
         "",

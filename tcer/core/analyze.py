@@ -110,15 +110,18 @@ def analyze_project(
         high_churn = 0
         test_net = None
         doc_net = None
+        reworked = None
         if sloc:
             high_churn = sloc.high_churn_files
             test_net = sloc.test_added - sloc.test_deleted
             doc_net = sloc.doc_added - sloc.doc_deleted
+            reworked = sloc.rework_deleted
 
         rep = metrics.compute(
             meta, u, net,
             loc_accumulated=loc_total, task_type=task_type,
             code_added=added, code_deleted=deleted,
+            code_reworked=reworked,
             high_churn_files=high_churn,
             test_net_loc=test_net,
             doc_net_loc=doc_net,
@@ -145,6 +148,7 @@ def analyze_project(
     # Second pass: merge usage + LOC per group, build one report per session.
     reports: list[SessionReport] = []
     tot_added = tot_deleted = tot_unseen = 0
+    tot_rework = 0
     tot_high_churn = 0
     tot_test_added = tot_test_deleted = 0
     tot_doc_added = tot_doc_deleted = 0
@@ -165,11 +169,13 @@ def analyze_project(
         added = sum(s.added for s in slocs)
         deleted = sum(s.deleted for s in slocs)
         unseen = sum(s.unseen_writes for s in slocs)
+        rework = sum(s.rework_deleted for s in slocs)
         # Aggregate file-level quality metrics
         merged_sloc = loc.SessionLoc(
             added=added,
             deleted=deleted,
             unseen_writes=unseen,
+            rework_deleted=rework,
             high_churn_files=sum(s.high_churn_files for s in slocs),
             test_added=sum(s.test_added for s in slocs),
             test_deleted=sum(s.test_deleted for s in slocs),
@@ -183,6 +189,7 @@ def analyze_project(
         tot_added += added
         tot_deleted += deleted
         tot_unseen += unseen
+        tot_rework += rework
         tot_high_churn += merged_sloc.high_churn_files
         tot_test_added += merged_sloc.test_added
         tot_test_deleted += merged_sloc.test_deleted
@@ -203,6 +210,7 @@ def analyze_project(
             added=tot_added,
             deleted=tot_deleted,
             unseen_writes=tot_unseen,
+            rework_deleted=tot_rework,
             high_churn_files=tot_high_churn,
             test_added=tot_test_added,
             test_deleted=tot_test_deleted,
@@ -211,6 +219,19 @@ def analyze_project(
             file_edit_counts=tot_file_edit_counts,
         )
         agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, total_subs, tot_unseen, agg_sloc)
+
+    # NCPI / CTEI / grade are per-session concepts: NCPI = net_loc / current
+    # codebase size. For the aggregate, ``net_loc`` is the *sum* of every
+    # session's output over the whole project life (including rewrites and the F1
+    # Write-overwrite overcount), while the denominator is the codebase's *current*
+    # snapshot — so the ratio routinely exceeds 1 (a project writes more lines over
+    # its life than it currently contains) and the multiplicative CTEI then
+    # explodes. Suppress them at the aggregate level rather than show a misleading
+    # "优秀". Per-session NCPI/CTEI (shown in the ranking tab) stay valid; TCER /
+    # PSAC / NTCER remain meaningful as aggregates and are kept.
+    agg.ncpi = None
+    agg.ctei = None
+    agg.grade = None
 
     return ProjectAnalysis(
         project_hash=proj.name, reports=reports, aggregate=agg,

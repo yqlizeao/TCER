@@ -526,8 +526,8 @@ class BaselinesPopup:
 
             hdr = tk.Frame(card, bg=theme.PANEL)
             hdr.pack(fill="x")
-            name = {"tcer": "TCER（行/百万Token）", "ncpi": "NCPI（净产出指数）",
-                    "cpe": "CPE（千行成本 $）"}[key]
+            name = {"tcer": "TCER（行/百万Token）", "ncpi": "NCPI（代码库贡献度）",
+                    "cpe": "CPE（千行成本·美元）"}[key]
             tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG,
                      anchor="w", font=theme.FONT_VALUE).pack(side="left")
             tk.Label(hdr, text=f"{val:.3f}", bg=theme.PANEL, fg=self._COLOR,
@@ -538,7 +538,7 @@ class BaselinesPopup:
 
         # Note
         tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
-        tk.Label(inner, text="应用后将写入配置并立即重算综合效率指数刻度。",
+        tk.Label(inner, text="应用后将写入配置并立即重算综合效率分刻度。",
                  bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
                  wraplength=380, justify="left").pack(padx=10, pady=4)
 

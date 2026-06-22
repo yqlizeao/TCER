@@ -67,6 +67,40 @@ def test_session_loc_notebookedit(tmp_path):
     assert loc.session_loc(f) == (3, 1)
 
 
+def test_rework_excludes_editing_preexisting_code(tmp_path):
+    """Editing code the session never wrote (pre-existing) is NOT self-rework."""
+    f = _write_jsonl(tmp_path / "s.jsonl", [
+        # First touch of a.py is an Edit → these old lines existed before the
+        # session, so deleting them is a normal edit, not rework.
+        ("Edit", {"file_path": "a.py", "old_string": "p\nq\nr", "new_string": "X"}),
+    ])
+    sl = loc.session_loc_full(f)
+    assert sl.deleted == 2      # net deletions (3 old − 1 new) still counted
+    assert sl.rework_deleted == 0  # but none of it is the session's own rework
+
+
+def test_rework_counts_deleting_own_written_lines(tmp_path):
+    """Writing lines then deleting them within the session IS self-rework."""
+    f = _write_jsonl(tmp_path / "s.jsonl", [
+        ("Write", {"file_path": "a.py", "content": "1\n2\n3\n4\n5"}),  # session authors 5 lines
+        ("Edit", {"file_path": "a.py", "old_string": "1\n2\n3",        # net -2 of its own
+                  "new_string": "one"}),
+    ])
+    sl = loc.session_loc_full(f)
+    assert sl.rework_deleted == 2   # the 2 net-deleted lines were session-authored
+
+
+def test_rework_capped_at_authored(tmp_path):
+    """A delete larger than what the session wrote only counts up to authored."""
+    f = _write_jsonl(tmp_path / "s.jsonl", [
+        ("Write", {"file_path": "a.py", "content": "a\nb"}),           # authors 2
+        ("Edit", {"file_path": "a.py", "old_string": "a\nb\nPRE\nPRE", # net -4
+                  "new_string": ""}),
+    ])
+    sl = loc.session_loc_full(f)
+    assert sl.rework_deleted == 2   # only the 2 it authored count as rework
+
+
 def test_tree_loc_counts_code_skips_excluded(tmp_path):
     (tmp_path / "a.py").write_text("1\n2\n3\n", encoding="utf-8")
     (tmp_path / "b.md").write_text("x\ny\n", encoding="utf-8")

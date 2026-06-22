@@ -35,6 +35,11 @@ VALUE_GOOD = "#4ec9b0"   # green  — good direction
 VALUE_BAD = "#f48771"    # red    — bad direction
 VALUE_NEUTRAL = "#e0e0e0"  # default gray
 
+# Per-row "best" marker (模型对比) — gold highlights the best value in each row,
+# where "best" follows the metric's 词性 (越大越好 → 取最大；越小越好 → 取最小).
+# Metrics with no good/bad direction get no marker.
+VALUE_BEST = "#e0b341"   # 金色 — 该行最优值
+
 # CTEI grade → bar/cell fill color (used by the Canvas CTEI chart).
 GRADE_HEX = {
     "优秀": "#2e7d32",
@@ -46,12 +51,13 @@ GRADE_HEX = {
 
 # Six-group framework — header background per group.
 GROUP_COLORS = {
-    "G1": "#2a2a2e",
+    "G1": "#3a3a3e",
     "G2": "#1e4a6f",
     "G3": "#1e5c5c",
     "G4": "#1e5c2b",
     "G5": "#6f4a1e",
     "G6": "#5a1e6f",
+    "G_NEUTRAL": "#4a4a4e",
 }
 
 # Fonts (named so they can be tuned in one place).
@@ -85,7 +91,8 @@ def setup_style(ttk) -> None:
     # Notebook (tab) styling — dark theme matching left panel
     style.configure("TNotebook", background=BG, borderwidth=0)
     style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED,
-                    padding=[12, 4], font=(FONT_CJK, 9))
+                    padding=[14, 4], font=(FONT_CJK, 9))
     style.map("TNotebook.Tab",
-              background=[("selected", PANEL_2), ("active", "#333333")],
-              foreground=[("selected", FG), ("active", FG)])
+              background=[("selected", "#3e3e42"), ("active", "#333333")],
+              foreground=[("selected", FG), ("active", FG)],
+              padding=[("selected", [16, 6])])

@@ -75,7 +75,7 @@ class TcerGui:
         tab_t = tk.Frame(nb, bg=theme.PANEL)
         tab_c = tk.Frame(nb, bg=theme.PANEL)
         nb.add(tab_m, text="指标分类")
-        nb.add(tab_b, text="综合效率指数排名")
+        nb.add(tab_b, text="综合效率分排名")
         nb.add(tab_t, text="趋势")
         nb.add(tab_c, text="模型对比")
 
@@ -157,11 +157,20 @@ class TcerGui:
         self._current = a
         self._selected_session_id = None
         self.session_col.update(a.reports)
-        self.session_col.clear_selection()
+        # Auto-select first session
+        if a.reports:
+            first = a.reports[0]
+            sid = first.meta.session_id or first.meta.path.stem
+            self._selected_session_id = sid
+            self.session_col.select_first()
         self.ranking_view.update(a.reports)
-        self.trend_chart.update(a.reports)
-        self.model_compare.update(a.reports)
+        # Trend + 模型对比 must respect the current view mode (project vs
+        # session). _render_session_views handles both, plus the trend highlight;
+        # calling it here avoids clobbering the session-scoped views that
+        # select_first() just rendered when in 会话 mode.
+        self._render_session_views()
         self._render_metrics()
+        self._update_tab_names()
         self.filter.set_status(f"完成 · 共 {a.n_sessions} 个会话")
 
     # --------------------------------------------------------------- sessions / view
@@ -169,9 +178,38 @@ class TcerGui:
         self._selected_session_id = sid
         if self.view_mode.get() == "session":
             self._render_metrics()
+            self._render_session_views()
+        self._update_tab_names()
 
     def _on_view_change(self) -> None:
         self._render_metrics()
+        self._render_session_views()
+        self._update_tab_names()
+
+    def _render_session_views(self) -> None:
+        """Update model compare based on view mode. Trend always shows all sessions."""
+        if not self._current:
+            return
+        self.trend_chart.update(self._current.reports)
+        # Highlight selected session in trend chart
+        if self._selected_session_id:
+            self.trend_chart.select_session_by_sid(self._selected_session_id)
+        mode = self.view_mode.get()
+        if mode == "session" and self._selected_session_id:
+            report = self._session_report(self._selected_session_id)
+            if report:
+                self.model_compare.update([report])
+        else:
+            self.model_compare.update(self._current.reports)
+
+    def _update_tab_names(self) -> None:
+        """Update tab names with (项目) or (会话) suffix based on view mode."""
+        mode = self.view_mode.get()
+        suffix = "(会话)" if mode == "session" and self._selected_session_id else "(项目)"
+        self._nb.tab(0, text=f"指标分类 {suffix}")
+        self._nb.tab(1, text="综合效率分排名")
+        self._nb.tab(2, text="趋势")
+        self._nb.tab(3, text=f"模型对比 {suffix}")
 
     def _session_report(self, sid: str):
         for r in self._current.reports:

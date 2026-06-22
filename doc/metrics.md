@@ -32,6 +32,13 @@ cost = (input × r["input"] + cache_write × r["cache_write"] + cache_read × r[
 - **PSAC**：`83.64 / (83.64 − 0.000866 × loc_accumulated)`，抵消大代码库的结构性 TCER 下降
 - **CTEI**：`(TCER/TCER_baseline) × (NCPI/NCPI_baseline) × (CPE_baseline/CPE) × (1 + CHR × 0.5)`
 - **评级**：优秀 >2 · 良好 1~2 · 中等 0.5~1 · 低效 0.1~0.5 · 极端低效 <0.1
+- **Churn（返工率）**：`自返工删除行 / 写入行`。自返工删除行 = 本会话先写入、随后又被自己删除/替换的行数（按文件累计，封顶于「本会话已写入该文件的行数」）；删除会话之外的既有代码属正常编辑，不计入。这样维护/重构任务不会因编辑既有代码而虚高返工率。
+- **search_edit_ratio（搜索后编辑比）**：Grep/Glob 调用中，3 回合内发生 Write/Edit 的占比。**按回合就近匹配，不绑定具体文件**——真实 Grep/Glob 的 `path` 多为目录或缺省（仓库级搜索），按文件匹配不可靠。
+
+> ⚠️ **聚合层限制**：NCPI / CTEI / 评级是**单会话**指标（NCPI = 净增行 ÷ 当前代码库行数）。「全部会话」聚合时，分子是全项目生命周期的净增累计（含重写与 F1 高估），分母是当前快照，比值常 >1 致 CTEI 虚高，故聚合视图对这三项显示「-」。TCER / PSAC / NTCER 作为聚合仍有效。
+
+> ⚠️ **比率类指标的 Bash 盲区**：`read_write_ratio` / `exploration_ratio` 只统计 Read/Grep/Glob 等专用工具；Claude Code 中大量阅读与搜索经 `Bash`（cat/rg/find）完成，不计入，故这两项实测普遍低于直觉，仅作粗略趋势参考。
+
 
 基准默认值：TCER=76.59, NCPI=0.101, CPE=8.22（来自原始框架 16 会话参考数据集）。可通过 `tcer/config/composite_baselines.json` 覆盖。
 

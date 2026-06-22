@@ -11,27 +11,39 @@
       "description": "产生新代码的任务（新功能开发、功能扩展、测试编写等）",
       "ttaf": 1.0,
       "typical_tcer_range": "60-120",
-      "behavior_hints": ["高 net_loc", "低 exploration_ratio", "低 edit_ratio（多用 Write）"]
+      "behavior_hints": [
+        "高 net_loc",
+        "低 exploration_ratio",
+        "低 edit_ratio（多用 Write）"
+      ]
     },
     "code_maintenance": {
       "name": "代码维护",
       "description": "修改/优化现有代码（调试排查、代码重构等）",
       "ttaf": 0.45,
       "typical_tcer_range": "25-65",
-      "behavior_hints": ["高 exploration_ratio", "高 edit_ratio", "低 net_loc"]
+      "behavior_hints": [
+        "高 exploration_ratio",
+        "高 edit_ratio",
+        "低 net_loc"
+      ]
     },
     "non_coding": {
       "name": "非编码",
       "description": "不以代码产出为主要目标（代码审查、调研研究等）",
       "ttaf": 0.2,
       "typical_tcer_range": "0-30",
-      "behavior_hints": ["极高 read_write_ratio", "极高 exploration_ratio", "极低或零 net_loc"]
+      "behavior_hints": [
+        "极高 read_write_ratio",
+        "极高 exploration_ratio",
+        "极低或零 net_loc"
+      ]
     }
   },
   "ctei_baselines": {
-    "tcer": 76.59,
-    "ncpi": 0.101,
-    "cpe": 8.22,
+    "tcer": 35.949296044253295,
+    "ncpi": 0.08481064527260179,
+    "cpe": 5.317090240384615,
     "_note": "Medians (TCER, CPE) and mean (NCPI) from the framework's reference dataset. Override these once you have your own accumulated data."
   },
   "psac": {

@@ -46,83 +46,97 @@ def _file_manager_label() -> str:
 
 
 class FilterBar:
-    """Top control bar: task type, time filter, subagent toggle, action buttons."""
+    """Top control bar: segmented view switch + filters + actions, single row."""
 
     def __init__(self, parent, controller) -> None:
         self.controller = controller
         bar = tk.Frame(parent, bg=theme.BG)
         bar.pack(side="top", fill="x", padx=8, pady=6)
 
-        # 任务类型选择（只有 3 个大类，显示中文）
-        tk.Label(bar, text="任务类型:", bg=theme.BG, fg=theme.FG).pack(side="left")
-        self.task_var = tk.StringVar(value="代码创作")  # 默认值用中文
+        # -- View switcher: segmented control --
+        self.view_mode = controller.view_mode
+        seg_bg = tk.Frame(bar, bg="#333333", padx=2, pady=2)
+        seg_bg.pack(side="left", padx=(0, 12))
+        self._view_btns: dict[str, tk.Label] = {}
+        for label, val in [("项目汇总", "project"), ("会话详情", "session")]:
+            btn = tk.Label(seg_bg, text=label, padx=8, pady=1, cursor="hand2",
+                           font=theme.FONT_UI_SMALL)
+            btn.pack(side="left", padx=1)
+            btn.bind("<Button-1>", lambda e, v=val: self._set_view(v))
+            self._view_btns[val] = btn
+        self._update_view_btns()
 
-        # 中文显示映射
+        # -- Filters --
+        tk.Label(bar, text="任务类型:", bg=theme.BG, fg=theme.FG).pack(side="left")
+        self.task_var = tk.StringVar(value="代码创作")
         self._task_display_names = {
             "code_creation": "代码创作",
             "code_maintenance": "代码维护",
             "non_coding": "非编码",
         }
         self._task_reverse_map = {v: k for k, v in self._task_display_names.items()}
-
-        task_cb = ttk.Combobox(bar, textvariable=self.task_var, width=12,
+        task_cb = ttk.Combobox(bar, textvariable=self.task_var, width=10,
                                values=list(self._task_display_names.values()), state="readonly")
-        task_cb.pack(side="left", padx=(4, 4))
+        task_cb.pack(side="left", padx=(4, 12))
         task_cb.bind("<<ComboboxSelected>>", self._on_task_type_change)
         Tooltip(task_cb, self._generate_task_type_tooltip())
 
-        tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left", padx=(12, 4))
+        tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left")
         self.since_var = tk.StringVar(value="")
-        self._date_entry(bar, self.since_var, "开始日期（YYYY-MM-DD，留空=全部）").pack(side="left", padx=2)
+        self._date_entry(bar, self.since_var, "开始日期").pack(side="left", padx=2)
         tk.Label(bar, text="至", bg=theme.BG, fg=theme.FG).pack(side="left", padx=2)
         self.until_var = tk.StringVar(value="")
-        self._date_entry(bar, self.until_var, "结束日期（YYYY-MM-DD，留空=全部）").pack(side="left", padx=2)
+        self._date_entry(bar, self.until_var, "结束日期").pack(side="left", padx=2)
 
         for label, preset in (("本周", "week"), ("本月", "month"), ("全部", "all")):
             tk.Button(bar, text=label, command=lambda p=preset: self._set_preset(p),
-                      bg=theme.PANEL, fg=theme.FG, relief="flat", padx=4, pady=2).pack(side="left", padx=2)
+                      bg=theme.PANEL, fg=theme.FG, relief="flat", padx=4, pady=1).pack(side="left", padx=2)
 
-        # 视图切换（从右侧面板移入顶部栏）
-        self.view_mode = controller.view_mode
-        tk.Label(bar, text="视图:", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_UI_BOLD).pack(side="left", padx=(16, 4))
-        tk.Radiobutton(bar, text="项目汇总", variable=self.view_mode, value="project",
-                       bg=theme.BG, fg=theme.FG, selectcolor=theme.BG,
-                       activebackground=theme.BG, activeforeground=theme.ACCENT,
-                       font=theme.FONT_UI, command=controller._on_view_change).pack(side="left")
-        tk.Radiobutton(bar, text="会话详情", variable=self.view_mode, value="session",
-                       bg=theme.BG, fg=theme.FG, selectcolor=theme.BG,
-                       activebackground=theme.BG, activeforeground=theme.ACCENT,
-                       font=theme.FONT_UI, command=controller._on_view_change).pack(side="left")
+        # -- Actions (right side) --
+        for factory in [
+            lambda: self._make_tool_menu(bar),
+            lambda: self._make_export_menu(bar),
+        ]:
+            factory().pack(side="right", padx=2)
 
-        tk.Button(bar, text="刷新项目", command=controller.refresh_projects,
-                  bg=theme.PANEL, fg=theme.FG, relief="flat", padx=6).pack(side="left", padx=4)
+        self.status = tk.Label(bar, text="就绪", bg=theme.BG, fg="#9cdcfe", anchor="e")
+        self.status.pack(side="right", padx=(8, 4))
 
-        # 导出 menu
-        mb = tk.Menubutton(bar, text="导出 ▾", relief="flat", bg=theme.PANEL, fg=theme.FG,
+    def _set_view(self, mode: str) -> None:
+        self.view_mode.set(mode)
+        self._update_view_btns()
+        self.controller._on_view_change()
+
+    def _update_view_btns(self) -> None:
+        current = self.view_mode.get()
+        for val, btn in self._view_btns.items():
+            if val == current:
+                btn.config(bg=theme.ACCENT, fg="#ffffff")
+            else:
+                btn.config(bg="#333333", fg=theme.MUTED)
+
+    def _make_tool_menu(self, parent) -> tk.Menubutton:
+        tb = tk.Menubutton(parent, text="工具 ▾", relief="flat", bg=theme.PANEL, fg=theme.FG,
+                           padx=6, activebackground=theme.BG, activeforeground=theme.FG)
+        tmenu = tk.Menu(tb, tearoff=False, bg=theme.PANEL, fg=theme.FG,
+                        activebackground=theme.ACCENT, activeforeground=theme.FG)
+        tmenu.add_command(label="LOC 校准", command=self.controller.run_calibration)
+        tmenu.add_command(label="计算个人基准", command=self.controller.compute_baselines)
+        tmenu.add_command(label="高级选项", command=self.controller.show_advanced)
+        tb.config(menu=tmenu)
+        Tooltip(tb, "LOC 校准 · 计算个人基准 · 高级选项")
+        return tb
+
+    def _make_export_menu(self, parent) -> tk.Menubutton:
+        mb = tk.Menubutton(parent, text="导出 ▾", relief="flat", bg=theme.PANEL, fg=theme.FG,
                            padx=6, activebackground=theme.BG, activeforeground=theme.FG)
         menu = tk.Menu(mb, tearoff=False, bg=theme.PANEL, fg=theme.FG,
                        activebackground=theme.ACCENT, activeforeground=theme.FG)
         for label, fmt in (("JSON", "json"), ("CSV", "csv"), ("Markdown", "md")):
-            menu.add_command(label=label, command=lambda f=fmt: controller.export(f))
+            menu.add_command(label=label, command=lambda f=fmt: self.controller.export(f))
         mb.config(menu=menu)
-        mb.pack(side="left", padx=4)
-        Tooltip(mb, "把当前项目的指标导出为文件（JSON / CSV / Markdown）。")
-
-        # 工具 menu
-        tb = tk.Menubutton(bar, text="工具 ▾", relief="flat", bg=theme.PANEL, fg=theme.FG,
-                           padx=6, activebackground=theme.BG, activeforeground=theme.FG)
-        tmenu = tk.Menu(tb, tearoff=False, bg=theme.PANEL, fg=theme.FG,
-                        activebackground=theme.ACCENT, activeforeground=theme.FG)
-        tmenu.add_command(label="LOC 校准", command=controller.run_calibration)
-        tmenu.add_command(label="计算个人基准", command=controller.compute_baselines)
-        tmenu.add_command(label="高级选项", command=controller.show_advanced)
-        tb.config(menu=tmenu)
-        tb.pack(side="left", padx=4)
-        Tooltip(tb, "LOC 校准（对照 git 验证精度）· 计算个人基准 · 高级选项。")
-
-        self.status = tk.Label(bar, text="就绪", bg=theme.BG, fg="#9cdcfe", anchor="e")
-        self.status.pack(side="right")
+        Tooltip(mb, "导出为 JSON / CSV / Markdown")
+        return mb
 
     def _date_entry(self, bar, var, tip):
         e = tk.Entry(bar, textvariable=var, width=10, bg=theme.PANEL, fg=theme.FG,
@@ -510,6 +524,13 @@ class SessionColumn:
             self._selected.set_selected(False)
         self._selected = None
 
+    def select_first(self) -> None:
+        """Select the first session card (if any)."""
+        if self._cards:
+            card = self._cards[0]
+            sid = self._reports[0].meta.session_id or self._reports[0].meta.path.stem
+            self._select(card, sid)
+
 
 class MetricPanel:
     """Right-column tab 1: the G1–G6 metric grid, built from metric_defs."""
@@ -526,15 +547,28 @@ class MetricPanel:
             self._build_group(group)
 
     def _build_group(self, group) -> None:
-        header = tk.Frame(self.container, bg=theme.GROUP_COLORS[group.id], padx=6, pady=3)
+        header = tk.Frame(self.container, bg=theme.GROUP_COLORS[group.id], padx=6, pady=2)
         header.pack(fill="x", pady=(1, 0))
         tk.Label(header, text=f"▼ {group.id} {group.name}",
                  bg=theme.GROUP_COLORS[group.id], fg=theme.FG,
                  font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
-        grid = tk.Frame(self.container, bg=theme.PANEL, padx=4, pady=4)
+        if group.subgroups:
+            for sg in group.subgroups:
+                self._build_metric_grid(sg.metrics, sub_label=sg.name)
+        else:
+            self._build_metric_grid(group.metrics)
+
+    def _build_metric_grid(self, metrics, sub_label: str | None = None) -> None:
+        if sub_label:
+            sub = tk.Frame(self.container, bg=theme.PANEL, padx=8, pady=1)
+            sub.pack(fill="x", pady=(2, 0))
+            tk.Label(sub, text=f"· {sub_label}", bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+
+        grid = tk.Frame(self.container, bg=theme.PANEL, padx=4, pady=2)
         grid.pack(fill="x", pady=(0, 1))
-        for i, metric in enumerate(group.metrics):
+        for i, metric in enumerate(metrics):
             if metric.key == "tools":
                 on_click = self.controller.show_tool_calls
             elif metric.key == "models":
@@ -596,9 +630,9 @@ class CteiRankingView:
         self._sort_reverse: bool = True
 
         # -- Grade summary bar (top, wrapped in group header) --
-        grade_header = tk.Frame(parent, bg=theme.GROUP_COLORS["G5"], padx=6, pady=3)
+        grade_header = tk.Frame(parent, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
         grade_header.pack(fill="x", pady=(1, 0))
-        tk.Label(grade_header, text="▼ 评级分布", bg=theme.GROUP_COLORS["G5"], fg=theme.FG,
+        tk.Label(grade_header, text="▼ 评级分布", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
                  font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
         self._grade_canvas = tk.Canvas(parent, bg=theme.PANEL, height=38,
@@ -629,7 +663,7 @@ class CteiRankingView:
                                   selectmode="browse", height=20)
         self._tree.heading("rank",    text="#",    anchor="center",
                            command=lambda: self._sort_by("rank"))
-        self._tree.heading("session", text="会话", anchor="w",
+        self._tree.heading("session", text="标题", anchor="w",
                            command=lambda: self._sort_by("session"))
         self._tree.heading("ctei_val", text="CTEI", anchor="e",
                            command=lambda: self._sort_by("ctei"))
@@ -670,8 +704,8 @@ class CteiRankingView:
     def update(self, reports) -> None:
         scored = [r for r in reports if r.ctei is not None]
         scored.sort(key=lambda r: r.ctei, reverse=True)
-        self._ranking = [(s.meta.session_id or s.meta.path.stem, s.ctei, s.grade or "", s)
-                         for s in scored]
+        self._ranking = [(r.meta.title or r.meta.session_id or r.meta.path.stem, r.ctei, r.grade or "", r)
+                         for r in scored]
         self._avg_factors = ctei_decompose_avg(reports)
         self._current_report = None
         self._grade_filter = None
@@ -1271,14 +1305,6 @@ class TrendChart:
         for w in self._content.winfo_children():
             w.destroy()
 
-    def _add_mode_buttons(self, top) -> None:
-        """Add mode radio buttons to a header frame."""
-        for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
-            tk.Radiobutton(top, text=label, variable=self._mode, value=val,
-                           bg=theme.BG, fg=theme.FG, selectcolor=theme.BG,
-                           activebackground=theme.BG, activeforeground=theme.ACCENT,
-                           font=theme.FONT_UI, command=self._switch_mode).pack(side="left")
-
     def _build_trend_content(self) -> None:
         self._clear_content()
         # Left: metric selector
@@ -1287,23 +1313,27 @@ class TrendChart:
         left.pack_propagate(False)
         self._selector = MetricTrendSelector(left, on_change=self._on_selection_change)
 
+        # Separator
+        sep = tk.Frame(self._content, bg="#3e3e42", width=2)
+        sep.pack(side="left", fill="y")
+
         # Right: header + canvas + stats
         right = tk.Frame(self._content, bg=theme.BG)
         right.pack(side="left", fill="both", expand=True)
 
         # Mode buttons in group header
-        mode_header = tk.Frame(right, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
+        mode_header = tk.Frame(right, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
         mode_header.pack(fill="x", pady=(1, 0))
-        tk.Label(mode_header, text="▼ 趋势分析", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
+        tk.Label(mode_header, text="▼ 趋势分析", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
                  font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
         for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
             tk.Radiobutton(mode_header, text=label, variable=self._mode, value=val,
-                           bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
-                           selectcolor=theme.GROUP_COLORS["G2"],
-                           activebackground=theme.GROUP_COLORS["G2"],
+                           bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
+                           selectcolor=theme.GROUP_COLORS["G_NEUTRAL"],
+                           activebackground=theme.GROUP_COLORS["G_NEUTRAL"],
                            activeforeground=theme.ACCENT,
                            font=theme.FONT_UI, command=self._switch_mode).pack(side="left", padx=4)
-        self._legend_frame = tk.Frame(mode_header, bg=theme.GROUP_COLORS["G2"])
+        self._legend_frame = tk.Frame(mode_header, bg=theme.GROUP_COLORS["G_NEUTRAL"])
         self._legend_frame.pack(side="right")
         self._zoom_reset_btn = tk.Button(
             mode_header, text="重置缩放", command=self._reset_zoom,
@@ -1342,11 +1372,20 @@ class TrendChart:
         right = tk.Frame(self._content, bg=theme.BG)
         right.pack(fill="both", expand=True)
 
-        top = tk.Frame(right, bg=theme.BG)
-        top.pack(fill="x", padx=4, pady=2)
-        self._add_mode_buttons(top)
-        tk.Label(top, text="  6 组代表指标总览", bg=theme.BG, fg=theme.MUTED,
-                 font=theme.FONT_UI_SMALL).pack(side="left", padx=8)
+        # Mode buttons in group header (same as trend)
+        mode_header = tk.Frame(right, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
+        mode_header.pack(fill="x", pady=(1, 0))
+        tk.Label(mode_header, text="▼ 趋势分析", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
+            tk.Radiobutton(mode_header, text=label, variable=self._mode, value=val,
+                           bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
+                           selectcolor=theme.GROUP_COLORS["G_NEUTRAL"],
+                           activebackground=theme.GROUP_COLORS["G_NEUTRAL"],
+                           activeforeground=theme.ACCENT,
+                           font=theme.FONT_UI, command=self._switch_mode).pack(side="left", padx=4)
+        tk.Label(mode_header, text="6 组代表指标总览", bg=theme.GROUP_COLORS["G_NEUTRAL"],
+                 fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left", padx=8)
 
         self._dashboard = DashboardChart(right)
         self._dashboard.update(self._reports)
@@ -1356,9 +1395,18 @@ class TrendChart:
         right = tk.Frame(self._content, bg=theme.BG)
         right.pack(fill="both", expand=True)
 
-        top = tk.Frame(right, bg=theme.BG)
-        top.pack(fill="x", padx=4, pady=2)
-        self._add_mode_buttons(top)
+        # Mode buttons in group header (same as trend)
+        mode_header = tk.Frame(right, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
+        mode_header.pack(fill="x", pady=(1, 0))
+        tk.Label(mode_header, text="▼ 趋势分析", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
+            tk.Radiobutton(mode_header, text=label, variable=self._mode, value=val,
+                           bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
+                           selectcolor=theme.GROUP_COLORS["G_NEUTRAL"],
+                           activebackground=theme.GROUP_COLORS["G_NEUTRAL"],
+                           activeforeground=theme.ACCENT,
+                           font=theme.FONT_UI, command=self._switch_mode).pack(side="left", padx=4)
 
         self._scatter_chart = ScatterChart(right)
         self._scatter_chart.update(self._reports)
@@ -2449,7 +2497,6 @@ class ModelCompareView:
     def __init__(self, parent, controller=None):
         self.parent = parent
         self._models: list = []
-        self._value_labels: list[tk.Label] = []  # (section_idx, metric_idx, model_idx)
 
         sf = ScrollFrame(parent, bg=theme.BG)
         sf.canvas.pack(fill="both", expand=True)
@@ -2461,36 +2508,48 @@ class ModelCompareView:
         # Rebuild entire grid
         for w in self._container.winfo_children():
             w.destroy()
-        self._value_labels = []
         if not self._models:
             tk.Label(self._container, text="无模型数据", bg=theme.BG, fg=theme.MUTED,
                      font=theme.FONT_UI, pady=40).pack()
             return
         self._build_header()
+        # Row tuple: (名称, 显示格式, 取值, tip_key, best方向)
+        # best: "max"=越大越好, "min"=越小越好, None=无好坏方向（不标金色）
         self._build_group("Token 用量", [
-            ("总 Token", lambda mc: _fmt_tok(mc.total_tokens)),
-            ("输入", lambda mc: _fmt_tok(mc.input_tokens)),
-            ("输出", lambda mc: _fmt_tok(mc.output_tokens)),
-            ("缓存写入", lambda mc: _fmt_tok(mc.cache_creation_tokens)),
-            ("缓存读取", lambda mc: _fmt_tok(mc.cache_read_tokens)),
+            ("总 Token", lambda mc: _fmt_tok(mc.total_tokens), lambda mc: mc.total_tokens, "total_tokens", None),
+            ("输入", lambda mc: _fmt_tok(mc.input_tokens), lambda mc: mc.input_tokens, "input", None),
+            ("输出", lambda mc: _fmt_tok(mc.output_tokens), lambda mc: mc.output_tokens, "output", None),
+            ("缓存创建", lambda mc: _fmt_tok(mc.cache_creation_tokens), lambda mc: mc.cache_creation_tokens, "cache_write", None),
+            ("缓存命中", lambda mc: _fmt_tok(mc.cache_read_tokens), lambda mc: mc.cache_read_tokens, "cache_read", None),
         ])
         self._build_group("成本", [
-            ("成本 (USD)", lambda mc: f"${mc.cost:.2f}" if mc.cost > 0 else "免费"),
-            ("成本占比", lambda mc: f"{mc.cost_share:.1f}%"),
-            ("Token 效率", lambda mc: f"{_fmt_tok(mc.tokens_per_dollar)}/$" if mc.tokens_per_dollar else ("∞" if mc.cost == 0 else "-")),
+            ("总成本", lambda mc: f"${mc.cost:.2f}" if mc.cost > 0 else "免费", lambda mc: mc.cost, "cost", "min"),
+            ("成本占比", lambda mc: f"{mc.cost_share:.1f}%", lambda mc: mc.cost_share, None, None),
+            ("Token 效率", lambda mc: f"{_fmt_tok(mc.tokens_per_dollar)}/$" if mc.tokens_per_dollar else ("∞" if mc.cost == 0 else "-"), lambda mc: mc.tokens_per_dollar, None, "max"),
+            ("代码效率", lambda mc: f"{mc.code_per_dollar:.1f} 行/$" if mc.code_per_dollar is not None else ("∞" if mc.cost == 0 else "-"), lambda mc: mc.code_per_dollar, None, "max"),
         ])
         self._build_group("效率", [
-            ("Token 占比", lambda mc: f"{mc.token_share:.1f}%"),
-            ("缓存命中率", lambda mc: f"{mc.cache_hit_ratio:.1%}" if mc.cache_hit_ratio is not None else "-"),
-            ("会话数", lambda mc: str(mc.session_count)),
+            ("Token 占比", lambda mc: f"{mc.token_share:.1f}%", lambda mc: mc.token_share, None, None),
+            ("缓存命中率", lambda mc: f"{mc.cache_hit_ratio:.1%}" if mc.cache_hit_ratio is not None else "-", lambda mc: mc.cache_hit_ratio, "chr", "max"),
+            ("会话数", lambda mc: str(mc.session_count), lambda mc: mc.session_count, None, None),
+        ])
+        self._build_group("代码质量与行为", [
+            ("净增行/会话", lambda mc: f"{mc.net_loc_per_session:.0f}" if mc.net_loc_per_session is not None else "-", lambda mc: mc.net_loc_per_session, None, "max"),
+            ("工具错误率", lambda mc: f"{mc.tool_error_rate:.1%}" if mc.tool_error_rate is not None else "-", lambda mc: mc.tool_error_rate, "tool_error_rate", "min"),
+            ("探索占比", lambda mc: f"{mc.exploration_ratio:.1%}" if mc.exploration_ratio is not None else "-", lambda mc: mc.exploration_ratio, "exploration_ratio", None),
+            ("编辑占比", lambda mc: f"{mc.edit_ratio:.1%}" if mc.edit_ratio is not None else "-", lambda mc: mc.edit_ratio, "edit_ratio", "max"),
+            ("读写比", lambda mc: f"{mc.read_write_ratio:.1f}" if mc.read_write_ratio is not None else "-", lambda mc: mc.read_write_ratio, "read_write_ratio", "max"),
+            ("返工率", lambda mc: f"{mc.churn_ratio:.1%}" if mc.churn_ratio is not None else "-", lambda mc: mc.churn_ratio, "churn", "min"),
+            ("先读后写率", lambda mc: f"{mc.read_before_write:.1%}" if mc.read_before_write is not None else "-", lambda mc: mc.read_before_write, "read_before_write", "max"),
+            ("涉及文件/会话", lambda mc: f"{mc.files_per_session:.1f}" if mc.files_per_session is not None else "-", lambda mc: mc.files_per_session, None, None),
         ])
 
     def _build_header(self) -> None:
         """Cost distribution bar + model summary, matching group header style."""
         # Group header with title
-        header = tk.Frame(self._container, bg=theme.GROUP_COLORS["G5"], padx=6, pady=3)
+        header = tk.Frame(self._container, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
         header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text="▼ 模型对比", bg=theme.GROUP_COLORS["G5"], fg=theme.FG,
+        tk.Label(header, text="▼ 模型对比", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
                  font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
         # Cost distribution bar
@@ -2538,12 +2597,17 @@ class ModelCompareView:
             color = self._COL_COLORS[j % len(self._COL_COLORS)]
             cell = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=2)
             cell.grid(row=0, column=j, sticky="nsew", padx=2)
-            tk.Label(cell, text=mc.display_name, bg=theme.PANEL, fg=color,
-                     font=theme.FONT_VALUE, anchor="w").pack(anchor="w")
+            name_lbl = tk.Label(cell, text=mc.display_name, bg=theme.PANEL, fg=color,
+                                font=theme.FONT_VALUE, anchor="w")
+            name_lbl.pack(anchor="w")
             cost_str = f"${mc.cost:.2f}" if mc.cost > 0 else "免费"
-            tk.Label(cell, text=f"{cost_str} · {mc.session_count} 会话",
-                     bg=theme.PANEL, fg=theme.MUTED,
-                     font=theme.FONT_UI_SMALL, anchor="w").pack(anchor="w")
+            sub_lbl = tk.Label(cell, text=f"{cost_str} · {mc.session_count} 会话",
+                               bg=theme.PANEL, fg=theme.MUTED,
+                               font=theme.FONT_UI_SMALL, anchor="w")
+            sub_lbl.pack(anchor="w")
+            price_tip = _model_price_tip(mc)
+            for w in (cell, name_lbl, sub_lbl):
+                Tooltip(w, price_tip)
         for j in range(len(self._models)):
             grid.grid_columnconfigure(j, weight=1)
 
@@ -2566,20 +2630,70 @@ class ModelCompareView:
                          row=0, column=j + 1, sticky="e", padx=2)
 
         # Metric rows
-        for i, (name, fmt_fn) in enumerate(metrics):
-            tk.Label(grid, text=name, bg=theme.PANEL, fg=theme.FG,
-                     font=theme.FONT_UI_SMALL, anchor="w").grid(
-                         row=i + 1, column=0, sticky="w")
+        for i, row in enumerate(metrics):
+            name, fmt_fn = row[0], row[1]
+            num_fn = row[2] if len(row) > 2 else None
+            tip_key = row[3] if len(row) > 3 else None
+            best = row[4] if len(row) > 4 else None
+            # Reuse the metric_defs tip for metrics shared with 指标分类,
+            # so naming + explanation stay consistent across tabs.
+            tip_metric = _metric_by_key.get(tip_key) if tip_key else None
+            tip_text = f"{tip_metric.name}\n{tip_metric.tip}" if tip_metric else None
+
+            name_lbl = tk.Label(grid, text=name, bg=theme.PANEL, fg=theme.FG,
+                                font=theme.FONT_UI_SMALL, anchor="w")
+            name_lbl.grid(row=i + 1, column=0, sticky="w")
+            if tip_text:
+                Tooltip(name_lbl, tip_text)
+
+            # Gold-highlight the best value in this row. "best" follows the
+            # metric's 词性: "max"=越大越好, "min"=越小越好. Skipped for metrics
+            # with no good/bad direction, or when all models tie.
+            row_colors: dict[int, str] = {}
+            if num_fn is not None and best:
+                valid = [(j, num_fn(mc)) for j, mc in enumerate(self._models)]
+                valid = [(j, v) for j, v in valid if isinstance(v, (int, float))]
+                distinct = {v for _, v in valid}
+                if len(distinct) >= 2:
+                    target = max(distinct) if best == "max" else min(distinct)
+                    for j, v in valid:
+                        if v == target:
+                            row_colors[j] = theme.VALUE_BEST
+
             for j, mc in enumerate(self._models):
                 val = fmt_fn(mc)
                 lbl = tk.Label(grid, text=val, bg=theme.PANEL,
-                               fg=theme.VALUE_NEUTRAL, font=theme.FONT_VALUE,
-                               anchor="e")
+                               fg=row_colors.get(j, theme.VALUE_NEUTRAL),
+                               font=theme.FONT_VALUE, anchor="e")
                 lbl.grid(row=i + 1, column=j + 1, sticky="e", padx=2)
+                if tip_text:
+                    Tooltip(lbl, tip_text)
 
         # Make columns expandable
         for j in range(len(self._models) + 1):
             grid.grid_columnconfigure(j, weight=1)
+
+
+def _model_price_tip(mc) -> str:
+    """Tooltip text: a model's full list price (the four $/MTok billing rates).
+
+    Rates come from ``pricing.resolve`` — the same table used to cost the
+    session — so the card shows exactly what each dimension was charged at.
+    Unknown models fall back to the Anthropic default list price.
+    """
+    from tcer.core import pricing
+
+    def _rate(x: float) -> str:
+        return f"${f'{x:.4f}'.rstrip('0').rstrip('.')}/百万"
+
+    r = pricing.resolve(mc.model_id)
+    return (
+        f"{mc.display_name} · 官方标价（$/百万 Token）\n"
+        f"输入　　　{_rate(r['input'])}\n"
+        f"输出　　　{_rate(r['output'])}\n"
+        f"缓存创建　{_rate(r['cache_write'])}\n"
+        f"缓存命中　{_rate(r['cache_read'])}"
+    )
 
 
 def _fmt_tok(n: float) -> str:
