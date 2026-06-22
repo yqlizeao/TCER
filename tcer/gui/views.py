@@ -2466,8 +2466,8 @@ class ModelCompareView:
         self.parent = parent
         self._models: list = []
 
-        # Header
-        self._header = tk.Canvas(parent, bg=theme.PANEL, height=48, highlightthickness=0)
+        # Header (taller: bar + model names)
+        self._header = tk.Canvas(parent, bg=theme.PANEL, height=64, highlightthickness=0)
         self._header.pack(fill="x", padx=4, pady=(4, 0))
 
         # Scrollable body
@@ -2490,15 +2490,32 @@ class ModelCompareView:
         if not self._models or cw < 10:
             return
         n = len(self._models)
-        col_w = (cw - 120) // n
-        x0 = 120  # label column width
+        col_w = (cw - 140) // n
+        x0 = 140  # label column width
+
+        # Cost distribution bar (top)
+        total_cost = sum(mc.cost for mc in self._models)
+        bar_x = x0
+        bar_w = cw - x0 - 8
+        bar_y0, bar_y1 = 4, 18
+        if total_cost > 0:
+            rx = 0.0
+            for i, mc in enumerate(self._models):
+                rw = mc.cost / total_cost
+                color = self._COL_COLORS[i % len(self._COL_COLORS)]
+                x1 = bar_x + int(rx * bar_w)
+                x2 = bar_x + int((rx + rw) * bar_w)
+                c.create_rectangle(x1, bar_y0, x2, bar_y1, fill=color, outline="")
+                rx += rw
+
+        # Model names + costs (below bar)
         for i, mc in enumerate(self._models):
             x = x0 + i * col_w + col_w // 2
             color = self._COL_COLORS[i % len(self._COL_COLORS)]
-            c.create_text(x, 14, text=mc.display_name, fill=color,
+            c.create_text(x, 34, text=mc.display_name, fill=color,
                           font=theme.FONT_UI_BOLD, anchor="center")
             cost_str = f"${mc.cost:.2f}" if mc.cost > 0 else "免费"
-            c.create_text(x, 34, text=cost_str, fill=theme.MUTED,
+            c.create_text(x, 52, text=cost_str, fill=theme.MUTED,
                           font=theme.FONT_MONO, anchor="center")
 
     def _draw_body(self) -> None:
