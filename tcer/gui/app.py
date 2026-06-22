@@ -155,19 +155,21 @@ class TcerGui:
 
     def _on_analysis(self, a: analyze.ProjectAnalysis) -> None:
         self._current = a
+        prev_sid = self._selected_session_id
         self._selected_session_id = None
         self.session_col.update(a.reports)
-        # Auto-select first session
-        if a.reports:
-            first = a.reports[0]
-            sid = first.meta.session_id or first.meta.path.stem
-            self._selected_session_id = sid
-            self.session_col.select_first()
+        # Preserve the prior selection across the refresh when it survived
+        # (e.g. a reanalyze triggered indirectly by a date-filter FocusOut
+        # firing as a popup closes); otherwise default to the most recent.
+        # select_* set the visual selection only (notify=False) — the unified
+        # render below handles metrics + trend exactly once.
+        if prev_sid and self.session_col.select_by_sid(prev_sid, notify=False):
+            self._selected_session_id = prev_sid
+        elif a.reports:
+            self._selected_session_id = self.session_col.select_first(notify=False)
         self.ranking_view.update(a.reports)
         # Trend + 模型对比 must respect the current view mode (project vs
-        # session). _render_session_views handles both, plus the trend highlight;
-        # calling it here avoids clobbering the session-scoped views that
-        # select_first() just rendered when in 会话 mode.
+        # session). _render_session_views handles both, plus the trend highlight.
         self._render_session_views()
         self._render_metrics()
         self._update_tab_names()
@@ -178,22 +180,20 @@ class TcerGui:
         self._selected_session_id = sid
         if self.view_mode.get() == "session":
             self._render_metrics()
-            self._render_session_views()
+            self._update_model_compare()
+            # Highlight in trend without rebuilding the chart (preserves zoom).
+            self.trend_chart.select_session_by_sid(sid)
         self._update_tab_names()
 
     def _on_view_change(self) -> None:
         self._render_metrics()
-        self._render_session_views()
+        self._update_model_compare()
         self._update_tab_names()
 
-    def _render_session_views(self) -> None:
-        """Update model compare based on view mode. Trend always shows all sessions."""
+    def _update_model_compare(self) -> None:
+        """Update model compare based on view mode. Does not touch TrendChart."""
         if not self._current:
             return
-        self.trend_chart.update(self._current.reports)
-        # Highlight selected session in trend chart
-        if self._selected_session_id:
-            self.trend_chart.select_session_by_sid(self._selected_session_id)
         mode = self.view_mode.get()
         if mode == "session" and self._selected_session_id:
             report = self._session_report(self._selected_session_id)
@@ -201,6 +201,16 @@ class TcerGui:
                 self.model_compare.update([report])
         else:
             self.model_compare.update(self._current.reports)
+
+    def _render_session_views(self) -> None:
+        """Rebuild TrendChart and model compare. Called only on fresh analysis."""
+        if not self._current:
+            return
+        self.trend_chart.update(self._current.reports)
+        # Highlight selected session in trend chart
+        if self._selected_session_id:
+            self.trend_chart.select_session_by_sid(self._selected_session_id)
+        self._update_model_compare()
 
     def _update_tab_names(self) -> None:
         """Update tab names with (项目) or (会话) suffix based on view mode."""

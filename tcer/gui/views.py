@@ -417,12 +417,13 @@ class SessionColumn:
             w.bind("<Double-Button-1>", lambda e, s=sid: self.controller.show_session_detail(s))
         return card
 
-    def _select(self, card, sid):
+    def _select(self, card, sid, *, notify=True):
         if self._selected is not None:
             self._selected.set_selected(False)
         self._selected = card
         card.set_selected(True)
-        self.controller.on_select_session(sid)
+        if notify:
+            self.controller.on_select_session(sid)
 
     def _on_right_click(self, event, report, sid):
         """Right-click context menu on a session card."""
@@ -529,12 +530,21 @@ class SessionColumn:
             self._selected.set_selected(False)
         self._selected = None
 
-    def select_first(self) -> None:
-        """Select the first session card (if any)."""
-        if self._cards:
-            card = self._cards[0]
-            sid = self._reports[0].meta.session_id or self._reports[0].meta.path.stem
-            self._select(card, sid)
+    def select_first(self, *, notify=True) -> str | None:
+        """Select the first session card (if any); return its sid."""
+        if not self._cards:
+            return None
+        sid = self._reports[0].meta.session_id or self._reports[0].meta.path.stem
+        self._select(self._cards[0], sid, notify=notify)
+        return sid
+
+    def select_by_sid(self, sid: str, *, notify=True) -> bool:
+        """Select the card whose session id matches ``sid``; return True if found."""
+        for card, r in zip(self._cards, self._reports):
+            if (r.meta.session_id or r.meta.path.stem) == sid:
+                self._select(card, sid, notify=notify)
+                return True
+        return False
 
 
 class MetricPanel:
@@ -1268,6 +1278,25 @@ class TrendChart:
         for w in self._content.winfo_children():
             w.destroy()
 
+    def _add_mode_buttons(self, parent) -> tk.Frame:
+        """Build the shared '趋势分析' group header with the 3 mode radio buttons.
+
+        The three sub-modes (趋势图 / 散点图 / 仪表板) rebuild ``_content`` from
+        scratch, so each needs its own header. Callers pack their own extras
+        (legend / 重置缩放 / hint label) into the returned frame.
+        """
+        gc = theme.GROUP_COLORS["G_NEUTRAL"]
+        header = tk.Frame(parent, bg=gc, padx=6, pady=3)
+        header.pack(fill="x", pady=(1, 0))
+        tk.Label(header, text="▼ 趋势分析", bg=gc, fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
+            tk.Radiobutton(header, text=label, variable=self._mode, value=val,
+                           bg=gc, fg=theme.FG, selectcolor=gc,
+                           activebackground=gc, activeforeground=theme.ACCENT,
+                           font=theme.FONT_UI, command=self._switch_mode).pack(side="left", padx=4)
+        return header
+
     def _build_trend_content(self) -> None:
         self._clear_content()
         # Left: metric selector
@@ -1285,17 +1314,7 @@ class TrendChart:
         right.pack(side="left", fill="both", expand=True)
 
         # Mode buttons in group header
-        mode_header = tk.Frame(right, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
-        mode_header.pack(fill="x", pady=(1, 0))
-        tk.Label(mode_header, text="▼ 趋势分析", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-        for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
-            tk.Radiobutton(mode_header, text=label, variable=self._mode, value=val,
-                           bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
-                           selectcolor=theme.GROUP_COLORS["G_NEUTRAL"],
-                           activebackground=theme.GROUP_COLORS["G_NEUTRAL"],
-                           activeforeground=theme.ACCENT,
-                           font=theme.FONT_UI, command=self._switch_mode).pack(side="left", padx=4)
+        mode_header = self._add_mode_buttons(right)
         self._legend_frame = tk.Frame(mode_header, bg=theme.GROUP_COLORS["G_NEUTRAL"])
         self._legend_frame.pack(side="right")
         self._zoom_reset_btn = tk.Button(
@@ -1336,17 +1355,7 @@ class TrendChart:
         right.pack(fill="both", expand=True)
 
         # Mode buttons in group header (same as trend)
-        mode_header = tk.Frame(right, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
-        mode_header.pack(fill="x", pady=(1, 0))
-        tk.Label(mode_header, text="▼ 趋势分析", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-        for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
-            tk.Radiobutton(mode_header, text=label, variable=self._mode, value=val,
-                           bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
-                           selectcolor=theme.GROUP_COLORS["G_NEUTRAL"],
-                           activebackground=theme.GROUP_COLORS["G_NEUTRAL"],
-                           activeforeground=theme.ACCENT,
-                           font=theme.FONT_UI, command=self._switch_mode).pack(side="left", padx=4)
+        mode_header = self._add_mode_buttons(right)
         tk.Label(mode_header, text="6 组代表指标总览", bg=theme.GROUP_COLORS["G_NEUTRAL"],
                  fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left", padx=8)
 
@@ -1359,17 +1368,7 @@ class TrendChart:
         right.pack(fill="both", expand=True)
 
         # Mode buttons in group header (same as trend)
-        mode_header = tk.Frame(right, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
-        mode_header.pack(fill="x", pady=(1, 0))
-        tk.Label(mode_header, text="▼ 趋势分析", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-        for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
-            tk.Radiobutton(mode_header, text=label, variable=self._mode, value=val,
-                           bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
-                           selectcolor=theme.GROUP_COLORS["G_NEUTRAL"],
-                           activebackground=theme.GROUP_COLORS["G_NEUTRAL"],
-                           activeforeground=theme.ACCENT,
-                           font=theme.FONT_UI, command=self._switch_mode).pack(side="left", padx=4)
+        self._add_mode_buttons(right)
 
         self._scatter_chart = ScatterChart(right)
         self._scatter_chart.update(self._reports)
@@ -1398,6 +1397,19 @@ class TrendChart:
 
     # -- public API -------------------------------------------------------
     def update(self, reports) -> None:
+        """Update the chart with new reports, restoring the selected session by sid.
+
+        Zoom is intentionally NOT preserved: the zoom window is a pair of
+        indices into the previous report list, which is meaningless once the
+        data changes. Only the selected data point is carried over.
+        """
+        # Save current state
+        old_selected_sid = None
+        if self._selected_idx is not None and self._selected_idx < len(self._reports):
+            r = self._reports[self._selected_idx]
+            old_selected_sid = r.meta.session_id or r.meta.path.stem
+
+        # Update data
         self._all_reports = sorted(reports,
                                    key=lambda r: r.usage.started_at or r.usage.ended_at or 0)
         self._reports = list(self._all_reports)
@@ -1405,6 +1417,14 @@ class TrendChart:
         self._zoom_offset = 0
         self._selected_idx = None
         self._tooltip.hide()
+
+        # Restore selection if the session still exists
+        if old_selected_sid:
+            for i, r in enumerate(self._reports):
+                if (r.meta.session_id or r.meta.path.stem) == old_selected_sid:
+                    self._selected_idx = i
+                    break
+
         self._draw()
 
     # -- event handlers ---------------------------------------------------
