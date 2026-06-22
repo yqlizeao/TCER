@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -170,6 +171,94 @@ def save_baselines(values: dict) -> None:
     TCER_BASELINE = b["tcer"]
     NCPI_BASELINE = b["ncpi"]
     CPE_BASELINE = b["cpe"]
+
+
+# ============================================================
+# 模型对比
+# ============================================================
+
+_SKIP_MODELS = {"<synthetic>", ""}
+
+
+@dataclass
+class ModelComparison:
+    """Aggregated stats for one model across sessions."""
+    model_id: str
+    display_name: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
+    cost: float = 0.0
+    session_count: int = 0
+    cache_hit_ratio: float | None = None
+    tokens_per_dollar: float | None = None
+    avg_ctei: float | None = None
+    avg_tcer: float | None = None
+    token_share: float = 0.0
+    cost_share: float = 0.0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens + self.cache_creation_tokens + self.cache_read_tokens
+
+
+def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
+    """Aggregate and compare models across sessions."""
+    from tcer.core.pricing import label as model_label
+
+    buckets: dict[str, ModelComparison] = {}
+    for r in reports:
+        u = r.usage
+        for model_id, mu in u.per_model.items():
+            if model_id in _SKIP_MODELS:
+                continue
+            mc = buckets.get(model_id)
+            if mc is None:
+                mc = ModelComparison(model_id=model_id, display_name=model_label(model_id))
+                buckets[model_id] = mc
+            mc.input_tokens += mu.input_tokens
+            mc.output_tokens += mu.output_tokens
+            mc.cache_creation_tokens += mu.cache_creation_input_tokens
+            mc.cache_read_tokens += mu.cache_read_input_tokens
+            mc.session_count += 1
+            # Track CTEI/TCER for sessions where model is primary (>50% tokens)
+            mu_total = mu.input_tokens + mu.output_tokens + mu.cache_creation_input_tokens + mu.cache_read_input_tokens
+            if u.total > 0 and mu_total / u.total > 0.5:
+                if r.ctei is not None:
+                    mc.avg_ctei = r.ctei if mc.avg_ctei is None else (mc.avg_ctei + r.ctei) / 2
+                if r.tcer is not None:
+                    mc.avg_tcer = r.tcer if mc.avg_tcer is None else (mc.avg_tcer + r.tcer) / 2
+
+    # Compute derived metrics
+    grand_tokens = sum(mc.total_tokens for mc in buckets.values())
+    grand_cost = 0.0
+    for mc in buckets.values():
+        mc.cost = cost_usd(
+            _FakeModelUsage(mc.input_tokens, mc.output_tokens,
+                            mc.cache_creation_tokens, mc.cache_read_tokens),
+            model=mc.model_id)
+        grand_cost += mc.cost
+        denom = mc.input_tokens + mc.cache_creation_tokens
+        mc.cache_hit_ratio = mc.cache_read_tokens / denom if denom > 0 else None
+        mc.tokens_per_dollar = mc.total_tokens / mc.cost if mc.cost > 0 else None
+        mc.token_share = mc.total_tokens / grand_tokens * 100 if grand_tokens else 0
+    for mc in buckets.values():
+        mc.cost_share = mc.cost / grand_cost * 100 if grand_cost else 0
+
+    return sorted(buckets.values(), key=lambda mc: mc.total_tokens, reverse=True)
+
+
+class _FakeModelUsage:
+    """Lightweight stand-in for ModelUsage (avoids importing models.py)."""
+    __slots__ = ("input_tokens", "output_tokens",
+                 "cache_creation_input_tokens", "cache_read_input_tokens")
+
+    def __init__(self, i, o, cw, cr):
+        self.input_tokens = i
+        self.output_tokens = o
+        self.cache_creation_input_tokens = cw
+        self.cache_read_input_tokens = cr
 
 
 

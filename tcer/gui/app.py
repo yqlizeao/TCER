@@ -20,7 +20,7 @@ from tcer.core.calibrate import calibrate_project
 from tcer.core.paths import list_projects
 from tcer.core.reader import discover_jsonl
 from . import popups, theme, views
-from .views import CteiRankingView, FilterBar, MetricPanel, ProjectColumn, SessionColumn, TrendChart
+from .views import CteiRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
 
 
 class TcerGui:
@@ -73,13 +73,16 @@ class TcerGui:
         tab_m = tk.Frame(nb, bg=theme.BG)
         tab_b = tk.Frame(nb, bg=theme.PANEL)
         tab_t = tk.Frame(nb, bg=theme.PANEL)
+        tab_c = tk.Frame(nb, bg=theme.PANEL)
         nb.add(tab_m, text="指标分类")
         nb.add(tab_b, text="综合效率指数排名")
         nb.add(tab_t, text="趋势")
+        nb.add(tab_c, text="模型对比")
 
         self.metric_panel = MetricPanel(tab_m, self)
         self.ranking_view = CteiRankingView(tab_b, controller=self)
         self.trend_chart = TrendChart(tab_t, controller=self)
+        self.model_compare = ModelCompareView(tab_c, controller=self)
 
         root.update_idletasks()
         paned.sash_place(0, 190, 0)
@@ -157,6 +160,7 @@ class TcerGui:
         self.session_col.clear_selection()
         self.ranking_view.update(a.reports)
         self.trend_chart.update(a.reports)
+        self.model_compare.update(a.reports)
         self._render_metrics()
         self.filter.set_status(f"完成 · 共 {a.n_sessions} 个会话")
 
