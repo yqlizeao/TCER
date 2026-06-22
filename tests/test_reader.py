@@ -212,6 +212,37 @@ def test_session_meta_extracts_id_cwd_title():
     assert meta.is_subagent is False
 
 
+def test_session_meta_tail_title_beats_stale_head_title(tmp_path):
+    """A newer ai-title in the tail must win over an older one in the head.
+
+    Claude Code rewrites the title as the conversation grows; the freshest one
+    lives furthest down the file. Regression guard for the head-overwrites-tail bug.
+    """
+    lines: list[dict] = [
+        {"type": "user", "sessionId": "sess-x", "cwd": "/tmp/p",
+         "message": {"role": "user", "content": "原始问题"}},
+        {"type": "ai-title", "sessionId": "sess-x", "aiTitle": "旧标题"},
+    ]
+    # Pad past the head window so head (first 20) and tail (last 30) don't overlap.
+    for _ in range(50):
+        lines.append(_assistant(_usage(1, 0, 0, 1)))
+    lines.append({"type": "ai-title", "sessionId": "sess-x", "aiTitle": "新标题"})
+    meta = reader.read_session_meta(write_session(tmp_path, lines))
+    assert meta.title == "新标题"
+    assert meta.session_id == "sess-x"
+
+
+def test_session_meta_falls_back_to_user_message_without_ai_title(tmp_path):
+    """No ai-title anywhere → first real user message is used as the title."""
+    lines = [
+        {"type": "user", "sessionId": "sess-y", "cwd": "/tmp/p",
+         "message": {"role": "user", "content": "重构这个函数"}},
+        _assistant(_usage(1, 0, 0, 1)),
+    ]
+    meta = reader.read_session_meta(write_session(tmp_path, lines))
+    assert meta.title == "重构这个函数"
+
+
 def test_is_subagent_detection():
     assert reader.is_subagent(Path("/home/u/.claude/projects/p/subagents/ag.jsonl")) is True
     assert reader.is_subagent(Path("/home/u/.claude/projects/p/main.jsonl")) is False

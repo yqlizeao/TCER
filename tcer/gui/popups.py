@@ -12,7 +12,7 @@ from tkinter import ttk
 from tcer.core import format as fmt
 from tcer.core import metrics
 from . import theme
-from .metric_defs import CONCEPT_NOTES, GROUPS
+from .metric_defs import CONCEPT_NOTES, GROUPS, METRIC_BY_KEY
 from .widgets import ScrollFrame
 
 
@@ -224,11 +224,13 @@ class ModelsPopup:
         "cache_creation": "#dcdcaa",  # yellow
         "cache_read":     "#6a6a6a",  # gray
     }
+    # Token-type labels sourced from the metric SSOT (G2 names) so they read
+    # identically to the 指标分类 tab — input/output/缓存创建/缓存命中.
     _LABELS = {
-        "input":          "输入",
-        "output":         "输出",
-        "cache_creation": "缓存写入",
-        "cache_read":     "缓存读取",
+        "input":          METRIC_BY_KEY["input"].name,
+        "output":         METRIC_BY_KEY["output"].name,
+        "cache_creation": METRIC_BY_KEY["cache_write"].name,
+        "cache_read":     METRIC_BY_KEY["cache_read"].name,
     }
     # Models to hide from the popup (ccswitch synthetic stubs, always zero usage)
     _SKIP_MODELS = {"<synthetic>"}
@@ -701,31 +703,33 @@ class RadarPopup:
     instead of project min/max, so outliers don't distort the shape.
     """
 
-    # (key, label, norm_type, ref)
+    # (key, norm_type, ref) — axis label + value text come from the metric SSOT
+    # (metric_defs) so the radar reads exactly like the 指标分类 tab. ``norm_type``
+    # / ``ref`` are radar-only (how the 0–1 polygon radius is scaled).
     _AXES = [
-        ("ctei",  "综合效率", "grade",     2.0),
-        ("chr",   "缓存命中", "pct100",    1.0),
-        ("cpe",   "千行成本", "grade_inv", 8.22),
-        ("churn", "返工率",   "pct_inv",   1.0),
-        ("read_write_ratio", "读写比", "ratio", 3.0),
-        ("tcer",  "编码效率", "grade",     76.59),
+        ("ctei",  "grade",     2.0),
+        ("chr",   "pct100",    1.0),
+        ("cpe",   "grade_inv", 8.22),
+        ("churn", "pct_inv",   1.0),
+        ("read_write_ratio", "ratio", 3.0),
+        ("tcer",  "grade",     76.59),
     ]
 
     def __init__(self, parent, report, all_reports) -> None:
         import math
-        from tcer.gui.views import metric_raw_value
+        from .metric_defs import raw_value as metric_raw_value
+        from .metric_defs import display as metric_display, METRIC_BY_KEY
 
         sid = (report.meta.session_id or report.meta.path.stem)[:16]
         win = _new_window(parent, f"效率雷达 · {sid}…", "460x560")
         tk.Label(win, text="六维效率雷达", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=8).pack()
 
-        # Summary header
+        # Summary header — CTEI string straight from the SSOT (matches 指标分类).
         head = tk.Frame(win, bg="#2a2a2e", padx=10, pady=6)
         head.pack(fill="x", padx=10, pady=(0, 4))
-        ctei_raw = metric_raw_value(report, "ctei")
         grade = report.grade or "-"
-        ctei_val = f"{ctei_raw:.2f}" if ctei_raw else "-"
+        ctei_val = metric_display(report, "ctei")
         tk.Label(head, text=f"{report.meta.title or sid}  CTEI {ctei_val}  评级 {grade}",
                  bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI).pack()
 
@@ -734,12 +738,14 @@ class RadarPopup:
                            width=400, height=400)
         canvas.pack(padx=16, pady=8)
 
-        # Normalize each axis to 0-1 using absolute scales
+        # Normalize each axis to 0-1 using absolute scales; label + value from SSOT.
         axis_data = []
-        for key, label, ntype, ref in self._AXES:
+        for key, ntype, ref in self._AXES:
             raw = metric_raw_value(report, key)
             norm = self._normalize(raw, ntype, ref)
-            axis_data.append((key, label, raw, norm))
+            label = METRIC_BY_KEY[key].name
+            value_text = metric_display(report, key)
+            axis_data.append((key, label, value_text, norm))
 
         # Draw hexagonal radar
         cx, cy, R = 200, 200, 140
@@ -758,7 +764,7 @@ class RadarPopup:
                            fill="#444444", font=theme.FONT_MONO)
 
         # Axes + labels
-        for ai, (key, label, raw, norm) in enumerate(axis_data):
+        for ai, (key, label, value_text, norm) in enumerate(axis_data):
             angle = math.pi / 2 + 2 * math.pi * ai / n
             ex = cx + R * math.cos(angle)
             ey = cy - R * math.sin(angle)
@@ -767,15 +773,14 @@ class RadarPopup:
             ly = cy - (R + 24) * math.sin(angle)
             canvas.create_text(lx, ly, text=label, fill=theme.FG,
                                font=theme.FONT_UI_SMALL_BOLD)
-            raw_text = self._fmt_raw(key, raw)
             rx = cx + (R + 24) * math.cos(angle)
             ry = cy - (R + 24) * math.sin(angle) + 14
-            canvas.create_text(rx, ry, text=raw_text, fill=theme.MUTED,
+            canvas.create_text(rx, ry, text=value_text, fill=theme.MUTED,
                                font=theme.FONT_MONO)
 
         # Data polygon
         data_pts = []
-        for ai, (key, label, raw, norm) in enumerate(axis_data):
+        for ai, (key, label, value_text, norm) in enumerate(axis_data):
             angle = math.pi / 2 + 2 * math.pi * ai / n
             px = cx + R * norm * math.cos(angle)
             py = cy - R * norm * math.sin(angle)
@@ -811,26 +816,6 @@ class RadarPopup:
         if ntype == "ratio":
             return max(0.0, min(1.0, raw / ref))
         return 0.0
-
-    @staticmethod
-    def _fmt_raw(key, raw):
-        if raw is None:
-            return "—"
-        if key == "chr":
-            # metric_raw_value already scales chr to 0-100
-            return f"{raw:.1f}%"
-        if key == "churn":
-            # churn is 0-1 ratio, display as percentage
-            return f"{raw * 100:.1f}%"
-        if key == "cpe":
-            return f"${raw:.1f}"
-        if key == "ctei":
-            return f"{raw:.2f}"
-        if key == "tcer":
-            return f"{raw:.1f}"
-        if key == "read_write_ratio":
-            return f"{raw:.2f}"
-        return f"{raw:g}"
 
 
 def _copy(win, text: str) -> None:

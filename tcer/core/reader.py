@@ -239,20 +239,21 @@ def read_session_meta(path: Path) -> SessionMeta:
     doesn't require scanning whole files.
 
     **Title source = the AI-generated title** (matches VSCode Claude Code's session
-    list). Claude Code writes a refined ``ai-title`` line at the very end of the
-    file as the conversation grows, so the latest title lives in the tail — we take
-    the last non-empty ``aiTitle``. Sessions with no ``ai-title`` yet fall back to
-    the first real user message (VSCode's own pending-title behaviour).
+    list). Claude Code rewrites the ``ai-title`` line repeatedly as the conversation
+    grows, so the *newest* title lives furthest down the file — i.e. in the tail. We
+    therefore pick by priority: last ``aiTitle`` in the tail, else last ``aiTitle``
+    in the head, else the first real user message (VSCode's pending-title behaviour).
+    Tail must outrank head — head lines are older, so a stale head title must never
+    overwrite a fresher tail one.
     """
     head, tail = _read_head_tail_lines(path, head_n=20, tail_n=30)
     session_id: str | None = None
     cwd: str | None = None
     entrypoint: str | None = None
 
-    # Prefer the AI-generated title. Keep overwriting → the last (newest) non-empty
-    # aiTitle wins. The latest ai-title line sits at the file's end, so the tail
-    # captures it.
-    title: str | None = None
+    # Newest ai-title in the tail wins. Keep overwriting → the last non-empty
+    # aiTitle in the tail is the freshest the file has.
+    tail_title: str | None = None
     for line in tail:
         try:
             obj = json.loads(line)
@@ -261,8 +262,10 @@ def read_session_meta(path: Path) -> SessionMeta:
         if obj.get("type") == "ai-title":
             t = obj.get("aiTitle")
             if isinstance(t, str) and t.strip():
-                title = t.strip()
+                tail_title = t.strip()
 
+    head_title: str | None = None
+    fallback_title: str | None = None
     for line in head:
         try:
             obj = json.loads(line)
@@ -271,7 +274,7 @@ def read_session_meta(path: Path) -> SessionMeta:
         if obj.get("type") == "ai-title":
             t = obj.get("aiTitle")
             if isinstance(t, str) and t.strip():
-                title = t.strip()
+                head_title = t.strip()
         if session_id is None:
             sid = obj.get("sessionId")
             if isinstance(sid, str):
@@ -284,8 +287,8 @@ def read_session_meta(path: Path) -> SessionMeta:
             ep = obj.get("entrypoint")
             if isinstance(ep, str):
                 entrypoint = ep
-        # Fallback title only when no ai-title exists: first real user message.
-        if title is None:
+        # First real user message — only used when no ai-title exists at all.
+        if fallback_title is None:
             msg = obj.get("message")
             if isinstance(msg, dict) and msg.get("role") == "user":
                 txt = extract_text(msg.get("content")).strip()
@@ -294,8 +297,10 @@ def read_session_meta(path: Path) -> SessionMeta:
                     txt = _strip_tags(txt)
                     # Skip system-generated phrases after cleaning
                     if txt and not txt.startswith(_TITLE_NOISE_AFTER_CLEAN):
-                        title = txt
+                        fallback_title = txt
 
+    # Priority: newest tail ai-title > head ai-title > first user message.
+    title = tail_title or head_title or fallback_title
     if title:
         title = truncate_summary(title, TITLE_MAX_CHARS)
     return SessionMeta(

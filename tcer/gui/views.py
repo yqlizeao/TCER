@@ -17,7 +17,12 @@ from tcer.core import metrics
 from tcer.core.export import ctei_decompose, ctei_decompose_avg
 from tcer.core.format import fmt_dt
 from . import theme
-from .metric_defs import GROUPS, report_values
+from .metric_defs import (
+    GROUPS, MODEL_GROUPS, Metric, METRIC_BY_KEY,
+    CTEI_FACTORS, CTEI_FACTOR_GOOD_THRESHOLD, format_factor,
+    report_values, raw_value, format_value, format_plot,
+    model_display, model_raw, model_tip,
+)
 from .widgets import Card, MetricCell, ScrollFrame, Tooltip
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
@@ -482,9 +487,9 @@ class SessionColumn:
             label="📋 复制会话标题",
             command=lambda: self._copy_text(title),
         )
-        cost_str = f"${report.cost:.4f}" if report.cost else "$0"
-        tcer_str = f"{report.tcer:.1f}" if report.tcer is not None else "—"
-        ctei_str = f"{report.ctei:.2f}" if report.ctei is not None else "—"
+        cost_str = format_value("cost", report.cost)
+        tcer_str = format_value("tcer", report.tcer)
+        ctei_str = format_value("ctei", report.ctei)
         menu.add_command(
             label=f"📋 复制摘要（TCER={tcer_str} · CTEI={ctei_str} · {cost_str}）",
             command=lambda: self._copy_text(
@@ -607,18 +612,8 @@ class CteiRankingView:
     Decompose panel: summary card + 4-factor waterfall bars + project avg comparison.
     """
 
-    # Factor display names + color when above/below 1.0.
-    _FACTOR_META = {
-        "eff_factor":     ("效率因子", "TCER÷基准"),
-        "density_factor": ("产出密度", "NCPI÷基准"),
-        "cost_factor":    ("成本效率", "基准÷CPE"),
-        "cache_factor":   ("缓存因子", "1+CHR×0.5"),
-    }
-    _FACTOR_KEYS = ("eff_factor", "density_factor", "cost_factor", "cache_factor")
-    _FACTOR_GOOD = "#4ec9b0"
-    _FACTOR_BAD  = "#f48771"
-    _FACTOR_MID  = "#6B7077"
-    _MID_X       = 160  # X position of the 1.0 neutral line in factor bars
+    # CTEI factor metadata (names / formulas / 好坏阈值) comes from the metric SSOT
+    # (metric_defs.CTEI_FACTORS); colours are the shared theme value colours.
 
     def __init__(self, parent, controller=None) -> None:
         self._controller = controller
@@ -723,7 +718,7 @@ class CteiRankingView:
         if w < 10:
             return
 
-        grades_in_order = ["优秀", "良好", "中等", "低效", "极端低效"]
+        grades_in_order = [label for label, _ in metrics.GRADE_BANDS]
         counts = {g: 0 for g in grades_in_order}
         for _, _, g, _ in self._ranking:
             if g in counts:
@@ -775,7 +770,7 @@ class CteiRankingView:
         for rank, (label, ctei, grade, report) in enumerate(items, 1):
             tag = f"grade_{grade}" if grade else ""
             self._tree.insert("", "end",
-                              values=(rank, label, f"{ctei:.3f}", grade),
+                              values=(rank, label, format_value("ctei", ctei), grade),
                               tags=(tag,),
                               iid=str(id(report)))
         # Restore selection if report still visible
@@ -868,7 +863,7 @@ class CteiRankingView:
         grade = report.grade or ""
         tk.Label(row, text="CTEI", bg=theme.PANEL, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL).pack(side="left")
-        tk.Label(row, text=f"{ctei_val:.3f}", bg=theme.PANEL,
+        tk.Label(row, text=format_value("ctei", ctei_val), bg=theme.PANEL,
                  fg=theme.GRADE_HEX.get(grade, theme.FG),
                  font=("Consolas", 16, "bold")).pack(side="left", padx=(4, 8))
 
@@ -901,9 +896,9 @@ class CteiRankingView:
         grid.pack(fill="x", pady=(0, 1))
 
         # Factor rows
-        for i, key in enumerate(self._FACTOR_KEYS):
-            val = factors.get(key, 0.0)
-            name, desc = self._FACTOR_META[key]
+        for i, factor in enumerate(CTEI_FACTORS):
+            val = factors.get(factor.key, 0.0)
+            name, desc = factor.name, factor.formula
 
             row = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=4)
             row.pack(fill="x")
@@ -911,8 +906,8 @@ class CteiRankingView:
             # Label + value
             tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG,
                      font=theme.FONT_UI_SMALL, width=10, anchor="w").pack(side="left")
-            color = self._FACTOR_GOOD if val >= 1.0 else self._FACTOR_BAD
-            tk.Label(row, text=f"{val:.2f}", bg=theme.PANEL, fg=color,
+            color = theme.VALUE_GOOD if val >= CTEI_FACTOR_GOOD_THRESHOLD else theme.VALUE_BAD
+            tk.Label(row, text=format_factor(val), bg=theme.PANEL, fg=color,
                      font=theme.FONT_VALUE, width=6, anchor="e").pack(side="left", padx=4)
 
             # Bar
@@ -935,7 +930,7 @@ class CteiRankingView:
         prod_frame.pack(fill="x", pady=(0, 1))
         tk.Label(prod_frame, text="乘积 =", bg=theme.PANEL, fg=theme.MUTED,
                  font=theme.FONT_UI).pack(side="left")
-        tk.Label(prod_frame, text=f"CTEI  {report.ctei:.3f}", bg=theme.PANEL,
+        tk.Label(prod_frame, text=f"CTEI  {format_value('ctei', report.ctei)}", bg=theme.PANEL,
                  fg=theme.GRADE_HEX.get(report.grade or "", theme.FG),
                  font=theme.FONT_VALUE).pack(side="left", padx=4)
 
@@ -953,10 +948,10 @@ class CteiRankingView:
         grid = tk.Frame(self._decomp_inner, bg=theme.PANEL, padx=4, pady=4)
         grid.pack(fill="x", pady=(0, 1))
 
-        for i, key in enumerate(self._FACTOR_KEYS):
-            name, _ = self._FACTOR_META[key]
-            sel_val = factors.get(key, 0.0)
-            avg_val = avg.get(key, 0.0)
+        for i, factor in enumerate(CTEI_FACTORS):
+            name = factor.name
+            sel_val = factors.get(factor.key, 0.0)
+            avg_val = avg.get(factor.key, 0.0)
 
             row = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=3)
             row.pack(fill="x")
@@ -965,12 +960,12 @@ class CteiRankingView:
                      font=theme.FONT_UI_SMALL, width=10, anchor="w").pack(side="left")
 
             # Selected value
-            sel_color = self._FACTOR_GOOD if sel_val >= avg_val else self._FACTOR_BAD
-            tk.Label(row, text=f"{sel_val:.2f}", bg=theme.PANEL, fg=sel_color,
+            sel_color = theme.VALUE_GOOD if sel_val >= avg_val else theme.VALUE_BAD
+            tk.Label(row, text=format_factor(sel_val), bg=theme.PANEL, fg=sel_color,
                      font=theme.FONT_VALUE, width=6, anchor="e").pack(side="left", padx=2)
 
             # Average value
-            tk.Label(row, text=f"均值 {avg_val:.2f}", bg=theme.PANEL, fg=theme.MUTED,
+            tk.Label(row, text=f"均值 {format_factor(avg_val)}", bg=theme.PANEL, fg=theme.MUTED,
                      font=theme.FONT_UI_SMALL).pack(side="left", padx=4)
 
 
@@ -993,14 +988,31 @@ _METRIC_BASELINE: dict[str, str] = {
 # Fixed palette for multi-metric overlay (up to 4 lines).
 _OVERLAY_COLORS = ["#007acc", "#4ec9b0", "#ce9178", "#c586c0"]
 
-# CTEI grade background bands (lo, hi, fill_color, label).
-_CTEI_BANDS: list[tuple[float, float, str, str]] = [
-    (2.0, 999, "#142814", "优秀 >2"),
-    (1.0, 2.0, "#14202e", "良好 1–2"),
-    (0.5, 1.0, "#2e2a14", "中等 0.5–1"),
-    (0.1, 0.5, "#2e1e14", "低效 0.1–0.5"),
-    (0.0, 0.1, "#2e1414", "极端低效 <0.1"),
-]
+# CTEI grade background bands (lo, hi, fill_color, label) — names + thresholds
+# derived from the metric SSOT (metrics.GRADE_BANDS); only the dark trend-fill
+# colours are presentation-local here.
+_BAND_FILL = {
+    "优秀": "#142814", "良好": "#14202e", "中等": "#2e2a14",
+    "低效": "#2e1e14", "极端低效": "#2e1414",
+}
+
+
+def _build_ctei_bands() -> list[tuple[float, float, str, str]]:
+    gb = metrics.GRADE_BANDS  # [(label, lower_bound)] best→worst
+    bands = []
+    for i, (label, lo) in enumerate(gb):
+        hi = gb[i - 1][1] if i > 0 else 999
+        if i == 0:
+            rng = f">{lo:g}"
+        elif i == len(gb) - 1:
+            rng = f"<{gb[i - 1][1]:g}"
+        else:
+            rng = f"{lo:g}–{hi:g}"
+        bands.append((lo, hi, _BAND_FILL[label], f"{label} {rng}"))
+    return bands
+
+
+_CTEI_BANDS: list[tuple[float, float, str, str]] = _build_ctei_bands()
 
 
 def _units_compatible(overlays: list[_OverlayLine]) -> bool:
@@ -1009,59 +1021,10 @@ def _units_compatible(overlays: list[_OverlayLine]) -> bool:
     return len(units) <= 1
 
 
-def metric_raw_value(report, key: str) -> float | None:
-    """Extract the raw numeric value for *key* from a SessionReport.
-
-    Returns None when the metric is unavailable or not numeric.
-    Special-cases keys whose attribute names differ from the metric key
-    or that live on ``report.usage``.
-    """
-    u = report.usage
-    # Key → attribute name mismatches (metric_defs key != SessionReport attr)
-    _ATTR_MAP = {
-        "churn": "churn_ratio",
-        "added": "code_added",
-        "deleted": "code_deleted",
-        "test_loc": "test_net_loc",
-        "doc_loc": "doc_net_loc",
-    }
-    try:
-        if key == "chr":
-            return report.chr * 100.0 if report.chr is not None else None
-        if key == "duration":
-            if u.started_at and u.ended_at:
-                return (u.ended_at - u.started_at) / 3600_000
-            return None
-        if key == "latency":
-            return report.avg_turn_latency_sec
-        if key == "tools":
-            return float(sum(u.tool_calls.values())) if u.tool_calls else None
-        if key == "total_tokens":
-            return float(u.total)
-        if key == "input":
-            return float(u.input_tokens)
-        if key == "output":
-            return float(u.output_tokens)
-        if key == "cache_write":
-            return float(u.cache_creation_input_tokens)
-        if key == "cache_read":
-            return float(u.cache_read_input_tokens)
-        if key == "turns":
-            return float(u.assistant_msgs)
-        if key == "subagent":
-            return float(report.subagent_count)
-        if key == "user_msgs":
-            return float(u.user_msgs)
-        if key == "thinking_count":
-            return float(u.thinking_count)
-        # Attribute name remapping for mismatches
-        attr = _ATTR_MAP.get(key, key)
-        v = getattr(report, attr, None)
-        if v is None:
-            return None
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+# Raw numeric extraction for charts now lives in the metric SSOT (metric_defs).
+# Kept as a module-level alias so existing call sites (and popups importing it
+# from here) keep working.
+metric_raw_value = raw_value
 
 
 def _nice_ticks(v_min: float, v_max: float, n: int = 5) -> list[float]:
@@ -1627,14 +1590,8 @@ class TrendChart:
     # -- tooltip ----------------------------------------------------------
     @staticmethod
     def _fmt_metric(key: str, raw: float, m: 'Metric | None') -> str:
-        """Format a single metric value for tooltip display (lightweight)."""
-        if key == "chr":
-            return f"{raw:.1f}%"
-        if key in ("cost", "cpe", "cost_per_mt"):
-            return f"${raw:.4f}"
-        if m and m.unit in ("行", "个"):
-            return f"{raw:,.0f}"
-        return f"{raw:g}"
+        """Format a single metric value for tooltip display (SSOT: format_plot)."""
+        return format_plot(key, raw, m)
 
     def _show_tooltip(self, idx: int, mx: int, my: int) -> None:
         r = self._reports[idx]
@@ -2513,36 +2470,11 @@ class ModelCompareView:
                      font=theme.FONT_UI, pady=40).pack()
             return
         self._build_header()
-        # Row tuple: (名称, 显示格式, 取值, tip_key, best方向)
-        # best: "max"=越大越好, "min"=越小越好, None=无好坏方向（不标金色）
-        self._build_group("Token 用量", [
-            ("总 Token", lambda mc: _fmt_tok(mc.total_tokens), lambda mc: mc.total_tokens, "total_tokens", None),
-            ("输入", lambda mc: _fmt_tok(mc.input_tokens), lambda mc: mc.input_tokens, "input", None),
-            ("输出", lambda mc: _fmt_tok(mc.output_tokens), lambda mc: mc.output_tokens, "output", None),
-            ("缓存创建", lambda mc: _fmt_tok(mc.cache_creation_tokens), lambda mc: mc.cache_creation_tokens, "cache_write", None),
-            ("缓存命中", lambda mc: _fmt_tok(mc.cache_read_tokens), lambda mc: mc.cache_read_tokens, "cache_read", None),
-        ])
-        self._build_group("成本", [
-            ("总成本", lambda mc: f"${mc.cost:.2f}" if mc.cost > 0 else "免费", lambda mc: mc.cost, "cost", "min"),
-            ("成本占比", lambda mc: f"{mc.cost_share:.1f}%", lambda mc: mc.cost_share, None, None),
-            ("Token 效率", lambda mc: f"{_fmt_tok(mc.tokens_per_dollar)}/$" if mc.tokens_per_dollar else ("∞" if mc.cost == 0 else "-"), lambda mc: mc.tokens_per_dollar, None, "max"),
-            ("代码效率", lambda mc: f"{mc.code_per_dollar:.1f} 行/$" if mc.code_per_dollar is not None else ("∞" if mc.cost == 0 else "-"), lambda mc: mc.code_per_dollar, None, "max"),
-        ])
-        self._build_group("效率", [
-            ("Token 占比", lambda mc: f"{mc.token_share:.1f}%", lambda mc: mc.token_share, None, None),
-            ("缓存命中率", lambda mc: f"{mc.cache_hit_ratio:.1%}" if mc.cache_hit_ratio is not None else "-", lambda mc: mc.cache_hit_ratio, "chr", "max"),
-            ("会话数", lambda mc: str(mc.session_count), lambda mc: mc.session_count, None, None),
-        ])
-        self._build_group("代码质量与行为", [
-            ("净增行/会话", lambda mc: f"{mc.net_loc_per_session:.0f}" if mc.net_loc_per_session is not None else "-", lambda mc: mc.net_loc_per_session, None, "max"),
-            ("工具错误率", lambda mc: f"{mc.tool_error_rate:.1%}" if mc.tool_error_rate is not None else "-", lambda mc: mc.tool_error_rate, "tool_error_rate", "min"),
-            ("探索占比", lambda mc: f"{mc.exploration_ratio:.1%}" if mc.exploration_ratio is not None else "-", lambda mc: mc.exploration_ratio, "exploration_ratio", None),
-            ("编辑占比", lambda mc: f"{mc.edit_ratio:.1%}" if mc.edit_ratio is not None else "-", lambda mc: mc.edit_ratio, "edit_ratio", "max"),
-            ("读写比", lambda mc: f"{mc.read_write_ratio:.1f}" if mc.read_write_ratio is not None else "-", lambda mc: mc.read_write_ratio, "read_write_ratio", "max"),
-            ("返工率", lambda mc: f"{mc.churn_ratio:.1%}" if mc.churn_ratio is not None else "-", lambda mc: mc.churn_ratio, "churn", "min"),
-            ("先读后写率", lambda mc: f"{mc.read_before_write:.1%}" if mc.read_before_write is not None else "-", lambda mc: mc.read_before_write, "read_before_write", "max"),
-            ("涉及文件/会话", lambda mc: f"{mc.files_per_session:.1f}" if mc.files_per_session is not None else "-", lambda mc: mc.files_per_session, None, None),
-        ])
+        # Per-model metric groups now come from the SSOT (metric_defs.MODEL_GROUPS):
+        # labels, formatting, tooltips and 好坏方向 all live there, shared with the
+        # other tabs' metric metadata.
+        for group in MODEL_GROUPS:
+            self._build_group(group)
 
     def _build_header(self) -> None:
         """Cost distribution bar + model summary, matching group header style."""
@@ -2600,7 +2532,7 @@ class ModelCompareView:
             name_lbl = tk.Label(cell, text=mc.display_name, bg=theme.PANEL, fg=color,
                                 font=theme.FONT_VALUE, anchor="w")
             name_lbl.pack(anchor="w")
-            cost_str = f"${mc.cost:.2f}" if mc.cost > 0 else "免费"
+            cost_str = model_display(mc, "m_cost")
             sub_lbl = tk.Label(cell, text=f"{cost_str} · {mc.session_count} 会话",
                                bg=theme.PANEL, fg=theme.MUTED,
                                font=theme.FONT_UI_SMALL, anchor="w")
@@ -2611,11 +2543,11 @@ class ModelCompareView:
         for j in range(len(self._models)):
             grid.grid_columnconfigure(j, weight=1)
 
-    def _build_group(self, title: str, metrics: list) -> None:
-        """Build a group section matching MetricPanel style."""
+    def _build_group(self, group) -> None:
+        """Build one per-model metric group from a metric_defs.Group (SSOT)."""
         header = tk.Frame(self._container, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
         header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text=f"▼ {title}", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
+        tk.Label(header, text=f"▼ {group.name}", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
                  font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
         grid = tk.Frame(self._container, bg=theme.PANEL, padx=4, pady=4)
@@ -2629,39 +2561,33 @@ class ModelCompareView:
                      font=theme.FONT_UI_SMALL_BOLD, anchor="e").grid(
                          row=0, column=j + 1, sticky="e", padx=2)
 
-        # Metric rows
-        for i, row in enumerate(metrics):
-            name, fmt_fn = row[0], row[1]
-            num_fn = row[2] if len(row) > 2 else None
-            tip_key = row[3] if len(row) > 3 else None
-            best = row[4] if len(row) > 4 else None
-            # Reuse the metric_defs tip for metrics shared with 指标分类,
-            # so naming + explanation stay consistent across tabs.
-            tip_metric = _metric_by_key.get(tip_key) if tip_key else None
-            tip_text = f"{tip_metric.name}\n{tip_metric.tip}" if tip_metric else None
+        # Metric rows — name / value / tooltip / 好坏方向 all come from the SSOT.
+        for i, metric in enumerate(group.metrics):
+            key = metric.key
+            tip_text = model_tip(key)
 
-            name_lbl = tk.Label(grid, text=name, bg=theme.PANEL, fg=theme.FG,
+            name_lbl = tk.Label(grid, text=metric.name, bg=theme.PANEL, fg=theme.FG,
                                 font=theme.FONT_UI_SMALL, anchor="w")
             name_lbl.grid(row=i + 1, column=0, sticky="w")
             if tip_text:
                 Tooltip(name_lbl, tip_text)
 
-            # Gold-highlight the best value in this row. "best" follows the
-            # metric's 词性: "max"=越大越好, "min"=越小越好. Skipped for metrics
+            # Gold-highlight the best value in this row. metric.sentiment follows
+            # the metric's 词性: "up"=越大越好, "down"=越小越好. Skipped for metrics
             # with no good/bad direction, or when all models tie.
             row_colors: dict[int, str] = {}
-            if num_fn is not None and best:
-                valid = [(j, num_fn(mc)) for j, mc in enumerate(self._models)]
+            if metric.sentiment in ("up", "down"):
+                valid = [(j, model_raw(mc, key)) for j, mc in enumerate(self._models)]
                 valid = [(j, v) for j, v in valid if isinstance(v, (int, float))]
                 distinct = {v for _, v in valid}
                 if len(distinct) >= 2:
-                    target = max(distinct) if best == "max" else min(distinct)
+                    target = max(distinct) if metric.sentiment == "up" else min(distinct)
                     for j, v in valid:
                         if v == target:
                             row_colors[j] = theme.VALUE_BEST
 
             for j, mc in enumerate(self._models):
-                val = fmt_fn(mc)
+                val = model_display(mc, key)
                 lbl = tk.Label(grid, text=val, bg=theme.PANEL,
                                fg=row_colors.get(j, theme.VALUE_NEUTRAL),
                                font=theme.FONT_VALUE, anchor="e")
@@ -2696,18 +2622,6 @@ def _model_price_tip(mc) -> str:
     )
 
 
-def _fmt_tok(n: float) -> str:
-    """Format token count with K/M suffix."""
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K"
-    return str(int(n))
-
-
-# Build reverse lookup: metric key → Metric object (for _build_overlay / tooltip).
-_metric_by_key: dict[str, 'Metric'] = {}
-for _g in GROUPS:
-    for _m in _g.metrics:
-        if _m.key not in _NON_PLOTTABLE:
-            _metric_by_key[_m.key] = _m
+# Reverse lookup metric key → Metric object (overlay / tooltip / axis labels),
+# sourced from the metric SSOT so there is a single registry of metric metadata.
+_metric_by_key = METRIC_BY_KEY

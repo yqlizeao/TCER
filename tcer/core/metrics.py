@@ -556,19 +556,30 @@ def ctei(
     )
 
 
+# CTEI rating bands (framework §6.3), best → worst: ``(label, lower_bound)``.
+# The top band is strictly greater-than its bound; the rest are ≥. Single source
+# for the rating taxonomy — ``grade()`` and the GUI's ranking bar / trend bands
+# all derive their names + thresholds from here.
+GRADE_BANDS: list[tuple[str, float]] = [
+    ("优秀", 2.0),
+    ("良好", 1.0),
+    ("中等", 0.5),
+    ("低效", 0.1),
+    ("极端低效", 0.0),
+]
+
+
 def grade(ctei_: float | None) -> str | None:
-    """CTEI rating (framework §6.3 thresholds)."""
+    """CTEI rating (framework §6.3 thresholds), derived from GRADE_BANDS."""
     if ctei_ is None:
         return None
-    if ctei_ > 2.0:
-        return "优秀"
-    if ctei_ >= 1.0:
-        return "良好"
-    if ctei_ >= 0.5:
-        return "中等"
-    if ctei_ >= 0.1:
-        return "低效"
-    return "极端低效"
+    top_label, top_lo = GRADE_BANDS[0]
+    if ctei_ > top_lo:
+        return top_label
+    for label, lo in GRADE_BANDS[1:]:
+        if ctei_ >= lo:
+            return label
+    return GRADE_BANDS[-1][0]
 
 
 def compute(

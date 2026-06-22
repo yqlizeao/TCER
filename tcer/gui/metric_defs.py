@@ -26,6 +26,8 @@ class Metric:
     tip: str      # plain-Chinese explanation
     level: str    # basic / compound → theme.LEVEL_COLORS
     sentiment: str = ""  # "up"=越高越好, "down"=越低越好, ""=中性
+    fmt: str = ""        # format spec token (filled from _SESSION_FMT / _MODEL_FMT at
+                         # import); drives format_value. "" / "text" = pass-through string.
 
 
 @dataclass(frozen=True)
@@ -280,76 +282,358 @@ def _task_category_name(category_key: str | None) -> str | None:
     return category_info["name"] if category_info else category_key
 
 
+# ============================================================
+# Metric engine — the single source of truth for extraction + formatting.
+#
+# Three concerns, one home:
+#   • format_value(fmt, native)  — native value → display string (panel, popups)
+#   • raw_value(report, key)     — numeric value in display magnitude (charts)
+#   • format_plot(key, raw, m)   — chart-tooltip formatting of a raw value
+# Consumers (views.py, popups.py) call these instead of re-deriving their own.
+# ============================================================
+
+# Format spec per session metric key. Drives _format_native; populated onto each
+# Metric.fmt at import so consumers can also read it off the Metric object.
+_SESSION_FMT: dict[str, str] = {
+    # G1 — text / custom display (see _DISPLAY_EXTRACTORS), grade is plain text
+    "subagent": "text", "turns": "text", "started": "text", "last_time": "text",
+    "duration": "text", "models": "text", "tools": "text", "entrypoint": "text",
+    "task_type": "text", "grade": "text",
+    "latency": "float:0.0", "user_msgs": "int",
+    # G2
+    "total_tokens": "int", "input": "int", "output": "int",
+    "cache_write": "int", "cache_read": "int",
+    # G3
+    "chr": "pct", "io_ratio": "float:0.1", "caf": "float:0.00",
+    "cache_efficiency": "float:0.00", "cache_write_ratio": "pct",
+    "non_cached_input_ratio": "pct",
+    # G4
+    "net_loc": "int", "added": "int", "deleted": "int", "churn": "pct",
+    "test_loc": "int", "doc_loc": "int", "read_write_ratio": "float:0.0",
+    "edit_ratio": "pct", "exploration_ratio": "pct", "thinking_count": "int",
+    "files_touched": "int", "search_edit_ratio": "pct", "read_before_write": "pct",
+    "tool_error_rate": "pct", "high_churn_files": "int", "unseen_writes": "int",
+    # G5
+    "cost": "money", "cost_per_mt": "money2", "cpe": "money",
+    # G6
+    "tcer": "float:0.0", "ctei": "float:0.000", "ttaf": "float:0.00",
+    "ntcer": "float:0.00", "ncpi": "float:0.000", "psac": "float:0.000",
+    "tcer_phase_adj": "float:0.00",
+    "bl_tcer": "float:0.00", "bl_ncpi": "float:0.000", "bl_cpe": "float:0.00",
+}
+
+# key → attribute name on SessionReport when they differ from the metric key.
+_REPORT_ATTR = {
+    "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
+    "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
+    "high_churn_files": "high_churn_file_count", "latency": "avg_turn_latency_sec",
+}
+# key → attribute name on report.usage (token counters live there).
+_USAGE_ATTR = {
+    "total_tokens": "total", "input": "input_tokens", "output": "output_tokens",
+    "cache_write": "cache_creation_input_tokens", "cache_read": "cache_read_input_tokens",
+    "user_msgs": "user_msgs", "thinking_count": "thinking_count",
+}
+# key → callable returning the current baseline constant (read-only reference).
+_BASELINE = {
+    "bl_tcer": lambda: _metrics.TCER_BASELINE,
+    "bl_ncpi": lambda: _metrics.NCPI_BASELINE,
+    "bl_cpe": lambda: _metrics.CPE_BASELINE,
+}
+
+
+def _format_native(fmt_spec: str, v) -> str:
+    """Format a *native* value (chr=0.959, cost in USD, …) per a fmt spec token.
+
+    Mirrors the per-key formatting the GUI has always used, so output is byte-for-byte
+    identical to the old hand-written ``report_values``.
+    """
+    if fmt_spec == "int":
+        return fmt.fmt_int(v)
+    if fmt_spec == "pct":
+        return fmt.fmt_pct(v)
+    if fmt_spec.startswith("float:"):
+        return fmt.fmt_float(v, fmt_spec.split(":", 1)[1])
+    if fmt_spec == "money":
+        return fmt.fmt_money(v)
+    if fmt_spec == "money2":
+        return f"${v:.2f}" if v is not None else "-"
+    # "text" / "" — already a string (or None)
+    if v is None:
+        return "-"
+    return v if isinstance(v, str) else str(v)
+
+
+def format_value(key: str, native) -> str:
+    """Native value → display string, using the metric's declared fmt."""
+    m = METRIC_BY_KEY.get(key)
+    return _format_native(m.fmt if m else "", native)
+
+
+# Metrics whose display string is genuinely custom (not just fmt(native)).
+_DISPLAY_EXTRACTORS = {
+    "subagent": lambda r: str(r.subagent_count or 0),
+    "turns": lambda r: _turns_display(r.usage),
+    "started": lambda r: fmt.fmt_dt(r.usage.started_at),
+    "last_time": lambda r: fmt.fmt_dt(r.usage.ended_at),
+    "duration": _duration_hours,
+    "models": lambda r: fmt.models_label(r.usage) if r.usage.models else "-",
+    "tools": _tools_summary,
+    "entrypoint": lambda r: r.meta.entrypoint or "-",
+    "task_type": lambda r: _task_category_name(r.task_type) or "-",
+}
+
+
+def _native(report: SessionReport, key: str):
+    """The underlying value for *key* (chr=0.959, cost USD, grade str, …)."""
+    if key in _USAGE_ATTR:
+        return getattr(report.usage, _USAGE_ATTR[key], None)
+    if key in _BASELINE:
+        return _BASELINE[key]()
+    return getattr(report, _REPORT_ATTR.get(key, key), None)
+
+
+def display(report: SessionReport, key: str) -> str:
+    """The display string for one metric of one SessionReport (session/aggregate)."""
+    ext = _DISPLAY_EXTRACTORS.get(key)
+    if ext is not None:
+        return ext(report)
+    return _format_native(_SESSION_FMT.get(key, ""), _native(report, key))
+
+
 def report_values(report: SessionReport) -> dict[str, str]:
     """Format every metric key for one SessionReport (works for aggregate or single).
 
     The single place that maps metric ``key`` → display string, so the grid just
-    looks up ``values[key]``. Keys without a value fall back to ``"-"`` upstream.
+    looks up ``values[key]``. Now data-driven from the SSOT (``_SESSION_FMT`` +
+    ``_DISPLAY_EXTRACTORS``) — output is identical to the former hand-written map.
+    """
+    return {key: display(report, key) for key in ALL_KEYS}
+
+
+def raw_value(report, key: str) -> float | None:
+    """Extract the raw numeric value for *key* for charts.
+
+    Returns None when the metric is unavailable or not numeric. Only ``chr`` is
+    scaled to 0–100 (matching the GUI's long-standing behaviour); every other
+    metric is returned in its native magnitude. The single source for trend /
+    scatter / dashboard / radar value extraction.
     """
     u = report.usage
-    return {
-        # G1 会话概况
-        "subagent": str(report.subagent_count or 0),
-        "turns": _turns_display(u),
-        "started": fmt.fmt_dt(u.started_at),
-        "last_time": fmt.fmt_dt(u.ended_at),
-        "duration": _duration_hours(report),
-        "models": fmt.models_label(u) if u.models else "-",
-        "tools": _tools_summary(report),
-        "latency": fmt.fmt_float(report.avg_turn_latency_sec, "0.0"),
-        "user_msgs": fmt.fmt_int(u.user_msgs),
-        "entrypoint": report.meta.entrypoint or "-",
-        # G2 Token 用量
-        "total_tokens": fmt.fmt_int(u.total),
-        "input": fmt.fmt_int(u.input_tokens),
-        "output": fmt.fmt_int(u.output_tokens),
-        "cache_write": fmt.fmt_int(u.cache_creation_input_tokens),
-        "cache_read": fmt.fmt_int(u.cache_read_input_tokens),
-        # G3 缓存效率
-        "chr": fmt.fmt_pct(report.chr),
-        "io_ratio": fmt.fmt_float(report.io_ratio, "0.1"),
-        "caf": fmt.fmt_float(report.caf, "0.00"),
-        "cache_efficiency": fmt.fmt_float(report.cache_efficiency, "0.00"),
-        "cache_write_ratio": fmt.fmt_pct(report.cache_write_ratio),
-        "non_cached_input_ratio": fmt.fmt_pct(report.non_cached_input_ratio),
-        # G4 代码产出与质量
-        "net_loc": fmt.fmt_int(report.net_loc),
-        "added": fmt.fmt_int(report.code_added),
-        "deleted": fmt.fmt_int(report.code_deleted),
-        "churn": fmt.fmt_pct(report.churn_ratio),
-        "test_loc": fmt.fmt_int(report.test_net_loc),
-        "doc_loc": fmt.fmt_int(report.doc_net_loc),
-        "read_write_ratio": fmt.fmt_pct(report.read_write_ratio),
-        "edit_ratio": fmt.fmt_pct(report.edit_ratio),
-        "exploration_ratio": fmt.fmt_pct(report.exploration_ratio),
-        "thinking_count": fmt.fmt_int(u.thinking_count),
-        "files_touched": fmt.fmt_int(report.files_touched),
-        "search_edit_ratio": fmt.fmt_pct(report.search_edit_ratio),
-        "read_before_write": fmt.fmt_pct(report.read_before_write),
-        "tool_error_rate": fmt.fmt_pct(report.tool_error_rate),
-        "high_churn_files": fmt.fmt_int(report.high_churn_file_count),
-        "unseen_writes": fmt.fmt_int(report.unseen_writes),
-        # G5 成本分析
-        "cost": fmt.fmt_money(report.cost),
-        "cost_per_mt": f"${report.cost_per_mt:.2f}" if report.cost_per_mt is not None else "-",
-        "cpe": fmt.fmt_money(report.cpe),
-        # G6 综合评分
-        "tcer": fmt.fmt_float(report.tcer, "0.0"),
-        "ctei": fmt.fmt_float(report.ctei, "0.00"),
-        "grade": report.grade or "-",
-        "task_type": _task_category_name(report.task_type) or "-",
-        "ttaf": fmt.fmt_float(report.ttaf, "0.00") if report.ttaf is not None else "-",
-        "ntcer": fmt.fmt_float(report.ntcer, "0.00"),
-        "ncpi": fmt.fmt_float(report.ncpi, "0.000"),
-        "psac": fmt.fmt_float(report.psac, "0.000"),
-        "tcer_phase_adj": fmt.fmt_float(report.tcer_phase_adj, "0.00"),
-        # Current CTEI baselines (read-only reference from config)
-        "bl_tcer": fmt.fmt_float(_metrics.TCER_BASELINE, "0.00"),
-        "bl_ncpi": fmt.fmt_float(_metrics.NCPI_BASELINE, "0.000"),
-        "bl_cpe": fmt.fmt_float(_metrics.CPE_BASELINE, "0.00"),
+    # key → attribute name on SessionReport, for the numeric/chart path. Note this
+    # is intentionally NARROWER than _REPORT_ATTR (no high_churn_files / latency):
+    # it reproduces the former views.metric_raw_value exactly.
+    _RAW_ATTR = {
+        "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
+        "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
     }
+    try:
+        if key == "chr":
+            return report.chr * 100.0 if report.chr is not None else None
+        if key == "duration":
+            if u.started_at and u.ended_at:
+                return (u.ended_at - u.started_at) / 3600_000
+            return None
+        if key == "latency":
+            return report.avg_turn_latency_sec
+        if key == "tools":
+            return float(sum(u.tool_calls.values())) if u.tool_calls else None
+        if key in _USAGE_ATTR:
+            return float(getattr(u, _USAGE_ATTR[key]))
+        if key == "turns":
+            return float(u.assistant_msgs)
+        if key == "subagent":
+            return float(report.subagent_count)
+        attr = _RAW_ATTR.get(key, key)
+        v = getattr(report, attr, None)
+        if v is None:
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def format_plot(key: str, raw: float, m: "Metric | None") -> str:
+    """Format a *display-magnitude* raw value for a chart tooltip (lightweight)."""
+    if key == "chr":
+        return f"{raw:.1f}%"
+    if key in ("cost", "cpe", "cost_per_mt"):
+        return f"${raw:.4f}"
+    if m and m.unit in ("行", "个"):
+        return f"{raw:,.0f}"
+    return f"{raw:g}"
 
 
 # All keys referenced by GROUPS — used by tests to guard against drift
 # between the definitions and ``report_values``.
 ALL_KEYS = {m.key for group in GROUPS for m in group.metrics}
+
+# Flat key → Metric index across every group (session metrics; MODEL_GROUPS
+# appended below once defined).
+METRIC_BY_KEY: dict[str, Metric] = {m.key: m for group in GROUPS for m in group.metrics}
+
+# Populate each session Metric's ``fmt`` from the central _SESSION_FMT map so the
+# format spec lives on the Metric object too (frozen dataclass → object.__setattr__).
+for _m in METRIC_BY_KEY.values():
+    object.__setattr__(_m, "fmt", _SESSION_FMT.get(_m.key, "text"))
+
+
+# ============================================================
+# Per-model SSOT (模型对比). Reuses the Metric dataclass to describe each
+# ModelComparison display field. Values come from _MODEL_EXTRACTORS; tooltips are
+# borrowed from the linked session metric via _MODEL_TIP_KEY so naming and
+# explanation stay consistent across tabs. model_display reproduces the model
+# tab's exact strings (K/M suffix, 免费 / ∞ / - special cases).
+# ============================================================
+
+def _fmt_tok(n: float) -> str:
+    """Format a token count with K/M suffix (e.g. 1_500_000 → '1.5M').
+
+    Retained for any external caller, but the model 对比 tab no longer uses it —
+    per-model token metrics now render through ``format_value`` so they read
+    identically to the 指标分类 grid (full comma-separated numbers).
+    """
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(int(n))
+
+
+MODEL_GROUPS: list[Group] = [
+    Group("M_TOK", "Token 用量", [
+        Metric("m_total_tokens", "总 Token", "", "", "basic"),
+        Metric("m_input", "输入", "", "", "basic"),
+        Metric("m_output", "输出", "", "", "basic"),
+        Metric("m_cache_write", "缓存创建", "", "", "basic"),
+        Metric("m_cache_read", "缓存命中", "", "", "basic"),
+    ]),
+    Group("M_COST", "成本", [
+        Metric("m_cost", "总成本", "", "", "basic", "down"),
+        Metric("m_cost_share", "成本占比", "", "", "basic"),
+        Metric("m_tokens_per_dollar", "Token 效率", "", "", "basic", "up"),
+        Metric("m_code_per_dollar", "代码效率", "", "", "basic", "up"),
+    ]),
+    Group("M_EFF", "效率", [
+        Metric("m_token_share", "Token 占比", "", "", "basic"),
+        Metric("m_cache_hit_ratio", "缓存命中率", "", "", "basic", "up"),
+        Metric("m_session_count", "会话数", "", "", "basic"),
+    ]),
+    Group("M_QUAL", "代码质量与行为", [
+        Metric("m_net_loc_per_session", "净增行/会话", "", "", "basic", "up"),
+        Metric("m_tool_error_rate", "工具错误率", "", "", "basic", "down"),
+        Metric("m_exploration_ratio", "探索占比", "", "", "basic"),
+        Metric("m_edit_ratio", "编辑占比", "", "", "basic", "up"),
+        Metric("m_read_write_ratio", "读写比", "", "", "basic", "up"),
+        Metric("m_churn", "返工率", "", "", "basic", "down"),
+        Metric("m_read_before_write", "先读后写率", "", "", "basic", "up"),
+        Metric("m_files_per_session", "涉及文件/会话", "", "", "basic"),
+    ]),
+]
+
+MODEL_BY_KEY: dict[str, Metric] = {m.key: m for g in MODEL_GROUPS for m in g.metrics}
+
+# model metric key → session metric key whose name+tip is borrowed for the tooltip
+# (None / absent → no tooltip, matching the model tab's prior behaviour).
+_MODEL_TIP_KEY = {
+    "m_total_tokens": "total_tokens", "m_input": "input", "m_output": "output",
+    "m_cache_write": "cache_write", "m_cache_read": "cache_read", "m_cost": "cost",
+    "m_cache_hit_ratio": "chr", "m_tool_error_rate": "tool_error_rate",
+    "m_exploration_ratio": "exploration_ratio", "m_edit_ratio": "edit_ratio",
+    "m_read_write_ratio": "read_write_ratio", "m_churn": "churn",
+    "m_read_before_write": "read_before_write",
+}
+
+
+def _tpd_text(mc) -> str:
+    if mc.tokens_per_dollar:
+        return f"{mc.tokens_per_dollar:,.0f}/$"   # full count, like the grid
+    return "∞" if mc.cost == 0 else "-"
+
+
+def _cpd_text(mc) -> str:
+    if mc.code_per_dollar is not None:
+        return f"{mc.code_per_dollar:.1f} 行/$"
+    return "∞" if mc.cost == 0 else "-"
+
+
+def _cost_text(mc) -> str:
+    return "免费" if mc.cost == 0 else format_value("cost", mc.cost)
+
+
+# key → (numeric value for best-in-row, display string). Metrics that mirror a
+# session metric format through ``format_value`` with that session key, so the
+# model 对比 tab reads byte-identically to the 指标分类 grid. Model-only metrics
+# (shares, per-session averages) use explicit formats consistent with the grid's
+# conventions (full token counts, 1-dp ratios).
+_MODEL_EXTRACTORS = {
+    "m_total_tokens": (lambda mc: mc.total_tokens, lambda mc: format_value("total_tokens", mc.total_tokens)),
+    "m_input": (lambda mc: mc.input_tokens, lambda mc: format_value("input", mc.input_tokens)),
+    "m_output": (lambda mc: mc.output_tokens, lambda mc: format_value("output", mc.output_tokens)),
+    "m_cache_write": (lambda mc: mc.cache_creation_tokens, lambda mc: format_value("cache_write", mc.cache_creation_tokens)),
+    "m_cache_read": (lambda mc: mc.cache_read_tokens, lambda mc: format_value("cache_read", mc.cache_read_tokens)),
+    "m_cost": (lambda mc: mc.cost, _cost_text),
+    "m_cost_share": (lambda mc: mc.cost_share, lambda mc: f"{mc.cost_share:.1f}%"),
+    "m_tokens_per_dollar": (lambda mc: mc.tokens_per_dollar, _tpd_text),
+    "m_code_per_dollar": (lambda mc: mc.code_per_dollar, _cpd_text),
+    "m_token_share": (lambda mc: mc.token_share, lambda mc: f"{mc.token_share:.1f}%"),
+    "m_cache_hit_ratio": (lambda mc: mc.cache_hit_ratio, lambda mc: format_value("chr", mc.cache_hit_ratio)),
+    "m_session_count": (lambda mc: mc.session_count, lambda mc: str(mc.session_count)),
+    "m_net_loc_per_session": (lambda mc: mc.net_loc_per_session, lambda mc: f"{mc.net_loc_per_session:,.0f}" if mc.net_loc_per_session is not None else "-"),
+    "m_tool_error_rate": (lambda mc: mc.tool_error_rate, lambda mc: format_value("tool_error_rate", mc.tool_error_rate)),
+    "m_exploration_ratio": (lambda mc: mc.exploration_ratio, lambda mc: format_value("exploration_ratio", mc.exploration_ratio)),
+    "m_edit_ratio": (lambda mc: mc.edit_ratio, lambda mc: format_value("edit_ratio", mc.edit_ratio)),
+    "m_read_write_ratio": (lambda mc: mc.read_write_ratio, lambda mc: format_value("read_write_ratio", mc.read_write_ratio)),
+    "m_churn": (lambda mc: mc.churn_ratio, lambda mc: format_value("churn", mc.churn_ratio)),
+    "m_read_before_write": (lambda mc: mc.read_before_write, lambda mc: format_value("read_before_write", mc.read_before_write)),
+    "m_files_per_session": (lambda mc: mc.files_per_session, lambda mc: f"{mc.files_per_session:.1f}" if mc.files_per_session is not None else "-"),
+}
+
+
+def model_raw(mc, key: str):
+    """Numeric value of a per-model metric (for best-in-row highlighting)."""
+    ext = _MODEL_EXTRACTORS.get(key)
+    return ext[0](mc) if ext else None
+
+
+def model_display(mc, key: str) -> str:
+    """Display string of a per-model metric (model 对比 tab)."""
+    ext = _MODEL_EXTRACTORS.get(key)
+    return ext[1](mc) if ext else "-"
+
+
+def model_tip(key: str) -> str | None:
+    """Tooltip for a per-model metric, borrowed from the linked session metric."""
+    sk = _MODEL_TIP_KEY.get(key)
+    m = METRIC_BY_KEY.get(sk) if sk else None
+    return f"{m.name}\n{m.tip}" if m else None
+
+
+# ============================================================
+# CTEI factor decomposition (综合效率分排名 → CTEI 因子分解).
+# The four multiplicative factors of CTEI. Keys match export.ctei_decompose.
+# Labels / formula text / formatting / 好坏阈值 live here (SSOT), so the ranking
+# tab no longer defines its own.
+# ============================================================
+
+@dataclass(frozen=True)
+class CteiFactor:
+    key: str        # matches a key from export.ctei_decompose
+    name: str       # display label (效率因子 / 产出密度 / …)
+    formula: str    # short formula shown beside the bar
+
+
+CTEI_FACTORS: list[CteiFactor] = [
+    CteiFactor("eff_factor", "效率因子", "TCER÷基准"),
+    CteiFactor("density_factor", "产出密度", "NCPI÷基准"),
+    CteiFactor("cost_factor", "成本效率", "基准÷CPE"),
+    CteiFactor("cache_factor", "缓存因子", "1+CHR×0.5"),
+]
+
+# A factor ≥ this sits at/above baseline (good); below it drags CTEI down.
+CTEI_FACTOR_GOOD_THRESHOLD = 1.0
+
+
+def format_factor(val: float) -> str:
+    """Format a CTEI factor value (2 dp), matching the ranking tab."""
+    return f"{val:.2f}"
