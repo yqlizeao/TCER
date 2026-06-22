@@ -2445,210 +2445,128 @@ class DashboardChart:
 
 
 # ============================================================
-# 模型对比
+# 模型对比 (Apple-style side-by-side comparison)
 # ============================================================
 
 class ModelCompareView:
-    """模型对比 — per-model aggregated stats with table + detail canvas."""
+    """模型对比 — Apple-style column comparison, one column per model.
 
-    # Token type colors (same as ModelsPopup)
+    Each row shows one metric across all models with visual bars for comparison.
+    """
+
     _TOK_COLORS = {
         "input":          "#569cd6",
         "output":         "#4ec9b0",
         "cache_creation": "#dcdcaa",
         "cache_read":     "#6a6a6a",
     }
+    _COL_COLORS = ["#569cd6", "#4ec9b0", "#dcdcaa", "#ce9178", "#9cdcfe", "#c586c0"]
 
     def __init__(self, parent, controller=None):
         self.parent = parent
         self._models: list = []
-        self._sort_key = "total_tokens"
-        self._sort_rev = True
 
-        # Summary bar
-        self._bar_canvas = tk.Canvas(parent, bg=theme.PANEL, height=24,
-                                     highlightthickness=0)
-        self._bar_canvas.pack(fill="x", padx=4, pady=(4, 0))
+        # Header
+        self._header = tk.Canvas(parent, bg=theme.PANEL, height=48, highlightthickness=0)
+        self._header.pack(fill="x", padx=4, pady=(4, 0))
 
-        # PanedWindow: tree (left) + detail (right)
-        paned = tk.PanedWindow(parent, orient="horizontal", bg=theme.BG, sashwidth=3)
-        paned.pack(fill="both", expand=True, padx=4, pady=4)
-
-        # Left: Treeview
-        left = tk.Frame(paned, bg=theme.BG)
-        paned.add(left, minsize=300)
-        cols = ("model", "tokens", "cost", "share", "chr", "tpd")
-        self._tree = ttk.Treeview(left, columns=cols, show="headings", height=20)
-        for cid, text, w in [
-            ("model", "模型", 140), ("tokens", "Token", 100),
-            ("cost", "成本", 80), ("share", "占比", 60),
-            ("chr", "缓存率", 60), ("tpd", "效率", 80),
-        ]:
-            self._tree.heading(cid, text=text,
-                               command=lambda c=cid: self._sort_by(c))
-            self._tree.column(cid, width=w, anchor="w" if cid == "model" else "e")
-        self._tree.pack(fill="both", expand=True)
-        self._tree.bind("<<TreeviewSelect>>", self._on_select)
-
-        # Right: detail canvas
-        right = tk.Frame(paned, bg=theme.BG)
-        paned.add(right, minsize=320)
-        self._detail = tk.Canvas(right, bg=theme.PANEL, highlightthickness=0)
-        self._detail.pack(fill="both", expand=True)
+        # Scrollable body
+        from tcer.gui.widgets import ScrollFrame
+        self._sf = ScrollFrame(parent, bg=theme.PANEL)
+        self._sf.canvas.pack(fill="both", expand=True, padx=4, pady=4)
+        self._body = self._sf.inner
 
     def update(self, reports) -> None:
         from tcer.core.metrics import compare_models
         self._models = compare_models(reports)
-        self._rebuild_tree()
-        self._draw_bar()
+        self._draw_header()
+        self._draw_body()
 
-    def _rebuild_tree(self) -> None:
-        for item in self._tree.get_children():
-            self._tree.delete(item)
-        for mc in self._sorted():
-            tok_str = _fmt_tok(mc.total_tokens)
-            cost_str = f"${mc.cost:.2f}" if mc.cost > 0 else "免费"
-            chr_str = f"{mc.cache_hit_ratio:.0%}" if mc.cache_hit_ratio is not None else "-"
-            if mc.tokens_per_dollar is not None:
-                tpd_str = _fmt_tok(mc.tokens_per_dollar) + "/$"
-            else:
-                tpd_str = "∞/$" if mc.cost == 0 else "-"
-            self._tree.insert("", "end", iid=mc.model_id, values=(
-                mc.display_name, tok_str, cost_str,
-                f"{mc.token_share:.1f}%", chr_str, tpd_str,
-            ))
-        # Select first
-        children = self._tree.get_children()
-        if children:
-            self._tree.selection_set(children[0])
-
-    def _sorted(self):
-        key_map = {
-            "model": lambda m: m.display_name.lower(),
-            "tokens": lambda m: m.total_tokens,
-            "cost": lambda m: m.cost,
-            "share": lambda m: m.token_share,
-            "chr": lambda m: m.cache_hit_ratio or 0,
-            "tpd": lambda m: m.tokens_per_dollar or 0,
-        }
-        fn = key_map.get(self._sort_key, key_map["tokens"])
-        return sorted(self._models, key=fn, reverse=self._sort_rev)
-
-    def _sort_by(self, col: str) -> None:
-        if self._sort_key == col:
-            self._sort_rev = not self._sort_rev
-        else:
-            self._sort_key = col
-            self._sort_rev = True
-        self._rebuild_tree()
-
-    def _on_select(self, _event=None) -> None:
-        sel = self._tree.selection()
-        if not sel:
-            return
-        mc = next((m for m in self._models if m.model_id == sel[0]), None)
-        if mc:
-            self._draw_detail(mc)
-
-    def _draw_bar(self) -> None:
-        c = self._bar_canvas
-        c.delete("all")
-        c.update_idletasks()
-        w = c.winfo_width()
-        if not self._models or w < 10:
-            return
-        total_cost = sum(m.cost for m in self._models)
-        if total_cost <= 0:
-            return
-        colors = ["#569cd6", "#4ec9b0", "#dcdcaa", "#ce9178", "#9cdcfe", "#c586c0"]
-        x = 0
-        for i, mc in enumerate(self._models):
-            seg_w = max(2, int(mc.cost / total_cost * (w - 4)))
-            color = colors[i % len(colors)]
-            c.create_rectangle(x, 2, x + seg_w, 22, fill=color, outline="")
-            if seg_w > 40:
-                c.create_text(x + seg_w / 2, 12, text=mc.display_name[:10],
-                              fill="#1e1e1e", font=(theme.FONT_MONO_NAME, 7))
-            x += seg_w
-
-    def _draw_detail(self, mc) -> None:
-        c = self._detail
+    def _draw_header(self) -> None:
+        c = self._header
         c.delete("all")
         c.update_idletasks()
         cw = c.winfo_width()
-        ch = c.winfo_height()
-        if cw < 50 or ch < 50:
+        if not self._models or cw < 10:
+            return
+        n = len(self._models)
+        col_w = (cw - 120) // n
+        x0 = 120  # label column width
+        for i, mc in enumerate(self._models):
+            x = x0 + i * col_w + col_w // 2
+            color = self._COL_COLORS[i % len(self._COL_COLORS)]
+            c.create_text(x, 14, text=mc.display_name, fill=color,
+                          font=theme.FONT_UI_BOLD, anchor="center")
+            cost_str = f"${mc.cost:.2f}" if mc.cost > 0 else "免费"
+            c.create_text(x, 34, text=cost_str, fill=theme.MUTED,
+                          font=theme.FONT_MONO, anchor="center")
+
+    def _draw_body(self) -> None:
+        for w in self._body.winfo_children():
+            w.destroy()
+        if not self._models:
+            tk.Label(self._body, text="无模型数据", bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI, pady=40).pack()
             return
 
-        y = 16
-        pad = 16
+        n = len(self._models)
+        col_w = max(100, (700 - 160) // n)  # approx column width
 
-        # Title
-        c.create_text(pad, y, text=mc.display_name, fill=theme.FG,
-                      font=theme.FONT_HEADING, anchor="w")
-        y += 28
+        # Summary row: token counts
+        self._add_section("Token 用量")
+        for label, attr in [("总 Token", "total_tokens"), ("输入", "input_tokens"),
+                            ("输出", "output_tokens"), ("缓存写入", "cache_creation_tokens"),
+                            ("缓存读取", "cache_read_tokens")]:
+            vals = [getattr(mc, attr) for mc in self._models]
+            self._add_metric_row(label, vals, col_w, fmt=_fmt_tok)
 
-        # Summary line
-        cost_str = f"${mc.cost:.2f}" if mc.cost > 0 else "免费"
-        summary = f"{mc.total_tokens:,} Token · {cost_str} · {mc.session_count} 个会话"
-        c.create_text(pad, y, text=summary, fill=theme.MUTED,
-                      font=theme.FONT_UI, anchor="w")
-        y += 24
+        # Cost row
+        self._add_section("成本")
+        vals = [mc.cost for mc in self._models]
+        self._add_metric_row("成本 (USD)", vals, col_w, fmt=lambda v: f"${v:.2f}" if v > 0 else "免费")
 
-        # Token composition bar
-        c.create_text(pad, y, text="Token 构成", fill="#9cdcfe",
-                      font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        y += 18
-        bar_x = pad
-        bar_w = cw - pad * 2
-        bar_h = 16
-        vals = [mc.input_tokens, mc.output_tokens,
-                mc.cache_creation_tokens, mc.cache_read_tokens]
-        keys = ["input", "output", "cache_creation", "cache_read"]
-        labels = ["输入", "输出", "缓存写入", "缓存读取"]
-        if mc.total_tokens > 0:
-            relx = 0.0
-            for v, k in zip(vals, keys):
-                if v > 0:
-                    rw = v / mc.total_tokens
-                    seg_w = max(1, int(rw * bar_w))
-                    c.create_rectangle(bar_x + int(relx * bar_w), y,
-                                       bar_x + int(relx * bar_w) + seg_w, y + bar_h,
-                                       fill=self._TOK_COLORS[k], outline="")
-                    relx += rw
-        y += bar_h + 8
+        # Efficiency rows
+        self._add_section("效率")
+        vals = [mc.token_share for mc in self._models]
+        self._add_metric_row("Token 占比", vals, col_w, fmt=lambda v: f"{v:.1f}%")
+        vals = [mc.cost_share for mc in self._models]
+        self._add_metric_row("成本占比", vals, col_w, fmt=lambda v: f"{v:.1f}%")
+        vals = [mc.cache_hit_ratio for mc in self._models]
+        self._add_metric_row("缓存命中率", vals, col_w, fmt=lambda v: f"{v:.1%}" if v is not None else "-")
+        vals = [mc.tokens_per_dollar for mc in self._models]
+        self._add_metric_row("Token 效率", vals, col_w,
+                             fmt=lambda v: f"{_fmt_tok(v)}/$" if v else ("∞" if v == 0 else "-"))
+        vals = [mc.session_count for mc in self._models]
+        self._add_metric_row("会话数", vals, col_w, fmt=lambda v: str(v))
 
-        # Detail labels
-        for v, k, label in zip(vals, keys, labels):
-            pct = v / mc.total_tokens * 100 if mc.total_tokens else 0
-            c.create_text(pad, y, text=f"{label}  {v:,}（{pct:.0f}%）",
-                          fill=self._TOK_COLORS[k], font=(theme.FONT_MONO_NAME, 8),
-                          anchor="w")
-            y += 14
+    def _add_section(self, title: str) -> None:
+        tk.Label(self._body, text=title, bg=theme.PANEL, fg="#9cdcfe",
+                 font=theme.FONT_UI_BOLD, anchor="w").pack(fill="x", padx=8, pady=(12, 4))
 
-        y += 8
-
-        # Metrics
-        metrics = [
-            ("缓存命中率", f"{mc.cache_hit_ratio:.1%}" if mc.cache_hit_ratio else "-"),
-            ("Token 效率", f"{mc.tokens_per_dollar:,.0f} Token/$" if mc.tokens_per_dollar else ("∞" if mc.cost == 0 else "-")),
-            ("Token 占比", f"{mc.token_share:.1f}%"),
-            ("成本占比", f"{mc.cost_share:.1f}%"),
-        ]
-        if mc.avg_ctei is not None:
-            metrics.append(("平均 CTEI", f"{mc.avg_ctei:.2f}"))
-        if mc.avg_tcer is not None:
-            metrics.append(("平均 TCER", f"{mc.avg_tcer:.1f}"))
-
-        c.create_text(pad, y, text="关键指标", fill="#9cdcfe",
-                      font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        y += 18
-        for name, val in metrics:
-            c.create_text(pad, y, text=name, fill=theme.MUTED,
-                          font=theme.FONT_UI, anchor="w")
-            c.create_text(cw - pad, y, text=val, fill=theme.FG,
-                          font=theme.FONT_MONO, anchor="e")
-            y += 20
+    def _add_metric_row(self, label: str, vals: list, col_w: int, fmt=None) -> None:
+        row = tk.Frame(self._body, bg=theme.PANEL, padx=8, pady=3)
+        row.pack(fill="x")
+        # Label
+        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI, width=14, anchor="w").pack(side="left")
+        # Values
+        max_val = max((v for v in vals if v is not None and v > 0), default=1)
+        for i, mc in enumerate(self._models):
+            v = vals[i]
+            cell = tk.Frame(row, bg=theme.PANEL)
+            cell.pack(side="left", padx=2)
+            # Value text
+            text = fmt(v) if fmt else str(v)
+            tk.Label(cell, text=text, bg=theme.PANEL, fg=theme.FG,
+                     font=theme.FONT_MONO, width=10, anchor="e").pack()
+            # Mini bar
+            bar_bg = tk.Frame(cell, bg="#333333", height=4, width=col_w - 20)
+            bar_bg.pack(fill="x", pady=(1, 0))
+            if v and v > 0 and max_val > 0:
+                rw = min(1.0, v / max_val)
+                color = self._COL_COLORS[i % len(self._COL_COLORS)]
+                tk.Frame(bar_bg, bg=color, height=4).place(
+                    relx=0, rely=0, relwidth=rw, relheight=1.0)
 
 
 def _fmt_tok(n: float) -> str:
