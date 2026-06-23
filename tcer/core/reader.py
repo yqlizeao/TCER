@@ -60,6 +60,56 @@ def parent_session_id(path: Path) -> str:
     return path.stem
 
 
+def session_artifacts(any_path: Path) -> tuple[str, Path, Path]:
+    """Resolve a session's on-disk identity from *any* of its JSONL paths.
+
+    A session lives on disk as two artifacts under the project hash directory:
+      * ``<project>/<sid>.jsonl``  — the main conversation file
+      * ``<project>/<sid>/``       — a directory holding ``subagents/`` (each
+        ``agent-*.jsonl`` plus its ``.meta.json``) and ``tool-results/``
+
+    Given the main file *or* one of the subagent files, return
+    ``(session_id, main_jsonl, session_dir)``. The identity is taken from the
+    **path** (folder/stem), not the JSONL ``sessionId`` field — the two can
+    differ (e.g. resumed sessions), and only the path reflects what is actually
+    on disk, so deletion must key off it. Neither returned path is guaranteed to
+    exist (an orphan-subagent session has no main file).
+    """
+    if is_subagent(any_path):
+        session_dir = any_path.parents[1]      # <project>/<sid>/subagents/x.jsonl → <project>/<sid>
+        proj_dir = session_dir.parent          # <project>
+        sid = session_dir.name
+        main = proj_dir / f"{sid}.jsonl"
+    else:
+        proj_dir = any_path.parent             # <project>
+        sid = any_path.stem
+        main = any_path
+        session_dir = proj_dir / sid
+    return sid, main, session_dir
+
+
+def delete_session(any_path: Path) -> list[Path]:
+    """Permanently delete a session and all its residue from disk.
+
+    Removes the main ``<sid>.jsonl`` and the entire ``<sid>/`` directory tree
+    (subagents + their ``.meta.json`` sidecars + tool-results), so no subagent
+    data is left orphaned. Accepts any of the session's file paths (see
+    :func:`session_artifacts`). Returns the list of paths actually removed
+    (missing artifacts are silently skipped). Raises ``OSError`` on failure.
+    """
+    import shutil
+
+    _, main, session_dir = session_artifacts(any_path)
+    removed: list[Path] = []
+    if main.is_file():
+        main.unlink()
+        removed.append(main)
+    if session_dir.is_dir():
+        shutil.rmtree(session_dir)
+        removed.append(session_dir)
+    return removed
+
+
 def iter_messages(path: Path):
     """Yield each parsed JSON object in a session jsonl, skipping meta/garbage lines."""
     with path.open("r", encoding="utf-8", errors="replace") as fh:

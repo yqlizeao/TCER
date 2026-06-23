@@ -185,6 +185,35 @@ class TcerGui:
             self.trend_chart.select_session_by_sid(sid)
         self._update_tab_names()
 
+    def delete_session(self, report) -> None:
+        """彻底删除一个会话（主文件 + subagent/tool-results 目录），随后刷新视图。
+
+        删除按磁盘路径定位，保证不残留 subagent 数据。删除后若项目仍有会话则
+        重算，否则刷新项目列表（该项目转为「无会话」）。
+        """
+        from tkinter import messagebox
+        from tcer.core import reader
+
+        sid = report.meta.session_id or report.meta.path.stem
+        try:
+            removed = reader.delete_session(report.meta.path)
+        except OSError as e:
+            messagebox.showerror("删除失败", f"无法删除会话 {sid[:16]}…\n{e}")
+            return
+
+        if self._selected_session_id == sid:
+            self._selected_session_id = None
+        self.session_col.clear_selection()
+
+        proj = self._selected_project()
+        if proj is not None and discover_jsonl(proj.name):
+            self.reanalyze()
+        else:
+            # 最后一个会话被删 — 项目变空，回到项目列表状态。
+            self._current = None
+            self.refresh_projects()
+        self.filter.set_status(f"已删除会话 · 移除 {len(removed)} 项磁盘对象")
+
     def _on_view_change(self) -> None:
         self._render_metrics()
         self._update_model_compare()

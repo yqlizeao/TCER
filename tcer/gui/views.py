@@ -498,7 +498,25 @@ class SessionColumn:
                 f"TCER: {tcer_str} · CTEI: {ctei_str} · 成本: {cost_str}"),
         )
 
+        menu.add_separator()
+
+        # Destructive action — last item, gated behind a二次确认对话框.
+        menu.add_command(
+            label="🗑 删除会话…",
+            command=lambda: self._confirm_delete(report, sid),
+        )
+
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _confirm_delete(self, report, sid):
+        """弹出二次确认；确认后彻底删除该会话（含 subagent / tool-results）。"""
+        from . import popups
+        title = report.meta.title or "(无标题)"
+        popups.ConfirmDeletePopup(
+            self.controller.root,
+            title=title, session_id=sid,
+            on_confirm=lambda: self.controller.delete_session(report),
+        )
 
     def _navigate_to_trend(self, sid):
         """Switch to trend tab and highlight this session's data point."""

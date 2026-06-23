@@ -45,6 +45,74 @@ def test_parent_session_id_main_and_subagent():
     assert reader.is_subagent(sub) and not reader.is_subagent(main)
 
 
+def test_session_artifacts_from_main_and_subagent():
+    main = Path("/c/.claude/projects/hash/SID-123.jsonl")
+    sub = Path("/c/.claude/projects/hash/SID-123/subagents/agent-abc.jsonl")
+    # Both the main file and a subagent file resolve to the same identity/targets.
+    for p in (main, sub):
+        sid, main_jsonl, session_dir = reader.session_artifacts(p)
+        assert sid == "SID-123"
+        assert main_jsonl == Path("/c/.claude/projects/hash/SID-123.jsonl")
+        assert session_dir == Path("/c/.claude/projects/hash/SID-123")
+
+
+def _make_session_on_disk(proj: Path, sid: str) -> Path:
+    """Lay out a main file + subagents/ + tool-results/ like Claude Code does."""
+    proj.mkdir(parents=True, exist_ok=True)
+    main = proj / f"{sid}.jsonl"
+    main.write_text('{"type":"assistant"}\n', encoding="utf-8")
+    sub_dir = proj / sid / "subagents"
+    sub_dir.mkdir(parents=True)
+    (sub_dir / "agent-x.jsonl").write_text("{}\n", encoding="utf-8")
+    (sub_dir / "agent-x.meta.json").write_text("{}\n", encoding="utf-8")
+    tr_dir = proj / sid / "tool-results"
+    tr_dir.mkdir(parents=True)
+    (tr_dir / "call_1.json").write_text("{}\n", encoding="utf-8")
+    return main
+
+
+def test_delete_session_removes_main_and_subagent_tree(tmp_path: Path):
+    proj = tmp_path / "hash"
+    main = _make_session_on_disk(proj, "SID-A")
+    # A second session must survive untouched.
+    other = _make_session_on_disk(proj, "SID-B")
+
+    removed = reader.delete_session(main)
+
+    assert not main.exists()
+    assert not (proj / "SID-A").exists()       # subagents + tool-results gone
+    assert set(removed) == {main, proj / "SID-A"}
+    # Neighbour session is intact.
+    assert other.exists()
+    assert (proj / "SID-B" / "subagents" / "agent-x.jsonl").exists()
+
+
+def test_delete_session_via_subagent_path(tmp_path: Path):
+    proj = tmp_path / "hash"
+    _make_session_on_disk(proj, "SID-A")
+    sub = proj / "SID-A" / "subagents" / "agent-x.jsonl"
+
+    removed = reader.delete_session(sub)
+
+    assert not (proj / "SID-A.jsonl").exists()
+    assert not (proj / "SID-A").exists()
+    assert len(removed) == 2
+
+
+def test_delete_session_orphan_subagent_only(tmp_path: Path):
+    """No main file (orphan subagents): only the directory is removed, no error."""
+    proj = tmp_path / "hash"
+    sub_dir = proj / "SID-A" / "subagents"
+    sub_dir.mkdir(parents=True)
+    (sub_dir / "agent-x.jsonl").write_text("{}\n", encoding="utf-8")
+
+    removed = reader.delete_session(sub_dir / "agent-x.jsonl")
+
+    assert not (proj / "SID-A").exists()
+    assert removed == [proj / "SID-A"]
+
+
+
 def test_aggregate_dedupes_by_message_id(tmp_path):
     """One API response split across content-block lines (same message.id + usage)
     must be counted ONCE, not per line (observed up to 6× on Bedrock sessions)."""

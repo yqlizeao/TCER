@@ -818,6 +818,66 @@ class RadarPopup:
         return 0.0
 
 
+class ConfirmDeletePopup:
+    """二次确认删除会话的模态对话框（仿 ccswitch 删除确认）。
+
+    强调「不可恢复」，默认聚焦在「取消」上以防误删；点「删除会话」才触发
+    ``on_confirm()``。删除真正的磁盘操作由调用方在回调里完成。
+    """
+
+    _DANGER = "#e53935"          # 醒目红 — 删除按钮
+    _DANGER_ACTIVE = "#c62828"   # 按下/悬停态
+
+    def __init__(self, parent, *, title: str, session_id: str, on_confirm) -> None:
+        win = _new_window(parent, "删除会话", "460x250")
+        win.transient(parent)
+        win.resizable(False, False)
+
+        # 标题行：警告图标 + 标题
+        head = tk.Frame(win, bg=theme.BG)
+        head.pack(fill="x", padx=20, pady=(18, 6))
+        tk.Label(head, text="⚠", bg=theme.BG, fg=self._DANGER,
+                 font=(theme.FONT_MONO_NAME, 18, "bold")).pack(side="left", padx=(0, 8))
+        tk.Label(head, text="删除会话", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING).pack(side="left")
+
+        body = tk.Frame(win, bg=theme.BG)
+        body.pack(fill="both", expand=True, padx=20)
+        disp_title = title if len(title) <= 36 else title[:36] + "…"
+        tk.Label(body, text=f"将永久删除本地会话“{disp_title}”",
+                 bg=theme.BG, fg=theme.FG, font=theme.FONT_UI,
+                 anchor="w", justify="left").pack(anchor="w", pady=(2, 0))
+        tk.Label(body, text=f"Session ID: {session_id}",
+                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_MONO,
+                 anchor="w", justify="left").pack(anchor="w", pady=(2, 0))
+        tk.Label(body, text="将一并删除其 subagent 与 tool-results 数据，此操作不可恢复。",
+                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
+                 anchor="w", justify="left", wraplength=410).pack(anchor="w", pady=(12, 0))
+
+        # 按钮行（右对齐）
+        btn_bar = tk.Frame(win, bg=theme.BG)
+        btn_bar.pack(fill="x", padx=20, pady=(8, 16))
+
+        def _do_delete():
+            win.destroy()
+            on_confirm()
+
+        del_btn = tk.Button(btn_bar, text="删除会话", command=_do_delete,
+                            bg=self._DANGER, fg="#ffffff", relief="flat",
+                            activebackground=self._DANGER_ACTIVE, activeforeground="#ffffff",
+                            padx=16, pady=5, font=theme.FONT_UI_BOLD, cursor="hand2")
+        del_btn.pack(side="right")
+        cancel_btn = tk.Button(btn_bar, text="取消", command=win.destroy,
+                              bg=theme.PANEL_2, fg=theme.FG, relief="flat",
+                              activebackground=theme.PANEL, activeforeground=theme.FG,
+                              padx=16, pady=5, font=theme.FONT_UI, cursor="hand2")
+        cancel_btn.pack(side="right", padx=(0, 8))
+
+        win.bind("<Escape>", lambda e: win.destroy())
+        cancel_btn.focus_set()          # 默认聚焦取消，回车不会误删
+        win.grab_set()                  # 模态
+
+
 def _copy(win, text: str) -> None:
     win.clipboard_clear()
     win.clipboard_append(text)
