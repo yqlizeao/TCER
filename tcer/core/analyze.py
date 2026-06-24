@@ -233,6 +233,14 @@ def analyze_project(
     agg.ctei = None
     agg.grade = None
 
+    # Project-level memory files (read from disk once for the aggregate).
+    mem_dir = proj / "memory"
+    if mem_dir.is_dir():
+        agg.memory_files = sorted(
+            str(f) for f in mem_dir.iterdir() if f.is_file()
+        )
+        agg.memory_dir = str(mem_dir)
+
     return ProjectAnalysis(
         project_hash=proj.name, reports=reports, aggregate=agg,
         code_dir=code_path, n_sessions=len(reports), n_subagents=total_subs,

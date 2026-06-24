@@ -696,6 +696,80 @@ class FilesTouchedPopup:
                 relx=0, rely=0, relwidth=cnt / max_cnt, relheight=1.0)
 
 
+class MemoryFilesPopup:
+    """项目记忆文件 — 展示 memory/ 下的文件列表，带跳转到目录按钮。
+
+    风格与 FilesTouchedPopup 一致（卡片 + 比例条），多一个「打开目录」按钮。
+    """
+
+    _COLOR = "#c586c0"  # purple accent for memory files
+
+    def __init__(self, parent, memory_dir: str, files: list[str]) -> None:
+        from .platform import open_in_file_manager, FILE_MANAGER_NAME
+
+        count = len(files)
+        win = _new_window(parent, "项目记忆文件", "560x460")
+        tk.Label(win, text=f"项目记忆文件（{count} 个）", bg=theme.BG,
+                 fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
+        tk.Label(win, text=f"路径：{memory_dir}",
+                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI, wraplength=520,
+                 justify="left").pack()
+
+        # 按钮栏：打开目录（居中）
+        btn_bar = tk.Frame(win, bg=theme.BG)
+        btn_bar.pack(fill="x", padx=10, pady=(4, 8))
+        tk.Button(btn_bar, text=f"📂 在{FILE_MANAGER_NAME}中打开目录",
+                  command=lambda: open_in_file_manager(memory_dir),
+                  bg=theme.PANEL_2, fg=theme.FG, relief="flat",
+                  activebackground=theme.PANEL, activeforeground=theme.FG,
+                  padx=12, pady=3, font=theme.FONT_UI, cursor="hand2").pack(anchor="center")
+
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        inner = sf.inner
+
+        # Summary header
+        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head.pack(fill="x", pady=10)
+        tk.Label(head, text=f"共 {count} 个文件 · memory/",
+                 bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+
+        if count == 0:
+            tk.Label(inner, text="该目录下暂无记忆文件", bg=theme.PANEL,
+                     fg=theme.MUTED, font=theme.FONT_UI, pady=30).pack()
+            return
+
+        # 按文件名排序
+        from pathlib import Path as PPath
+        sorted_files = sorted(files, key=lambda f: PPath(f).name)
+        max_size = max((PPath(f).stat().st_size for f in sorted_files if PPath(f).exists()), default=1)
+
+        for fp in sorted_files:
+            p = PPath(fp)
+            name = p.name
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+
+            # 卡片（与 FilesTouchedPopup 同结构）
+            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+            hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            hdr.pack(fill="x")
+            tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
+                     font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
+            size_txt = f"{size:,} B" if size < 1024 else f"{size / 1024:.1f} KB"
+            tk.Label(hdr, text=size_txt, bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+                     font=theme.FONT_MONO).pack(side="right")
+
+            bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            bar_frame.pack(fill="x")
+            bar_bg = tk.Frame(bar_frame, bg="#333333", height=8)
+            bar_bg.pack(fill="x")
+            tk.Frame(bar_bg, bg=self._COLOR, height=8).place(
+                relx=0, rely=0, relwidth=size / max_size, relheight=1.0)
+
+
 class RadarPopup:
     """六维效率雷达 — hexagonal radar chart with absolute-grade normalization.
 

@@ -241,3 +241,5 @@ class SessionReport:
     thinking_count: int = 0  # thinking content blocks
     search_edit_ratio: float | None = None  # edits / (searches + edits)
     read_before_write: float | None = None  # files read before being written/edited
+    memory_files: list[str] | None = None   # project memory/*.md paths (project-level only)
+    memory_dir: str | None = None           # absolute path to the memory/ directory

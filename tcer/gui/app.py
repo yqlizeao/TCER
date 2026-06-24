@@ -326,6 +326,15 @@ class TcerGui:
         else:
             messagebox.showinfo("涉及文件", "当前会话未涉及任何文件操作。")
 
+    def show_memory_files(self) -> None:
+        report = self._rendered_report
+        # memory_files 是项目级指标，只在聚合报告上有数据
+        agg = self._current.aggregate if self._current else None
+        if agg and agg.memory_files is not None and agg.memory_dir:
+            popups.MemoryFilesPopup(self.root, agg.memory_dir, agg.memory_files)
+        else:
+            messagebox.showinfo("项目记忆文件", "当前项目没有 memory/ 目录或目录为空。")
+
     # --------------------------------------------------------------- tools
     def run_calibration(self) -> None:
         proj = self._selected_project()

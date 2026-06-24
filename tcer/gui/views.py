@@ -610,6 +610,8 @@ class MetricPanel:
                 on_click = self.controller.show_user_msgs
             elif metric.key == "files_touched":
                 on_click = self.controller.show_files_touched
+            elif metric.key == "memory_files":
+                on_click = self.controller.show_memory_files
             elif metric.key == "cost":
                 on_click = self.controller.show_cost_breakdown
             else:

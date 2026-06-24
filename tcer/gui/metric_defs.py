@@ -75,6 +75,9 @@ GROUPS: list[Group] = [
                "你主动发送的消息条数，点击查看全部；与「助手回合」对比可看交互密度。", "basic"),
         Metric("entrypoint", "启动方式", "",
                "会话启动入口：claude-vscode（VS Code 扩展）、claude-cli（命令行）等。", "basic"),
+        Metric("memory_files", "项目记忆文件", "个",
+               "当前项目 memory/ 目录下的文件数量（项目级指标，仅在项目汇总视图显示计数，"
+               "会话视图为 -）。点击查看文件列表并可跳转到目录。", "basic"),
     ]),
     Group("G2", "Token 用量", [
         Metric("total_tokens", "总 Token", "",
@@ -313,6 +316,7 @@ _SESSION_FMT: dict[str, str] = {
     "edit_ratio": "pct", "exploration_ratio": "pct", "thinking_count": "int",
     "files_touched": "int", "search_edit_ratio": "pct", "read_before_write": "pct",
     "tool_error_rate": "pct", "high_churn_files": "int", "unseen_writes": "int",
+    "memory_files": "int",
     # G5
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
     # G6
@@ -381,6 +385,7 @@ _DISPLAY_EXTRACTORS = {
     "tools": _tools_summary,
     "entrypoint": lambda r: r.meta.entrypoint or "-",
     "task_type": lambda r: _task_category_name(r.task_type) or "-",
+    "memory_files": lambda r: str(len(r.memory_files)) if r.memory_files is not None else "-",
 }
 
 
