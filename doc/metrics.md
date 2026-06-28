@@ -17,7 +17,7 @@
 
 成本按模型分别计价再求和。每个模型的 token 用各自 `$/MTok` 价表算钱。
 
-价表来源：cc-switch 的 `seed_model_pricing()`（≈160 模型），落盘为 `tcer/config/model_pricing.json`。
+价表来源：cc-switch 的 `seed_model_pricing()`（≈162 模型），落盘为 `tcer/config/model_pricing.json`。
 解析：`pricing.resolve(model)` 按「精确 id → 最长前缀 id → default」。
 未知模型回退 default（Anthropic 标价 input $3 / output $15 / cache-write $3.75 / cache-read $0.30 每百万 Token）。
 

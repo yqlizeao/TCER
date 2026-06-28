@@ -15,6 +15,17 @@ def test_exact_resolve():
     assert r == {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25}
 
 
+def test_doubao_seed_2_1():
+    # v3.16.4: 豆包 Seed 2.1 Pro/Turbo（火山官方 list 价，CNY 按 ~7.14 折算）
+    assert pricing.resolve("doubao-seed-2-1-pro") == {
+        "input": 0.84, "output": 4.2, "cache_read": 0.17, "cache_write": 0.0,
+    }
+    assert pricing.resolve("doubao-seed-2-1-turbo") == {
+        "input": 0.42, "output": 2.1, "cache_read": 0.08, "cache_write": 0.0,
+    }
+
+
+
 def test_suffix_prefix_resolve():
     # Claude Code appends a [1m] / dated suffix to the base id.
     assert pricing.resolve("claude-opus-4-8[1m]") == pricing.resolve("claude-opus-4-8")

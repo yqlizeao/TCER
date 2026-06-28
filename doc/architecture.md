@@ -8,7 +8,7 @@
 | `tcer/core/paths.py` | 定位 `~/.claude`、项目哈希编解码 |
 | `tcer/core/loc.py` | git-free 代码量统计：session_loc（工具调用统计增删）+ tree_loc（扫描工作目录） |
 | `tcer/core/metrics.py` | 全部公式：TCER/CHR/CPE/CAF/TTAF/TA-TCER/PSAC/NCPI/churn/CTEI + 评级 + 逐模型成本 |
-| `tcer/core/pricing.py` | 逐模型计价：从 `tcer/config/model_pricing.json`（≈160 模型）解析 $/MTok |
+| `tcer/core/pricing.py` | 逐模型计价：从 `tcer/config/model_pricing.json`（≈162 模型）解析 $/MTok |
 | `tcer/core/models.py` | 数据类：TokenUsage / ModelUsage / SessionMeta / SessionReport |
 | `tcer/core/analyze.py` | 编排层：项目→会话→指标，GUI 调用 |
 | `tcer/core/calibrate.py` | LOC 精度校准（库，GUI 不暴露——纯离线工具不依赖 git） |

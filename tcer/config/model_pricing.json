@@ -4,8 +4,8 @@
     "source": "farion1231/cc-switch — seed_model_pricing()",
     "source_url": "https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/database/schema.rs",
     "source_raw": "https://raw.githubusercontent.com/farion1231/cc-switch/main/src-tauri/src/database/schema.rs",
-    "fetched_at": "2026-06-19",
-    "ref": "main @ 2026-06-19 (⊇ v3.16.3: 159 个价格逐字一致 + 新增 glm-5.2)",
+    "fetched_at": "2026-06-28",
+    "ref": "main @ 2026-06-27 v3.16.4 (162 个价格逐字一致；新增 doubao-seed-2-1-pro/turbo)",
     "unit": "USD per 1,000,000 tokens (厂商官方 list 价；CNY 按官方汇率折算)",
     "fields": {
       "input": "非缓存输入 (input_cost_per_million)",
@@ -13,7 +13,7 @@
       "cache_read": "缓存读取 (cache_read_cost_per_million)",
       "cache_write": "缓存写入/创建 (cache_creation_cost_per_million)；0 表示该模型无独立缓存写入计价"
     },
-    "model_count": 160,
+    "model_count": 162,
     "note": "可自由增删 models 条目；未匹配到的模型回退到 default（Anthropic 通用 list 价）。"
   },
   "default": {
@@ -568,6 +568,20 @@
       "input": 0.1,
       "output": 0.3,
       "cache_read": 0.02,
+      "cache_write": 0
+    },
+    "doubao-seed-2-1-pro": {
+      "display_name": "Doubao Seed 2.1 Pro",
+      "input": 0.84,
+      "output": 4.2,
+      "cache_read": 0.17,
+      "cache_write": 0
+    },
+    "doubao-seed-2-1-turbo": {
+      "display_name": "Doubao Seed 2.1 Turbo",
+      "input": 0.42,
+      "output": 2.1,
+      "cache_read": 0.08,
       "cache_write": 0
     },
     "doubao-seed-code": {
