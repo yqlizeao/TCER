@@ -12,6 +12,7 @@ coverage (e.g. new providers) without touching code.
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -36,40 +37,98 @@ def default_pricing() -> dict[str, float]:
     return _rates(_load()["default"])
 
 
+def _normalize(s: str) -> str:
+    """Aggressive normalization for fallback matching.
+
+    Lowercases, spells a digit-``p``-digit version dot literally (``5p2`` →
+    ``5.2``), then drops ``-``/``_`` separators. So ``GLM-5.2``, ``glm5.2`` and
+    ``glm-5p2`` all collapse to ``glm5.2``. Only used as a last resort by
+    ``_match_id`` after exact / prefix matching fails.
+    """
+    s = s.lower()
+    s = re.sub(r"(\d)p(\d)", r"\1.\2", s)
+    return s.replace("-", "").replace("_", "")
+
+
+@lru_cache(maxsize=1)
+def _norm_index() -> dict[str, str]:
+    """Normalized-form → table key, keeping only unambiguous mappings.
+
+    If two table keys ever normalize to the same form (a future edit could do
+    it), both are dropped so a fuzzy match can never silently merge two
+    distinct models and corrupt pricing.
+    """
+    buckets: dict[str, list[str]] = {}
+    for k in _load()["models"]:
+        buckets.setdefault(_normalize(k), []).append(k)
+    return {n: ks[0] for n, ks in buckets.items() if len(ks) == 1}
+
+
 @lru_cache(maxsize=512)
 def _match_id(model: str) -> str | None:
     """Resolve a model string to a table key, with bidirectional prefix matching.
 
-    Three resolution strategies in priority order:
+    Resolution strategies in priority order:
     1. Exact match: ``model`` is a table key.
-    2. Forward prefix: ``model.startswith(mid)`` — handles date/``[1m]`` suffixes
+    2. Normalized exact: lowercase, drop ``-``/``_``, and spell a ``5p2`` version
+       dot literally (``5p2`` → ``5.2``). Collapses ``glm5.2`` / ``GLM-5.2`` /
+       ``glm-5p2`` onto ``glm-5.2``. Tried before prefix matching so a damaged
+       id like ``glm-5p2`` doesn't forward-prefix onto the shorter ``glm-5``.
+    3. Forward prefix: ``model.startswith(mid)`` — handles date/``[1m]`` suffixes
        appended by Claude Code (e.g. ``claude-opus-4-8[1m]`` → ``claude-opus-4-8``).
-    3. Reverse prefix: ``mid.startswith(model)`` — handles shortened ids written
+    4. Reverse prefix: ``mid.startswith(model)`` — handles shortened ids written
        by JSONL (e.g. ``claude-opus-4-6`` → ``claude-opus-4-6-20260206``).
        When multiple table keys share the same prefix, the **shortest** match wins
        (closest to the caller's string, least ambiguous).
 
-    Returns ``None`` if nothing in the table matches, or if *model* is empty.
+    Each strategy is tried first on the raw ``model``, then on its last ``/``
+    segment (to strip a vendor path prefix like ``z-ai/`` or
+    ``accounts/fireworks/models/``). Returns ``None`` if nothing in the table
+    matches, or if *model* is empty.
     """
     if not model:
         return None
     models = _load()["models"]
-    # 1. Exact
-    if model in models:
-        return model
-    # 2. Forward prefix (model is longer than table key)
-    best_fwd: str | None = None
-    for mid in models:
-        if model.startswith(mid) and (best_fwd is None or len(mid) > len(best_fwd)):
-            best_fwd = mid
-    if best_fwd is not None:
-        return best_fwd
-    # 3. Reverse prefix (table key is longer than model)
-    best_rev: str | None = None
-    for mid in models:
-        if mid.startswith(model) and (best_rev is None or len(mid) < len(best_rev)):
-            best_rev = mid
-    return best_rev
+    # Candidates: the raw id, plus its last path segment if a vendor prefixed it
+    # ("z-ai/glm-5.2" -> also try "glm-5.2"). Raw is tried first to preserve the
+    # long-standing [1m]/date-suffix behaviour exactly.
+    candidates = [model]
+    if "/" in model:
+        candidates.append(model.rsplit("/", 1)[-1])
+    for cand in candidates:
+        # 1. Exact
+        if cand in models:
+            return cand
+        # 2. Normalized exact (tolerant of case / missing dash / '5p2' for '5.2').
+        #    Tried BEFORE prefix matching so "glm-5p2" resolves to "glm-5.2" here
+        #    instead of forward-prefixing onto the shorter table key "glm-5".
+        nk = _norm_index().get(_normalize(cand))
+        if nk is not None:
+            return nk
+        # 3. Forward prefix (candidate is longer than table key)
+        best_fwd: str | None = None
+        for mid in models:
+            if cand.startswith(mid) and (best_fwd is None or len(mid) > len(best_fwd)):
+                best_fwd = mid
+        if best_fwd is not None:
+            return best_fwd
+        # 4. Reverse prefix (table key is longer than candidate)
+        best_rev: str | None = None
+        for mid in models:
+            if mid.startswith(cand) and (best_rev is None or len(mid) < len(best_rev)):
+                best_rev = mid
+        if best_rev is not None:
+            return best_rev
+    return None
+
+
+def table_key(model: str | None) -> str | None:
+    """The canonical table key for *model*, or ``None`` if it falls back to default.
+
+    Lets callers tell priced-from-the-table apart from Anthropic-list-price
+    fallback without re-running the match itself.
+    """
+    return _match_id(model) if model else None
 
 
 @lru_cache(maxsize=512)

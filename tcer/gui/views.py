@@ -2645,7 +2645,9 @@ def _model_price_tip(mc) -> str:
 
     Rates come from ``pricing.resolve`` — the same table used to cost the
     session — so the card shows exactly what each dimension was charged at.
-    Unknown models fall back to the Anthropic default list price.
+    Unknown models fall back to the Anthropic default list price, which is
+    called out in the header so the user doesn't mistake it for the model's
+    own official price.
     """
     from tcer.core import pricing
 
@@ -2653,12 +2655,15 @@ def _model_price_tip(mc) -> str:
         return f"${f'{x:.4f}'.rstrip('0').rstrip('.')}/百万"
 
     r = pricing.resolve(mc.model_id)
+    known = pricing.table_key(mc.model_id) is not None
+    title = "官方标价" if known else "默认配置价（未在价表中）"
+    note = "" if known else "\n⚠️ 该模型未在价表中，按 Anthropic 通用 list 价回退，非其厂商官方价。"
     return (
-        f"{mc.display_name} · 官方标价（$/百万 Token）\n"
+        f"{mc.display_name} · {title}（$/百万 Token）\n"
         f"输入　　　{_rate(r['input'])}\n"
         f"输出　　　{_rate(r['output'])}\n"
         f"缓存创建　{_rate(r['cache_write'])}\n"
-        f"缓存命中　{_rate(r['cache_read'])}"
+        f"缓存命中　{_rate(r['cache_read'])}{note}"
     )
 
 

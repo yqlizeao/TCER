@@ -69,7 +69,7 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）：
 
 1. **按 message.id 去重**：一次 API 响应被拆成多行写入 JSONL，每行重复携带 usage。必须按 id 只计一次（实测 55.9% 重复计数）。**边界**：空字符串 `""` 视为无 id，逐条计数。**ccswitch 兼容**：mimo 消息第一行是 thinking 桩（usage=0），第二行才有真实 usage；零 usage 行会释放 id 锁（`seen.discard`），允许后续行贡献真实 token。详见 [doc/data-format.md](doc/data-format.md)。
 2. **LOC 不依赖 git**：净增代码来自会话内工具调用回放。Write 覆写已有文件会高估（F1 风险），`unseen_writes` 计数暴露上界。
-3. **逐模型计价**：TokenUsage.per_model 按 message.model 分桶，混用多模型会话也精确。价表 `tcer/config/model_pricing.json`（≈162 模型）。**双向前缀匹配**：JSONL 中的短名称（如 `claude-opus-4-6`）通过反向前缀匹配解析到定价表的带日期 key（`claude-opus-4-6-20260206`）。`pricing.normalize()` 将 per_model key 归一化为定价表规范 key。
+3. **逐模型计价**：TokenUsage.per_model 按 message.model 分桶，混用多模型会话也精确。价表 `tcer/config/model_pricing.json`（≈162 模型）。**四级匹配**（`pricing._match_id`，按优先级）：①精确 ②归一化精确（小写、去 `-`/`_`、`5p2`→`5.2`，先于前缀以防 `glm-5p2` 误中 `glm-5`）③前缀（`claude-opus-4-8[1m]`→`claude-opus-4-8`）④反向前缀（短名 `claude-opus-4-6`→带日期 key）。每条先试原 id 再试末段 path（剥 `z-ai/`、`accounts/fireworks/models/` 等供应商前缀）。`pricing.normalize()` 把 per_model key 归一化到价表规范 key；`pricing.table_key()` 返回 None 即走 default 回退（GUI 价表浮窗据此标"默认配置价"）。
 4. **过滤 `<synthetic>`**：ccswitch 在 429 限流或系统占位时注入伪 assistant 消息，`model` 字段为 `<synthetic>`，usage 全为零。reader 层直接过滤，不计入 `models` 和 `per_model`。
 5. **子代理并入父会话**：Token 与 LOC 保留真实成本，不单独计为 session。
 6. **时序分析**：`ToolOp(turn, tool, path)` 记录每个工具调用的回合序号和文件路径。**搜索后编辑比**按回合就近匹配（搜索后 3 回合内出现 Write/Edit 即算跟进，不绑定具体文件——真实 Grep/Glob 的 `path` 多为目录）；**先读后写率**等仍用 file_path。merge 时 rebase turn 编号保证聚合后时序连续。

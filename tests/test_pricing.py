@@ -31,6 +31,35 @@ def test_suffix_prefix_resolve():
     assert pricing.resolve("claude-opus-4-8[1m]") == pricing.resolve("claude-opus-4-8")
 
 
+def test_irregular_provider_names_collapse():
+    """Providers wrap/damage the id in various ways; all must resolve to the
+    one canonical table key so the model-comparison tab doesn't show duplicates."""
+    glm52 = pricing.resolve("glm-5.2")
+    # missing dash
+    assert pricing.normalize("glm5.2") == "glm-5.2"
+    assert pricing.resolve("glm5.2") == glm52
+    # vendor path prefix
+    assert pricing.normalize("z-ai/glm-5.2") == "glm-5.2"
+    assert pricing.resolve("z-ai/glm-5.2") == glm52
+    assert pricing.normalize("z-ai/glm-5.1") == "glm-5.1"
+    # deep vendor path + version dot spelled as 'p' (fireworks: glm-5p2)
+    assert pricing.normalize("accounts/fireworks/models/glm-5p2") == "glm-5.2"
+    assert pricing.resolve("accounts/fireworks/models/glm-5p2") == glm52
+    # -fp8 quantization suffix still routes via forward prefix
+    assert pricing.normalize("glm-5.2-fp8") == "glm-5.2"
+    assert pricing.resolve("glm-5.2-fp8") == glm52
+    # upper-case
+    assert pricing.resolve("GLM-5.2") == glm52
+
+
+def test_table_key_distinguishes_default():
+    assert pricing.table_key("glm-5.2") == "glm-5.2"
+    assert pricing.table_key("glm5.2") == "glm-5.2"  # normalized, not default
+    assert pricing.table_key("totally-made-up-model") is None
+    assert pricing.table_key(None) is None
+    assert pricing.table_key("") is None
+
+
 def test_unknown_falls_back_to_default():
     assert pricing.resolve("totally-made-up-model") == pricing.default_pricing()
     assert pricing.default_pricing() == {
