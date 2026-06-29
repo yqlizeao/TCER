@@ -293,7 +293,7 @@ class ProjectColumn:
             card = self._make_card(d, idx, is_empty=(idx in self._empty))
             self._cards.append(card)
         self.count_label.config(text=f"项目（{len(projects)}）")
-        self.scroll.update_scroll()
+        self.scroll.update_scroll(reset=True)
         # 自动选中第一个有数据的项目
         if self._cards:
             first_valid = next(
@@ -439,7 +439,7 @@ class SessionColumn:
         for r in self._reports:
             self._cards.append(self._make_card(r))
         self.count_label.config(text=f"会话（{len(self._reports)}）")
-        self.scroll.update_scroll()
+        self.scroll.update_scroll(reset=True)
 
     def _make_card(self, r):
         sid = r.meta.session_id or r.meta.path.stem
@@ -1211,7 +1211,7 @@ class MetricTrendSelector:
                 Tooltip(rb, m.tip)
                 self._buttons[m.key] = rb
 
-        self._scroll.update_scroll()
+        self._scroll.update_scroll(reset=True)
 
     def _toggle_overlay(self) -> None:
         self._overlay_mode = self._overlay_var.get()

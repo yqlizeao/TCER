@@ -73,9 +73,11 @@ class ScrollFrame:
             self._unbind_wheel()
             self._unbind_wheel = None
 
-    def update_scroll(self) -> None:
+    def update_scroll(self, *, reset: bool = False) -> None:
         self.inner.update_idletasks()
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        if reset:
+            self.canvas.yview_moveto(0)
 
 
 class Card:
