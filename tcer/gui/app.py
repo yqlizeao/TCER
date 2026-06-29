@@ -91,6 +91,7 @@ class TcerGui:
     # --------------------------------------------------------------- projects
     def refresh_projects(self) -> None:
         source = self.filter.get_source()
+        self._selected_project_idx = None
         self._projects = list_project_refs(source)
         # 标记哪些项目没有会话数据（置灰显示）
         self._empty_projects = {
@@ -98,11 +99,24 @@ class TcerGui:
             if p.source == "claude" and not discover_jsonl(p.key)
         }
         self.project_col.update(self._projects, self._empty_projects)
+        if self._selected_project_idx is None:
+            self._clear_analysis_view()
         n_empty = len(self._empty_projects)
         status = f"发现 {len(self._projects)} 个项目"
         if n_empty:
             status += f"（{n_empty} 个无会话数据）"
         self.filter.set_status(status)
+
+    def _clear_analysis_view(self) -> None:
+        self._current = None
+        self._selected_session_id = None
+        self._rendered_report = None
+        self.session_col.update([])
+        self.ranking_view.update([])
+        self.trend_chart.update([])
+        self.model_compare.update([])
+        self.metric_panel.clear()
+        self._update_tab_names()
 
     def on_select_project(self, idx: int) -> None:
         self._selected_project_idx = idx
@@ -157,6 +171,13 @@ class TcerGui:
         self.root.after(120, self._poll)
 
     def _on_analysis(self, a: analyze.ProjectAnalysis) -> None:
+        proj = self._selected_project()
+        if proj is None:
+            return
+        if a.project_ref and (
+            a.project_ref.source != proj.source or a.project_ref.key != proj.key
+        ):
+            return
         self._current = a
         prev_sid = self._selected_session_id
         self._selected_session_id = None

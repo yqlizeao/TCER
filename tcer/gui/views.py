@@ -685,6 +685,10 @@ class MetricPanel:
         for key, cell in self._cells.items():
             cell.set_value(vals.get(key, "-"))
 
+    def clear(self) -> None:
+        for cell in self._cells.values():
+            cell.set_value("-")
+
 
 # --------------------------------------------------------------------------- #
 # Charts (Canvas)
