@@ -198,8 +198,9 @@ class TcerGui:
         from tcer.core import reader
 
         sid = report.meta.session_id or report.meta.path.stem
-        if report.meta.source == "codex":
-            messagebox.showinfo("删除会话", "Codex 会话当前仅支持只读分析，暂不删除本地 session JSONL。")
+        if report.meta.source in ("codex", "opencode"):
+            label = "Codex" if report.meta.source == "codex" else "OpenCode"
+            messagebox.showinfo("删除会话", f"{label} 会话当前仅支持只读分析，暂不删除本地会话数据。")
             return
         try:
             removed = reader.delete_session(report.meta.path)
@@ -333,6 +334,21 @@ class TcerGui:
             else:
                 messagebox.showinfo("用户消息", "当前 Codex 会话未记录到用户消息。")
             return
+        if report and report.meta.source == "opencode":
+            from tcer.core import opencode_reader
+            msgs: list[str] = []
+            if report.meta.session_id == "(aggregate)" and self._current:
+                for r in self._current.reports:
+                    sid = r.meta.session_id
+                    if sid:
+                        msgs.extend(opencode_reader.read_user_messages(r.meta.path, sid))
+            elif report.meta.session_id:
+                msgs = opencode_reader.read_user_messages(report.meta.path, report.meta.session_id)
+            if msgs:
+                popups.UserMsgsPopup(self.root, msgs)
+            else:
+                messagebox.showinfo("用户消息", "当前 OpenCode 会话未记录到用户消息。")
+            return
         if report and report.usage.user_message_texts:
             popups.UserMsgsPopup(self.root, report.usage.user_message_texts)
         else:
@@ -360,8 +376,9 @@ class TcerGui:
         if proj is None:
             messagebox.showinfo("LOC 校准", "请先选择一个项目。")
             return
-        if proj.source == "codex":
-            messagebox.showinfo("LOC 校准", "Codex 会话当前仅支持只读分析，暂不支持 LOC 校准。")
+        if proj.source in ("codex", "opencode"):
+            label = "Codex" if proj.source == "codex" else "OpenCode"
+            messagebox.showinfo("LOC 校准", f"{label} 会话当前仅支持只读分析，暂不支持 LOC 校准。")
             return
         self.filter.set_status("校准中…")
         threading.Thread(target=self._calibration_worker, args=(proj.key,),

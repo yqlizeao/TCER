@@ -46,6 +46,21 @@ def codex_sessions_dir() -> Path:
     return codex_dir() / "sessions"
 
 
+def opencode_dir() -> Path:
+    """Return the OpenCode data directory.
+
+    OpenCode documents ``~/.local/share/opencode`` (also on Windows under the
+    user profile). ``OPENCODE_DATA_DIR`` is accepted as a test/user override.
+    """
+    override = os.environ.get("OPENCODE_DATA_DIR") or os.environ.get("OPENCODE_DATA_HOME")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg) / "opencode"
+    return Path.home() / ".local" / "share" / "opencode"
+
+
 def encode_hash(cwd: str | Path) -> str:
     """Encode a working-directory path into its project-hash folder name.
 
@@ -68,8 +83,9 @@ def list_projects() -> list[Path]:
 def list_project_refs(source: str = "all") -> list[ProjectRef]:
     """Return source-aware project refs for the GUI.
 
-    ``source`` is one of ``"all"``, ``"claude"``, or ``"codex"``. Claude refs
-    wrap real project directories; Codex refs are grouped by session cwd.
+    ``source`` is one of ``"all"``, ``"claude"``, ``"codex"``, or
+    ``"opencode"``. Claude refs wrap real project directories; Codex/OpenCode
+    refs are grouped by session cwd/project directory.
     """
     refs: list[ProjectRef] = []
     if source in ("all", "claude"):
@@ -87,6 +103,10 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
         from tcer.core import codex_reader
 
         refs.extend(codex_reader.list_project_refs())
+    if source in ("all", "opencode"):
+        from tcer.core import opencode_reader
+
+        refs.extend(opencode_reader.list_project_refs())
     return sorted(refs, key=lambda r: (r.source, r.display_name.lower()))
 
 

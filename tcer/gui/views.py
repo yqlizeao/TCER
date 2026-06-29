@@ -47,15 +47,20 @@ def _short_name(project_hash: str) -> str:
 def project_label(project) -> str:
     """Display label for a source-aware project ref or legacy Path."""
     source = getattr(project, "source", "claude")
-    if source == "codex":
-        return getattr(project, "display_name", None) or getattr(project, "key", "Codex")
+    if source in ("codex", "opencode"):
+        default = "Codex" if source == "codex" else "OpenCode"
+        return getattr(project, "display_name", None) or getattr(project, "key", default)
     name = getattr(project, "name", None) or getattr(project, "key", str(project))
     return _short_name(name)
 
 
 def project_source_label(project) -> str:
     source = getattr(project, "source", "claude")
-    return "Codex" if source == "codex" else "Claude"
+    if source == "codex":
+        return "Codex"
+    if source == "opencode":
+        return "OpenCode"
+    return "Claude"
 
 
 def project_open_path(project) -> str:
@@ -112,13 +117,14 @@ class FilterBar:
             "all": "全部",
             "claude": "Claude",
             "codex": "Codex",
+            "opencode": "OpenCode",
         }
         self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
         source_cb = ttk.Combobox(bar, textvariable=self.source_var, width=8,
                                  values=list(self._source_display_names.values()), state="readonly")
         source_cb.pack(side="left", padx=(4, 12))
         source_cb.bind("<<ComboboxSelected>>", self._on_source_change)
-        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex")
+        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex / OpenCode")
 
         tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left")
         self.since_var = tk.StringVar(value="")
@@ -483,7 +489,7 @@ class SessionColumn:
                 self.controller.root, report.usage, f" · {sid[:16]}…"),
         )
         has_user_msgs = bool(report.usage.user_message_texts) or (
-            report.meta.source == "codex" and report.usage.user_msgs > 0
+            report.meta.source in ("codex", "opencode") and report.usage.user_msgs > 0
         )
         menu.add_command(
             label=f"💬 查看用户消息（{report.usage.user_msgs} 条）",
@@ -543,8 +549,9 @@ class SessionColumn:
         menu.add_separator()
 
         # Destructive action — last item, gated behind a二次确认对话框.
-        delete_state = "disabled" if report.meta.source == "codex" else "normal"
-        delete_label = "🗑 删除会话…" if report.meta.source != "codex" else "🗑 删除会话（Codex 只读）"
+        readonly = report.meta.source in ("codex", "opencode")
+        delete_state = "disabled" if readonly else "normal"
+        delete_label = "🗑 删除会话…" if not readonly else f"🗑 删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(
             label=delete_label,
             command=lambda: self._confirm_delete(report, sid),
