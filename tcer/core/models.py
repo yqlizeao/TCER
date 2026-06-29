@@ -5,6 +5,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+@dataclass(frozen=True)
+class ProjectRef:
+    """A source-aware project entry shown by the GUI.
+
+    Claude projects are directories under ``~/.claude/projects``. Codex projects
+    are virtual groups of session JSONL files sharing the same cwd.
+    """
+
+    source: str  # "claude" / "codex"
+    key: str
+    display_name: str
+    cwd: str | None
+    path: Path | None = None
+    session_paths: tuple[Path, ...] = ()
+
+    @property
+    def name(self) -> str:
+        """Compatibility shim for existing GUI code that expects Path.name."""
+        return self.key
+
+
 @dataclass
 class ModelUsage:
     """The four billing-relevant token counts for a single model within a session.
@@ -65,6 +86,23 @@ class TokenUsage:
     thinking_count: int = 0  # count of thinking content blocks
     tool_ops: list[ToolOp] = field(default_factory=list)  # ordered tool calls for temporal analysis
     user_message_texts: list[str] = field(default_factory=list)  # extracted user message text
+    reasoning_output_tokens: int = 0  # Codex exposes this separately; output_tokens already includes it
+    model_context_window: int | None = None
+    time_to_first_token_ms: int | None = None
+    task_count: int = 0
+    completed_task_count: int = 0
+    aborted_task_count: int = 0
+    compaction_count: int = 0
+    compaction_event_count: int = 0
+    web_search_count: int = 0
+    web_search_end_count: int = 0
+    image_count: int = 0
+    local_image_count: int = 0
+    patch_apply_count: int = 0
+    patch_apply_success_count: int = 0
+    rate_limit_snapshots: int = 0
+    rate_limit_reached_count: int = 0
+    rate_limit_names: set[str] = field(default_factory=set)
 
     @property
     def total_input(self) -> int:
@@ -131,6 +169,23 @@ class TokenUsage:
             thinking_count=self.thinking_count + other.thinking_count,
             tool_ops=self.tool_ops + rebased_other_ops,
             user_message_texts=self.user_message_texts + other.user_message_texts,
+            reasoning_output_tokens=self.reasoning_output_tokens + other.reasoning_output_tokens,
+            model_context_window=_max_ms(self.model_context_window, other.model_context_window),
+            time_to_first_token_ms=_min_ms(self.time_to_first_token_ms, other.time_to_first_token_ms),
+            task_count=self.task_count + other.task_count,
+            completed_task_count=self.completed_task_count + other.completed_task_count,
+            aborted_task_count=self.aborted_task_count + other.aborted_task_count,
+            compaction_count=self.compaction_count + other.compaction_count,
+            compaction_event_count=self.compaction_event_count + other.compaction_event_count,
+            web_search_count=self.web_search_count + other.web_search_count,
+            web_search_end_count=self.web_search_end_count + other.web_search_end_count,
+            image_count=self.image_count + other.image_count,
+            local_image_count=self.local_image_count + other.local_image_count,
+            patch_apply_count=self.patch_apply_count + other.patch_apply_count,
+            patch_apply_success_count=self.patch_apply_success_count + other.patch_apply_success_count,
+            rate_limit_snapshots=self.rate_limit_snapshots + other.rate_limit_snapshots,
+            rate_limit_reached_count=self.rate_limit_reached_count + other.rate_limit_reached_count,
+            rate_limit_names=self.rate_limit_names | other.rate_limit_names,
         )
 
 
@@ -178,6 +233,18 @@ class SessionMeta:
     path: Path
     is_subagent: bool
     entrypoint: str | None = None  # "claude-vscode" / "claude-cli" / etc.
+    source: str = "claude"  # "claude" / "codex"
+    cli_version: str | None = None
+    model_provider: str | None = None
+    thread_source: str | None = None
+    git_branch: str | None = None
+    git_commit: str | None = None
+    git_repository: str | None = None
+    approval_policy: str | None = None
+    sandbox_policy: str | None = None
+    permission_profile: str | None = None
+    collaboration_mode: str | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass
@@ -243,3 +310,9 @@ class SessionReport:
     read_before_write: float | None = None  # files read before being written/edited
     memory_files: list[str] | None = None   # project memory/*.md paths (project-level only)
     memory_dir: str | None = None           # absolute path to the memory/ directory
+    # --- Codex/local-agent runtime metrics ---
+    time_to_first_token_sec: float | None = None
+    task_completion_rate: float | None = None
+    patch_apply_success_rate: float | None = None
+    context_window_used_ratio: float | None = None
+    reasoning_output_ratio: float | None = None

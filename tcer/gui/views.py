@@ -44,6 +44,26 @@ def _short_name(project_hash: str) -> str:
     return project_hash
 
 
+def project_label(project) -> str:
+    """Display label for a source-aware project ref or legacy Path."""
+    source = getattr(project, "source", "claude")
+    if source == "codex":
+        return getattr(project, "display_name", None) or getattr(project, "key", "Codex")
+    name = getattr(project, "name", None) or getattr(project, "key", str(project))
+    return _short_name(name)
+
+
+def project_source_label(project) -> str:
+    source = getattr(project, "source", "claude")
+    return "Codex" if source == "codex" else "Claude"
+
+
+def project_open_path(project) -> str:
+    path = getattr(project, "path", None)
+    cwd = getattr(project, "cwd", None)
+    return str(path or cwd or project)
+
+
 def _file_manager_label() -> str:
     """Platform-appropriate file manager name for menu labels."""
     from .platform import FILE_MANAGER_NAME
@@ -85,6 +105,20 @@ class FilterBar:
         task_cb.pack(side="left", padx=(4, 12))
         task_cb.bind("<<ComboboxSelected>>", self._on_task_type_change)
         Tooltip(task_cb, self._generate_task_type_tooltip())
+
+        tk.Label(bar, text="来源:", bg=theme.BG, fg=theme.FG).pack(side="left")
+        self.source_var = tk.StringVar(value="全部")
+        self._source_display_names = {
+            "all": "全部",
+            "claude": "Claude",
+            "codex": "Codex",
+        }
+        self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
+        source_cb = ttk.Combobox(bar, textvariable=self.source_var, width=8,
+                                 values=list(self._source_display_names.values()), state="readonly")
+        source_cb.pack(side="left", padx=(4, 12))
+        source_cb.bind("<<ComboboxSelected>>", self._on_source_change)
+        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex")
 
         tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left")
         self.since_var = tk.StringVar(value="")
@@ -191,6 +225,9 @@ class FilterBar:
         # task_var 存储的是中文名称，直接触发重新分析
         self.controller.reanalyze()
 
+    def _on_source_change(self, event) -> None:
+        self.controller.refresh_projects()
+
     def _generate_task_type_tooltip(self) -> str:
         """生成任务类型的简要说明"""
         lines = []
@@ -209,6 +246,9 @@ class FilterBar:
             "since": self.since_var.get().strip() or None,
             "until": self.until_var.get().strip() or None,
         }
+
+    def get_source(self) -> str:
+        return self._source_reverse_map.get(self.source_var.get(), "all")
 
     def set_status(self, text: str) -> None:
         self.status.config(text=text)
@@ -261,11 +301,12 @@ class ProjectColumn:
                     on_click=lambda c, i=idx, e=is_empty: self._on_card_click(c, i, e),
                     on_right_click=lambda e, _i=idx, _d=project_dir: self._on_right_click(e, _i, _d),
                     padx=1, pady=1)
-        name = _short_name(project_dir.name)
+        name = project_label(project_dir)
+        label = project_source_label(project_dir)
         if is_empty:
             name += " （无会话）"
         fg = theme.MUTED if is_empty else theme.FG
-        lbl = tk.Label(card.frame, text=name, bg=theme.PANEL_2, fg=fg,
+        lbl = tk.Label(card.frame, text=f"[{label}] {name}", bg=theme.PANEL_2, fg=fg,
                        font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         lbl.pack(fill="x", padx=4, pady=3)
         card.bind_to(lbl)
@@ -286,7 +327,7 @@ class ProjectColumn:
 
     def _on_right_click(self, event, idx, project_dir):
         """Right-click context menu on a project card."""
-        name = _short_name(project_dir.name)
+        name = project_label(project_dir)
         is_empty = idx in self._empty
         menu = tk.Menu(self.container, tearoff=False, bg=theme.PANEL, fg=theme.FG,
                        activebackground=theme.ACCENT, activeforeground=theme.FG)
@@ -320,7 +361,7 @@ class ProjectColumn:
         )
         menu.add_command(
             label="📋 复制项目路径",
-            command=lambda: self._copy_text(str(project_dir)),
+            command=lambda: self._copy_text(project_open_path(project_dir)),
         )
         menu.add_command(
             label="📋 复制项目名称",
@@ -352,7 +393,7 @@ class ProjectColumn:
 
     def _open_in_explorer(self, project_dir):
         from .platform import open_in_file_manager
-        open_in_file_manager(str(project_dir))
+        open_in_file_manager(project_open_path(project_dir))
 
     def _copy_text(self, text):
         self.controller.root.clipboard_clear()
@@ -441,11 +482,12 @@ class SessionColumn:
             command=lambda: popups.ToolCallsPopup(
                 self.controller.root, report.usage, f" · {sid[:16]}…"),
         )
-        has_user_msgs = bool(report.usage.user_message_texts)
+        has_user_msgs = bool(report.usage.user_message_texts) or (
+            report.meta.source == "codex" and report.usage.user_msgs > 0
+        )
         menu.add_command(
-            label=f"💬 查看用户消息（{len(report.usage.user_message_texts)} 条）",
-            command=lambda: popups.UserMsgsPopup(
-                self.controller.root, report.usage.user_message_texts),
+            label=f"💬 查看用户消息（{report.usage.user_msgs} 条）",
+            command=lambda: self._show_user_msgs(report),
             state="normal" if has_user_msgs else "disabled",
         )
         has_files = bool(report.files_touched_details)
@@ -501,9 +543,12 @@ class SessionColumn:
         menu.add_separator()
 
         # Destructive action — last item, gated behind a二次确认对话框.
+        delete_state = "disabled" if report.meta.source == "codex" else "normal"
+        delete_label = "🗑 删除会话…" if report.meta.source != "codex" else "🗑 删除会话（Codex 只读）"
         menu.add_command(
-            label="🗑 删除会话…",
+            label=delete_label,
             command=lambda: self._confirm_delete(report, sid),
+            state=delete_state,
         )
 
         menu.tk_popup(event.x_root, event.y_root)
@@ -517,6 +562,12 @@ class SessionColumn:
             title=title, session_id=sid,
             on_confirm=lambda: self.controller.delete_session(report),
         )
+
+    def _show_user_msgs(self, report):
+        old = getattr(self.controller, "_rendered_report", None)
+        self.controller._rendered_report = report
+        self.controller.show_user_msgs()
+        self.controller._rendered_report = old
 
     def _navigate_to_trend(self, sid):
         """Switch to trend tab and highlight this session's data point."""

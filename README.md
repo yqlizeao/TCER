@@ -2,7 +2,7 @@
 
 > **Token-to-Code Efficiency Ratio** — 度量 AI 编程效率的离线分析工具
 
-基于 Claude Code 会话数据（`~/.claude/` JSONL），多维度量化「每消耗多少 Token、产出多少有效代码」。
+基于 Claude Code（`~/.claude/`）与 Codex（`~/.codex/`）本地 JSONL 会话数据，多维度量化「每消耗多少 Token、产出多少有效代码」。
 
 ![主界面](img/主界面.png)
 
@@ -21,9 +21,11 @@ python -m tcer
 
 Tkinter 桌面界面，纯离线运行。需要 Python ≥3.11 标准库，零依赖，免安装。
 
+默认在统一项目列表中展示 Claude 与 Codex 项目，可通过顶部「来源」切换为全部 / Claude / Codex。Codex v1 为只读分析：支持会话、Token、成本、模型、工具行为、趋势、运行环境、上下文窗口、首字延迟、推理输出、Web 搜索、补丁应用、图片输入与限流信号；仅在会话包含可解析 `apply_patch` 记录时计算 LOC/TCER。
+
 ## 特性
 
-**49 项指标，6 组分类**：会话概况、Token 用量、缓存效率、代码产出与质量、成本分析、综合评分。鼠标悬停即有中文解释。
+**70+ 项指标，6 组分类**：会话概况、Token 用量、缓存效率、代码产出与质量、成本分析、综合评分。鼠标悬停即有中文解释。
 
 ![主界面-指标](img/主界面.png)
 

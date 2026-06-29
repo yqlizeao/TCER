@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from tcer.core import analyze, export as export_mod, metrics
 from tcer.core.calibrate import calibrate_project
-from tcer.core.paths import list_projects
+from tcer.core.paths import list_project_refs
 from tcer.core.reader import discover_jsonl
 from . import popups, theme, views
 from .views import CteiRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
@@ -27,7 +27,7 @@ class TcerGui:
     def __init__(self, root) -> None:
         self.root = root
         self._q: queue.Queue = queue.Queue()
-        self._projects: list[Path] = []
+        self._projects: list = []
         self._current: analyze.ProjectAnalysis | None = None
         self._selected_project_idx: int | None = None
         self._selected_session_id: str | None = None
@@ -90,11 +90,12 @@ class TcerGui:
 
     # --------------------------------------------------------------- projects
     def refresh_projects(self) -> None:
-        self._projects = list_projects()
+        source = self.filter.get_source()
+        self._projects = list_project_refs(source)
         # 标记哪些项目没有会话数据（置灰显示）
         self._empty_projects = {
             i for i, p in enumerate(self._projects)
-            if not discover_jsonl(p.name)
+            if p.source == "claude" and not discover_jsonl(p.key)
         }
         self.project_col.update(self._projects, self._empty_projects)
         n_empty = len(self._empty_projects)
@@ -107,7 +108,7 @@ class TcerGui:
         self._selected_project_idx = idx
         self.reanalyze()
 
-    def _selected_project(self) -> Path | None:
+    def _selected_project(self):
         if self._selected_project_idx is None or self._selected_project_idx >= len(self._projects):
             return None
         return self._projects[self._selected_project_idx]
@@ -117,10 +118,12 @@ class TcerGui:
         proj = self._selected_project()
         if proj is None:
             return
-        self.filter.set_status(f"分析中… {views._short_name(proj.name)}")
+        self.filter.set_status(f"分析中… {views.project_label(proj)}")
         params = self.filter.get_params()
         args = dict(
-            project=proj.name,
+            project=proj.key,
+            source=proj.source,
+            project_ref=proj,
             task_type=params["task_type"],
             since=params["since"],
             until=params["until"],
@@ -195,6 +198,9 @@ class TcerGui:
         from tcer.core import reader
 
         sid = report.meta.session_id or report.meta.path.stem
+        if report.meta.source == "codex":
+            messagebox.showinfo("删除会话", "Codex 会话当前仅支持只读分析，暂不删除本地 session JSONL。")
+            return
         try:
             removed = reader.delete_session(report.meta.path)
         except OSError as e:
@@ -206,7 +212,7 @@ class TcerGui:
         self.session_col.clear_selection()
 
         proj = self._selected_project()
-        if proj is not None and discover_jsonl(proj.name):
+        if proj is not None and proj.source == "claude" and discover_jsonl(proj.key):
             self.reanalyze()
         else:
             # 最后一个会话被删 — 项目变空，回到项目列表状态。
@@ -314,6 +320,19 @@ class TcerGui:
 
     def show_user_msgs(self) -> None:
         report = self._rendered_report
+        if report and report.meta.source == "codex":
+            from tcer.core import codex_reader
+            msgs: list[str] = []
+            if report.meta.session_id == "(aggregate)" and self._current:
+                for r in self._current.reports:
+                    msgs.extend(codex_reader.read_user_messages(r.meta.path))
+            else:
+                msgs = codex_reader.read_user_messages(report.meta.path)
+            if msgs:
+                popups.UserMsgsPopup(self.root, msgs)
+            else:
+                messagebox.showinfo("用户消息", "当前 Codex 会话未记录到用户消息。")
+            return
         if report and report.usage.user_message_texts:
             popups.UserMsgsPopup(self.root, report.usage.user_message_texts)
         else:
@@ -341,8 +360,11 @@ class TcerGui:
         if proj is None:
             messagebox.showinfo("LOC 校准", "请先选择一个项目。")
             return
+        if proj.source == "codex":
+            messagebox.showinfo("LOC 校准", "Codex 会话当前仅支持只读分析，暂不支持 LOC 校准。")
+            return
         self.filter.set_status("校准中…")
-        threading.Thread(target=self._calibration_worker, args=(proj.name,),
+        threading.Thread(target=self._calibration_worker, args=(proj.key,),
                          daemon=True).start()
 
     def _calibration_worker(self, project: str) -> None:

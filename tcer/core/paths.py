@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from tcer.core.models import ProjectRef
+
 # Characters Claude Code replaces with '-' when hashing a cwd into a folder name.
 _HASH_REPLACE = ("\\", "/", ".", ":")
 
@@ -28,6 +30,22 @@ def projects_dir() -> Path:
     return _claude_dir() / "projects"
 
 
+def codex_dir() -> Path:
+    """Return the Codex config directory (``~/.codex`` by default).
+
+    Honors ``CODEX_HOME`` when set, matching Codex's local-state convention.
+    """
+    override = os.environ.get("CODEX_HOME")
+    if override:
+        return Path(override)
+    return Path.home() / ".codex"
+
+
+def codex_sessions_dir() -> Path:
+    """Return the root directory containing Codex session JSONL files."""
+    return codex_dir() / "sessions"
+
+
 def encode_hash(cwd: str | Path) -> str:
     """Encode a working-directory path into its project-hash folder name.
 
@@ -45,6 +63,31 @@ def list_projects() -> list[Path]:
     if not base.is_dir():
         return []
     return sorted(d for d in base.iterdir() if d.is_dir())
+
+
+def list_project_refs(source: str = "all") -> list[ProjectRef]:
+    """Return source-aware project refs for the GUI.
+
+    ``source`` is one of ``"all"``, ``"claude"``, or ``"codex"``. Claude refs
+    wrap real project directories; Codex refs are grouped by session cwd.
+    """
+    refs: list[ProjectRef] = []
+    if source in ("all", "claude"):
+        refs.extend(
+            ProjectRef(
+                source="claude",
+                key=d.name,
+                display_name=d.name,
+                cwd=None,
+                path=d,
+            )
+            for d in list_projects()
+        )
+    if source in ("all", "codex"):
+        from tcer.core import codex_reader
+
+        refs.extend(codex_reader.list_project_refs())
+    return sorted(refs, key=lambda r: (r.source, r.display_name.lower()))
 
 
 def resolve_project(project: str) -> Path | None:

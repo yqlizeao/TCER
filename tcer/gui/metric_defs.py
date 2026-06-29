@@ -78,6 +78,22 @@ GROUPS: list[Group] = [
         Metric("memory_files", "项目记忆文件", "个",
                "当前项目 memory/ 目录下的文件数量（项目级指标，仅在项目汇总视图显示计数，"
                "会话视图为 -）。点击查看文件列表并可跳转到目录。", "basic"),
+        Metric("cli_version", "Codex 版本", "",
+               "Codex 本地会话记录中的 CLI / App 版本。Claude 会话或旧 Codex 记录无此字段时显示 -。", "basic"),
+        Metric("model_provider", "模型供应商", "",
+               "Codex 记录中的 model_provider，用于区分 OpenAI、custom provider 等来源。", "basic"),
+        Metric("thread_source", "线程来源", "",
+               "Codex 线程来源分类，例如 user、automation 或其他未来来源。", "basic"),
+        Metric("approval_policy", "审批策略", "",
+               "Codex turn_context 中的 approval_policy，帮助解释命令是否需要用户批准。", "basic"),
+        Metric("sandbox_policy", "沙箱策略", "",
+               "Codex turn_context 中的 sandbox_policy / permission profile，帮助解释工具可用范围。", "basic"),
+        Metric("reasoning_effort", "推理强度", "",
+               "Codex turn_context 中记录的 reasoning effort；不同模型或配置可能为空。", "basic"),
+        Metric("git_branch", "Git 分支", "",
+               "Codex session_meta.git.branch，本地会话开始时记录的工作分支。", "basic"),
+        Metric("git_commit", "Git 提交", "",
+               "Codex session_meta.git.commit_hash，本地会话开始时记录的提交。", "basic"),
     ]),
     Group("G2", "Token 用量", [
         Metric("total_tokens", "总 Token", "",
@@ -90,6 +106,13 @@ GROUPS: list[Group] = [
                "首次写入缓存的 Token 数。单价随模型而定（Anthropic 回退价约 $3.75/百万，部分路由模型为 0）。", "basic"),
         Metric("cache_read", "缓存命中", "",
                "从缓存读取的 Token 数，单价远低于普通输入（Anthropic 回退价约 $0.30/百万，为输入的 1/10），命中越多越省。", "basic"),
+        Metric("reasoning_tokens", "推理输出", "",
+               "Codex token_count 单独暴露的 reasoning_output_tokens；它已包含在「输出」中，这里只作为推理占比分析，不重复计费。", "basic"),
+        Metric("context_window", "上下文窗口", "",
+               "Codex 上报的 model_context_window，表示当前模型上下文窗口大小。", "basic"),
+        Metric("context_window_used", "窗口使用率", "",
+               "公式：总输入 ÷ 上下文窗口\n"
+               "说明：粗略衡量本会话输入规模相对模型窗口的压力；多轮累计输入可能超过单轮窗口，趋势参考优先。", "basic", "down"),
     ]),
     Group("G3", "缓存效率", [
         Metric("chr", "缓存命中率", "",
@@ -148,6 +171,15 @@ GROUPS: list[Group] = [
                    "说明：衡量「搜完是否跟进修改」的工作流;按回合就近匹配(不绑定具体文件，因 Grep 的 path 多为目录)；偏低=搜索后未动手(探索过度)。", "basic", "up"),
             Metric("thinking_count", "思考次数", "",
                    "AI 输出 thinking（推理）内容块的次数,消耗 output token。⚠️ 对推理类模型(mimo/glm/带思考的 Claude)几乎每回合都有,≈回合数,并非「复杂度」信号;关闭思考的会话则恒为 0。", "basic"),
+            Metric("reasoning_ratio", "推理输出占比", "",
+                   "公式：推理输出 Token ÷ 输出 Token\n"
+                   "说明：Codex 推理模型会把 reasoning_output_tokens 单独上报，比例越高通常表示更多输出预算用于推理。", "basic"),
+            Metric("compactions", "上下文压缩", "",
+                   "Codex 记录中的 compacted/context_compacted 次数；数值高表示会话发生过上下文压缩或窗口替换。", "basic"),
+            Metric("web_searches", "网页搜索", "",
+                   "Codex response_item.web_search_call 数量；旧格式仅有 web_search_end 时用结束事件兜底。", "basic"),
+            Metric("image_inputs", "图片输入", "",
+                   "用户消息中携带的远程图片和本地图片数量合计。", "basic"),
         ]),
         Subgroup("质量", [
             Metric("churn", "返工率", "",
@@ -170,6 +202,18 @@ GROUPS: list[Group] = [
                    "公式：Write 写入「此前未读取/未接触」文件的次数\n"
                    "推荐：越低越可靠\n"
                    "说明：既反映「盲写」习惯，也是净增行高估的上界——覆写已有文件会把旧内容计为新增。", "basic", "down"),
+            Metric("task_completion", "任务完成率", "",
+                   "公式：task_complete ÷ task_started\n"
+                   "说明：Codex task_started / task_complete / turn_aborted 事件给出的本地任务完成情况。", "basic", "up"),
+            Metric("ttft", "首字延迟", "秒",
+                   "Codex task_complete.time_to_first_token_ms，表示任务从开始到首个模型输出的耗时。", "basic", "down"),
+            Metric("patch_success", "补丁成功率", "",
+                   "公式：patch_apply_end.success ÷ patch_apply_end 总数\n"
+                   "说明：Codex 本地补丁应用事件的成功率，能解释 Edit 失败或工具错误率。", "basic", "up"),
+            Metric("aborted_tasks", "中断任务", "",
+                   "Codex turn_aborted 次数。用户中断、取消或运行中止时会增加。", "basic", "down"),
+            Metric("rate_limit_hits", "限流命中", "",
+                   "Codex token_count.rate_limits 中出现 rate_limit_reached_type 的次数。", "basic", "down"),
         ]),
     ]),
     Group("G5", "成本分析", [
@@ -301,11 +345,15 @@ _SESSION_FMT: dict[str, str] = {
     # G1 — text / custom display (see _DISPLAY_EXTRACTORS), grade is plain text
     "subagent": "text", "turns": "text", "started": "text", "last_time": "text",
     "duration": "text", "models": "text", "tools": "text", "entrypoint": "text",
-    "task_type": "text", "grade": "text",
+    "task_type": "text", "grade": "text", "cli_version": "text",
+    "model_provider": "text", "thread_source": "text", "approval_policy": "text",
+    "sandbox_policy": "text", "reasoning_effort": "text", "git_branch": "text",
+    "git_commit": "text",
     "latency": "float:0.0", "user_msgs": "int",
     # G2
     "total_tokens": "int", "input": "int", "output": "int",
-    "cache_write": "int", "cache_read": "int",
+    "cache_write": "int", "cache_read": "int", "reasoning_tokens": "int",
+    "context_window": "int", "context_window_used": "pct",
     # G3
     "chr": "pct", "io_ratio": "float:0.1", "caf": "float:0.00",
     "cache_efficiency": "float:0.00", "cache_write_ratio": "pct",
@@ -316,7 +364,10 @@ _SESSION_FMT: dict[str, str] = {
     "edit_ratio": "pct", "exploration_ratio": "pct", "thinking_count": "int",
     "files_touched": "int", "search_edit_ratio": "pct", "read_before_write": "pct",
     "tool_error_rate": "pct", "high_churn_files": "int", "unseen_writes": "int",
-    "memory_files": "int",
+    "memory_files": "int", "reasoning_ratio": "pct", "compactions": "int",
+    "web_searches": "int", "image_inputs": "int", "task_completion": "pct",
+    "ttft": "float:0.0", "patch_success": "pct", "aborted_tasks": "int",
+    "rate_limit_hits": "int",
     # G5
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
     # G6
@@ -331,12 +382,23 @@ _REPORT_ATTR = {
     "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
     "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
     "high_churn_files": "high_churn_file_count", "latency": "avg_turn_latency_sec",
+    "context_window_used": "context_window_used_ratio",
+    "reasoning_ratio": "reasoning_output_ratio",
+    "task_completion": "task_completion_rate",
+    "ttft": "time_to_first_token_sec",
+    "patch_success": "patch_apply_success_rate",
 }
 # key → attribute name on report.usage (token counters live there).
 _USAGE_ATTR = {
     "total_tokens": "total", "input": "input_tokens", "output": "output_tokens",
     "cache_write": "cache_creation_input_tokens", "cache_read": "cache_read_input_tokens",
     "user_msgs": "user_msgs", "thinking_count": "thinking_count",
+    "reasoning_tokens": "reasoning_output_tokens",
+    "context_window": "model_context_window",
+    "compactions": "compaction_count",
+    "web_searches": "web_search_count",
+    "aborted_tasks": "aborted_task_count",
+    "rate_limit_hits": "rate_limit_reached_count",
 }
 # key → callable returning the current baseline constant (read-only reference).
 _BASELINE = {
@@ -384,8 +446,17 @@ _DISPLAY_EXTRACTORS = {
     "models": lambda r: fmt.models_label(r.usage) if r.usage.models else "-",
     "tools": _tools_summary,
     "entrypoint": lambda r: r.meta.entrypoint or "-",
+    "cli_version": lambda r: r.meta.cli_version or "-",
+    "model_provider": lambda r: r.meta.model_provider or "-",
+    "thread_source": lambda r: r.meta.thread_source or "-",
+    "approval_policy": lambda r: r.meta.approval_policy or "-",
+    "sandbox_policy": lambda r: r.meta.sandbox_policy or r.meta.permission_profile or "-",
+    "reasoning_effort": lambda r: r.meta.reasoning_effort or "-",
+    "git_branch": lambda r: r.meta.git_branch or "-",
+    "git_commit": lambda r: (r.meta.git_commit[:12] if r.meta.git_commit else "-"),
     "task_type": lambda r: _task_category_name(r.task_type) or "-",
     "memory_files": lambda r: str(len(r.memory_files)) if r.memory_files is not None else "-",
+    "image_inputs": lambda r: fmt.fmt_int(r.usage.image_count + r.usage.local_image_count),
 }
 
 
@@ -443,8 +514,11 @@ def raw_value(report, key: str) -> float | None:
             return report.avg_turn_latency_sec
         if key == "tools":
             return float(sum(u.tool_calls.values())) if u.tool_calls else None
+        if key == "image_inputs":
+            return float(u.image_count + u.local_image_count)
         if key in _USAGE_ATTR:
-            return float(getattr(u, _USAGE_ATTR[key]))
+            v = getattr(u, _USAGE_ATTR[key])
+            return float(v) if v is not None else None
         if key == "turns":
             return float(u.assistant_msgs)
         if key == "subagent":

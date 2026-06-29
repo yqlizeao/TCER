@@ -653,6 +653,23 @@ def compute(
     # --- new quality metrics ---
     total_tools = sum(u.tool_calls.values())
     tool_err_rate = u.tool_errors / total_tools if total_tools else None
+    ttft_sec = (u.time_to_first_token_ms / 1000) if u.time_to_first_token_ms else None
+    task_completion = (
+        u.completed_task_count / u.task_count
+        if u.task_count else None
+    )
+    patch_success = (
+        u.patch_apply_success_count / u.patch_apply_count
+        if u.patch_apply_count else None
+    )
+    context_window_ratio = (
+        u.total_input / u.model_context_window
+        if u.model_context_window else None
+    )
+    reasoning_ratio = (
+        u.reasoning_output_tokens / u.output_tokens
+        if u.output_tokens else None
+    )
     # Derive files_touched from tool_ops
     touched: set[str] = set()
     ftd: dict[str, int] = {}
@@ -716,4 +733,9 @@ def compute(
         thinking_count=u.thinking_count,
         search_edit_ratio=fq["search_edit_ratio"],
         read_before_write=fq["read_before_write"],
+        time_to_first_token_sec=ttft_sec,
+        task_completion_rate=task_completion,
+        patch_apply_success_rate=patch_success,
+        context_window_used_ratio=context_window_ratio,
+        reasoning_output_ratio=reasoning_ratio,
     )

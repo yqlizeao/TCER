@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
 
-from tcer.core import loc, metrics, reader
-from tcer.core.models import SessionMeta, SessionReport, TokenUsage
+from tcer.core import codex_reader, loc, metrics, reader
+from tcer.core.models import ProjectRef, SessionMeta, SessionReport, TokenUsage
 from tcer.core.paths import resolve_project
 
 
@@ -26,11 +26,15 @@ class ProjectAnalysis:
     code_dir: Path | None  # directory scanned for accumulated LOC (None if unknown)
     n_sessions: int  # number of real sessions (not counting subagents separately)
     n_subagents: int  # total subagent files folded into the sessions above
+    source: str = "claude"
+    project_ref: ProjectRef | None = None
 
 
 def analyze_project(
     project: str,
     *,
+    source: str = "claude",
+    project_ref: ProjectRef | None = None,
     session: str | None = None,
     no_subagents: bool = False,
     code_dir: str | Path | None = None,
@@ -54,6 +58,20 @@ def analyze_project(
 
     Raises ``FileNotFoundError`` if the project or any matching session is missing.
     """
+    if source == "codex" or (project_ref and project_ref.source == "codex"):
+        return _analyze_codex_project(
+            project_ref or project,
+            session=session,
+            code_dir=code_dir,
+            no_loc=no_loc,
+            task_type=task_type,
+            baseline_tcer=baseline_tcer,
+            baseline_ncpi=baseline_ncpi,
+            baseline_cpe=baseline_cpe,
+            since=since,
+            until=until,
+        )
+
     proj = resolve_project(project)
     if proj is None:
         raise FileNotFoundError(f"project '{project}' not found under ~/.claude/projects")
@@ -244,6 +262,144 @@ def analyze_project(
     return ProjectAnalysis(
         project_hash=proj.name, reports=reports, aggregate=agg,
         code_dir=code_path, n_sessions=len(reports), n_subagents=total_subs,
+        source="claude", project_ref=project_ref,
+    )
+
+
+def _analyze_codex_project(
+    project: str | ProjectRef,
+    *,
+    session: str | None = None,
+    code_dir: str | Path | None = None,
+    no_loc: bool = False,
+    task_type: str = "code_creation",
+    baseline_tcer: float = metrics.TCER_BASELINE,
+    baseline_ncpi: float = metrics.NCPI_BASELINE,
+    baseline_cpe: float = metrics.CPE_BASELINE,
+    since: str | None = None,
+    until: str | None = None,
+) -> ProjectAnalysis:
+    """Analyze a Codex cwd-grouped project."""
+    ref = project if isinstance(project, ProjectRef) else codex_reader.resolve_project(project)
+    if ref is None:
+        raise FileNotFoundError(f"codex project '{project}' not found under ~/.codex/sessions")
+    files = codex_reader.sessions_for_project(ref)
+    if not files:
+        raise FileNotFoundError(f"no Codex session files for '{ref.display_name}'")
+
+    since_ms = _parse_date_to_ms(since) if since else None
+    until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
+    if since_ms or until_ms:
+        filtered = []
+        for f in files:
+            u = codex_reader.aggregate_usage(f)
+            if u.started_at is None:
+                continue
+            if since_ms and u.started_at < since_ms:
+                continue
+            if until_ms and u.started_at > until_ms:
+                continue
+            filtered.append(f)
+        files = filtered
+
+    if session:
+        files = [
+            f for f in files
+            if session in (codex_reader.read_session_meta(f).session_id or f.stem)
+        ]
+        if not files:
+            raise FileNotFoundError(f"no Codex session matches '{session}'")
+
+    code_path = Path(code_dir) if code_dir else (Path(ref.cwd) if ref.cwd else None)
+    loc_total = None if no_loc else (
+        loc.tree_loc(code_path) if code_path and _is_project_dir(code_path) else None
+    )
+
+    def _mk(meta, u, net, added, deleted, sloc=None) -> SessionReport:
+        high_churn = sloc.high_churn_files if sloc else 0
+        test_net = (sloc.test_added - sloc.test_deleted) if sloc else None
+        doc_net = (sloc.doc_added - sloc.doc_deleted) if sloc else None
+        reworked = sloc.rework_deleted if sloc else None
+        rep = metrics.compute(
+            meta, u, net,
+            loc_accumulated=loc_total, task_type=task_type,
+            code_added=added, code_deleted=deleted, code_reworked=reworked,
+            high_churn_files=high_churn,
+            test_net_loc=test_net, doc_net_loc=doc_net,
+            tcer_baseline=baseline_tcer, ncpi_baseline=baseline_ncpi,
+            cpe_baseline=baseline_cpe,
+        )
+        if sloc:
+            details = {fp: cnt for fp, cnt in sloc.file_edit_counts.items() if cnt >= 3}
+            if details:
+                rep.high_churn_details = dict(sorted(details.items(), key=lambda x: -x[1]))
+        return rep
+
+    reports: list[SessionReport] = []
+    agg_u = TokenUsage()
+    tot_added = tot_deleted = tot_rework = 0
+    tot_high_churn = 0
+    tot_test_added = tot_test_deleted = 0
+    tot_doc_added = tot_doc_deleted = 0
+    tot_file_edit_counts: dict[str, int] = {}
+    all_loc_known = not no_loc
+
+    for f in files:
+        meta = codex_reader.read_session_meta(f)
+        u = codex_reader.aggregate_usage(f)
+        agg_u = agg_u.merge(u)
+        if no_loc or not codex_reader.has_loc_signal(f):
+            all_loc_known = False
+            reports.append(_mk(meta, u, None, None, None))
+            continue
+
+        sloc = codex_reader.session_loc_full(f)
+        tot_added += sloc.added
+        tot_deleted += sloc.deleted
+        tot_rework += sloc.rework_deleted
+        tot_high_churn += sloc.high_churn_files
+        tot_test_added += sloc.test_added
+        tot_test_deleted += sloc.test_deleted
+        tot_doc_added += sloc.doc_added
+        tot_doc_deleted += sloc.doc_deleted
+        for fp, cnt in sloc.file_edit_counts.items():
+            tot_file_edit_counts[fp] = tot_file_edit_counts.get(fp, 0) + cnt
+        reports.append(_mk(meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted, sloc))
+
+    agg_meta = SessionMeta(
+        session_id="(aggregate)", cwd=str(code_path) if code_path else ref.cwd,
+        title=None, path=ref.path or (files[0].parent if files else Path(".")),
+        is_subagent=False, entrypoint="codex", source="codex",
+    )
+    if all_loc_known:
+        agg_sloc = loc.SessionLoc(
+            added=tot_added,
+            deleted=tot_deleted,
+            unseen_writes=0,
+            rework_deleted=tot_rework,
+            high_churn_files=tot_high_churn,
+            test_added=tot_test_added,
+            test_deleted=tot_test_deleted,
+            doc_added=tot_doc_added,
+            doc_deleted=tot_doc_deleted,
+            file_edit_counts=tot_file_edit_counts,
+        )
+        agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, agg_sloc)
+    else:
+        agg = _mk(agg_meta, agg_u, None, None, None)
+    agg.ncpi = None
+    agg.ctei = None
+    agg.grade = None
+
+    return ProjectAnalysis(
+        project_hash=ref.key,
+        reports=reports,
+        aggregate=agg,
+        code_dir=code_path,
+        n_sessions=len(reports),
+        n_subagents=0,
+        source="codex",
+        project_ref=ref,
     )
 
 
@@ -330,4 +486,3 @@ def _parse_date_to_ms(date_str: str, end_of_day: bool = False) -> int:
         return int(dt.timestamp() * 1000)
     except ValueError as e:
         raise ValueError(f"Invalid date format '{date_str}' (expected YYYY-MM-DD)") from e
-
