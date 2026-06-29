@@ -241,3 +241,98 @@ def test_opencode_sqlite_without_project_table_groups_by_directory(tmp_path, mon
     assert opencode_reader.sessions_for_project(ref) == ["ses-no-project"]
     meta = opencode_reader.read_session_meta(db, "ses-no-project")
     assert meta.title == "无 project 表"
+
+
+def test_opencode_discovers_windows_localappdata_data_dir(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENCODE_DATA_DIR", raising=False)
+    monkeypatch.delenv("OPENCODE_DATA_HOME", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    db = _make_db(
+        tmp_path / "LocalAppData" / "opencode" / "data" / "opencode.db",
+        str(tmp_path / "repo"),
+    )
+
+    refs = opencode_reader.list_project_refs()
+
+    assert any(ref.path == db for ref in refs)
+
+
+def test_opencode_env_override_accepts_comma_separated_dirs(tmp_path, monkeypatch):
+    first = tmp_path / "missing"
+    second = tmp_path / "actual"
+    monkeypatch.setenv("OPENCODE_DATA_DIR", f"{first},{second}")
+    db = _make_db(second / "opencode.sqlite3", str(tmp_path / "repo"))
+
+    refs = opencode_reader.list_project_refs()
+
+    assert [ref.path for ref in refs] == [db]
+
+
+def test_opencode_legacy_storage_reads_split_message_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    session_dir = tmp_path / "storage" / "session" / "proj-legacy"
+    message_dir = tmp_path / "storage" / "message"
+    session_dir.mkdir(parents=True)
+    message_dir.mkdir(parents=True)
+    session_file = session_dir / "ses-legacy.json"
+    session_file.write_text(
+        _j({
+            "id": "ses-legacy",
+            "projectID": "proj-legacy",
+            "title": "legacy",
+            "tokens": {"input": 10, "output": 2},
+        }),
+        encoding="utf-8",
+    )
+    (message_dir / "ses-legacy.json").write_text(
+        _j({
+            "messages": [
+                {"role": "user", "text": "旧版消息"},
+                {"role": "assistant", "text": "ok"},
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+    refs = opencode_reader.list_project_refs()
+    assert len(refs) == 1
+    assert refs[0].session_paths == (session_file,)
+
+    usage = opencode_reader.aggregate_usage(session_file.parent, str(session_file))
+    assert usage.user_msgs == 1
+    assert opencode_reader.read_user_messages(session_file.parent, str(session_file)) == ["旧版消息"]
+
+
+def test_opencode_legacy_storage_reads_message_part_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    session_dir = tmp_path / "storage" / "session" / "proj-legacy"
+    message_dir = tmp_path / "storage" / "message" / "ses-legacy"
+    part_dir = tmp_path / "storage" / "part" / "msg-user"
+    session_dir.mkdir(parents=True)
+    message_dir.mkdir(parents=True)
+    part_dir.mkdir(parents=True)
+    session_file = session_dir / "ses-legacy.json"
+    session_file.write_text(
+        _j({
+            "id": "ses-legacy",
+            "projectID": "proj-legacy",
+            "title": "legacy",
+            "tokens": {"input": 10, "output": 2},
+        }),
+        encoding="utf-8",
+    )
+    (message_dir / "msg-user.json").write_text(
+        _j({"id": "msg-user", "role": "user"}),
+        encoding="utf-8",
+    )
+    (part_dir / "part-text.json").write_text(
+        _j({"type": "text", "text": "拆分 part 消息"}),
+        encoding="utf-8",
+    )
+
+    refs = opencode_reader.list_project_refs()
+    assert len(refs) == 1
+
+    usage = opencode_reader.aggregate_usage(session_file.parent, str(session_file))
+    assert usage.user_msgs == 1
+    assert opencode_reader.read_user_messages(session_file.parent, str(session_file)) == ["拆分 part 消息"]

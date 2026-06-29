@@ -10,6 +10,7 @@ classes without writing to the database.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -25,18 +26,24 @@ _NO_PROJECT_LABEL = "OpenCode 未知项目"
 
 def discover_databases() -> list[Path]:
     """Return candidate OpenCode SQLite databases."""
-    base = opencode_dir()
-    if not base.is_dir():
-        return []
-    direct = sorted(p for p in base.glob("opencode*.db") if p.is_file())
-    nested = sorted(p for p in (base / "storage").glob("*.db") if p.is_file()) if (base / "storage").is_dir() else []
     out: list[Path] = []
     seen: set[Path] = set()
-    for p in direct + nested:
-        rp = p.resolve()
-        if rp not in seen and _has_tables(p, {"session"}):
-            out.append(p)
-            seen.add(rp)
+    for base in _data_dirs():
+        if not base.is_dir():
+            continue
+        candidates = list(base.glob("opencode*.db"))
+        candidates.extend(base.glob("*.sqlite"))
+        candidates.extend(base.glob("*.sqlite3"))
+        storage = base / "storage"
+        if storage.is_dir():
+            candidates.extend(storage.glob("*.db"))
+            candidates.extend(storage.glob("*.sqlite"))
+            candidates.extend(storage.glob("*.sqlite3"))
+        for p in sorted(c for c in candidates if c.is_file()):
+            rp = p.resolve()
+            if rp not in seen and _has_tables(p, {"session"}):
+                out.append(p)
+                seen.add(rp)
     return out
 
 
@@ -255,7 +262,7 @@ def read_user_messages(db_path: Path, session_id: str) -> list[str]:
         obj = _read_json(Path(session_id))
         return [
             truncate_summary(t.strip(), 500)
-            for t in _legacy_texts(obj)
+            for t in _legacy_texts_for_path(Path(session_id), obj)
             if t.strip()
         ]
     messages: list[str] = []
@@ -343,14 +350,67 @@ def _connect(path: Path) -> sqlite3.Connection:
     return con
 
 
+def _data_dirs() -> list[Path]:
+    overrides = [
+        value
+        for value in (
+            os.environ.get("OPENCODE_DATA_DIR"),
+            os.environ.get("OPENCODE_DATA_HOME"),
+        )
+        if value
+    ]
+    if overrides:
+        return _dedupe_paths(
+            Path(part.strip())
+            for value in overrides
+            for part in value.split(",")
+            if part.strip()
+        )
+
+    dirs: list[Path] = []
+    dirs.append(opencode_dir())
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        dirs.append(Path(xdg) / "opencode")
+    dirs.append(Path.home() / ".local" / "share" / "opencode")
+    dirs.append(Path.home() / ".opencode")
+
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        dirs.append(Path(local_app) / "opencode")
+        dirs.append(Path(local_app) / "opencode" / "data")
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        dirs.append(Path(appdata) / "opencode")
+        dirs.append(Path(appdata) / "opencode" / "data")
+
+    return _dedupe_paths(dirs)
+
+
+def _dedupe_paths(paths) -> list[Path]:
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for d in paths:
+        try:
+            key = d.resolve()
+        except OSError:
+            key = d
+        if key not in seen:
+            out.append(d)
+            seen.add(key)
+    return out
+
+
 def _legacy_project_refs() -> list[ProjectRef]:
-    base = opencode_dir()
-    roots = [base / "storage" / "session"]
-    project_root = base / "project"
-    if project_root.is_dir():
-        for p in project_root.glob("*"):
-            if p.is_dir():
-                roots.append(p / "storage" / "session")
+    roots: list[Path] = []
+    for base in _data_dirs():
+        roots.append(base / "storage" / "session")
+        roots.append(base / "session")
+        project_root = base / "project"
+        if project_root.is_dir():
+            for p in project_root.glob("*"):
+                if p.is_dir():
+                    roots.append(p / "storage" / "session")
     groups: dict[str, list[Path]] = {}
     cwd_by_key: dict[str, str | None] = {}
     for root in roots:
@@ -435,9 +495,67 @@ def _legacy_usage(path: Path) -> TokenUsage:
     if i + o + cr + cw:
         u.assistant_msgs = 1
         u.bucket(model or "").add(i, cw, cr, o)
-    texts = list(_legacy_texts(obj))
+    texts = list(_legacy_texts_for_path(path, obj))
     u.user_msgs = len(texts)
     return u
+
+
+def _legacy_texts_for_path(path: Path, obj: dict):
+    yielded = False
+    for text in _legacy_texts(obj):
+        yielded = True
+        yield text
+    if yielded:
+        return
+
+    sid = _first_str(obj.get("id"), obj.get("sessionID"), obj.get("session_id"), path.stem)
+    for msg_path in _legacy_message_paths(path, sid):
+        msg_obj = _read_json(msg_path)
+        for text in _legacy_texts(msg_obj):
+            yield text
+        role = _first_str(msg_obj.get("role"), _dig(msg_obj, "data", "role"))
+        if role != "user":
+            continue
+        text = _first_str(msg_obj.get("text"), msg_obj.get("content"), _dig(msg_obj, "data", "text"))
+        if text:
+            yield text
+            continue
+        mid = _first_str(msg_obj.get("id"), msg_obj.get("messageID"), msg_obj.get("message_id"), msg_path.stem)
+        for part_path in _legacy_part_paths(path, mid):
+            part_obj = _read_json(part_path)
+            text = _first_str(part_obj.get("text"), part_obj.get("content"), _dig(part_obj, "data", "text"))
+            if text:
+                yield text
+
+
+def _legacy_message_paths(session_path: Path, sid: str | None) -> list[Path]:
+    if not sid:
+        return []
+    parts = list(session_path.parts)
+    for i, part in enumerate(parts):
+        if part == "storage" and i + 1 < len(parts) and parts[i + 1] == "session":
+            base = Path(*parts[:i + 1]) / "message"
+            candidates = [
+                base / f"{sid}.json",
+                base / session_path.parent.name / f"{sid}.json",
+            ]
+            session_dir = base / sid
+            if session_dir.is_dir():
+                candidates.extend(sorted(session_dir.glob("*.json")))
+            return [p for p in candidates if p.is_file()]
+    return []
+
+
+def _legacy_part_paths(session_path: Path, mid: str | None) -> list[Path]:
+    if not mid:
+        return []
+    parts = list(session_path.parts)
+    for i, part in enumerate(parts):
+        if part == "storage" and i + 1 < len(parts) and parts[i + 1] == "session":
+            part_dir = Path(*parts[:i + 1]) / "part" / mid
+            if part_dir.is_dir():
+                return sorted(part_dir.glob("*.json"))
+    return []
 
 
 def _legacy_texts(obj: dict):

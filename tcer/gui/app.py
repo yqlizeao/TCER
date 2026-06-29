@@ -35,6 +35,7 @@ class TcerGui:
         self._rendered_report = None  # last report rendered in MetricPanel (for popups)
         self._code_dir: str | None = None
         self._no_loc: bool = False
+        self._analysis_generation = 0
 
         root.title("TCER — Token 转码效率计量")
         root.configure(bg=theme.BG)
@@ -90,8 +91,10 @@ class TcerGui:
 
     # --------------------------------------------------------------- projects
     def refresh_projects(self) -> None:
+        self._analysis_generation += 1
         source = self.filter.get_source()
         self._selected_project_idx = None
+        self._clear_analysis_view()
         self._projects = list_project_refs(source)
         # 标记哪些项目没有会话数据（置灰显示）
         self._empty_projects = {
@@ -99,8 +102,6 @@ class TcerGui:
             if p.source == "claude" and not discover_jsonl(p.key)
         }
         self.project_col.update(self._projects, self._empty_projects)
-        if self._selected_project_idx is None:
-            self._clear_analysis_view()
         n_empty = len(self._empty_projects)
         status = f"发现 {len(self._projects)} 个项目"
         if n_empty:
@@ -133,6 +134,8 @@ class TcerGui:
         if proj is None:
             return
         self.filter.set_status(f"分析中… {views.project_label(proj)}")
+        self._analysis_generation += 1
+        generation = self._analysis_generation
         params = self.filter.get_params()
         args = dict(
             project=proj.key,
@@ -144,26 +147,34 @@ class TcerGui:
             code_dir=self._code_dir,
             no_loc=self._no_loc,
         )
-        threading.Thread(target=self._worker, args=(args,), daemon=True).start()
+        threading.Thread(target=self._worker, args=(generation, args), daemon=True).start()
 
-    def _worker(self, args: dict) -> None:
+    def _worker(self, generation: int, args: dict) -> None:
         try:
             result = analyze.analyze_project(**args)
-            self._q.put(("ok", result))
+            self._q.put(("ok", generation, result))
         except Exception as e:  # noqa: BLE001 — surface any failure in the UI
-            self._q.put(("err", f"{e}\n{traceback.format_exc()}"))
+            self._q.put(("err", generation, f"{e}\n{traceback.format_exc()}"))
 
     def _poll(self) -> None:
         try:
             while True:
-                kind, payload = self._q.get_nowait()
+                item = self._q.get_nowait()
+                kind = item[0]
                 if kind == "ok":
+                    _, generation, payload = item
+                    if generation != self._analysis_generation:
+                        continue
                     self._on_analysis(payload)
                 elif kind == "calibration":
+                    _, payload = item
                     cals, text_report = payload
                     self.filter.set_status("校准完成")
                     popups.CalibratePopup(self.root, cals, text_report)
                 else:
+                    _, generation, payload = item
+                    if generation != self._analysis_generation:
+                        continue
                     self.filter.set_status("出错")
                     messagebox.showerror("TCER 分析出错", payload)
         except queue.Empty:

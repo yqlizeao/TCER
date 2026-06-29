@@ -52,8 +52,8 @@ class ScrollFrame:
         self.canvas = tk.Canvas(parent, bg=bg, highlightthickness=0)
         self.inner = tk.Frame(self.canvas, bg=bg)
         self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>",
-                        lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self._reset_pending = False
+        self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_resize)
         self._unbind_wheel = None
         self.canvas.bind("<Enter>", self._on_enter)
@@ -62,6 +62,11 @@ class ScrollFrame:
 
     def _on_resize(self, event) -> None:
         self.canvas.itemconfig(self._win, width=event.width)
+
+    def _on_inner_configure(self, _event=None) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        if self._reset_pending:
+            self.canvas.yview_moveto(0)
 
     def _on_enter(self, _event=None) -> None:
         from .platform import bind_mousewheel
@@ -74,10 +79,17 @@ class ScrollFrame:
             self._unbind_wheel = None
 
     def update_scroll(self, *, reset: bool = False) -> None:
+        self._reset_pending = reset
         self.inner.update_idletasks()
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         if reset:
             self.canvas.yview_moveto(0)
+            self.canvas.after_idle(self._finish_reset)
+
+    def _finish_reset(self) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.canvas.yview_moveto(0)
+        self._reset_pending = False
 
 
 class Card:
