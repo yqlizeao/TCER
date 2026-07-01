@@ -60,13 +60,27 @@ def _index_titles() -> dict[str, str]:
     return titles
 
 
+def _normalize_cwd(cwd: str | None) -> str | None:
+    """Normalize cwd path to avoid duplicates from drive-letter case differences.
+
+    On Windows ``c:\\GitHub`` and ``C:\\GitHub`` resolve to the same path;
+    ``Path.resolve()`` normalises the drive letter to uppercase.
+    """
+    if not cwd:
+        return cwd
+    try:
+        return str(Path(cwd).resolve())
+    except (OSError, ValueError):
+        return cwd
+
+
 def list_project_refs() -> list[ProjectRef]:
     """Group Codex sessions by cwd for the unified project list."""
     groups: dict[str, list[Path]] = {}
     cwd_by_key: dict[str, str | None] = {}
     for p in discover_sessions():
         meta = read_session_meta(p)
-        cwd = meta.cwd
+        cwd = _normalize_cwd(meta.cwd)
         key = encode_hash(cwd) if cwd else _NO_CWD_KEY
         groups.setdefault(key, []).append(p)
         cwd_by_key.setdefault(key, cwd)

@@ -4,7 +4,17 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from tcer.core import analyze, opencode_reader
+
+
+@pytest.fixture(autouse=True)
+def _clear_data_dirs_cache():
+    """Clear _data_dirs() LRU cache so env/monkeypatch changes take effect."""
+    opencode_reader._data_dirs.cache_clear()
+    yield
+    opencode_reader._data_dirs.cache_clear()
 
 
 def _j(obj) -> str:
@@ -336,3 +346,47 @@ def test_opencode_legacy_storage_reads_message_part_files(tmp_path, monkeypatch)
     usage = opencode_reader.aggregate_usage(session_file.parent, str(session_file))
     assert usage.user_msgs == 1
     assert opencode_reader.read_user_messages(session_file.parent, str(session_file)) == ["拆分 part 消息"]
+
+
+def test_opencode_discovers_wsl_data_dir(tmp_path, monkeypatch):
+    """_wsl_data_dirs() should find OpenCode dirs under simulated WSL trees."""
+    # Build a fake WSL tree: <root>/Ubuntu/home/user/.local/share/opencode/
+    wsl_root = tmp_path / "wsl_root"
+    ubuntu = wsl_root / "Ubuntu" / "home" / "user"
+    oc_dir = ubuntu / ".local" / "share" / "opencode"
+    oc_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(opencode_reader, "_WSL_PREFIXES", (str(wsl_root),))
+    monkeypatch.setattr(opencode_reader.sys, "platform", "win32")
+
+    result = opencode_reader._wsl_data_dirs()
+    assert len(result) == 1
+    assert result[0] == oc_dir
+
+
+def test_opencode_wsl_deduces_distros_across_prefixes(tmp_path, monkeypatch):
+    """Same distro visible via both \\wsl$ and \\wsl.localhost should appear once."""
+    wsl_root = tmp_path / "wsl_root"
+    ubuntu = wsl_root / "Ubuntu" / "home" / "user"
+    oc_dir = ubuntu / ".local" / "share" / "opencode"
+    oc_dir.mkdir(parents=True)
+
+    # Two prefixes pointing to the same tree
+    monkeypatch.setattr(
+        opencode_reader, "_WSL_PREFIXES", (str(wsl_root), str(wsl_root))
+    )
+    monkeypatch.setattr(opencode_reader.sys, "platform", "win32")
+
+    result = opencode_reader._wsl_data_dirs()
+    assert len(result) == 1
+
+
+def test_opencode_wsl_no_opencode_dir_returns_empty(tmp_path, monkeypatch):
+    """WSL users without OpenCode installed should contribute nothing."""
+    wsl_root = tmp_path / "wsl_root"
+    (wsl_root / "Ubuntu" / "home" / "user").mkdir(parents=True)
+
+    monkeypatch.setattr(opencode_reader, "_WSL_PREFIXES", (str(wsl_root),))
+    monkeypatch.setattr(opencode_reader.sys, "platform", "win32")
+
+    assert opencode_reader._wsl_data_dirs() == []

@@ -64,6 +64,10 @@ def project_source_label(project) -> str:
 
 
 def project_open_path(project) -> str:
+    source = getattr(project, "source", "claude")
+    if source == "codex":
+        from tcer.core.paths import codex_sessions_dir
+        return str(codex_sessions_dir())
     path = getattr(project, "path", None)
     cwd = getattr(project, "cwd", None)
     return str(path or cwd or project)

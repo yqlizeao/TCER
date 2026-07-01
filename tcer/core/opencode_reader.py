@@ -13,6 +13,8 @@ import json
 import os
 import re
 import sqlite3
+import sys
+from functools import lru_cache
 from pathlib import Path
 
 from tcer.core import pricing
@@ -344,12 +346,19 @@ def has_loc_signal(db_path: Path, session_id: str) -> bool:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
-    uri = path.resolve().as_uri() + "?mode=ro"
-    con = sqlite3.connect(uri, uri=True)
+    resolved = path.resolve()
+    try:
+        uri = resolved.as_uri() + "?mode=ro"
+        con = sqlite3.connect(uri, uri=True)
+    except (sqlite3.OperationalError, OSError):
+        # UNC paths (\\wsl$\...) may not work with as_uri(); fall back to
+        # a plain path connection.
+        con = sqlite3.connect(str(resolved))
     con.row_factory = sqlite3.Row
     return con
 
 
+@lru_cache(maxsize=1)
 def _data_dirs() -> list[Path]:
     overrides = [
         value
@@ -384,7 +393,7 @@ def _data_dirs() -> list[Path]:
         dirs.append(Path(appdata) / "opencode")
         dirs.append(Path(appdata) / "opencode" / "data")
 
-    return _dedupe_paths(dirs)
+    return _dedupe_paths(dirs + _wsl_data_dirs())
 
 
 def _dedupe_paths(paths) -> list[Path]:
@@ -399,6 +408,60 @@ def _dedupe_paths(paths) -> list[Path]:
             out.append(d)
             seen.add(key)
     return out
+
+
+# ── WSL discovery ──────────────────────────────────────────────────────
+
+_WSL_PREFIXES = ("\\\\wsl$", "\\\\wsl.localhost")
+_WSL_OC_SUBDIRS = (
+    Path(".local") / "share" / "opencode",
+    Path(".opencode"),
+)
+
+
+def _wsl_data_dirs() -> list[Path]:
+    r"""Probe WSL distributions for OpenCode data directories.
+
+    On Windows, WSL filesystems are accessible via ``\\wsl$\<distro>`` or
+    ``\\wsl.localhost\<distro>``.  This function enumerates home directories
+    inside each visible distribution and returns those that contain OpenCode
+    data.  On non-Windows platforms (or when no WSL distributions are
+    installed) an empty list is returned.
+    """
+    if sys.platform != "win32":
+        return []
+
+    dirs: list[Path] = []
+    seen_distros: set[Path] = set()
+    for prefix in _WSL_PREFIXES:
+        root = Path(prefix)
+        if not root.is_dir():
+            continue
+        try:
+            distros = [d for d in root.iterdir() if d.is_dir()]
+        except OSError:
+            continue
+        for distro in distros:
+            try:
+                resolved = distro.resolve()
+            except OSError:
+                resolved = distro
+            if resolved in seen_distros:
+                continue
+            seen_distros.add(resolved)
+            home_root = distro / "home"
+            if not home_root.is_dir():
+                continue
+            try:
+                users = [u for u in home_root.iterdir() if u.is_dir()]
+            except OSError:
+                continue
+            for user_home in users:
+                for sub in _WSL_OC_SUBDIRS:
+                    candidate = user_home / sub
+                    if candidate.is_dir():
+                        dirs.append(candidate)
+    return dirs
 
 
 def _legacy_project_refs() -> list[ProjectRef]:
