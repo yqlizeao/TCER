@@ -28,15 +28,24 @@ else:  # win32
 # File-manager open
 # ---------------------------------------------------------------------------
 def open_in_file_manager(path: str) -> None:
-    """Open *path* in the platform's default file manager."""
+    """Open *path* in the platform's default file manager.
+
+    On Windows, file paths use ``explorer /select`` so the file is
+    highlighted in its parent directory rather than opened by its
+    default application.
+    """
     import subprocess
+    from pathlib import Path
     try:
         if PLATFORM == "darwin":
             subprocess.Popen(["open", path])
         elif PLATFORM == "linux":
             subprocess.Popen(["xdg-open", path])
         else:
-            subprocess.Popen(["explorer", path])
+            if Path(path).is_file():
+                subprocess.Popen(["explorer", f"/select,{path}"])
+            else:
+                subprocess.Popen(["explorer", path])
     except Exception:
         pass
 
