@@ -530,6 +530,12 @@ class SessionColumn:
 
         menu.add_separator()
 
+        # File location
+        menu.add_command(
+            label=f"📂 在{_file_manager_label()}中打开",
+            command=lambda: self._open_session_file(report),
+        )
+
         # Copy actions
         menu.add_command(
             label="📋 复制会话 ID",
@@ -604,6 +610,10 @@ class SessionColumn:
     def _copy_text(self, text):
         self.controller.root.clipboard_clear()
         self.controller.root.clipboard_append(text)
+
+    def _open_session_file(self, report):
+        from .platform import open_in_file_manager
+        open_in_file_manager(str(report.meta.path))
 
     def clear_selection(self) -> None:
         if self._selected is not None:
