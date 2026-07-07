@@ -335,11 +335,18 @@ def read_user_messages(path: Path) -> list[str]:
     return messages
 
 
-def session_loc_full(path: Path):
-    """Return LOC from parseable Codex apply_patch calls only."""
+def _loc_scan(path: Path):
+    """Single pass over events returning ``(SessionLoc, has_signal)``.
+
+    ``has_signal`` is True if any parseable apply_patch exists (independent of
+    code-file filtering, matching ``has_loc_signal``). Combining the LOC tally
+    and the signal check into one scan avoids walking the file twice — the
+    analyze loop needs both for every session.
+    """
     from tcer.core.loc import SessionLoc, _is_code
 
     added = deleted = 0
+    has_signal = False
     file_edit_counts: dict[str, int] = {}
     test_added = test_deleted = doc_added = doc_deleted = 0
     for obj in iter_events(path):
@@ -351,6 +358,7 @@ def session_loc_full(path: Path):
         patch = _extract_patch(payload.get("arguments"))
         if not patch:
             continue
+        has_signal = True
         for fp, a, d in _patch_file_deltas(patch):
             if not _is_code(fp):
                 continue
@@ -364,7 +372,7 @@ def session_loc_full(path: Path):
             elif norm.endswith(".md") or "/doc/" in norm or "/docs/" in norm or "readme" in norm:
                 doc_added += a
                 doc_deleted += d
-    return SessionLoc(
+    sloc = SessionLoc(
         added=added,
         deleted=deleted,
         unseen_writes=0,
@@ -376,17 +384,17 @@ def session_loc_full(path: Path):
         doc_deleted=doc_deleted,
         file_edit_counts=file_edit_counts,
     )
+    return sloc, has_signal
+
+
+def session_loc_full(path: Path):
+    """Return LOC from parseable Codex apply_patch calls only."""
+    return _loc_scan(path)[0]
 
 
 def has_loc_signal(path: Path) -> bool:
     """True if the session contains a parseable apply_patch call."""
-    for obj in iter_events(path):
-        payload = obj.get("payload")
-        if obj.get("type") == "response_item" and isinstance(payload, dict):
-            if payload.get("type") == "function_call" and payload.get("name") == "apply_patch":
-                if _extract_patch(payload.get("arguments")):
-                    return True
-    return False
+    return _loc_scan(path)[1]
 
 
 def _add_token_usage(u: TokenUsage, usage: dict, model: str) -> None:

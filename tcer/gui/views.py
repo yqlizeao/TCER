@@ -637,12 +637,24 @@ class SessionColumn:
         return False
 
 
+@dataclass
+class _MetricGrid:
+    """Per-grid collapse state for MetricPanel: the cells, the expander label,
+    and whether empty (「-」) cells are currently shown."""
+    frame: tk.Frame
+    cells: list
+    expander: tk.Label
+    expander_row: int
+    expanded: bool = False
+
+
 class MetricPanel:
     """Right-column tab 1: the G1–G6 metric grid, built from metric_defs."""
 
     def __init__(self, parent, controller) -> None:
         self.controller = controller
         self._cells: dict[str, MetricCell] = {}
+        self._grids: list[_MetricGrid] = []
 
         sf = ScrollFrame(parent, bg=theme.BG)
         sf.canvas.pack(fill="both", expand=True)
@@ -652,7 +664,7 @@ class MetricPanel:
             self._build_group(group)
 
     def _build_group(self, group) -> None:
-        header = tk.Frame(self.container, bg=theme.GROUP_COLORS[group.id], padx=6, pady=2)
+        header = tk.Frame(self.container, bg=theme.GROUP_COLORS[group.id], padx=6, pady=1)
         header.pack(fill="x", pady=(1, 0))
         tk.Label(header, text=f"▼ {group.id} {group.name}",
                  bg=theme.GROUP_COLORS[group.id], fg=theme.FG,
@@ -666,13 +678,14 @@ class MetricPanel:
 
     def _build_metric_grid(self, metrics, sub_label: str | None = None) -> None:
         if sub_label:
-            sub = tk.Frame(self.container, bg=theme.PANEL, padx=8, pady=1)
-            sub.pack(fill="x", pady=(2, 0))
+            sub = tk.Frame(self.container, bg=theme.PANEL, padx=8, pady=0)
+            sub.pack(fill="x", pady=(1, 0))
             tk.Label(sub, text=f"· {sub_label}", bg=theme.PANEL, fg=theme.MUTED,
                      font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
-        grid = tk.Frame(self.container, bg=theme.PANEL, padx=4, pady=2)
-        grid.pack(fill="x", pady=(0, 1))
+        grid = tk.Frame(self.container, bg=theme.PANEL, padx=4, pady=1)
+        grid.pack(fill="x", pady=(0, 0))
+        cells: list[MetricCell] = []
         for i, metric in enumerate(metrics):
             if metric.key == "tools":
                 on_click = self.controller.show_tool_calls
@@ -691,17 +704,67 @@ class MetricPanel:
             cell = MetricCell(grid, metric, on_click=on_click)
             cell.frame.grid(row=i // _PER_ROW, column=i % _PER_ROW, sticky="nsew", padx=2)
             self._cells[metric.key] = cell
+            cells.append(cell)
         for c in range(_PER_ROW):
             grid.grid_columnconfigure(c, weight=1)
+        # Collapse expander: lives INSIDE the grid so grid_remove/grid() preserves
+        # its row — pack_forget + pack would reshuffle it past the next group
+        # header. Row = len(metrics) is guaranteed below every cell row; empty
+        # rows between collapse and expand are auto-collapsed by Tk's grid.
+        exp_row = len(metrics)
+        expander = tk.Label(grid, text="", bg=theme.PANEL, fg=theme.MUTED,
+                            font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor="hand2")
+        expander.grid(row=exp_row, column=0, columnspan=_PER_ROW,
+                      sticky="w", pady=(1, 0))
+        expander.grid_remove()  # hidden until _apply_grid finds empty cells
+        state = _MetricGrid(frame=grid, cells=cells, expander=expander,
+                            expander_row=exp_row, expanded=False)
+        expander.bind("<Button-1>", lambda e, s=state: self._toggle(s))
+        self._grids.append(state)
 
     def update(self, report) -> None:
         vals = report_values(report)
         for key, cell in self._cells.items():
             cell.set_value(vals.get(key, "-"))
+        for state in self._grids:
+            self._apply_grid(state)
 
     def clear(self) -> None:
         for cell in self._cells.values():
             cell.set_value("-")
+        for state in self._grids:
+            self._apply_grid(state)
+
+    def _toggle(self, state: _MetricGrid) -> None:
+        state.expanded = not state.expanded
+        self._apply_grid(state)
+
+    def _apply_grid(self, state: _MetricGrid) -> None:
+        """Reflow one grid: hide empty (「-」) cells when collapsed, repack the
+        rest tightly, and show/hide the expander row. The empty set is recomputed
+        every call so a session change that fills a previously-empty metric
+        brings its cell back automatically; the user's expand/collapse choice
+        persists on ``state.expanded`` across updates."""
+        empty = [c for c in state.cells if c.var.get() == "-"]
+        n_empty = len(empty)
+        if state.expanded or n_empty == 0:
+            shown = state.cells
+        else:
+            empty_ids = {id(c) for c in empty}
+            shown = [c for c in state.cells if id(c) not in empty_ids]
+        for i, c in enumerate(shown):
+            c.frame.grid(row=i // _PER_ROW, column=i % _PER_ROW,
+                         sticky="nsew", padx=2)
+        if not state.expanded and n_empty > 0:
+            for c in empty:
+                c.frame.grid_remove()
+        if n_empty == 0:
+            state.expander.grid_remove()
+        else:
+            arrow = "▼" if state.expanded else "▶"
+            action = "收起" if state.expanded else "展开"
+            state.expander.config(text=f"{arrow} {n_empty} 项无数据（点击{action}）")
+            state.expander.grid()
 
 
 # --------------------------------------------------------------------------- #
@@ -1271,13 +1334,10 @@ class _ChartTooltip:
     def __init__(self, canvas: tk.Canvas) -> None:
         self._canvas = canvas
         self._win: tk.Toplevel | None = None
+        self._sig: tuple | None = None  # content signature last rendered
 
-    def show(self, x: int, y: int, lines: list[str],
-             colors: list[str] | None = None) -> None:
-        self.hide()
-        self._win = tk.Toplevel(self._canvas)
-        self._win.wm_overrideredirect(True)
-
+    def _place(self, x: int, y: int) -> None:
+        """Compute a screen position with edge detection and move the window."""
         cx = self._canvas.winfo_rootx() + x + 16
         cy = self._canvas.winfo_rooty() + y - 10
         # Edge detection: flip if near screen edge
@@ -1291,8 +1351,22 @@ class _ChartTooltip:
             cx = 4
         if cy < 0:
             cy = 4
-
         self._win.wm_geometry(f"+{cx}+{cy}")
+
+    def show(self, x: int, y: int, lines: list[str],
+             colors: list[str] | None = None) -> None:
+        # The tooltip tracks the cursor every pixel, but its CONTENT only changes
+        # when the hovered data point changes. Rebuilding a Toplevel + N Labels
+        # per mouse-motion event is expensive, so when the content is unchanged
+        # we reuse the existing window and just reposition it.
+        sig = (tuple(lines), tuple(colors or ()))
+        if self._win is not None and self._sig == sig:
+            self._place(x, y)
+            return
+        self.hide()
+        self._win = tk.Toplevel(self._canvas)
+        self._win.wm_overrideredirect(True)
+        self._place(x, y)
         fr = tk.Frame(self._win, bg=theme.PANEL_2, relief="solid",
                       borderwidth=1, padx=8, pady=5)
         fr.pack()
@@ -1300,11 +1374,13 @@ class _ChartTooltip:
             color = (colors[i] if colors and i < len(colors) else theme.FG)
             tk.Label(fr, text=line, bg=theme.PANEL_2, fg=color,
                      font=theme.FONT_UI, anchor="w").pack(anchor="w")
+        self._sig = sig
 
     def hide(self) -> None:
         if self._win:
             self._win.destroy()
             self._win = None
+        self._sig = None
 
 
 @dataclass
@@ -1655,11 +1731,14 @@ class TrendChart:
             self._controller.on_select_session(sid)
 
     def select_session_by_sid(self, sid: str) -> None:
-        """Public API: find and highlight a session by its ID."""
+        """Public API: find and highlight a session by its ID without rebuilding
+        the chart (preserves zoom); only the selection overlay is refreshed."""
         for i, r in enumerate(self._reports):
             if (r.meta.session_id or r.meta.path.stem) == sid:
+                if self._selected_idx == i:
+                    return  # already highlighted
                 self._selected_idx = i
-                self._draw()
+                self._refresh_selection()
                 return
 
     def _on_key_prev(self, _event=None) -> None:
@@ -1970,24 +2049,45 @@ class TrendChart:
                     self._draw_marker(c, px, py, False, color)
 
         if draw_selection and self._selected_idx is not None:
-            for j, ri in enumerate(ol.report_indices):
-                if ri == self._selected_idx:
-                    px, py = ol.screen_pts[j]
-                    # Vertical crosshair line (solid, visible)
-                    c.create_line(px, self._PAD_T, px,
-                                  c.winfo_height() - self._PAD_B,
-                                  fill=theme.ACCENT, dash=(4, 3), width=1)
-                    # Selection ring (large, bright)
-                    c.create_oval(px - 10, py - 10, px + 10, py + 10,
-                                  outline=theme.ACCENT, width=2)
-                    # Label showing which session is selected
-                    sel_r = self._reports[ri] if ri < len(self._reports) else None
-                    if sel_r:
-                        sel_sid = (sel_r.meta.session_id or sel_r.meta.path.stem)[:12]
-                        c.create_text(px, py - 16, text=f"▸ {sel_sid}…",
-                                      fill=theme.ACCENT, font=theme.FONT_UI_SMALL_BOLD,
-                                      anchor="s")
-                    break
+            self._draw_selection(c, ol)
+
+    def _draw_selection(self, c, ol) -> None:
+        """Draw the crosshair + ring + label for the selected point on one
+        overlay. Items carry the ``sel_overlay`` tag so they can be wiped and
+        redrawn incrementally (see ``_refresh_selection``) without a full chart
+        redraw."""
+        if self._selected_idx is None:
+            return
+        for j, ri in enumerate(ol.report_indices):
+            if ri == self._selected_idx:
+                px, py = ol.screen_pts[j]
+                # Vertical crosshair line (solid, visible)
+                c.create_line(px, self._PAD_T, px,
+                              c.winfo_height() - self._PAD_B,
+                              fill=theme.ACCENT, dash=(4, 3), width=1,
+                              tags="sel_overlay")
+                # Selection ring (large, bright)
+                c.create_oval(px - 10, py - 10, px + 10, py + 10,
+                              outline=theme.ACCENT, width=2, tags="sel_overlay")
+                # Label showing which session is selected
+                sel_r = self._reports[ri] if ri < len(self._reports) else None
+                if sel_r:
+                    sel_sid = (sel_r.meta.session_id or sel_r.meta.path.stem)[:12]
+                    c.create_text(px, py - 16, text=f"▸ {sel_sid}…",
+                                  fill=theme.ACCENT, font=theme.FONT_UI_SMALL_BOLD,
+                                  anchor="s", tags="sel_overlay")
+                break
+
+    def _refresh_selection(self) -> None:
+        """Incrementally redraw just the selection overlay (crosshair + ring +
+        label) without rebuilding the whole chart, so picking a session from the
+        list doesn't re-walk every data point. Mirrors the tag-based drag
+        rectangle; only drawn in single-metric mode (matching full ``_draw``)."""
+        c = self.canvas
+        c.delete("sel_overlay")
+        if self._selected_idx is None or len(self._overlay) != 1:
+            return
+        self._draw_selection(c, self._overlay[0])
 
     def _draw_prediction(self, c, ol, xv, yv, pad_l, plot_w) -> None:
         """Draw a 3-point linear extrapolation as a dashed line."""

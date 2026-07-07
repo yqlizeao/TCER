@@ -116,5 +116,20 @@ def test_tree_loc_counts_code_skips_excluded(tmp_path):
     assert loc.tree_loc(tmp_path) == 6
 
 
+def test_tree_loc_skips_build_and_dep_trees(tmp_path):
+    """Rust `target/`, JS build caches, and vendored dep trees must be skipped —
+    they hold generated/vendored files (not hand-written source) and the big
+    ones froze tree_loc for minutes on large repos (hmai regression)."""
+    (tmp_path / "real.py").write_text("a\nb\n", encoding="utf-8")  # 2 lines counted
+    for excluded in ("target", ".next", "Pods", "DerivedData", ".gradle",
+                     ".dart_tool", "bower_components", ".caches", "coverage"):
+        d = tmp_path / excluded
+        d.mkdir()
+        # each would add 3 lines if NOT excluded
+        (d / "gen.rs").write_text("x\ny\nz\n", encoding="utf-8")
+    # only real.py(2) counts; the 9 generated trees are skipped at any depth
+    assert loc.tree_loc(tmp_path) == 2
+
+
 def test_tree_loc_none_for_missing_dir(tmp_path):
     assert loc.tree_loc(tmp_path / "does-not-exist") is None

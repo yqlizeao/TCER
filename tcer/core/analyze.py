@@ -39,6 +39,7 @@ def analyze_project(
     no_subagents: bool = False,
     code_dir: str | Path | None = None,
     no_loc: bool = False,
+    scan_code_dir: bool = False,
     task_type: str = "feature",
     baseline_tcer: float = metrics.TCER_BASELINE,
     baseline_ncpi: float = metrics.NCPI_BASELINE,
@@ -64,6 +65,7 @@ def analyze_project(
             session=session,
             code_dir=code_dir,
             no_loc=no_loc,
+            scan_code_dir=scan_code_dir,
             task_type=task_type,
             baseline_tcer=baseline_tcer,
             baseline_ncpi=baseline_ncpi,
@@ -77,6 +79,7 @@ def analyze_project(
             session=session,
             code_dir=code_dir,
             no_loc=no_loc,
+            scan_code_dir=scan_code_dir,
             task_type=task_type,
             baseline_tcer=baseline_tcer,
             baseline_ncpi=baseline_ncpi,
@@ -95,13 +98,24 @@ def analyze_project(
     if no_subagents:
         files = [f for f in files if not reader.is_subagent(f)]
 
+    # Memoize per-file usage so the since/until filter and the main aggregation
+    # pass don't both parse every JSONL file end-to-end.
+    usage_cache: dict[Path, TokenUsage] = {}
+
+    def _usage_of(f: Path) -> TokenUsage:
+        u = usage_cache.get(f)
+        if u is None:
+            u = reader.aggregate_usage(f)
+            usage_cache[f] = u
+        return u
+
     # Time filtering: parse YYYY-MM-DD to ms timestamp, filter sessions by started_at.
     since_ms = _parse_date_to_ms(since) if since else None
     until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
     if since_ms or until_ms:
         filtered = []
         for f in files:
-            u = reader.aggregate_usage(f)
+            u = _usage_of(f)
             if u.started_at is None:
                 continue  # skip sessions with no timestamp
             if since_ms and u.started_at < since_ms:
@@ -132,8 +146,14 @@ def analyze_project(
             cwd = Path(meta.cwd)
 
     code_path = Path(code_dir) if code_dir else cwd
-    loc_total = None if no_loc else (
-        loc.tree_loc(code_path) if code_path and _is_project_dir(code_path) else None
+    # tree_loc scans the whole code dir to size the codebase (NCPI denominator).
+    # Opt-in (scan_code_dir): large repos (e.g. Rust `target/`, vendored deps)
+    # can take minutes and freeze the UI, so it stays off by default. no_loc
+    # suppresses it too (it skips all LOC, session-level included).
+    loc_total = (
+        loc.tree_loc(code_path)
+        if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
+        else None
     )
 
     def _mk(meta, u, net, added, deleted, n_sub, unseen, sloc=None) -> SessionReport:
@@ -188,7 +208,7 @@ def analyze_project(
     agg_u = TokenUsage()
     for key, gfiles in groups.items():
         gu = reduce(lambda a, b: a.merge(b),
-                    (reader.aggregate_usage(f) for f in gfiles), TokenUsage())
+                    (_usage_of(f) for f in gfiles), TokenUsage())
         n_sub = sum(1 for f in gfiles if reader.is_subagent(f))
         total_subs += n_sub
         agg_u = agg_u.merge(gu)
@@ -285,6 +305,7 @@ def _analyze_codex_project(
     session: str | None = None,
     code_dir: str | Path | None = None,
     no_loc: bool = False,
+    scan_code_dir: bool = False,
     task_type: str = "code_creation",
     baseline_tcer: float = metrics.TCER_BASELINE,
     baseline_ncpi: float = metrics.NCPI_BASELINE,
@@ -300,12 +321,21 @@ def _analyze_codex_project(
     if not files:
         raise FileNotFoundError(f"no Codex session files for '{ref.display_name}'")
 
+    usage_cache: dict[Path, TokenUsage] = {}
+
+    def _usage_of(f: Path) -> TokenUsage:
+        u = usage_cache.get(f)
+        if u is None:
+            u = codex_reader.aggregate_usage(f)
+            usage_cache[f] = u
+        return u
+
     since_ms = _parse_date_to_ms(since) if since else None
     until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
     if since_ms or until_ms:
         filtered = []
         for f in files:
-            u = codex_reader.aggregate_usage(f)
+            u = _usage_of(f)
             if u.started_at is None:
                 continue
             if since_ms and u.started_at < since_ms:
@@ -324,8 +354,10 @@ def _analyze_codex_project(
             raise FileNotFoundError(f"no Codex session matches '{session}'")
 
     code_path = Path(code_dir) if code_dir else (Path(ref.cwd) if ref.cwd else None)
-    loc_total = None if no_loc else (
-        loc.tree_loc(code_path) if code_path and _is_project_dir(code_path) else None
+    loc_total = (
+        loc.tree_loc(code_path)
+        if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
+        else None
     )
 
     def _mk(meta, u, net, added, deleted, sloc=None) -> SessionReport:
@@ -359,14 +391,18 @@ def _analyze_codex_project(
 
     for f in files:
         meta = codex_reader.read_session_meta(f)
-        u = codex_reader.aggregate_usage(f)
+        u = _usage_of(f)
         agg_u = agg_u.merge(u)
-        if no_loc or not codex_reader.has_loc_signal(f):
+        if no_loc:
+            reports.append(_mk(meta, u, None, None, None))
+            continue
+        # Single scan yields both the LOC and whether any patch existed; the old
+        # form called has_loc_signal then session_loc_full, walking the file twice.
+        sloc, has_signal = codex_reader._loc_scan(f)
+        if not has_signal:
             all_loc_known = False
             reports.append(_mk(meta, u, None, None, None))
             continue
-
-        sloc = codex_reader.session_loc_full(f)
         tot_added += sloc.added
         tot_deleted += sloc.deleted
         tot_rework += sloc.rework_deleted
@@ -422,6 +458,7 @@ def _analyze_opencode_project(
     session: str | None = None,
     code_dir: str | Path | None = None,
     no_loc: bool = False,
+    scan_code_dir: bool = False,
     task_type: str = "code_creation",
     baseline_tcer: float = metrics.TCER_BASELINE,
     baseline_ncpi: float = metrics.NCPI_BASELINE,
@@ -438,12 +475,21 @@ def _analyze_opencode_project(
         raise FileNotFoundError(f"no OpenCode sessions for '{ref.display_name}'")
 
     db_path = ref.path
+    usage_cache: dict[str, TokenUsage] = {}
+
+    def _usage_of(sid: str) -> TokenUsage:
+        u = usage_cache.get(sid)
+        if u is None:
+            u = opencode_reader.aggregate_usage(db_path, sid)
+            usage_cache[sid] = u
+        return u
+
     since_ms = _parse_date_to_ms(since) if since else None
     until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
     if since_ms or until_ms:
         filtered = []
         for sid in session_ids:
-            u = opencode_reader.aggregate_usage(db_path, sid)
+            u = _usage_of(sid)
             if u.started_at is None:
                 continue
             if since_ms and u.started_at < since_ms:
@@ -459,8 +505,10 @@ def _analyze_opencode_project(
             raise FileNotFoundError(f"no OpenCode session matches '{session}'")
 
     code_path = Path(code_dir) if code_dir else (Path(ref.cwd) if ref.cwd else None)
-    loc_total = None if no_loc else (
-        loc.tree_loc(code_path) if code_path and _is_project_dir(code_path) else None
+    loc_total = (
+        loc.tree_loc(code_path)
+        if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
+        else None
     )
 
     def _mk(meta, u, net, added, deleted, sloc=None) -> SessionReport:
@@ -494,7 +542,7 @@ def _analyze_opencode_project(
 
     for sid in session_ids:
         meta = opencode_reader.read_session_meta(db_path, sid)
-        u = opencode_reader.aggregate_usage(db_path, sid)
+        u = _usage_of(sid)
         agg_u = agg_u.merge(u)
         if no_loc or not opencode_reader.has_loc_signal(db_path, sid):
             all_loc_known = False

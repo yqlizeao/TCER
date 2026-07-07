@@ -554,9 +554,10 @@ class BaselinesPopup:
 
 
 class AdvancedPopup:
-    """高级选项 — code-dir 覆盖 + 跳过 LOC，统一卡片风格。"""
+    """高级选项 — code-dir 覆盖 + 跳过 LOC + 代码库扫描开关，统一卡片风格。"""
 
-    def __init__(self, parent, code_dir: str, no_loc: bool, on_apply) -> None:
+    def __init__(self, parent, code_dir: str, no_loc: bool, scan_code_dir: bool,
+                 on_apply) -> None:
         win = _new_window(parent, "高级选项", "480x300")
         tk.Label(win, text="高级选项", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
@@ -595,11 +596,23 @@ class AdvancedPopup:
                        activebackground=theme.PANEL, activeforeground=theme.FG,
                        font=theme.FONT_UI).pack(anchor="w")
 
+        # Scan-code-dir card — opt-in tree_loc (NCPI/CTEI denominator). Off by
+        # default: scanning a large repo (Rust target/, vendored deps, …) can
+        # freeze the UI for minutes.
+        tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+        card3 = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
+        card3.pack(fill="x")
+        scan_code_var = tk.BooleanVar(value=scan_code_dir)
+        tk.Checkbutton(card3, text="扫描代码库目录（计算 NCPI/CTEI，大项目可能很慢）",
+                       variable=scan_code_var, bg=theme.PANEL, fg=theme.FG, selectcolor="#1e1e1e",
+                       activebackground=theme.PANEL, activeforeground=theme.FG,
+                       font=theme.FONT_UI).pack(anchor="w")
+
         # Buttons
         btn_bar = tk.Frame(win, bg=theme.BG)
         btn_bar.pack(pady=8)
         tk.Button(btn_bar, text="应用并重算",
-                  command=lambda: (on_apply(code_var.get().strip() or None, no_loc_var.get()), win.destroy()),
+                  command=lambda: (on_apply(code_var.get().strip() or None, no_loc_var.get(), scan_code_var.get()), win.destroy()),
                   bg=theme.ACCENT, fg=theme.FG, relief="flat", padx=16, pady=4).pack(side="left", padx=4)
         tk.Button(btn_bar, text="取消", command=win.destroy, bg=theme.PANEL, fg=theme.FG,
                   relief="flat", padx=16, pady=4).pack(side="left", padx=4)

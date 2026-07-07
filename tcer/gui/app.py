@@ -35,6 +35,7 @@ class TcerGui:
         self._rendered_report = None  # last report rendered in MetricPanel (for popups)
         self._code_dir: str | None = None
         self._no_loc: bool = False
+        self._scan_code_dir: bool = False
         self._analysis_generation = 0
 
         root.title("TCER — Token 转码效率计量")
@@ -146,6 +147,7 @@ class TcerGui:
             until=params["until"],
             code_dir=self._code_dir,
             no_loc=self._no_loc,
+            scan_code_dir=self._scan_code_dir,
         )
         threading.Thread(target=self._worker, args=(generation, args), daemon=True).start()
 
@@ -163,20 +165,26 @@ class TcerGui:
                 kind = item[0]
                 if kind == "ok":
                     _, generation, payload = item
-                    if generation != self._analysis_generation:
-                        continue
-                    self._on_analysis(payload)
+                    if generation == self._analysis_generation:
+                        self._on_analysis(payload)
+                elif kind == "err":
+                    # analysis error — gated by generation (stale if project switched)
+                    _, generation, payload = item
+                    if generation == self._analysis_generation:
+                        self.filter.set_status("出错")
+                        messagebox.showerror("TCER 分析出错", payload)
                 elif kind == "calibration":
                     _, payload = item
                     cals, text_report = payload
                     self.filter.set_status("校准完成")
                     popups.CalibratePopup(self.root, cals, text_report)
-                else:
-                    _, generation, payload = item
-                    if generation != self._analysis_generation:
-                        continue
-                    self.filter.set_status("出错")
-                    messagebox.showerror("TCER 分析出错", payload)
+                elif kind == "calibration_err":
+                    # calibration is user-initiated — no generation gate
+                    _, payload = item
+                    self.filter.set_status("校准出错")
+                    messagebox.showerror("LOC 校准出错", payload)
+                # unknown kind: ignore — never unpack an unexpected tuple shape,
+                # which would raise and stop _poll from rescheduling (freezes GUI).
         except queue.Empty:
             pass
         self.root.after(120, self._poll)
@@ -427,7 +435,7 @@ class TcerGui:
                              f"偏差 {cal.net_deviation:+d}")
             self._q.put(("calibration", (cals, "\n".join(lines))))
         except Exception as e:  # noqa: BLE001
-            self._q.put(("err", f"校准出错: {e}"))
+            self._q.put(("calibration_err", f"校准出错: {e}"))
 
     def compute_baselines(self) -> None:
         if not self._current:
@@ -445,12 +453,14 @@ class TcerGui:
         popups.BaselinesPopup(self.root, values, self._current.n_sessions, _apply)
 
     def show_advanced(self) -> None:
-        def _apply(code_dir, no_loc):
+        def _apply(code_dir, no_loc, scan_code_dir):
             self._code_dir = code_dir
             self._no_loc = no_loc
+            self._scan_code_dir = scan_code_dir
             self.reanalyze()
 
-        popups.AdvancedPopup(self.root, self._code_dir or "", self._no_loc, _apply)
+        popups.AdvancedPopup(self.root, self._code_dir or "", self._no_loc,
+                             self._scan_code_dir, _apply)
 
     # --------------------------------------------------------------- export
     def export(self, fmt: str) -> None:

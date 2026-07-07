@@ -154,7 +154,8 @@ def aggregate_usage(path: Path) -> TokenUsage:
     u = TokenUsage()
     seen: set[str] = set()
     call_id_to_name: dict[str, str] = {}  # tool_use_id → tool_name for error attribution
-    turn_idx = 0  # assistant message sequence for temporal analysis
+    turn_idx = 0  # next turn number to assign to a new response
+    current_turn = 0  # turn number of the response whose lines we are currently reading
     for obj in iter_messages(path):
         msg = obj.get("message")
         if not isinstance(msg, dict):
@@ -198,53 +199,64 @@ def aggregate_usage(path: Path) -> TokenUsage:
                             if tname:
                                 u.tool_errors_by_tool[tname] = u.tool_errors_by_tool.get(tname, 0) + 1
 
-        # Process assistant messages: dedup by message.id for token counting
+        # Process assistant messages: dedup by message.id for token counting.
+        # A single assistant response is split across multiple JSONL lines — one
+        # per content block (thinking / text / each tool_use) — all sharing the
+        # same message.id. We dedup TOKENS by id (count each response once), but
+        # the tool_use blocks live on those continuation lines, so content must
+        # be extracted from EVERY line, not just the first. The turn number is
+        # frozen when a response starts so all of its blocks share it (temporal
+        # analysis compares turns across responses, not within one).
         if role == "assistant":
             mid = msg.get("id")
-            if isinstance(mid, str) and mid:  # skip empty string → treat as no id
-                if mid in seen:
-                    continue  # same API response, already counted for usage
-                seen.add(mid)
-            # Track time window from all assistant turns (even zero-usage ones).
-            ts = parse_timestamp_ms(obj.get("timestamp"))
-            if ts is not None:
-                u.started_at = ts if u.started_at is None else min(u.started_at, ts)
-                u.ended_at = ts if u.ended_at is None else max(u.ended_at, ts)
-            usage = msg.get("usage") or {}
-            i = _as_int(usage.get("input_tokens"))
-            cw = _as_int(usage.get("cache_creation_input_tokens"))
-            cr = _as_int(usage.get("cache_read_input_tokens"))
-            o = _as_int(usage.get("output_tokens"))
-            # Count assistant turns: only lines with real usage count as turns.
-            # Zero-usage stubs (mimo thinking blocks, synthetic stubs) are tracked
-            # separately in empty_usage_skipped and do not inflate assistant_msgs.
-            # This ensures consistent turn counts across models: one API response
-            # = one turn, regardless of how many JSONL lines it spans.
-            if i + cw + cr + o == 0:
-                u.empty_usage_skipped += 1
-                # Release the id lock so a later line with the same message.id
-                # can contribute real tokens.  ccswitch writes mimo messages as
-                # two JSONL lines: first a thinking-only stub (usage=0), then
-                # the real response with actual token counts — same id.
-                if isinstance(mid, str) and mid:
-                    seen.discard(mid)
-            else:
-                u.assistant_msgs += 1
-                u.input_tokens += i
-                u.cache_creation_input_tokens += cw
-                u.cache_read_input_tokens += cr
-                u.output_tokens += o
-            model = msg.get("model")
-            # Skip synthetic stubs (ccswitch 429 errors, "No response requested")
-            # — they use the same message.model field but are not real model turns.
-            if isinstance(model, str) and model and model != "<synthetic>":
-                u.models.add(model)
-                bucket_key = pricing.normalize(model)
-            else:
-                bucket_key = ""
-            u.bucket(bucket_key).add(i, cw, cr, o)
+            is_dup = isinstance(mid, str) and mid and mid in seen
+            if not is_dup:
+                current_turn = turn_idx  # freeze turn for this whole response
+                turn_idx += 1
+                if isinstance(mid, str) and mid:  # skip empty string → treat as no id
+                    seen.add(mid)
+                # Track time window from all assistant turns (even zero-usage ones).
+                ts = parse_timestamp_ms(obj.get("timestamp"))
+                if ts is not None:
+                    u.started_at = ts if u.started_at is None else min(u.started_at, ts)
+                    u.ended_at = ts if u.ended_at is None else max(u.ended_at, ts)
+                usage = msg.get("usage") or {}
+                i = _as_int(usage.get("input_tokens"))
+                cw = _as_int(usage.get("cache_creation_input_tokens"))
+                cr = _as_int(usage.get("cache_read_input_tokens"))
+                o = _as_int(usage.get("output_tokens"))
+                # Count assistant turns: only lines with real usage count as turns.
+                # Zero-usage stubs (mimo thinking blocks, synthetic stubs) are tracked
+                # separately in empty_usage_skipped and do not inflate assistant_msgs.
+                # This ensures consistent turn counts across models: one API response
+                # = one turn, regardless of how many JSONL lines it spans.
+                if i + cw + cr + o == 0:
+                    u.empty_usage_skipped += 1
+                    # Release the id lock so a later line with the same message.id
+                    # can contribute real tokens.  ccswitch writes mimo messages as
+                    # two JSONL lines: first a thinking-only stub (usage=0), then
+                    # the real response with actual token counts — same id.
+                    if isinstance(mid, str) and mid:
+                        seen.discard(mid)
+                else:
+                    u.assistant_msgs += 1
+                    u.input_tokens += i
+                    u.cache_creation_input_tokens += cw
+                    u.cache_read_input_tokens += cr
+                    u.output_tokens += o
+                model = msg.get("model")
+                # Skip synthetic stubs (ccswitch 429 errors, "No response requested")
+                # — they use the same message.model field but are not real model turns.
+                if isinstance(model, str) and model and model != "<synthetic>":
+                    u.models.add(model)
+                    bucket_key = pricing.normalize(model)
+                else:
+                    bucket_key = ""
+                u.bucket(bucket_key).add(i, cw, cr, o)
 
-            # Extract tool_use / thinking blocks from content
+            # Extract tool_use / thinking from content on EVERY line of the
+            # response — continuation lines (dedup duplicates) carry the tool_use
+            # blocks, so extracting only on the first line loses most tool calls.
             content = msg.get("content")
             if isinstance(content, list):
                 for item in content:
@@ -266,13 +278,12 @@ def aggregate_usage(path: Path) -> TokenUsage:
                             else:
                                 fp = None
                             u.tool_ops.append(ToolOp(
-                                turn=turn_idx,
+                                turn=current_turn,
                                 tool=tool_name,
                                 path=fp if isinstance(fp, str) else "",
                             ))
                     elif item_type == "thinking":
                         u.thinking_count += 1
-            turn_idx += 1
 
     # Compute session_duration_ms from the time window
     if u.started_at and u.ended_at:

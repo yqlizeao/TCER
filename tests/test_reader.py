@@ -138,6 +138,70 @@ def test_aggregate_dedupes_by_message_id(tmp_path):
     assert agg.cache_creation_input_tokens == 157721     # not ×3
 
 
+def test_aggregate_tool_use_on_continuation_line_counted(tmp_path):
+    """A tool_use block on a continuation line (same message.id as the text line)
+    must still be counted. Claude Code writes one content block per JSONL line,
+    so the tool_use almost always lives on a *later* line than the first —
+    deduping it away loses ~78% of tool calls in real sessions.
+    """
+    u = _usage(i=2, o=722)
+    lines = [
+        # response 1: text on line 1, Edit on line 2 (same id) + Bash on line 3
+        {"type": "assistant", "timestamp": "2026-03-06T10:00:00Z",
+         "message": {"role": "assistant", "id": "msg_X", "model": "m",
+                     "content": [{"type": "text", "text": "hi"}], "usage": u}},
+        {"type": "assistant", "timestamp": "2026-03-06T10:00:01Z",
+         "message": {"role": "assistant", "id": "msg_X", "model": "m",
+                     "content": [{"type": "tool_use", "name": "Edit",
+                                  "id": "c1", "input": {"file_path": "/a.py"}}],
+                     "usage": u}},
+        {"type": "assistant", "timestamp": "2026-03-06T10:00:02Z",
+         "message": {"role": "assistant", "id": "msg_X", "model": "m",
+                     "content": [{"type": "tool_use", "name": "Bash",
+                                  "id": "c2", "input": {}}], "usage": u}},
+    ]
+    agg = reader.aggregate_usage(write_session(tmp_path, lines))
+
+    # tokens counted once (dedup), but BOTH tool calls captured
+    assert agg.assistant_msgs == 1
+    assert agg.output_tokens == 722
+    assert agg.tool_calls == {"Edit": 1, "Bash": 1}
+    assert len(agg.tool_ops) == 2
+    assert [(op.tool, op.path) for op in agg.tool_ops] == [("Edit", "/a.py"), ("Bash", "")]
+    # both tool_ops share response 1's turn number (frozen per response)
+    assert {op.turn for op in agg.tool_ops} == {0}
+
+
+def test_aggregate_tool_use_turn_frozen_per_response(tmp_path):
+    """Tool ops from different responses get distinct, sequential turns; all
+    blocks within one response share its turn. Guards the search→edit window
+    (metrics uses strict op.turn < edit_turn <= op.turn+WINDOW).
+    """
+    u = _usage(i=1, o=1)
+    lines = [
+        # response 1 (msg_A): Grep on continuation line
+        {"type": "assistant", "timestamp": "2026-03-06T10:00:00Z",
+         "message": {"role": "assistant", "id": "msg_A", "model": "m",
+                     "content": [{"type": "text", "text": "x"}], "usage": u}},
+        {"type": "assistant", "timestamp": "2026-03-06T10:00:01Z",
+         "message": {"role": "assistant", "id": "msg_A", "model": "m",
+                     "content": [{"type": "tool_use", "name": "Grep",
+                                  "id": "c1", "input": {}}], "usage": u}},
+        # response 2 (msg_B): Edit on continuation line
+        {"type": "assistant", "timestamp": "2026-03-06T10:01:00Z",
+         "message": {"role": "assistant", "id": "msg_B", "model": "m",
+                     "content": [{"type": "text", "text": "y"}], "usage": u}},
+        {"type": "assistant", "timestamp": "2026-03-06T10:01:01Z",
+         "message": {"role": "assistant", "id": "msg_B", "model": "m",
+                     "content": [{"type": "tool_use", "name": "Edit",
+                                  "id": "c2", "input": {"file_path": "/x.py"}}],
+                     "usage": u}},
+    ]
+    agg = reader.aggregate_usage(write_session(tmp_path, lines))
+    turns = [op.turn for op in agg.tool_ops]
+    assert turns == [0, 1]                       # Grep=turn0 (resp1), Edit=turn1 (resp2)
+
+
 # --------------------------------------------------------------------------- #
 # message.id edge-case boundary tests
 # --------------------------------------------------------------------------- #

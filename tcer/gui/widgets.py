@@ -130,7 +130,7 @@ class MetricCell:
 
     def __init__(self, parent, metric: Metric, on_click=None) -> None:
         self.metric = metric
-        self.frame = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=1)
+        self.frame = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=0)
         color = theme.LEVEL_COLORS.get(metric.level, theme.LEVEL_BASIC)
 
         # Title with unit inlined: "TCER（行/百万）" or just "缓存命中率"

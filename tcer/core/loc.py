@@ -36,10 +36,18 @@ CODE_SUFFIXES = {
 }
 
 # Directories skipped when scanning a working tree for accumulated LOC.
+# Build outputs, tooling caches, and vendored dependency trees — never
+# hand-written source, and the big ones (Rust `target/`, `node_modules/`,
+# CocoaPods `Pods/`, Xcode `DerivedData/`) can hold hundreds of thousands of
+# generated files that would stall tree_loc for minutes on large repos.
 EXCLUDE_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "__pycache__", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", "venv", ".venv", "env", "dist", "build",
-    ".idea", ".vscode", ".tox", "site-packages",
+    ".git", ".hg", ".svn", "node_modules", "bower_components",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "venv", ".venv", "env", ".tox", "site-packages",
+    "target", ".gradle", "build", "dist", "DerivedData", "Pods",
+    ".dart_tool", ".next", ".nuxt", ".svelte-kit", ".turbo", ".angular",
+    ".parcel-cache", ".webpack", "coverage", ".cache", ".caches",
+    ".idea", ".vscode",
 }
 
 # Tool names that mutate files (so their token cost should produce LOC).
