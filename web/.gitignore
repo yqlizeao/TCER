@@ -1,0 +1,8 @@
+# runtime SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# python bytecode
+__pycache__/
+*.pyc

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCER Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- 登录 -->
+<div id="login" class="login-wrap">
+  <form id="login-form" class="login-card">
+    <h1>TCER</h1>
+    <p class="muted">编程效率计量面板</p>
+    <input id="username" type="text" placeholder="账号" autocomplete="username" required>
+    <input id="password" type="password" placeholder="密码" autocomplete="current-password" required>
+    <button type="submit">登录</button>
+    <div id="login-err" class="err"></div>
+  </form>
+</div>
+
+<!-- 主面板 -->
+<div id="app" class="app hidden">
+  <header class="topbar">
+    <span class="brand">TCER Dashboard</span>
+    <div class="filters">
+      <div class="filter" data-key="persons"><label>人员</label><div class="multi" id="f-persons"></div></div>
+      <div class="filter" data-key="projects"><label>项目</label><div class="multi" id="f-projects"></div></div>
+      <div class="filter" data-key="models"><label>模型</label><div class="multi" id="f-models"></div></div>
+      <div class="filter"><label>开始</label><input type="date" id="f-start"></div>
+      <div class="filter"><label>结束</label><input type="date" id="f-end"></div>
+      <div class="filter"><label>指标</label>
+        <select id="f-metric">
+          <option value="tcer">TCER（综合）</option>
+          <option value="ctei">综合效率分 CTEI</option>
+          <option value="cost_usd">成本 (USD)</option>
+          <option value="net_loc">净增行</option>
+          <option value="total_tokens">总 Token</option>
+          <option value="churn_ratio">返工率</option>
+          <option value="chr">缓存命中率 CHR</option>
+          <option value="read_before_write">先读后写率</option>
+          <option value="search_edit_ratio">搜索后编辑比</option>
+          <option value="tool_error_rate">工具错误率</option>
+        </select>
+      </div>
+      <button id="apply">刷新</button>
+      <button id="logout" class="ghost">退出</button>
+    </div>
+  </header>
+
+  <main class="charts">
+    <section class="chart-card"><h2 id="t-person">按人员</h2><div class="chart" id="chart-person"></div></section>
+    <section class="chart-card"><h2 id="t-project">按项目</h2><div class="chart" id="chart-project"></div></section>
+    <section class="chart-card"><h2 id="t-model">按模型</h2><div class="chart" id="chart-model"></div></section>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
