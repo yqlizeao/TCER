@@ -26,8 +26,82 @@ def _claude_dir() -> Path:
 
 
 def projects_dir() -> Path:
-    """Return ``<claude_dir>/projects`` where per-project session JSONL lives."""
+    """Return ``<claude_dir>/projects`` where per-project session JSONL lives.
+
+    Note: this is the *canonical* root only. Use :func:`claude_config_dirs` to
+    enumerate every Claude config root when sessions may live under a custom
+    ``CLAUDE_CONFIG_DIR`` profile (e.g. ``~/.zclaude``).
+    """
     return _claude_dir() / "projects"
+
+
+def _looks_like_claude_config(d: Path) -> bool:
+    """Heuristic: a directory with ``projects/<hash>/*.jsonl`` looks like a Claude config root."""
+    projs = d / "projects"
+    if not projs.is_dir():
+        return False
+    try:
+        return any(projs.glob("*/*.jsonl"))
+    except OSError:
+        return False
+
+
+# Process-lifetime cache keyed by (home, CLAUDE_CONFIG_DIR) so the parent-dir scan
+# runs once per distinct config relocation. A custom profile created mid-session
+# only appears after a restart (or :func:`reset_claude_roots_cache`).
+_CLAUDE_ROOTS_CACHE: dict[tuple[str, str], list[Path]] = {}
+
+
+def claude_config_dirs() -> list[Path]:
+    """All Claude config roots visible to TCER: the canonical dir plus matching siblings.
+
+    Claude Code is often launched with ``CLAUDE_CONFIG_DIR=%USERPROFILE%\\.zclaude``
+    (or another custom name) to keep ``.claude`` clean. That env var lives in
+    Claude's process, not TCER's, so TCER cannot read it directly. Instead we scan
+    the canonical dir's *parent* (typically the home dir) for other directories
+    whose structure matches Claude's (``projects/<hash>/*.jsonl``) and treat each
+    as an additional root. Sessions for the same project hash across roots are
+    merged by :func:`tcer.core.reader.discover_jsonl`; a project unique to a custom
+    root simply becomes visible.
+    """
+    key = (str(Path.home()), os.environ.get("CLAUDE_CONFIG_DIR", ""))
+    cached = _CLAUDE_ROOTS_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    canonical = _claude_dir()
+    parent = canonical.parent
+    candidates: list[Path] = []
+    try:
+        candidates = [c for c in parent.iterdir() if c.is_dir()]
+    except OSError:
+        candidates = []
+    # Always consider the canonical dir even if the parent listing missed it.
+    if canonical not in candidates:
+        candidates.append(canonical)
+
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for cand in candidates:
+        try:
+            if not cand.is_dir():
+                continue
+            rp = cand.resolve()
+        except OSError:
+            continue
+        if rp in seen:
+            continue
+        if _looks_like_claude_config(cand):
+            seen.add(rp)
+            roots.append(cand)
+    roots.sort(key=lambda p: str(p).lower())
+    _CLAUDE_ROOTS_CACHE[key] = roots
+    return roots
+
+
+def reset_claude_roots_cache() -> None:
+    """Clear the cached Claude config-root scan (used by tests)."""
+    _CLAUDE_ROOTS_CACHE.clear()
 
 
 def codex_dir() -> Path:
@@ -61,6 +135,22 @@ def opencode_dir() -> Path:
     return Path.home() / ".local" / "share" / "opencode"
 
 
+def grok_dir() -> Path:
+    """Return the grok build CLI config directory (``~/.grok`` by default).
+
+    Honors ``GROK_HOME`` when set, matching grok build's data-root convention.
+    """
+    override = os.environ.get("GROK_HOME")
+    if override:
+        return Path(override)
+    return Path.home() / ".grok"
+
+
+def grok_sessions_dir() -> Path:
+    """Return the root directory containing Grok session directories."""
+    return grok_dir() / "sessions"
+
+
 def encode_hash(cwd: str | Path) -> str:
     """Encode a working-directory path into its project-hash folder name.
 
@@ -73,19 +163,37 @@ def encode_hash(cwd: str | Path) -> str:
 
 
 def list_projects() -> list[Path]:
-    """Return all project-hash directories under ``projects/``, sorted."""
-    base = projects_dir()
-    if not base.is_dir():
-        return []
-    return sorted(d for d in base.iterdir() if d.is_dir())
+    """Return all project-hash directories across every Claude config root, sorted.
+
+    When multiple config roots (e.g. ``~/.claude`` and ``~/.zclaude``) hold the
+    same project hash, the alphabetically-first root's directory represents it;
+    :func:`tcer.core.reader.discover_jsonl` still unions session files from every
+    root so no sessions are lost.
+    """
+    dirs: list[Path] = []
+    seen_names: set[str] = set()
+    for root in claude_config_dirs():
+        base = root / "projects"
+        if not base.is_dir():
+            continue
+        try:
+            children = sorted(base.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for d in children:
+            if d.is_dir() and d.name not in seen_names:
+                seen_names.add(d.name)
+                dirs.append(d)
+    dirs.sort(key=lambda p: p.name.lower())
+    return dirs
 
 
 def list_project_refs(source: str = "all") -> list[ProjectRef]:
     """Return source-aware project refs for the GUI.
 
-    ``source`` is one of ``"all"``, ``"claude"``, ``"codex"``, or
-    ``"opencode"``. Claude refs wrap real project directories; Codex/OpenCode
-    refs are grouped by session cwd/project directory.
+    ``source`` is one of ``"all"``, ``"claude"``, ``"codex"``, ``"opencode"``,
+    or ``"grok"``. Claude refs wrap real project directories; Codex/OpenCode/
+    Grok refs are grouped by session cwd/project directory.
     """
     refs: list[ProjectRef] = []
     if source in ("all", "claude"):
@@ -107,6 +215,10 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
         from tcer.core import opencode_reader
 
         refs.extend(opencode_reader.list_project_refs())
+    if source in ("all", "grok"):
+        from tcer.core import grok_reader
+
+        refs.extend(grok_reader.list_project_refs())
     return sorted(refs, key=lambda r: (r.source, r.display_name.lower()))
 
 

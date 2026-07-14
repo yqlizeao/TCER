@@ -238,8 +238,8 @@ class TcerGui:
         from tcer.core import reader
 
         sid = report.meta.session_id or report.meta.path.stem
-        if report.meta.source in ("codex", "opencode"):
-            label = "Codex" if report.meta.source == "codex" else "OpenCode"
+        if report.meta.source in ("codex", "opencode", "grok"):
+            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok"}.get(report.meta.source, report.meta.source)
             messagebox.showinfo("删除会话", f"{label} 会话当前仅支持只读分析，暂不删除本地会话数据。")
             return
         try:
@@ -389,6 +389,19 @@ class TcerGui:
             else:
                 messagebox.showinfo("用户消息", "当前 OpenCode 会话未记录到用户消息。")
             return
+        if report and report.meta.source == "grok":
+            from tcer.core import grok_reader
+            msgs: list[str] = []
+            if report.meta.session_id == "(aggregate)" and self._current:
+                for r in self._current.reports:
+                    msgs.extend(grok_reader.read_user_messages(r.meta.path))
+            else:
+                msgs = grok_reader.read_user_messages(report.meta.path)
+            if msgs:
+                popups.UserMsgsPopup(self.root, msgs)
+            else:
+                messagebox.showinfo("用户消息", "当前 Grok 会话未记录到用户消息。")
+            return
         if report and report.usage.user_message_texts:
             popups.UserMsgsPopup(self.root, report.usage.user_message_texts)
         else:
@@ -416,8 +429,8 @@ class TcerGui:
         if proj is None:
             messagebox.showinfo("LOC 校准", "请先选择一个项目。")
             return
-        if proj.source in ("codex", "opencode"):
-            label = "Codex" if proj.source == "codex" else "OpenCode"
+        if proj.source in ("codex", "opencode", "grok"):
+            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok"}.get(proj.source, proj.source)
             messagebox.showinfo("LOC 校准", f"{label} 会话当前仅支持只读分析，暂不支持 LOC 校准。")
             return
         self.filter.set_status("校准中…")

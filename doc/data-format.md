@@ -17,6 +17,10 @@ Claude Code 将所有会话数据存储在 `~/.claude/` 目录下（Windows: `%U
 
 **project-hash** 格式：将项目路径中的 `\`、`/`、`.`、`:` 替换为 `-`，例如 `c:\GitHub\TCER` → `c--GitHub-TCER`。
 
+### 自定义配置目录（`.zclaude` 等）
+
+启动 Claude Code 时传 `CLAUDE_CONFIG_DIR=%USERPROFILE%\.zclaude` 会让它改用 `.zclaude`（结构同 `.claude`）存数据，常用于不污染 `.claude`。该环境变量只在 Claude 进程内，TCER 读不到，因此 TCER 用**结构指纹**自动发现：以规范目录（`CLAUDE_CONFIG_DIR` 或 `~/.claude`）为锚，扫描其父目录下所有含 `projects/<hash>/*.jsonl` 的兄弟目录，全部当作 Claude 根。`discover_jsonl(hash)` 与 `list_projects()` 跨所有根查找，**同一项目 hash 在多个配置目录里的会话合并**；只存在于自定义目录的项目也会出现。无需任何手动配置。
+
 ## Session 元数据（`sessions/<pid>.json`）
 
 ```json
@@ -92,3 +96,68 @@ JSONL 中时间戳可能是三种格式：
 ## 工具调用统计
 
 `reader.aggregate_usage` 从 assistant 消息的 `content` 中提取 `tool_use` 块，按 `message.id` 去重后统计每种工具的调用次数。
+
+---
+
+## Grok 数据格式（grok build CLI）
+
+x.ai 的 grok build CLI 把会话持久化在 `~/.grok/sessions/`（`GROK_HOME` 可覆盖），按 **URL 编码的工作目录**分目录：
+
+```
+~/.grok/sessions/<URL编码cwd>/<UUIDv7>/
+  summary.json     # 元数据：info.id / info.cwd / generated_title / current_model_id
+                   #          / created_at / agent_name / reasoning_effort / sandbox_profile
+  updates.jsonl    # ★权威 ACP 对话流（JSON-RPC 通知），token 用量与工具调用都在此
+  chat_history.jsonl  # 原始发给模型的消息
+  events.jsonl     # 轻量事件：turn_ended(outcome) / tool_completed(duration) / permission_resolved
+  signals.json     # 聚合信号（turnCount / toolCallCount / modelsUsed / agentLines*）——仅交叉校验
+  rewind_points.jsonl / terminal/*.log / subagents/   # 按需
+```
+
+`<URL编码cwd>` 例：`C:\playground\langfuse` → `C%3A%5Cplayground%5Clangfuse`（`%3A`=`:`、`%5C`=`\`）。
+
+### updates.jsonl
+
+每行一条 JSON-RPC 通知：`{"timestamp": <epoch秒>, "method": "session/update", "params": {"sessionId", "update": {...}, "_meta": {...}}}`。`params.update.sessionUpdate` 决定记录类型：
+
+| sessionUpdate | 说明 | 关键字段 |
+|---|---|---|
+| `user_message_chunk` | 用户消息 | `content.text`、`_meta.modelId` |
+| `agent_thought_chunk` | 推理流 | 计入 `thinking_count` |
+| `agent_message_chunk` | 助手回复文本 | — |
+| `turn_completed` | ★唯一 token 用量来源 | `usage`（见下） |
+| `tool_call` | 工具发起 | `title`、`rawInput`、`_meta["x.ai/tool"]` |
+| `tool_call_update` | 工具流式结果 | `rawOutput.exit_code`（错误归因）、`status` |
+
+### Token 用量（`turn_completed.usage`）
+
+每个 turn 恰好一条 `turn_completed`（无 Claude 式多行重复携带 usage 的去重问题），直接累加：
+
+```json
+"usage": {
+  "inputTokens": 30305, "outputTokens": 116, "cachedReadTokens": 26368,
+  "reasoningTokens": 73, "modelCalls": 1, "apiDurationMs": 3322,
+  "modelUsage": { "grok-4.5": { ...同字段... } }
+}
+```
+
+- 非缓存输入 = `inputTokens - cachedReadTokens`；缓存命中 = `cachedReadTokens`；缓存创建记 0（Grok 无独立写缓存计价）。
+- `reasoningTokens` 单独展示，按输出价计费。
+- `modelUsage` 提供按模型分桶（混用多模型会话精确）；`apiDurationMs` 累加为会话活动时长。
+- **边界**：错误回合的 `turn_completed` 可能带空 usage（字段为 `null`）→ 计入 `empty_usage_skipped`，不虚增回合数。
+
+### 工具映射
+
+`_meta["x.ai/tool"].name`（规范名）映射到 TCER 通用工具分类：
+
+| Grok 工具 | TCER 分类 |
+|---|---|
+| `read_file` / `search_replace` / `write` | Read / Edit / Write |
+| `grep_search` / `list_dir` / `bash`·`run_terminal_command` | Grep / Glob / Bash |
+| `task` / `web_search` / `web_fetch` | Task / WebSearch / WebFetch |
+| `search_tool`·`use_tool`（MCP）等 | 取原始工具名 |
+
+### LOC
+
+`search_replace` 与 Claude 的 `Edit` 同构（`file_path` / `old_string` / `new_string`），净增 = `new_string` 行数 − `old_string` 行数；`write` 整文件写入计入 `unseen_writes`（同 F1 风险）。无 `search_replace`/`write` 的会话 TCER/CPE/CTEI 显示为 `-`。返工率首版置 0（与 Codex 同款简化；`search_replace` 数据上可后续支持自返工计算）。
+

@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tcer.core.models import SessionMeta, ToolOp, TokenUsage
-from tcer.core.paths import projects_dir
+from tcer.core.paths import claude_config_dirs
 from tcer.core import pricing
 
 # Title-extraction noise to skip, matching cc-switch's filters.
@@ -31,13 +31,21 @@ def _strip_tags(txt: str) -> str:
 
 
 def discover_jsonl(project_hash: str | None = None) -> list[Path]:
-    """Recursively collect every ``*.jsonl`` under a project (or all projects)."""
-    base = projects_dir()
-    if project_hash:
-        base = base / project_hash
-    if not base.is_dir():
-        return []
-    return sorted(base.rglob("*.jsonl"))
+    """Recursively collect every ``*.jsonl`` under a project (or all projects).
+
+    Searches every Claude config root (see :func:`paths.claude_config_dirs`) so a
+    project hash present in multiple custom profiles (e.g. ``.claude`` and
+    ``.zclaude``) yields the union of its session files across roots.
+    """
+    files: list[Path] = []
+    for root in claude_config_dirs():
+        base = root / "projects"
+        if project_hash:
+            base = base / project_hash
+        if not base.is_dir():
+            continue
+        files.extend(base.rglob("*.jsonl"))
+    return sorted(files)
 
 
 def is_subagent(path: Path) -> bool:
