@@ -20,6 +20,7 @@ PEOPLE = ["joey", "alice", "bob"]
 PROJECTS = ["TCER", "WebApp", "DataPipe"]
 MODELS = [
     ("Opus 4.8", "claude-opus-4-8"),
+    ("Opus 4.8", "claude-opus-4.8"),   # variant id — must auto-merge with above
     ("Sonnet 5", "claude-sonnet-5"),
     ("GLM-4.6", "glm-4-6"),
 ]
@@ -65,13 +66,25 @@ def main() -> int:
                 ctei = _rng(*prof["ctei"])
                 chr_ = _rng(*prof["chr"])
                 net_loc = random.randint(50, 900)
+                total_tokens = random.randint(20_000, 400_000)
+                # Split total into a plausible in / out / cache breakdown so the
+                # dashboard KPI card (输入/输出/缓存创建/缓存命中) has real numbers.
+                cache_read = int(total_tokens * _rng(0.55, 0.75))
+                cache_write = int(total_tokens * _rng(0.08, 0.18))
+                inp = int(total_tokens * _rng(0.04, 0.10))
+                out = max(0, total_tokens - cache_read - cache_write - inp)
                 session = {
                     "session_id": f"{person}-{project}-{days_ago}-{random.randint(1000,9999)}",
+                    "title": f"{project} · {label} 会话",
                     "tcer": tcer,
                     "ctei": ctei,
                     "cost_usd": _rng(0.2, 6.0),
                     "net_loc": net_loc,
-                    "total_tokens": random.randint(20_000, 400_000),
+                    "total_tokens": total_tokens,
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "cache_write_tokens": cache_write,
+                    "cache_read_tokens": cache_read,
                     "churn_ratio": _rng(0.0, 0.35),
                     "chr": chr_,
                     "read_before_write": _rng(0.4, 0.95),

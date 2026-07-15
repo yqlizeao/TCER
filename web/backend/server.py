@@ -2,11 +2,16 @@
 
 Endpoints
 ---------
-POST /api/login            {username, password}            -> {token}
-POST /api/upload           (Bearer) upload payload          -> {inserted}
-GET  /api/filters          (Bearer)                         -> {persons, projects, models}
-GET  /api/series           (Bearer) ?dimension=&metric=&... -> {series...}
-GET  /api/health                                            -> {ok:true}
+POST /api/login              {username, password}              -> {token}
+POST /api/upload             (Bearer) upload payload            -> {inserted}
+GET  /api/filters            (Bearer)                           -> {persons, projects, models}
+GET  /api/overview           (Bearer) ?metric=&...              -> {totals, series}
+GET  /api/detail             (Bearer) ?dimension=&...           -> {dimension, rows}
+GET  /api/aliases            (Bearer) ?kind=project|model|person -> {aliases}
+POST /api/aliases            (Bearer) {kind, raw, canonical}    -> {ok}
+GET  /api/sessions           (Bearer) ?filters...               -> {sessions, total}
+GET  /api/session            (Bearer) ?id=                      -> {session detail}
+GET  /api/health                                                -> {ok:true}
 
 Static frontend is served from ``../frontend`` for any non-/api path.
 
@@ -15,7 +20,7 @@ Run:
     python web/backend/server.py            # direct
 Env:
     TCER_WEB_HOST (default 127.0.0.1)
-    TCER_WEB_PORT (default 8787)
+    TCER_WEB_PORT (default 8899)
     TCER_WEB_SECRET  (token signing key; random if unset)
     TCER_WEB_DB      (sqlite path)
 """
@@ -46,7 +51,7 @@ _CONTENT_TYPES = {
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TCERWeb/0.1"
+    server_version = "TCERWeb/0.2"
 
     # -- helpers ----------------------------------------------------------- #
     def _send_json(self, obj: dict, status: int = 200) -> None:
@@ -80,22 +85,66 @@ class Handler(BaseHTTPRequestHandler):
             self._h_login()
         elif route == "/api/upload":
             self._h_upload()
+        elif route == "/api/aliases":
+            self._h_set_alias()
         else:
             self._send_json({"error": "not found"}, 404)
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         route = parsed.path
+        qs = parse_qs(parsed.query)
         if route == "/api/health":
             self._send_json({"ok": True})
         elif route == "/api/filters":
-            self._h_filters()
-        elif route == "/api/series":
-            self._h_series(parse_qs(parsed.query))
+            self._guard(self._h_filters)
+        elif route == "/api/overview":
+            self._guard(lambda: self._h_overview(qs))
+        elif route == "/api/detail":
+            self._guard(lambda: self._h_detail(qs))
+        elif route == "/api/aliases":
+            self._guard(lambda: self._h_get_aliases(qs))
+        elif route == "/api/sessions":
+            self._guard(lambda: self._h_sessions(qs))
+        elif route == "/api/session":
+            self._guard(lambda: self._h_session(qs))
         elif route.startswith("/api/"):
             self._send_json({"error": "not found"}, 404)
         else:
             self._serve_static(route)
+
+    def _guard(self, fn) -> None:
+        """Run an authenticated handler, 401-ing if no valid token."""
+        if not self._auth_user():
+            self._send_json({"error": "unauthorized"}, 401)
+            return
+        fn()
+
+    # -- query-string parsing --------------------------------------------- #
+    @staticmethod
+    def _multi(qs: dict, key: str) -> list[str] | None:
+        vals = qs.get(key)
+        if not vals:
+            return None
+        out: list[str] = []
+        for v in vals:
+            out.extend(x for x in v.split(",") if x)
+        return out or None
+
+    @staticmethod
+    def _one(qs: dict, key: str, default=None):
+        return qs.get(key, [default])[0]
+
+    def _common_filters(self, qs: dict) -> dict:
+        start = self._one(qs, "start")
+        end = self._one(qs, "end")
+        return {
+            "persons": self._multi(qs, "persons"),
+            "projects": self._multi(qs, "projects"),
+            "models": self._multi(qs, "models"),
+            "start_ts": int(start) if start else None,
+            "end_ts": int(end) if end else None,
+        }
 
     # -- handlers ---------------------------------------------------------- #
     def _h_login(self) -> None:
@@ -135,46 +184,65 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"inserted": n})
 
     def _h_filters(self) -> None:
-        if not self._auth_user():
-            self._send_json({"error": "unauthorized"}, 401)
-            return
         self._send_json(db.distinct_values())
 
-    def _h_series(self, qs: dict) -> None:
+    def _h_overview(self, qs: dict) -> None:
+        f = self._common_filters(qs)
+        metric = self._one(qs, "metric", "tcer")
+        try:
+            self._send_json(db.overview(metric=metric, **f))
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+
+    def _h_detail(self, qs: dict) -> None:
+        f = self._common_filters(qs)
+        dimension = self._one(qs, "dimension", "project")
+        try:
+            self._send_json(db.aggregate_by(dimension=dimension, **f))
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+
+    def _h_get_aliases(self, qs: dict) -> None:
+        kind = self._one(qs, "kind", "project")
+        try:
+            self._send_json({"kind": kind, "aliases": db.get_aliases(kind)})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+
+    def _h_set_alias(self) -> None:
         if not self._auth_user():
             self._send_json({"error": "unauthorized"}, 401)
             return
-
-        def multi(key: str) -> list[str] | None:
-            vals = qs.get(key)
-            if not vals:
-                return None
-            out: list[str] = []
-            for v in vals:
-                out.extend(x for x in v.split(",") if x)
-            return out or None
-
-        def one(key: str, default=None):
-            return qs.get(key, [default])[0]
-
-        dimension = one("dimension", "person")
-        metric = one("metric", "tcer")
-        start = one("start")
-        end = one("end")
+        data = self._read_json()
+        if not data or "kind" not in data or "raw" not in data:
+            self._send_json({"error": "kind and raw required"}, 400)
+            return
         try:
-            result = db.query_series(
-                dimension=dimension,
-                persons=multi("persons"),
-                projects=multi("projects"),
-                models=multi("models"),
-                start_ts=int(start) if start else None,
-                end_ts=int(end) if end else None,
-                metric=metric,
-            )
+            db.set_alias(str(data["kind"]), str(data["raw"]),
+                         data.get("canonical"))
         except ValueError as e:
             self._send_json({"error": str(e)}, 400)
             return
-        self._send_json(result)
+        self._send_json({"ok": True})
+
+    def _h_sessions(self, qs: dict) -> None:
+        f = self._common_filters(qs)
+        self._send_json(db.sessions_list(**f))
+
+    def _h_session(self, qs: dict) -> None:
+        sid = self._one(qs, "id")
+        if not sid:
+            self._send_json({"error": "id required"}, 400)
+            return
+        try:
+            detail = db.session_detail(int(sid))
+        except (TypeError, ValueError):
+            self._send_json({"error": "invalid id"}, 400)
+            return
+        if detail is None:
+            self._send_json({"error": "not found"}, 404)
+            return
+        self._send_json(detail)
 
     # -- static ------------------------------------------------------------ #
     def _serve_static(self, route: str) -> None:
@@ -201,7 +269,7 @@ def main() -> None:
         db.create_user("admin", "admin")
         sys.stderr.write("[tcer-web] created default user admin/admin — change it!\n")
     host = os.environ.get("TCER_WEB_HOST", "127.0.0.1")
-    port = int(os.environ.get("TCER_WEB_PORT", "8787"))
+    port = int(os.environ.get("TCER_WEB_PORT", "8899"))
     httpd = ThreadingHTTPServer((host, port), Handler)
     sys.stderr.write(f"[tcer-web] serving on http://{host}:{port}\n")
     try:
