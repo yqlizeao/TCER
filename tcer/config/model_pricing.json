@@ -4,8 +4,8 @@
     "source": "farion1231/cc-switch — seed_model_pricing()",
     "source_url": "https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/database/schema.rs",
     "source_raw": "https://raw.githubusercontent.com/farion1231/cc-switch/main/src-tauri/src/database/schema.rs",
-    "fetched_at": "2026-06-28",
-    "ref": "main @ 2026-06-27 v3.16.4 (162 个价格逐字一致；新增 doubao-seed-2-1-pro/turbo)",
+    "fetched_at": "2026-07-15",
+    "ref": "main @ 2026-07-13 v3.17.0（新增 claude-sonnet-5 / gpt-5.6 系列 9 款 / hunyuan-hy3 与 hy3 共 12 个；grok-4.5 为 TCER Grok 数据源自有项，不随上游删除）",
     "unit": "USD per 1,000,000 tokens (厂商官方 list 价；CNY 按官方汇率折算)",
     "fields": {
       "input": "非缓存输入 (input_cost_per_million)",
@@ -13,7 +13,7 @@
       "cache_read": "缓存读取 (cache_read_cost_per_million)",
       "cache_write": "缓存写入/创建 (cache_creation_cost_per_million)；0 表示该模型无独立缓存写入计价"
     },
-    "model_count": 162,
+    "model_count": 175,
     "note": "可自由增删 models 条目；未匹配到的模型回退到 default（Anthropic 通用 list 价）。"
   },
   "default": {
@@ -44,6 +44,13 @@
       "output": 25,
       "cache_read": 0.5,
       "cache_write": 6.25
+    },
+    "claude-sonnet-5": {
+      "display_name": "Claude Sonnet 5",
+      "input": 3,
+      "output": 15,
+      "cache_read": 0.3,
+      "cache_write": 3.75
     },
     "claude-opus-4-7": {
       "display_name": "Claude Opus 4.7",
@@ -121,6 +128,69 @@
       "output": 15,
       "cache_read": 0.3,
       "cache_write": 3.75
+    },
+    "gpt-5.6": {
+      "display_name": "GPT-5.6 Sol",
+      "input": 5,
+      "output": 30,
+      "cache_read": 0.5,
+      "cache_write": 6.25
+    },
+    "gpt-5.6-sol": {
+      "display_name": "GPT-5.6 Sol",
+      "input": 5,
+      "output": 30,
+      "cache_read": 0.5,
+      "cache_write": 6.25
+    },
+    "gpt-5.6-low": {
+      "display_name": "GPT-5.6 Sol",
+      "input": 5,
+      "output": 30,
+      "cache_read": 0.5,
+      "cache_write": 6.25
+    },
+    "gpt-5.6-medium": {
+      "display_name": "GPT-5.6 Sol",
+      "input": 5,
+      "output": 30,
+      "cache_read": 0.5,
+      "cache_write": 6.25
+    },
+    "gpt-5.6-high": {
+      "display_name": "GPT-5.6 Sol",
+      "input": 5,
+      "output": 30,
+      "cache_read": 0.5,
+      "cache_write": 6.25
+    },
+    "gpt-5.6-xhigh": {
+      "display_name": "GPT-5.6 Sol",
+      "input": 5,
+      "output": 30,
+      "cache_read": 0.5,
+      "cache_write": 6.25
+    },
+    "gpt-5.6-minimal": {
+      "display_name": "GPT-5.6 Sol",
+      "input": 5,
+      "output": 30,
+      "cache_read": 0.5,
+      "cache_write": 6.25
+    },
+    "gpt-5.6-luna": {
+      "display_name": "GPT-5.6 Luna",
+      "input": 1,
+      "output": 6,
+      "cache_read": 0.1,
+      "cache_write": 1.25
+    },
+    "gpt-5.6-terra": {
+      "display_name": "GPT-5.6 Terra",
+      "input": 2.5,
+      "output": 15,
+      "cache_read": 0.25,
+      "cache_write": 3.125
     },
     "gpt-5.5": {
       "display_name": "GPT-5.5",
@@ -624,6 +694,20 @@
       "input": 0.03,
       "output": 0.31,
       "cache_read": 0.0056,
+      "cache_write": 0
+    },
+    "hunyuan-hy3": {
+      "display_name": "Hunyuan Hy3",
+      "input": 0.14,
+      "output": 0.56,
+      "cache_read": 0.035,
+      "cache_write": 0
+    },
+    "hy3": {
+      "display_name": "Hunyuan Hy3",
+      "input": 0.14,
+      "output": 0.56,
+      "cache_read": 0.035,
       "cache_write": 0
     },
     "deepseek-v3.2": {
