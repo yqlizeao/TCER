@@ -52,6 +52,26 @@ def test_irregular_provider_names_collapse():
     assert pricing.resolve("GLM-5.2") == glm52
 
 
+def test_gpt_dash_version_collapses():
+    """Providers render ``gpt-5.6`` with a dash (``gpt-5-6``); the version dot
+    must be restored so the id binds to the GPT-5.6 entry, not forward-prefix
+    onto the shorter ``gpt-5`` key (wrong label AND wrong price)."""
+    sol = pricing.resolve("gpt-5.6-sol")
+    assert pricing.normalize("gpt-5-6-sol") == "gpt-5.6-sol"
+    assert pricing.resolve("gpt-5-6-sol") == sol
+    # all three GPT-5.6 tiers + an effort suffix
+    assert pricing.normalize("gpt-5-6") == "gpt-5.6"
+    assert pricing.normalize("gpt-5-6-luna") == "gpt-5.6-luna"
+    assert pricing.normalize("gpt-5-6-terra") == "gpt-5.6-terra"
+    assert pricing.normalize("gpt-5-6-high") == "gpt-5.6-high"
+    # the same dash damage hits the older codex line too
+    assert pricing.normalize("gpt-5-1-codex") == "gpt-5.1-codex"
+    assert pricing.normalize("gpt-5-3-codex") == "gpt-5.3-codex"
+    # regression guard: must NOT collapse onto the shorter gpt-5 key
+    assert pricing.table_key("gpt-5-6-sol") != "gpt-5"
+    assert pricing.resolve("gpt-5-6-sol") != pricing.resolve("gpt-5")
+
+
 def test_table_key_distinguishes_default():
     assert pricing.table_key("glm-5.2") == "glm-5.2"
     assert pricing.table_key("glm5.2") == "glm-5.2"  # normalized, not default

@@ -40,13 +40,21 @@ def default_pricing() -> dict[str, float]:
 def _normalize(s: str) -> str:
     """Aggressive normalization for fallback matching.
 
-    Lowercases, spells a digit-``p``-digit version dot literally (``5p2`` →
-    ``5.2``), then drops ``-``/``_`` separators. So ``GLM-5.2``, ``glm5.2`` and
-    ``glm-5p2`` all collapse to ``glm5.2``. Only used as a last resort by
-    ``_match_id`` after exact / prefix matching fails.
+    Lowercases, then spells a version dot literally in the two common damaged
+    forms providers emit — ``5p2`` → ``5.2`` (fireworks) and ``5-6`` → ``5.6``
+    (providers that render ``gpt-5.6`` as ``gpt-5-6``) — before dropping
+    ``-``/``_`` separators. So ``GLM-5.2``, ``glm5.2`` and ``glm-5p2`` all
+    collapse to ``glm5.2``, and ``gpt-5-6-sol`` collapses onto ``gpt5.6sol``
+    (== ``gpt-5.6-sol``). Without the ``5-6`` rule, ``gpt-5-6-sol`` would fall
+    through to forward-prefix matching and silently bind to the shorter
+    ``gpt-5`` key (wrong label AND wrong price). Only used as a last resort by
+    ``_match_id`` after exact / prefix matching fails; ``_norm_index`` drops any
+    bucket two distinct keys collapse onto, so this can never merge two real
+    models and corrupt pricing.
     """
     s = s.lower()
     s = re.sub(r"(\d)p(\d)", r"\1.\2", s)
+    s = re.sub(r"(\d)-(\d)", r"\1.\2", s)
     return s.replace("-", "").replace("_", "")
 
 
@@ -70,10 +78,12 @@ def _match_id(model: str) -> str | None:
 
     Resolution strategies in priority order:
     1. Exact match: ``model`` is a table key.
-    2. Normalized exact: lowercase, drop ``-``/``_``, and spell a ``5p2`` version
-       dot literally (``5p2`` → ``5.2``). Collapses ``glm5.2`` / ``GLM-5.2`` /
-       ``glm-5p2`` onto ``glm-5.2``. Tried before prefix matching so a damaged
-       id like ``glm-5p2`` doesn't forward-prefix onto the shorter ``glm-5``.
+    2. Normalized exact: lowercase, drop ``-``/``_``, and spell a version dot
+       literally from both damaged forms (``5p2`` → ``5.2``, ``5-6`` → ``5.6``).
+       Collapses ``glm5.2`` / ``GLM-5.2`` / ``glm-5p2`` onto ``glm-5.2``, and
+       ``gpt-5-6-sol`` onto ``gpt-5.6-sol``. Tried before prefix matching so a
+       damaged id doesn't forward-prefix onto a shorter key (``glm-5p2`` onto
+       ``glm-5``, or ``gpt-5-6-sol`` onto ``gpt-5``).
     3. Forward prefix: ``model.startswith(mid)`` — handles date/``[1m]`` suffixes
        appended by Claude Code (e.g. ``claude-opus-4-8[1m]`` → ``claude-opus-4-8``).
     4. Reverse prefix: ``mid.startswith(model)`` — handles shortened ids written
