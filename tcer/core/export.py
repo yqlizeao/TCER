@@ -135,7 +135,9 @@ def report_row_dict(r: SessionReport) -> dict:
         "code_deleted": r.code_deleted,
         "churn_ratio": r.churn_ratio,
         "unseen_writes": r.unseen_writes,
-        # --- timing ---
+        # --- timing (epoch ms; server folds ms→s for the time axis) ---
+        "started_at": u.started_at,
+        "ended_at": u.ended_at,
         "avg_turn_latency_sec": r.avg_turn_latency_sec,
         "session_duration_minutes": r.session_duration_minutes,
         # --- tool usage ---

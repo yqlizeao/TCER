@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCER 效率仪表盘</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- 登录 -->
+<div id="login" class="login-wrap">
+  <form id="login-form" class="login-card">
+    <h1>TCER</h1>
+    <p class="muted">编程效率计量面板</p>
+    <input id="username" type="text" placeholder="账号" autocomplete="username" required>
+    <input id="password" type="password" placeholder="密码" autocomplete="current-password" required>
+    <button type="submit">登录</button>
+    <div id="login-err" class="err"></div>
+  </form>
+</div>
+
+<!-- 主应用 -->
+<div id="app" class="app hidden">
+  <!-- 左侧菜单 -->
+  <aside id="sidebar" class="sidebar">
+    <div class="side-head">
+      <span class="logo">TCER</span>
+      <button id="side-toggle" class="icon-btn" title="收起/展开"></button>
+    </div>
+    <nav class="menu">
+      <a class="menu-item active" data-view="dashboard"><i class="mi mi-dash"></i><span>总览仪表盘</span></a>
+      <div class="menu-group">
+        <div class="menu-label"><span>详情</span></div>
+        <a class="menu-item" data-view="detail-project"><i class="mi mi-proj"></i><span>项目聚合</span></a>
+        <a class="menu-item" data-view="detail-person"><i class="mi mi-user"></i><span>人员聚合</span></a>
+        <a class="menu-item" data-view="detail-model"><i class="mi mi-model"></i><span>模型聚合</span></a>
+      </div>
+      <a class="menu-item" data-view="sessions"><i class="mi mi-list"></i><span>会话详情</span></a>
+    </nav>
+    <div class="side-foot">
+      <span id="who" class="muted"></span>
+      <button id="logout" class="icon-btn" title="退出">⎋</button>
+    </div>
+  </aside>
+
+  <!-- 右侧内容 -->
+  <main class="content">
+    <!-- 总览 -->
+    <section id="view-dashboard" class="view">
+      <div class="view-head">
+        <h1>总览仪表盘</h1>
+        <div class="range-tabs" id="range-tabs">
+          <button data-days="7" class="active">近 7 天</button>
+          <button data-days="30">近 30 天</button>
+          <button data-days="90">近 90 天</button>
+        </div>
+      </div>
+      <div id="kpis" class="kpis"></div>
+      <div class="chart-grid">
+        <section class="chart-card">
+          <div class="chart-card-head"><h2>按人员</h2><span class="muted" id="metric-name-1"></span><span class="zoom-hint">点击放大 ⤢</span></div>
+          <div class="chart" id="chart-person"></div>
+        </section>
+        <section class="chart-card">
+          <div class="chart-card-head"><h2>按项目</h2><span class="muted" id="metric-name-2"></span><span class="zoom-hint">点击放大 ⤢</span></div>
+          <div class="chart" id="chart-project"></div>
+        </section>
+        <section class="chart-card">
+          <div class="chart-card-head"><h2>按模型</h2><span class="muted" id="metric-name-3"></span><span class="zoom-hint">点击放大 ⤢</span></div>
+          <div class="chart" id="chart-model"></div>
+        </section>
+      </div>
+      <div class="metric-switch">
+        <label>曲线指标</label>
+        <select id="dash-metric"></select>
+      </div>
+    </section>
+
+    <!-- 聚合详情（项目/人员/模型共用） -->
+    <section id="view-detail" class="view hidden">
+      <div class="view-head">
+        <h1 id="detail-title">聚合详情</h1>
+        <span class="muted" id="detail-sub"></span>
+      </div>
+      <div class="table-wrap">
+        <table id="detail-table" class="grid"></table>
+      </div>
+    </section>
+
+    <!-- 会话详情 -->
+    <section id="view-sessions" class="view hidden">
+      <div class="filters-bar" id="sess-filters">
+        <div class="filter"><label>项目</label><div class="dropdown" id="fd-projects"></div></div>
+        <div class="filter"><label>人员</label><div class="dropdown" id="fd-persons"></div></div>
+        <div class="filter"><label>模型</label><div class="dropdown" id="fd-models"></div></div>
+        <div class="filter"><label>开始</label><input type="date" id="fs-start"></div>
+        <div class="filter"><label>结束</label><input type="date" id="fs-end"></div>
+        <button id="sess-apply">查询</button>
+      </div>
+      <div class="sess-body">
+        <aside class="sess-list" id="sess-list"></aside>
+        <div class="sess-detail" id="sess-detail">
+          <div class="placeholder">从左侧选择一个会话查看详情</div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="vendor/echarts.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
