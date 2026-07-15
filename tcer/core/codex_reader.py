@@ -335,6 +335,128 @@ def read_user_messages(path: Path) -> list[str]:
     return messages
 
 
+def read_conversation(path: Path) -> list[dict]:
+    """Extract the full ordered conversation from a Codex session JSONL.
+
+    Mirrors :func:`tcer.core.reader.read_conversation`'s output shape so the web
+    session view can render every source uniformly. Codex stores the turn stream
+    as ``{"type","payload"}`` events rather than Claude's ``message`` objects, so
+    the mapping is:
+
+      * ``response_item.message`` (role=user)      -> user text
+      * ``response_item.message`` (role=assistant) -> assistant text
+      * ``response_item.reasoning``                -> thinking (only when a plain
+        ``summary``/``content`` text exists; encrypted-only blocks are skipped)
+      * ``response_item.function_call`` /
+        ``custom_tool_call``                       -> tool_use (name + input)
+      * ``response_item.function_call_output`` /
+        ``custom_tool_call_output``                -> tool_result
+
+    The ``developer`` role (system/permission preamble) is skipped. Assistant
+    text is taken from ``response_item.message`` — NOT ``event_msg.agent_message``
+    — because the two duplicate each other and only ``response_item`` carries the
+    canonical, non-truncated content.
+    """
+    convo: list[dict] = []
+    for obj in iter_events(path):
+        ts = parse_timestamp_ms(obj.get("timestamp"))
+        if obj.get("type") != "response_item":
+            continue
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+
+        if ptype == "message":
+            role = payload.get("role")
+            if role not in ("user", "assistant"):
+                continue  # skip developer/system preamble
+            text = _message_text(payload.get("content")).strip()
+            if text:
+                convo.append({"role": role, "type": "text", "text": text, "ts": ts})
+        elif ptype == "reasoning":
+            text = _reasoning_text(payload).strip()
+            if text:
+                convo.append({"role": "assistant", "type": "thinking",
+                              "text": text, "ts": ts})
+        elif ptype in ("function_call", "custom_tool_call"):
+            name = payload.get("name")
+            tool_name = (_classify_tool(name, payload.get("arguments"))[0]
+                         if ptype == "function_call" and isinstance(name, str)
+                         else (str(name) if isinstance(name, str) and name else "CustomTool"))
+            raw_args = payload.get("arguments") if ptype == "function_call" else payload.get("input")
+            convo.append({
+                "role": "assistant", "type": "tool_use",
+                "name": tool_name,
+                "id": payload.get("call_id"),
+                "input": _tool_input(raw_args),
+                "ts": ts,
+            })
+        elif ptype in ("function_call_output", "custom_tool_call_output"):
+            output = payload.get("output")
+            text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str)
+            code = _exit_code(text) if isinstance(text, str) else None
+            convo.append({
+                "role": "tool", "type": "tool_result",
+                "tool_use_id": payload.get("call_id"),
+                "is_error": bool(code is not None and code != 0),
+                "text": text,
+                "ts": ts,
+            })
+    return convo
+
+
+def _message_text(content) -> str:
+    """Flatten a Codex ``message.content`` array (``input_text``/``output_text``)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for it in content:
+        if not isinstance(it, dict):
+            continue
+        for key in ("text", "input_text", "output_text"):
+            v = it.get(key)
+            if isinstance(v, str) and v:
+                parts.append(v)
+                break
+    return "\n".join(parts)
+
+
+def _reasoning_text(payload: dict) -> str:
+    """Plain-text reasoning from a Codex ``reasoning`` item, if any.
+
+    Codex usually ships reasoning as ``encrypted_content`` (opaque); only the
+    optional ``summary`` list / ``content`` field carry human-readable text.
+    """
+    summary = payload.get("summary")
+    if isinstance(summary, list):
+        parts = [s.get("text", "") if isinstance(s, dict) else str(s)
+                 for s in summary]
+        joined = "\n".join(p for p in parts if p)
+        if joined.strip():
+            return joined
+    content = payload.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return _message_text(content)
+    return ""
+
+
+def _tool_input(arguments):
+    """Parse a Codex tool ``arguments``/``input`` into a dict when it's JSON."""
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments)
+        except json.JSONDecodeError:
+            return {"raw": arguments}
+    return {}
+
+
 def _loc_scan(path: Path):
     """Single pass over events returning ``(SessionLoc, has_signal)``.
 
