@@ -297,6 +297,101 @@ def read_user_messages(path: Path) -> list[str]:
     return messages
 
 
+def read_conversation(path: Path) -> list[dict]:
+    """Extract the full ordered conversation from a Grok ``updates.jsonl``.
+
+    Mirrors :func:`tcer.core.reader.read_conversation`'s output shape. Grok
+    streams the turn as ACP notifications where text arrives in many
+    ``*_chunk`` updates, so consecutive chunks of the same kind are coalesced
+    into one block:
+
+      * ``user_message_chunk``    -> user text
+      * ``agent_message_chunk``   -> assistant text
+      * ``agent_thought_chunk``   -> assistant thinking
+      * ``tool_call``             -> tool_use (canonical name + rawInput)
+      * ``tool_call_update`` (status=completed) -> tool_result (rawOutput)
+
+    ``tool_call_update`` interleaves with chunks, so its result is attached to
+    the tool call by ``toolCallId`` when it completes.
+    """
+    convo: list[dict] = []
+    # Coalesce a run of same-kind chunks into one block, flushing on any change.
+    pending_role: str | None = None
+    pending_type: str | None = None
+    pending_parts: list[str] = []
+    pending_ts = None
+
+    def _flush() -> None:
+        nonlocal pending_role, pending_type, pending_parts, pending_ts
+        if pending_parts:
+            text = "".join(pending_parts).strip()
+            if text:
+                convo.append({"role": pending_role, "type": pending_type,
+                              "text": text, "ts": pending_ts})
+        pending_role = pending_type = None
+        pending_parts = []
+        pending_ts = None
+
+    def _accumulate(role: str, typ: str, text: str, ts) -> None:
+        nonlocal pending_role, pending_type, pending_parts, pending_ts
+        if pending_type != typ or pending_role != role:
+            _flush()
+            pending_role, pending_type, pending_ts = role, typ, ts
+        pending_parts.append(text)
+
+    _CHUNK_KINDS = {
+        "user_message_chunk": ("user", "text"),
+        "agent_message_chunk": ("assistant", "text"),
+        "agent_thought_chunk": ("assistant", "thinking"),
+    }
+
+    for obj in iter_updates(path):
+        ts = parse_timestamp_ms(obj.get("timestamp"))
+        update = _update_of(obj)
+        su = update.get("sessionUpdate")
+
+        if su in _CHUNK_KINDS:
+            role, typ = _CHUNK_KINDS[su]
+            _accumulate(role, typ, _chunk_text(update), ts)
+            continue
+
+        if su == "tool_call":
+            _flush()
+            tool_meta = update.get("_meta", {})
+            xt = tool_meta.get("x.ai/tool") if isinstance(tool_meta, dict) else None
+            name = xt.get("name") if isinstance(xt, dict) else None
+            convo.append({
+                "role": "assistant", "type": "tool_use",
+                "name": _classify_grok_tool(name),
+                "id": update.get("toolCallId"),
+                "input": update.get("rawInput") if isinstance(update.get("rawInput"), dict) else {},
+                "ts": ts,
+            })
+            continue
+
+        if su == "tool_call_update" and update.get("status") == "completed":
+            _flush()
+            raw_output = update.get("rawOutput")
+            if isinstance(raw_output, dict):
+                code = raw_output.get("exit_code")
+                text = _first_str(raw_output.get("output"), raw_output.get("stdout")) \
+                    or json.dumps(raw_output, ensure_ascii=False, default=str)
+            else:
+                code = None
+                text = raw_output if isinstance(raw_output, str) else ""
+            convo.append({
+                "role": "tool", "type": "tool_result",
+                "tool_use_id": update.get("toolCallId"),
+                "is_error": bool(code is not None and _as_int(code) != 0),
+                "text": text,
+                "ts": ts,
+            })
+            continue
+
+    _flush()
+    return convo
+
+
 def _loc_scan(path: Path):
     """Single pass over updates returning ``(SessionLoc, has_signal)``.
 

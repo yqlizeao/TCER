@@ -288,3 +288,27 @@ table.grid tbody tr { border-bottom: 1px solid var(--border); }
   border: 1px solid var(--border); padding: 9px 16px; border-radius: 8px; font-size: 14px; }
 .merge-actions .btn-ghost:hover { background: var(--hover); color: var(--fg); }
 .merge-hint { font-size: 12px; color: var(--muted); line-height: 1.5; }
+/* ---- 逐回合会话明细 ---- */
+.conversation { margin-top: 20px; }
+.cv-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.cv-block { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  background: var(--bg2); }
+.cv-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.cv-role { font-size: 12px; font-weight: 700; color: var(--fg); }
+.cv-tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 6px; padding: 1px 6px; }
+.cv-ts { font-size: 11px; color: var(--muted); margin-left: auto; }
+.cv-body { font-size: 13px; line-height: 1.55; color: var(--fg); white-space: pre-wrap;
+  word-break: break-word; }
+.cv-pre { font-size: 12px; line-height: 1.5; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 7px; padding: 8px 10px; margin: 4px 0 0; overflow-x: auto; white-space: pre-wrap;
+  word-break: break-word; color: var(--muted); }
+.cv-pre.cv-err { border-color: #a4443f; color: #e79a95; }
+.cv-toolname { font-size: 12px; font-weight: 600; color: #7fb2ff; font-family: monospace; }
+.cv-user { border-left: 3px solid #5b8cff; }
+.cv-assistant { border-left: 3px solid #38bda8; }
+.cv-tool { border-left: 3px solid #ffb454; }
+.cv-block.cv-result, .cv-block.cv-think { opacity: 0.92; }
+.cv-block.cv-think .cv-body { color: var(--muted); font-style: italic; }
+.detail-json details { margin-top: 6px; }
+.detail-json summary { cursor: pointer; font-size: 13px; }

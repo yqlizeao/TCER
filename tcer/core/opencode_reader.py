@@ -293,6 +293,94 @@ def read_user_messages(db_path: Path, session_id: str) -> list[str]:
     return messages
 
 
+def read_conversation(db_path: Path, session_id: str) -> list[dict]:
+    """Extract the full ordered conversation for one OpenCode session.
+
+    Mirrors :func:`tcer.core.reader.read_conversation`'s output shape. OpenCode
+    stores the turn as ``message`` rows (carrying the role) joined to ordered
+    ``part`` rows (text / reasoning / tool call / tool result). The mapping is:
+
+      * ``part.type == 'text'``                    -> user or assistant text
+        (role from the owning message row)
+      * ``part.type == 'reasoning'``               -> assistant thinking
+      * ``part.type in ('tool','tool-invocation','tool-call')`` -> tool_use
+      * ``part.type in ('tool-result','tool-output')``          -> tool_result
+
+    Legacy on-disk (pre-SQLite) sessions expose only user text, so those return
+    a user-only conversation via :func:`read_user_messages`.
+    """
+    if _is_legacy_session(session_id):
+        return [{"role": "user", "type": "text", "text": t, "ts": None}
+                for t in read_user_messages(db_path, session_id)]
+
+    with _connect(db_path) as con:
+        if not _has_table(con, "message") or not _has_table(con, "part"):
+            return []
+        msg_rows = con.execute(
+            "select id, data from message where session_id = ? order by time_created, id",
+            (session_id,),
+        ).fetchall()
+        part_rows = con.execute(
+            "select message_id, data, time_created, id from part "
+            "where session_id = ? order by time_created, id",
+            (session_id,),
+        ).fetchall()
+
+    role_by_msg: dict[str, str] = {}
+    for m in msg_rows:
+        data = _json_obj(m["data"])
+        role = _first_str(data.get("role"),
+                          m["data"] if m["data"] in ("user", "assistant") else None)
+        role_by_msg[str(m["id"])] = role or "assistant"
+
+    convo: list[dict] = []
+    for part in part_rows:
+        data = _json_obj(part["data"])
+        ptype = _first_str(data.get("type"), data.get("kind"))
+        role = role_by_msg.get(str(part["message_id"]), "assistant")
+        ts = parse_timestamp_ms(part["time_created"])
+
+        if ptype == "text":
+            text = data.get("text")
+            if isinstance(text, str) and text.strip():
+                convo.append({"role": role, "type": "text",
+                              "text": text.strip(), "ts": ts})
+        elif ptype == "reasoning":
+            text = _first_str(data.get("text"), data.get("reasoning"), data.get("content"))
+            if text and text.strip():
+                convo.append({"role": "assistant", "type": "thinking",
+                              "text": text.strip(), "ts": ts})
+        elif ptype in ("tool", "tool-invocation", "tool-call"):
+            name = _first_str(data.get("tool"), data.get("toolName"),
+                              data.get("name"), data.get("title")) or "Tool"
+            tool, _ = _classify_tool(name, data)
+            call_id = _first_str(data.get("callID"), data.get("call_id"),
+                                 data.get("toolCallId"), data.get("id"))
+            tool_input = data.get("input") if isinstance(data.get("input"), dict) else data.get("args")
+            convo.append({
+                "role": "assistant", "type": "tool_use",
+                "name": tool,
+                "id": call_id,
+                "input": tool_input if isinstance(tool_input, dict) else {},
+                "ts": ts,
+            })
+        elif ptype in ("tool-result", "tool-output"):
+            call_id = _first_str(data.get("callID"), data.get("call_id"),
+                                 data.get("toolCallId"))
+            out = data.get("output")
+            if out is None:
+                out = data.get("result") or data.get("content")
+            text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, default=str)
+            convo.append({
+                "role": "tool", "type": "tool_result",
+                "tool_use_id": call_id,
+                "is_error": _part_is_error(data),
+                "text": text,
+                "ts": ts,
+            })
+    return convo
+
+
 def session_loc_full(db_path: Path, session_id: str):
     """Return LOC from OpenCode's persisted session summary."""
     from tcer.core.loc import SessionLoc

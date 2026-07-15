@@ -158,20 +158,45 @@ def build_payload(
 def _read_conversation(report: SessionReport) -> list[dict]:
     """Full ordered conversation for a session report (empty on any failure).
 
-    A session may span several JSONL files (main + subagents); ``session_paths``
-    holds them all, falling back to the single ``path``. Blocks are concatenated
-    in file order.
+    Dispatches to the reader matching the session's ``source`` — each agent
+    stores its turn stream in a different on-disk shape (Claude JSONL, Codex
+    event JSONL, Grok ACP updates, OpenCode SQLite), so a single parser can't
+    handle all four. Every reader's ``read_conversation`` returns the same block
+    shape (see :func:`tcer.core.reader.read_conversation`) so the web session
+    view renders every source uniformly.
+
+    A Claude session may span several JSONL files (main + subagents);
+    ``session_paths`` holds them all, falling back to the single ``path``.
+    Blocks are concatenated in file order. OpenCode is keyed by
+    ``(db_path, session_id)`` rather than a JSONL path.
     """
-    from tcer.core import reader
+    from tcer.core import codex_reader, grok_reader, opencode_reader, reader
 
     meta = report.meta
+    source = getattr(meta, "source", "claude")
+
+    if source == "opencode":
+        # OpenCode lives in SQLite: meta.path is the db, meta.session_id the row.
+        sid = getattr(meta, "session_id", None)
+        if meta.path is None or not sid:
+            return []
+        try:
+            return opencode_reader.read_conversation(meta.path, sid)
+        except Exception:  # noqa: BLE001 — a bad DB must not abort the upload
+            return []
+
+    read_fn = {
+        "codex": codex_reader.read_conversation,
+        "grok": grok_reader.read_conversation,
+    }.get(source, reader.read_conversation)
+
     paths = list(getattr(meta, "session_paths", ()) or ())
     if not paths and getattr(meta, "path", None) is not None:
         paths = [meta.path]
     convo: list[dict] = []
     for p in paths:
         try:
-            convo.extend(reader.read_conversation(p))
+            convo.extend(read_fn(p))
         except Exception:  # noqa: BLE001 — a bad file must not abort the upload
             continue
     return convo

@@ -461,12 +461,76 @@ async function selectSession(id, el) {
     <div class="view-head"><h1>${esc(d.title || d.session_id || ("#" + d.id))}</h1>
       <span class="muted">${esc(d.person || "")} · ${esc(d.project || "")} · ${fmtDate(d.ts)}</span></div>
     ${renderKvGrid(d.raw)}
+    ${renderConversation(d.raw)}
     <div class="detail-json">
       <h2 style="font-size:15px;">原始上传数据</h2>
-      <pre>${esc(JSON.stringify(d.raw, null, 2))}</pre>
-      <p class="muted" style="margin-top:10px;">
-        JSONL 逐回合可视化解析将在后续版本接入此处（工具调用时间线、Token 流、回合展开）。</p>
+      <details><summary class="muted">展开原始 JSON</summary>
+        <pre>${esc(JSON.stringify(d.raw, null, 2))}</pre></details>
     </div>`;
+}
+
+// ---- 逐回合会话渲染 -------------------------------------------------------
+// 后端 raw.conversation 是跨源统一的 block 列表（Claude / Codex / Grok /
+// OpenCode 都归一到同一形状）：
+//   {role:"user"|"assistant"|"tool", type:"text"|"thinking"|"tool_use"|"tool_result", ...}
+const ROLE_LABEL = {
+  user: "用户", assistant: "助手", tool: "工具",
+};
+const BLOCK_META = {
+  text: { cls: "cv-text" },
+  thinking: { cls: "cv-think", tag: "思考" },
+  tool_use: { cls: "cv-tool", tag: "工具调用" },
+  tool_result: { cls: "cv-result", tag: "工具结果" },
+};
+
+function renderConversation(raw) {
+  const convo = raw && Array.isArray(raw.conversation) ? raw.conversation : null;
+  if (!convo || !convo.length) {
+    // 仅上传了聚合/指标、未附带明细会话时的提示
+    return `<div class="conversation">
+      <h2 style="font-size:15px;">会话明细</h2>
+      <p class="muted">本会话未包含逐回合明细。如需查看对话，请在客户端以「含明细」方式重新上传。</p>
+    </div>`;
+  }
+  const items = convo.map((b) => {
+    const role = b.role || "assistant";
+    const meta = BLOCK_META[b.type] || { cls: "cv-text" };
+    const roleLabel = ROLE_LABEL[role] || role;
+    const tag = meta.tag ? `<span class="cv-tag">${esc(meta.tag)}</span>` : "";
+    let body;
+    if (b.type === "tool_use") {
+      const inp = b.input && typeof b.input === "object"
+        ? JSON.stringify(b.input, null, 2) : String(b.input == null ? "" : b.input);
+      body = `<div class="cv-toolname">${esc(b.name || "工具")}</div>` +
+        (inp && inp !== "{}" ? `<pre class="cv-pre">${esc(inp)}</pre>` : "");
+    } else if (b.type === "tool_result") {
+      const errCls = b.is_error ? " cv-err" : "";
+      body = `<pre class="cv-pre${errCls}">${esc(truncateText(b.text || "", 4000))}</pre>`;
+    } else {
+      body = `<div class="cv-body">${esc(b.text || "")}</div>`;
+    }
+    return `<div class="cv-block ${meta.cls} cv-${esc(role)}">
+      <div class="cv-head"><span class="cv-role">${esc(roleLabel)}</span>${tag}
+        ${b.ts ? `<span class="cv-ts">${fmtTime(b.ts)}</span>` : ""}</div>
+      ${body}
+    </div>`;
+  }).join("");
+  return `<div class="conversation">
+    <h2 style="font-size:15px;">会话明细 <span class="muted">（${convo.length} 个回合块）</span></h2>
+    <div class="cv-list">${items}</div>
+  </div>`;
+}
+
+function truncateText(s, max) {
+  s = String(s == null ? "" : s);
+  return s.length > max ? s.slice(0, max) + "\n…（已截断）" : s;
+}
+function fmtTime(ts) {
+  // block ts 是 epoch ms
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 function renderKvGrid(raw) {

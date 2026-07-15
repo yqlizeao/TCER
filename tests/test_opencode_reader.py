@@ -174,6 +174,25 @@ def test_opencode_sqlite_usage_messages_and_loc(tmp_path, monkeypatch):
     assert sloc.file_edit_counts == {"app.py": 1, "tests/test_app.py": 1}
 
 
+def test_read_conversation_maps_opencode_parts(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    db = _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
+
+    convo = opencode_reader.read_conversation(db, "ses-1")
+    kinds = [(b["role"], b["type"]) for b in convo]
+    # part-reason has no text so the thinking block is dropped; the file part is
+    # not conversational and is skipped. Text + three tool calls remain.
+    assert kinds == [
+        ("user", "text"),
+        ("assistant", "tool_use"),
+        ("assistant", "tool_use"),
+        ("assistant", "tool_use"),
+    ]
+    assert convo[0]["text"] == "实现 OpenCode 支持"
+    assert convo[1]["name"] == "Read"
+    assert convo[3]["name"] == "Bash"
+
+
 def test_analyze_opencode_project(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
     _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
