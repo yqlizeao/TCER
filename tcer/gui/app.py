@@ -16,6 +16,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from tcer.core import analyze, export as export_mod, metrics
+from tcer.core import upload_client, upload_prefs
 from tcer.core.calibrate import calibrate_project
 from tcer.core.paths import list_project_refs
 from tcer.core.reader import discover_jsonl
@@ -37,6 +38,8 @@ class TcerGui:
         self._no_loc: bool = False
         self._scan_code_dir: bool = False
         self._analysis_generation = 0
+        self._upload_prefs: dict = upload_prefs.load()
+        self._auto_upload_after: str | None = None
 
         root.title("TCER — Token 转码效率计量")
         root.configure(bg=theme.BG)
@@ -52,6 +55,8 @@ class TcerGui:
         self._build_body(root)
         self.refresh_projects()
         root.after(100, self._poll)
+        if self._upload_prefs.get("auto_upload"):
+            self._schedule_auto_upload()
 
     # --------------------------------------------------------------- layout
     def _build_body(self, root) -> None:
@@ -183,6 +188,15 @@ class TcerGui:
                     _, payload = item
                     self.filter.set_status("校准出错")
                     messagebox.showerror("LOC 校准出错", payload)
+                elif kind == "upload":
+                    _, dialog, ok, message = item
+                    if ok:
+                        self.filter.set_status(message)
+                    if dialog is not None:
+                        try:
+                            dialog.set_status(message, error=not ok)
+                        except tk.TclError:
+                            pass  # dialog closed before result arrived
                 # unknown kind: ignore — never unpack an unexpected tuple shape,
                 # which would raise and stop _poll from rescheduling (freezes GUI).
         except queue.Empty:
@@ -488,6 +502,148 @@ class TcerGui:
             self.filter.set_status(f"已导出 → {Path(path).name}")
         except OSError as e:
             messagebox.showerror("导出失败", str(e))
+
+    # --------------------------------------------------------------- upload
+    def show_upload(self) -> None:
+        projects = [(p.key, f"[{views.project_source_label(p)}] {views.project_label(p)}")
+                    for p in self._projects]
+        default_proj = None
+        proj = self._selected_project()
+        if proj is not None:
+            default_proj = proj.key
+        popups.UploadDialog(
+            self.root,
+            prefs=self._upload_prefs,
+            projects=projects,
+            default_project=default_proj,
+            on_upload=self._start_upload,
+            on_save_prefs=self._save_upload_prefs,
+        )
+
+    def _save_upload_prefs(self, prefs: dict) -> None:
+        self._upload_prefs = prefs
+        try:
+            upload_prefs.save(prefs)
+        except OSError:
+            pass  # non-fatal — prefs just won't persist across restarts
+        # (Re)arm or cancel the auto-upload timer to match the new setting.
+        self._schedule_auto_upload()
+
+    def _project_ref_by_key(self, key: str):
+        for p in self._projects:
+            if p.key == key:
+                return p
+        return None
+
+    def _start_upload(self, prefs: dict, dialog=None) -> None:
+        """Analyze each selected project fresh, then upload its own report.
+
+        The earlier version reused ``self._current`` and merely relabelled it
+        with the chosen project name — so every project uploaded identical data.
+        Here each selected key is re-analyzed on a worker thread so each upload
+        carries that project's real aggregate (+ sessions when 全部会话 is on).
+        Returns immediately; the combined result arrives via the queue.
+        """
+        keys = list(prefs.get("last_projects") or [])
+        if not keys:
+            if dialog is not None:
+                dialog.set_status("请至少选择一个项目", error=True)
+            return
+        refs = [(k, self._project_ref_by_key(k)) for k in keys]
+        missing = [k for k, r in refs if r is None]
+        refs = [(k, r) for k, r in refs if r is not None]
+        if not refs:
+            if dialog is not None:
+                dialog.set_status("选中的项目已不存在，请刷新后重试", error=True)
+            return
+        params = self.filter.get_params()
+        analysis_args = dict(
+            task_type=params["task_type"],
+            since=params["since"],
+            until=params["until"],
+            code_dir=self._code_dir,
+            no_loc=self._no_loc,
+            scan_code_dir=self._scan_code_dir,
+        )
+        threading.Thread(
+            target=self._upload_worker,
+            args=(prefs, refs, missing, analysis_args, dialog),
+            daemon=True,
+        ).start()
+
+    def _upload_worker(self, prefs, refs, missing, analysis_args, dialog) -> None:
+        """Off-thread: analyze + upload each selected project, aggregate results.
+
+        Login happens once; per-project failures are collected without aborting
+        the rest. Each project is analyzed fresh so its payload carries that
+        project's own aggregate (and sessions when detail is on).
+        """
+        user = prefs.get("username") or None
+        anonymous = bool(prefs.get("anonymous"))
+        detail = bool(prefs.get("detail"))
+        server_url = prefs["server_url"]
+
+        try:
+            token = upload_client.login(server_url, prefs["username"],
+                                        prefs.get("password", ""))
+        except upload_client.UploadError as e:
+            self._q.put(("upload", dialog, False, f"登录失败：{e}"))
+            return
+        except Exception as e:  # noqa: BLE001
+            self._q.put(("upload", dialog, False, f"登录出错：{e}"))
+            return
+
+        total_inserted = 0
+        ok_projects = 0
+        errors: list[str] = []
+        for key, ref in refs:
+            label = views.project_label(ref)
+            try:
+                a = analyze.analyze_project(
+                    project=ref.key, source=ref.source, project_ref=ref,
+                    **analysis_args,
+                )
+                payload = upload_client.build_payload(
+                    aggregate=a.aggregate, reports=a.reports,
+                    n_sessions=a.n_sessions, project=key, user=user,
+                    anonymous=anonymous, detail=detail,
+                )
+                total_inserted += upload_client.upload(server_url, token, payload)
+                ok_projects += 1
+            except Exception as e:  # noqa: BLE001 — collect per-project failures
+                errors.append(f"{label}: {e}")
+
+        ok = ok_projects > 0 and not errors
+        parts = [f"上传完成 · {ok_projects}/{len(refs)} 个项目 · 写入 {total_inserted} 条记录"]
+        if missing:
+            parts.append(f"（{len(missing)} 个已不存在，已跳过）")
+        if errors:
+            shown = "；".join(errors[:3])
+            parts.append(f"失败：{shown}" + (f" 等 {len(errors)} 项" if len(errors) > 3 else ""))
+        self._q.put(("upload", dialog, ok, " ".join(parts)))
+
+    def _schedule_auto_upload(self) -> None:
+        """Arm (or cancel) the background auto-upload timer per prefs."""
+        if self._auto_upload_after is not None:
+            try:
+                self.root.after_cancel(self._auto_upload_after)
+            except (ValueError, tk.TclError):
+                pass
+            self._auto_upload_after = None
+        if not self._upload_prefs.get("auto_upload"):
+            return
+        interval_min = int(self._upload_prefs.get("interval_min", 30) or 30)
+        self._auto_upload_after = self.root.after(
+            max(1, interval_min) * 60_000, self._auto_upload_tick)
+
+    def _auto_upload_tick(self) -> None:
+        """Timer callback: silently upload remembered projects, then re-arm."""
+        self._auto_upload_after = None
+        prefs = self._upload_prefs
+        if (prefs.get("server_url") and prefs.get("username")
+                and prefs.get("last_projects")):
+            self._start_upload(prefs, dialog=None)
+        self._schedule_auto_upload()
 
     # --------------------------------------------------------------- entry
     @classmethod

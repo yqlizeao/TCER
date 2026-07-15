@@ -205,6 +205,15 @@ def _int(v) -> int | None:
         return None
 
 
+_INSERT_COLS = (
+    "batch_id", "uploaded_at", "uploaded_by", "person", "project", "kind",
+    "session_id", "title", "model", "ts", "tcer", "ctei", "cost_usd", "net_loc",
+    "total_tokens", "input_tokens", "output_tokens", "cache_write_tokens",
+    "cache_read_tokens", "churn_ratio", "chr", "read_before_write",
+    "search_edit_ratio", "tool_error_rate", "raw_json",
+)
+
+
 def insert_records(
     uploaded_by: str,
     person: str | None,
@@ -213,17 +222,18 @@ def insert_records(
     sessions: list[dict] | None,
     generated_at: int | None,
 ) -> int:
-    """Flatten and insert an upload payload. Returns number of rows inserted.
+    """Flatten and store an upload payload. Returns rows inserted OR updated.
 
-    All rows produced by one call share a ``batch_id`` so summing queries can
-    drop a detailed upload's aggregate row (its sessions already cover it)
-    while keeping aggregate rows from aggregate-only uploads.
+    Session rows are keyed by ``(person, project, session_id)``: a session that
+    was already uploaded is **updated in place** rather than duplicated, so a
+    later re-upload (e.g. one that now carries the turn-by-turn conversation, or
+    refreshed metrics) enriches the existing row instead of adding a copy. New
+    sessions are inserted. All rows from one call share a ``batch_id``.
     """
     now = int(time.time())
     batch_id = secrets.token_hex(8)
-    rows: list[tuple] = []
 
-    def _mk(row: dict, kind: str) -> tuple:
+    def _vals(row: dict, kind: str) -> tuple:
         ts = row.get("started_at")
         if ts:
             ts = int(ts) // 1000 if ts > 10_000_000_000 else int(ts)
@@ -244,28 +254,56 @@ def insert_records(
             json.dumps(row, ensure_ascii=False, default=str),
         )
 
-    if aggregate:
-        rows.append(_mk(aggregate, "aggregate"))
-    for s in sessions or []:
-        rows.append(_mk(s, "session"))
-
-    if not rows:
-        return 0
+    insert_sql = (
+        f"INSERT INTO uploads({', '.join(_INSERT_COLS)}) "
+        f"VALUES({','.join('?' * len(_INSERT_COLS))})"
+    )
+    # UPDATE keeps the row's id (and batch_id/uploaded_at) so existing references
+    # stay valid; it refreshes every other column from the new upload.
+    _upd_cols = [c for c in _INSERT_COLS if c not in ("batch_id", "uploaded_at")]
+    update_sql = (
+        f"UPDATE uploads SET {', '.join(f'{c}=?' for c in _upd_cols)} WHERE id=?"
+    )
 
     conn = connect()
     try:
-        conn.executemany(
-            """INSERT INTO uploads(
-                batch_id, uploaded_at, uploaded_by, person, project, kind,
-                session_id, title, model, ts, tcer, ctei, cost_usd, net_loc,
-                total_tokens, input_tokens, output_tokens, cache_write_tokens,
-                cache_read_tokens, churn_ratio, chr, read_before_write,
-                search_edit_ratio, tool_error_rate, raw_json
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            rows,
-        )
+        # Map existing session rows for this (person, project) so re-uploads
+        # update rather than duplicate. Scoped to person+project so two people
+        # sharing a session_id (across machines) don't clobber each other.
+        existing_ids: dict[str, int] = {}
+        if sessions:
+            sids = [str(s.get("session_id")) for s in sessions if s.get("session_id")]
+            if sids:
+                placeholders = ",".join("?" * len(sids))
+                q = (
+                    f"SELECT id, session_id FROM uploads "
+                    f"WHERE kind='session' AND session_id IN ({placeholders}) "
+                    f"AND person IS ? AND project IS ?"
+                )
+                for r in conn.execute(q, (*sids, person, project)):
+                    existing_ids[r["session_id"]] = r["id"]
+
+        n_changed = 0
+        # The aggregate row is dead weight when sessions are present (queries
+        # re-derive the aggregate by summing session rows and drop it), so only
+        # store it for aggregate-only uploads.
+        if aggregate and not sessions:
+            conn.execute(insert_sql, _vals(aggregate, "aggregate"))
+            n_changed += 1
+        for s in sessions or []:
+            sid = s.get("session_id")
+            row_id = existing_ids.get(str(sid)) if sid else None
+            if row_id is not None:
+                vals = _vals(s, "session")
+                idx = {c: i for i, c in enumerate(_INSERT_COLS)}
+                conn.execute(update_sql,
+                             (*(vals[idx[c]] for c in _upd_cols), row_id))
+            else:
+                conn.execute(insert_sql, _vals(s, "session"))
+            n_changed += 1
+
         conn.commit()
-        return len(rows)
+        return n_changed
     finally:
         conn.close()
 

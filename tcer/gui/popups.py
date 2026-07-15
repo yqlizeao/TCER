@@ -965,6 +965,187 @@ class ConfirmDeletePopup:
         win.grab_set()                  # 模态
 
 
+class UploadDialog:
+    """上传到 TCER Web — 服务器/账号/选项面板，统一卡片风格。
+
+    Collects server/credentials/options and hands them to ``on_upload`` (which
+    runs the actual HTTP call off the Tk thread) via a callback. The dialog only
+    gathers input, persists prefs, and shows status; it never touches the
+    network itself. ``projects`` is a list of ``(key, display)`` tuples.
+    """
+
+    def __init__(self, parent, *, prefs: dict, projects: list[tuple[str, str]],
+                 default_project: str | None, on_upload, on_save_prefs) -> None:
+        self._on_upload = on_upload
+        self._on_save_prefs = on_save_prefs
+        self._projects = projects
+
+        win = _new_window(parent, "上传到 TCER Web", "480x680")
+        self._win = win
+        tk.Label(win, text="上传到 TCER Web", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING, pady=10).pack()
+
+        sf = ScrollFrame(win, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 4))
+        inner = sf.inner
+
+        # -- Server + credentials card --
+        card1 = self._card(inner, "服务器与账号")
+        self.server_var = tk.StringVar(value=prefs.get("server_url", ""))
+        self._entry(card1, "服务器地址", self.server_var)
+        self.user_var = tk.StringVar(value=prefs.get("username", ""))
+        self._entry(card1, "账号", self.user_var)
+        self.pwd_var = tk.StringVar(value=prefs.get("password", ""))
+        self._entry(card1, "密码", self.pwd_var, show="*")
+        self.remember_var = tk.BooleanVar(value=bool(prefs.get("remember_password")))
+        self._check(card1, "记住密码（明文 base64 混淆存储，非加密）", self.remember_var)
+
+        # -- Options card --
+        card2 = self._card(inner, "上传选项")
+        self.anon_var = tk.BooleanVar(value=bool(prefs.get("anonymous")))
+        self._check(card2, "匿名上传（按账号生成稳定的匿名代号，便于 web 端归并）",
+                    self.anon_var)
+
+        # -- Project multi-select listbox --
+        tk.Label(card2, text="选择项目（可多选，Ctrl/Shift 点选）",
+                 bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI,
+                 anchor="w").pack(anchor="w", pady=(6, 0))
+        self._proj_keys = [k for k, _ in projects]
+        proj_displays = [d for _, d in projects]
+        lb_frame = tk.Frame(card2, bg=theme.PANEL)
+        lb_frame.pack(fill="x", pady=(2, 2))
+        self._proj_lb = tk.Listbox(
+            lb_frame, selectmode="extended", height=6, exportselection=False,
+            bg="#1e1e1e", fg=theme.FG, relief="flat", highlightthickness=1,
+            highlightbackground="#3e3e42", selectbackground=theme.ACCENT,
+            selectforeground="#ffffff", font=theme.FONT_UI, activestyle="none")
+        lb_sb = tk.Scrollbar(lb_frame, orient="vertical", command=self._proj_lb.yview)
+        self._proj_lb.configure(yscrollcommand=lb_sb.set)
+        self._proj_lb.pack(side="left", fill="both", expand=True)
+        lb_sb.pack(side="right", fill="y")
+        for d in proj_displays:
+            self._proj_lb.insert("end", d)
+        # Pre-select: current project + any remembered from prefs.
+        preselect = set(prefs.get("last_projects") or [])
+        if default_project:
+            preselect.add(default_project)
+        selected_idx = [i for i, k in enumerate(self._proj_keys) if k in preselect]
+        if not selected_idx and self._proj_keys:
+            selected_idx = [0]
+        for i in selected_idx:
+            self._proj_lb.selection_set(i)
+        if selected_idx:
+            self._proj_lb.see(selected_idx[0])
+
+        sel_btn_row = tk.Frame(card2, bg=theme.PANEL)
+        sel_btn_row.pack(anchor="w", pady=(0, 4))
+        tk.Button(sel_btn_row, text="全选",
+                  command=lambda: self._proj_lb.selection_set(0, "end"),
+                  bg=theme.PANEL_2, fg=theme.FG, relief="flat", padx=8,
+                  font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
+        tk.Button(sel_btn_row, text="清空",
+                  command=lambda: self._proj_lb.selection_clear(0, "end"),
+                  bg=theme.PANEL_2, fg=theme.FG, relief="flat", padx=8,
+                  font=theme.FONT_UI_SMALL).pack(side="left")
+
+        # 会话对话内容：每个会话始终作为独立指标行上传（后端按 session-id 去重）；
+        # 勾选后额外附带该会话的逐条用户对话内容，否则仅上传指标。
+        self.all_sessions_var = tk.BooleanVar(
+            value=bool(prefs.get("all_sessions") or prefs.get("detail")))
+        self._check(card2, "附带会话对话内容（默认各会话仅上传指标；后端按 session-id 去重）",
+                    self.all_sessions_var)
+
+        # -- Auto-upload card --
+        card3 = self._card(inner, "自动上传")
+        self.auto_var = tk.BooleanVar(value=bool(prefs.get("auto_upload")))
+        self._check(card3, "启用后台定时上传", self.auto_var)
+        int_row = tk.Frame(card3, bg=theme.PANEL)
+        int_row.pack(anchor="w", pady=(2, 0))
+        tk.Label(int_row, text="间隔（分钟）", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI).pack(side="left")
+        self.interval_var = tk.StringVar(value=str(prefs.get("interval_min", 30)))
+        tk.Entry(int_row, textvariable=self.interval_var, width=6, bg="#1e1e1e",
+                 fg=theme.FG, insertbackground=theme.FG, relief="flat",
+                 highlightthickness=1, highlightbackground="#3e3e42").pack(side="left", padx=6)
+
+        # -- Status line --
+        self._status = tk.Label(win, text="", bg=theme.BG, fg=theme.MUTED,
+                                font=theme.FONT_UI, wraplength=440, justify="left")
+        self._status.pack(fill="x", padx=12, pady=(2, 0))
+
+        # -- Buttons --
+        btn_bar = tk.Frame(win, bg=theme.BG)
+        btn_bar.pack(pady=8)
+        self._upload_btn = tk.Button(btn_bar, text="完成上传", command=self._do_upload,
+                                     bg=theme.ACCENT, fg=theme.FG, relief="flat",
+                                     padx=16, pady=4)
+        self._upload_btn.pack(side="left", padx=4)
+        tk.Button(btn_bar, text="关闭", command=win.destroy, bg=theme.PANEL,
+                  fg=theme.FG, relief="flat", padx=16, pady=4).pack(side="left", padx=4)
+
+    # -- small builders --
+    def _card(self, inner, title: str) -> tk.Frame:
+        tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
+        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=6)
+        head.pack(fill="x")
+        tk.Label(head, text=title, bg="#2a2a2e", fg=theme.FG,
+                 font=theme.FONT_UI_BOLD).pack(anchor="w")
+        card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
+        card.pack(fill="x")
+        return card
+
+    def _entry(self, card, label: str, var, show: str = "") -> None:
+        tk.Label(card, text=label, bg=theme.PANEL, fg=theme.FG,
+                 font=theme.FONT_UI, anchor="w").pack(anchor="w", pady=(4, 0))
+        tk.Entry(card, textvariable=var, width=48, bg="#1e1e1e", fg=theme.FG,
+                 insertbackground=theme.FG, relief="flat", highlightthickness=1,
+                 highlightbackground="#3e3e42", show=show).pack(anchor="w")
+
+    def _check(self, card, label: str, var) -> None:
+        tk.Checkbutton(card, text=label, variable=var, bg=theme.PANEL, fg=theme.FG,
+                       selectcolor="#1e1e1e", activebackground=theme.PANEL,
+                       activeforeground=theme.FG, font=theme.FONT_UI,
+                       anchor="w").pack(anchor="w", pady=(4, 0))
+
+    # -- prefs / status --
+    def _collect(self) -> dict:
+        try:
+            interval = max(1, int(self.interval_var.get().strip() or "30"))
+        except ValueError:
+            interval = 30
+        proj_keys = [self._proj_keys[i] for i in self._proj_lb.curselection()]
+        all_sessions = bool(self.all_sessions_var.get())
+        return {
+            "server_url": self.server_var.get().strip(),
+            "username": self.user_var.get().strip(),
+            "password": self.pwd_var.get(),
+            "remember_password": bool(self.remember_var.get()),
+            "anonymous": bool(self.anon_var.get()),
+            "last_projects": proj_keys,
+            "all_sessions": all_sessions,
+            "detail": all_sessions,  # 全部会话 ⇒ 上传明细
+            "auto_upload": bool(self.auto_var.get()),
+            "interval_min": interval,
+        }
+
+    def set_status(self, text: str, *, error: bool = False) -> None:
+        if not self._status.winfo_exists():
+            return
+        self._status.config(text=text, fg=theme.ERROR if error else theme.SUCCESS)
+
+    def _do_upload(self) -> None:
+        prefs = self._collect()
+        if not prefs["server_url"] or not prefs["username"]:
+            self.set_status("请填写服务器地址与账号", error=True)
+            return
+        if not prefs["last_projects"]:
+            self.set_status("请至少选择一个项目", error=True)
+            return
+        self._on_save_prefs(prefs)
+        self.set_status("上传中…")
+        self._on_upload(prefs, self)
+
+
 def _copy(win, text: str) -> None:
     win.clipboard_clear()
     win.clipboard_append(text)

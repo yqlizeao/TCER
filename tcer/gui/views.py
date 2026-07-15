@@ -145,6 +145,7 @@ class FilterBar:
         for factory in [
             lambda: self._make_tool_menu(bar),
             lambda: self._make_export_menu(bar),
+            lambda: self._make_upload_button(bar),
         ]:
             factory().pack(side="right", padx=2)
 
@@ -186,6 +187,13 @@ class FilterBar:
         mb.config(menu=menu)
         Tooltip(mb, "导出为 JSON / CSV / Markdown")
         return mb
+
+    def _make_upload_button(self, parent) -> tk.Button:
+        btn = tk.Button(parent, text="上传…", relief="flat", bg=theme.PANEL, fg=theme.FG,
+                        padx=6, activebackground=theme.BG, activeforeground=theme.FG,
+                        command=self.controller.show_upload)
+        Tooltip(btn, "上传当前项目的效率报告到 TCER Web")
+        return btn
 
     def _date_entry(self, bar, var, tip):
         e = tk.Entry(bar, textvariable=var, width=10, bg=theme.PANEL, fg=theme.FG,

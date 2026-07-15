@@ -167,10 +167,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "invalid or too-large body"}, 400)
             return
         anonymous = bool(data.get("anonymous"))
-        person = None if anonymous else (data.get("user") or user)
+        # For anonymous uploads the client sends a stable pseudonym in ``user``
+        # (e.g. "匿名-ab12cd34") so one user's anonymized rows still group under a
+        # single person instead of collapsing into 未标注. Honor whatever the
+        # client sent; fall back to the login name for non-anonymous uploads.
+        person = data.get("user") or (None if anonymous else user)
         project = data.get("project")
         aggregate = data.get("aggregate")
-        sessions = data.get("sessions") if data.get("detail") else None
+        # Per-session rows are always stored when present so each session lands as
+        # its own row (time axis + session-id dedup). ``detail`` only signals that
+        # each session row additionally carries the turn-by-turn conversation; it
+        # no longer decides whether sessions are stored at all.
+        sessions = data.get("sessions")
         generated_at = data.get("generated_at")
         try:
             n = db.insert_records(

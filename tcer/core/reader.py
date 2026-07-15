@@ -292,6 +292,88 @@ def aggregate_usage(path: Path) -> TokenUsage:
     return u
 
 
+def read_conversation(path: Path) -> list[dict]:
+    """Extract the full ordered conversation from a session jsonl.
+
+    Returns a flat list of message blocks in file order, capturing everything a
+    reviewer would want to see — not just user text:
+
+      * ``{"role": "user", "type": "text", "text": ...}``            — real user input
+      * ``{"role": "assistant", "type": "text", "text": ...}``       — model replies
+      * ``{"role": "assistant", "type": "thinking", "text": ...}``   — reasoning blocks
+      * ``{"role": "assistant", "type": "tool_use", "name": ...,
+            "input": {...}, "id": ...}``                              — tool calls (full input)
+      * ``{"role": "tool", "type": "tool_result", "tool_use_id": ...,
+            "is_error": bool, "text": ...}``                         — tool outputs
+
+    Each block carries a ``ts`` (epoch ms) when the source line had a timestamp.
+    Assistant responses split across several JSONL lines (one per content block,
+    sharing a ``message.id``) are NOT deduplicated here — every content block is
+    a distinct conversational event, so all are emitted in order.
+    """
+    convo: list[dict] = []
+    for obj in iter_messages(path):
+        msg = obj.get("message")
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        ts = parse_timestamp_ms(obj.get("timestamp"))
+        content = msg.get("content")
+
+        if role == "user":
+            if isinstance(content, str):
+                txt = content.strip()
+                if txt:
+                    convo.append({"role": "user", "type": "text", "text": txt, "ts": ts})
+            elif isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    it = item.get("type")
+                    if it == "text":
+                        txt = (item.get("text") or "").strip()
+                        if txt:
+                            convo.append({"role": "user", "type": "text",
+                                          "text": txt, "ts": ts})
+                    elif it == "tool_result":
+                        convo.append({
+                            "role": "tool", "type": "tool_result",
+                            "tool_use_id": item.get("tool_use_id"),
+                            "is_error": bool(item.get("is_error")),
+                            "text": extract_text(item.get("content")),
+                            "ts": ts,
+                        })
+        elif role == "assistant":
+            if isinstance(content, str):
+                txt = content.strip()
+                if txt:
+                    convo.append({"role": "assistant", "type": "text", "text": txt, "ts": ts})
+            elif isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    it = item.get("type")
+                    if it == "text":
+                        txt = (item.get("text") or "").strip()
+                        if txt:
+                            convo.append({"role": "assistant", "type": "text",
+                                          "text": txt, "ts": ts})
+                    elif it == "thinking":
+                        txt = (item.get("thinking") or item.get("text") or "").strip()
+                        if txt:
+                            convo.append({"role": "assistant", "type": "thinking",
+                                          "text": txt, "ts": ts})
+                    elif it == "tool_use":
+                        convo.append({
+                            "role": "assistant", "type": "tool_use",
+                            "name": item.get("name"),
+                            "id": item.get("id"),
+                            "input": item.get("input"),
+                            "ts": ts,
+                        })
+    return convo
+
+
 def read_session_meta(path: Path) -> SessionMeta:
     """Extract session metadata cheaply via head/tail sampling (for list views).
 
