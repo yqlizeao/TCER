@@ -233,9 +233,9 @@ def analyze_project(
     no_loc: bool = False,
     scan_code_dir: bool = False,
     task_type: str = metrics.DEFAULT_TASK_TYPE,
-    baseline_tcer: float = metrics.TCER_BASELINE,
-    baseline_ncpi: float = metrics.NCPI_BASELINE,
-    baseline_cpe: float = metrics.CPE_BASELINE,
+    baseline_tcer: float | None = None,
+    baseline_ncpi: float | None = None,
+    baseline_cpe: float | None = None,
     since: str | None = None,
     until: str | None = None,
     cancel_event: threading.Event | None = None,
@@ -255,6 +255,14 @@ def analyze_project(
 
     Raises ``FileNotFoundError`` if the project or any matching session is missing.
     """
+    # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
+    # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
+    if baseline_tcer is None:
+        baseline_tcer = metrics.TCER_BASELINE
+    if baseline_ncpi is None:
+        baseline_ncpi = metrics.NCPI_BASELINE
+    if baseline_cpe is None:
+        baseline_cpe = metrics.CPE_BASELINE
     auto_infer = metrics.is_auto_task_type(task_type)
     if not auto_infer:
         task_type = metrics.resolve_task_type(task_type)
@@ -481,15 +489,23 @@ def _analyze_codex_project(
     no_loc: bool = False,
     scan_code_dir: bool = False,
     task_type: str = metrics.DEFAULT_TASK_TYPE,
-    baseline_tcer: float = metrics.TCER_BASELINE,
-    baseline_ncpi: float = metrics.NCPI_BASELINE,
-    baseline_cpe: float = metrics.CPE_BASELINE,
+    baseline_tcer: float | None = None,
+    baseline_ncpi: float | None = None,
+    baseline_cpe: float | None = None,
     since: str | None = None,
     until: str | None = None,
     cancel_check: Callable[[], None] | None = None,
     auto_infer: bool = False,
 ) -> ProjectAnalysis:
     """Analyze a Codex cwd-grouped project."""
+    # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
+    # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
+    if baseline_tcer is None:
+        baseline_tcer = metrics.TCER_BASELINE
+    if baseline_ncpi is None:
+        baseline_ncpi = metrics.NCPI_BASELINE
+    if baseline_cpe is None:
+        baseline_cpe = metrics.CPE_BASELINE
     ref = project if isinstance(project, ProjectRef) else codex_reader.resolve_project(project)
     if ref is None:
         raise FileNotFoundError(f"codex project '{project}' not found under ~/.codex/sessions")
@@ -614,15 +630,23 @@ def _analyze_opencode_project(
     no_loc: bool = False,
     scan_code_dir: bool = False,
     task_type: str = metrics.DEFAULT_TASK_TYPE,
-    baseline_tcer: float = metrics.TCER_BASELINE,
-    baseline_ncpi: float = metrics.NCPI_BASELINE,
-    baseline_cpe: float = metrics.CPE_BASELINE,
+    baseline_tcer: float | None = None,
+    baseline_ncpi: float | None = None,
+    baseline_cpe: float | None = None,
     since: str | None = None,
     until: str | None = None,
     cancel_check: Callable[[], None] | None = None,
     auto_infer: bool = False,
 ) -> ProjectAnalysis:
     """Analyze an OpenCode project from its local SQLite database."""
+    # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
+    # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
+    if baseline_tcer is None:
+        baseline_tcer = metrics.TCER_BASELINE
+    if baseline_ncpi is None:
+        baseline_ncpi = metrics.NCPI_BASELINE
+    if baseline_cpe is None:
+        baseline_cpe = metrics.CPE_BASELINE
     ref = project if isinstance(project, ProjectRef) else opencode_reader.resolve_project(project)
     if ref is None or ref.path is None:
         raise FileNotFoundError(f"opencode project '{project}' not found under ~/.local/share/opencode")
@@ -741,15 +765,23 @@ def _analyze_grok_project(
     no_loc: bool = False,
     scan_code_dir: bool = False,
     task_type: str = metrics.DEFAULT_TASK_TYPE,
-    baseline_tcer: float = metrics.TCER_BASELINE,
-    baseline_ncpi: float = metrics.NCPI_BASELINE,
-    baseline_cpe: float = metrics.CPE_BASELINE,
+    baseline_tcer: float | None = None,
+    baseline_ncpi: float | None = None,
+    baseline_cpe: float | None = None,
     since: str | None = None,
     until: str | None = None,
     cancel_check: Callable[[], None] | None = None,
     auto_infer: bool = False,
 ) -> ProjectAnalysis:
     """Analyze a Grok cwd-grouped project."""
+    # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
+    # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
+    if baseline_tcer is None:
+        baseline_tcer = metrics.TCER_BASELINE
+    if baseline_ncpi is None:
+        baseline_ncpi = metrics.NCPI_BASELINE
+    if baseline_cpe is None:
+        baseline_cpe = metrics.CPE_BASELINE
     ref = project if isinstance(project, ProjectRef) else grok_reader.resolve_project(project)
     if ref is None:
         raise FileNotFoundError(f"grok project '{project}' not found under ~/.grok/sessions")
