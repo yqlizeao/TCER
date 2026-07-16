@@ -540,6 +540,10 @@ def _bucket_add(u: TokenUsage, mu: dict, model: str) -> tuple[bool, int]:
     o = _as_int(mu.get("outputTokens"))
     reasoning = _as_int(mu.get("reasoningTokens"))
     if i + cr + o == 0:
+        # Still fold reasoning tokens (billable) even when the visible
+        # counters are zero, so an error turn with reasoning-only usage
+        # is not silently dropped.
+        u.reasoning_output_tokens += reasoning
         return False, 0
     u.input_tokens += i
     u.cache_read_input_tokens += cr

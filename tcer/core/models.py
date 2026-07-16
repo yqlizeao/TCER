@@ -13,7 +13,7 @@ class ProjectRef:
     are virtual groups of session JSONL files sharing the same cwd.
     """
 
-    source: str  # "claude" / "codex"
+    source: str  # "claude" / "codex" / "opencode" / "grok"
     key: str
     display_name: str
     cwd: str | None
@@ -73,7 +73,7 @@ class TokenUsage:
     output_tokens: int = 0
     models: set[str] = field(default_factory=set)
     per_model: dict[str, ModelUsage] = field(default_factory=dict)
-    assistant_msgs: int = 0  # total assistant turns (incl. zero-usage stubs)
+    assistant_msgs: int = 0  # assistant turns with real token usage (zero-usage stubs excluded)
     empty_usage_skipped: int = 0  # assistant turns with all-zero usage
     started_at: int | None = None  # epoch ms of first counted assistant turn
     ended_at: int | None = None  # epoch ms of last counted assistant turn
@@ -238,7 +238,7 @@ class SessionMeta:
     path: Path
     is_subagent: bool
     entrypoint: str | None = None  # "claude-vscode" / "claude-cli" / etc.
-    source: str = "claude"  # "claude" / "codex"
+    source: str = "claude"  # "claude" / "codex" / "opencode" / "grok"
     cli_version: str | None = None
     model_provider: str | None = None
     thread_source: str | None = None
