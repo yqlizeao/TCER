@@ -207,6 +207,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
     turn_idx = 0
     call_id_to_name: dict[str, str] = {}
     active_duration_ms = 0
+    prev_total: dict[str, int] = {}  # running total_token_usage baseline for deltas
 
     for obj in iter_events(path):
         ts = parse_timestamp_ms(obj.get("timestamp"))
@@ -270,6 +271,23 @@ def aggregate_usage(path: Path) -> TokenUsage:
                     _set_max(u, "model_context_window", info.get("model_context_window"))
                 _add_rate_limit(u, payload.get("rate_limits"))
                 usage = info.get("last_token_usage") if isinstance(info, dict) else None
+                total = info.get("total_token_usage") if isinstance(info, dict) else None
+                # Prefer the delta of the authoritative, monotonic
+                # ``total_token_usage``: Codex re-emits the same
+                # ``last_token_usage`` on some token_count events (observed
+                # 1.5–2.5% overcount on real sessions), so summing ``last``
+                # double-counts. A negative delta (total reset) falls back to
+                # ``last`` and re-bases.
+                if isinstance(total, dict):
+                    delta = {k: _as_int(total.get(k)) - prev_total.get(k, 0)
+                             for k in _TOKEN_FIELDS}
+                    if all(v >= 0 for v in delta.values()):
+                        prev_total = {k: _as_int(total.get(k)) for k in _TOKEN_FIELDS}
+                        if any(delta.values()):
+                            _add_token_usage(u, delta, current_model)
+                            turn_idx += 1
+                        continue
+                    prev_total = {k: _as_int(total.get(k)) for k in _TOKEN_FIELDS}
                 if isinstance(usage, dict):
                     _add_token_usage(u, usage, current_model)
                     turn_idx += 1
@@ -547,6 +565,11 @@ def session_loc_full(path: Path):
 def has_loc_signal(path: Path) -> bool:
     """True if the session contains a parseable apply_patch call."""
     return _loc_scan(path)[1]
+
+
+# Billing fields shared by ``last_token_usage`` / ``total_token_usage``.
+_TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens",
+                 "reasoning_output_tokens")
 
 
 def _add_token_usage(u: TokenUsage, usage: dict, model: str) -> None:
