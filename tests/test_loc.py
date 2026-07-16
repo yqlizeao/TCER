@@ -36,6 +36,9 @@ def test_session_loc_write_edit_multiedit(tmp_path):
     assert added == 8
     assert deleted == 2
     assert loc.net_loc(f) == 6
+    # Default disk_prior=False: first Write to each path is F1-exposed (unseen).
+    sl = loc.session_loc_full(f)
+    assert sl.unseen_writes == 2  # a.py + README.md
 
 
 def test_session_loc_write_overwrite_tracks_prior(tmp_path):
@@ -99,6 +102,73 @@ def test_rework_capped_at_authored(tmp_path):
     ])
     sl = loc.session_loc_full(f)
     assert sl.rework_deleted == 2   # only the 2 it authored count as rework
+
+
+def test_disk_prior_corrects_write_overwrite_of_existing_file(tmp_path):
+    """F1: Write to an existing on-disk file nets against disk lines, not full content."""
+    target = tmp_path / "existing.py"
+    target.write_text("a\nb\nc\nd\ne\n", encoding="utf-8")  # 5 lines on disk
+    f = _write_jsonl(tmp_path / "s.jsonl", [
+        ("Write", {"file_path": str(target), "content": "x\ny"}),  # 5 → 2
+    ])
+    sl = loc.session_loc_full(f, disk_prior=True)
+    assert sl.added == 0
+    assert sl.deleted == 3
+    assert sl.unseen_writes == 0
+    assert sl.added - sl.deleted == -3
+    assert sl.rework_deleted == 0  # deleted pre-existing, not self-rework
+
+
+def test_disk_prior_relative_path_needs_cwd(tmp_path):
+    (tmp_path / "rel.py").write_text("1\n2\n3\n", encoding="utf-8")
+    f = _write_jsonl(tmp_path / "s.jsonl", [
+        ("Write", {"file_path": "rel.py", "content": "only"}),  # 3 → 1
+    ])
+    # Without cwd: cannot resolve → classic F1 (assume 0, full add, unseen).
+    sl0 = loc.session_loc_full(f, cwd=None, disk_prior=True)
+    assert sl0.added == 1 and sl0.deleted == 0 and sl0.unseen_writes == 1
+    # With cwd: correct net.
+    sl1 = loc.session_loc_full(f, cwd=tmp_path, disk_prior=True)
+    assert sl1.added == 0 and sl1.deleted == 2 and sl1.unseen_writes == 0
+
+
+def test_disk_prior_new_file_is_not_unseen(tmp_path):
+    """Missing target after resolve is a true new file — not F1 exposure."""
+    missing = tmp_path / "brand_new.py"
+    assert not missing.exists()
+    f = _write_jsonl(tmp_path / "s.jsonl", [
+        ("Write", {"file_path": str(missing), "content": "a\nb"}),
+    ])
+    sl = loc.session_loc_full(f, disk_prior=True)
+    assert sl.added == 2 and sl.deleted == 0 and sl.unseen_writes == 0
+
+
+def test_disk_prior_post_session_match_counts_full_write(tmp_path):
+    """After a real session, disk still holds Write content — must not zero net.
+
+    Live failure mode: disk_prior seeded post-session line count ≈ Write
+    payload → added=0 for Write-created .py files that still exist.
+    """
+    content = "def main():\n    return 1\n"
+    target = tmp_path / "created.py"
+    target.write_text(content, encoding="utf-8")  # post-session disk
+    f = _write_jsonl(tmp_path / "s.jsonl", [
+        ("Write", {"file_path": str(target), "content": content}),
+    ])
+    sl = loc.session_loc_full(f, disk_prior=True)
+    assert sl.added == 2 and sl.deleted == 0
+    assert sl.unseen_writes == 0
+    assert sl.added - sl.deleted == 2
+
+
+def test_disk_prior_disabled_keeps_legacy_f1(tmp_path):
+    target = tmp_path / "e.py"
+    target.write_text("1\n2\n3\n", encoding="utf-8")
+    f = _write_jsonl(tmp_path / "s.jsonl", [
+        ("Write", {"file_path": str(target), "content": "x"}),
+    ])
+    sl = loc.session_loc_full(f, disk_prior=False)
+    assert sl.added == 1 and sl.unseen_writes == 1
 
 
 def test_tree_loc_counts_code_skips_excluded(tmp_path):

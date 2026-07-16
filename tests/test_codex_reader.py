@@ -138,6 +138,8 @@ def test_aggregate_usage_maps_codex_tokens_and_tools(tmp_path):
     assert u.output_tokens == 20 + 30
     assert u.reasoning_output_tokens == 5 + 7
     assert u.model_context_window == 1000
+    # Peak single-turn input: max of (100, 200) raw input_tokens (includes cache)
+    assert u.peak_input_tokens == 200
     assert u.reasoning_output_tokens == 12
     assert u.rate_limit_snapshots == 2
     assert u.rate_limit_reached_count == 1
@@ -219,7 +221,8 @@ def test_codex_task_complete_duration_is_used(tmp_path):
     u = codex_reader.aggregate_usage(p)
     assert u.session_duration_ms == 1234
     assert u.time_to_first_token_ms == 456
-    assert u.tool_calls["Task"] == 1
+    # task_started/complete are turn lifecycle events, not tool calls.
+    assert "Task" not in u.tool_calls
     assert u.task_count == 1
     assert u.completed_task_count == 1
 
@@ -277,6 +280,132 @@ def test_apply_patch_loc_counts_only_patch_hunks(tmp_path):
     assert sloc.added == 3
     assert sloc.deleted == 1
     assert sloc.file_edit_counts == {"app.py": 1, "README.md": 1}
+    # First touch of app.py deletes pre-session "old" — not self-rework.
+    assert sloc.rework_deleted == 0
+
+
+def test_apply_patch_self_rework_across_patches(tmp_path):
+    """Lines this session added then removed in a later patch count as rework."""
+    add = """*** Begin Patch
+*** Add File: a.py
++1
++2
++3
++4
++5
+*** End Patch
+"""
+    trim = """*** Begin Patch
+*** Update File: a.py
+@@
+-1
+-2
+-3
++one
+*** End Patch
+"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "input": add,
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "input": trim,
+            },
+        },
+    ])
+    sloc = codex_reader.session_loc_full(p)
+    assert sloc.added == 6   # 5 add + 1 new
+    assert sloc.deleted == 3
+    assert sloc.rework_deleted == 3  # all deleted lines were session-authored
+
+
+def test_custom_tool_call_apply_patch_counts_as_edit(tmp_path):
+    """Live Codex often records apply_patch as custom_tool_call, not function_call."""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "input": {"patch": "*** Begin Patch\n*** End Patch\n"},
+            },
+        }
+    ])
+    u = codex_reader.aggregate_usage(p)
+    assert u.tool_calls.get("Edit", 0) == 1
+    assert "apply_patch" not in u.tool_calls
+
+
+def test_custom_tool_call_apply_patch_feeds_loc(tmp_path):
+    """LOC must parse custom_tool_call.input raw patch text (live Codex shape)."""
+    patch = """*** Begin Patch
+*** Update File: app.py
+@@
+-old
++new
++line
+*** End Patch
+"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "input": patch,
+            },
+        }
+    ])
+    assert codex_reader.has_loc_signal(p) is True
+    sloc = codex_reader.session_loc_full(p)
+    assert sloc.added == 2
+    assert sloc.deleted == 1
+    assert sloc.file_edit_counts.get("app.py") == 1
+
+
+def test_apply_patch_tool_op_path_from_patch_body(tmp_path):
+    """ToolOp.path must surface the first file in the patch (files_touched / R/W ratio)."""
+    patch = """*** Begin Patch
+*** Update File: src/main.py
+@@
+-old
++new
+*** Add File: extra.py
++x
+*** End Patch
+"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "apply_patch",
+                "arguments": json.dumps({"patch": patch}),
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "input": patch,
+            },
+        },
+    ])
+    u = codex_reader.aggregate_usage(p)
+    assert u.tool_calls.get("Edit") == 2
+    edit_ops = [op for op in u.tool_ops if op.tool == "Edit"]
+    assert len(edit_ops) == 2
+    assert all(op.path == "src/main.py" for op in edit_ops)
 
 
 def test_analyze_codex_project_without_loc_keeps_token_metrics(tmp_path, monkeypatch):
@@ -292,5 +421,7 @@ def test_analyze_codex_project_without_loc_keeps_token_metrics(tmp_path, monkeyp
     assert result.source == "codex"
     assert result.n_sessions == 1
     assert result.aggregate.usage.total > 0
-    assert result.aggregate.net_loc is None
-    assert result.reports[0].tcer is None
+    # No apply_patch → known zero LOC (not unknown); aggregate stays summable.
+    assert result.aggregate.net_loc == 0
+    assert result.reports[0].net_loc == 0
+    assert result.reports[0].tcer == 0.0

@@ -88,6 +88,10 @@ class TokenUsage:
     user_message_texts: list[str] = field(default_factory=list)  # extracted user message text
     reasoning_output_tokens: int = 0  # Codex exposes this separately; output_tokens already includes it
     model_context_window: int | None = None
+    # Max single-turn input (input + cache write + cache read). Used for
+    # context_window_used_ratio so multi-turn sessions don't look like 50–200×
+    # the window (session-summed total_input / window is not a utilization rate).
+    peak_input_tokens: int = 0
     time_to_first_token_ms: int | None = None
     task_count: int = 0
     completed_task_count: int = 0
@@ -171,6 +175,7 @@ class TokenUsage:
             user_message_texts=self.user_message_texts + other.user_message_texts,
             reasoning_output_tokens=self.reasoning_output_tokens + other.reasoning_output_tokens,
             model_context_window=_max_ms(self.model_context_window, other.model_context_window),
+            peak_input_tokens=max(self.peak_input_tokens, other.peak_input_tokens),
             time_to_first_token_ms=_min_ms(self.time_to_first_token_ms, other.time_to_first_token_ms),
             task_count=self.task_count + other.task_count,
             completed_task_count=self.completed_task_count + other.completed_task_count,

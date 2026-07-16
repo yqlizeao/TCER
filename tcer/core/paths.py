@@ -6,12 +6,25 @@ rule documented in CLAUDE.md (replace ``\\``, ``/``, ``.``, ``:`` with ``-``).
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from tcer.core.models import ProjectRef
 
 # Characters Claude Code replaces with '-' when hashing a cwd into a folder name.
 _HASH_REPLACE = ("\\", "/", ".", ":")
+
+
+def project_hash_key(name: str) -> str:
+    """Identity key for collapsing Claude project-hash folder names.
+
+    On Windows the drive letter in a cwd hash may appear as ``C--…`` or ``c--…``
+    depending on how the path was capitalized when Claude started — two folders
+    for the same project. We casefold the hash name on win32 so the GUI / list
+    shows one entry; :func:`tcer.core.reader.discover_jsonl` still unions JSONL
+    from every matching casing.
+    """
+    return name.lower() if sys.platform == "win32" else name
 
 
 def _claude_dir() -> Path:
@@ -166,12 +179,14 @@ def list_projects() -> list[Path]:
     """Return all project-hash directories across every Claude config root, sorted.
 
     When multiple config roots (e.g. ``~/.claude`` and ``~/.zclaude``) hold the
-    same project hash, the alphabetically-first root's directory represents it;
+    same project hash, the directory with more ``*.jsonl`` sessions represents
+    it (tie → lexicographically first name). On Windows, hash names that differ
+    only by case (``C--GitHub-X`` vs ``c--GitHub-X``) collapse to one entry;
     :func:`tcer.core.reader.discover_jsonl` still unions session files from every
-    root so no sessions are lost.
+    matching folder so no sessions are lost.
     """
-    dirs: list[Path] = []
-    seen_names: set[str] = set()
+    best: dict[str, Path] = {}
+    best_n: dict[str, int] = {}
     for root in claude_config_dirs():
         base = root / "projects"
         if not base.is_dir():
@@ -181,11 +196,41 @@ def list_projects() -> list[Path]:
         except OSError:
             continue
         for d in children:
-            if d.is_dir() and d.name not in seen_names:
-                seen_names.add(d.name)
-                dirs.append(d)
-    dirs.sort(key=lambda p: p.name.lower())
-    return dirs
+            if not d.is_dir():
+                continue
+            key = project_hash_key(d.name)
+            try:
+                n = sum(1 for _ in d.rglob("*.jsonl"))
+            except OSError:
+                n = 0
+            prev = best.get(key)
+            if prev is None or n > best_n[key] or (
+                n == best_n[key] and d.name.lower() < prev.name.lower()
+            ):
+                best[key] = d
+                best_n[key] = n
+    return sorted(best.values(), key=lambda p: p.name.lower())
+
+
+def project_has_sessions(ref: ProjectRef) -> bool:
+    """True if *ref* currently has at least one session the analyzer can open.
+
+    Used by the GUI to grey out empty projects and by ``tcer.audit`` to skip
+    hollow entries in ``--all-projects`` runs. Lazy-imports readers to avoid
+    import cycles with ``paths``.
+    """
+    if ref.source == "claude":
+        from tcer.core import reader
+        return bool(reader.discover_jsonl(ref.key))
+    if ref.source in ("codex", "grok"):
+        return bool(ref.session_paths)
+    if ref.source == "opencode":
+        from tcer.core import opencode_reader
+        try:
+            return bool(opencode_reader.sessions_for_project(ref))
+        except Exception:  # noqa: BLE001 — treat unreadable as empty
+            return False
+    return False
 
 
 def list_project_refs(source: str = "all") -> list[ProjectRef]:
@@ -225,12 +270,17 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
 def resolve_project(project: str) -> Path | None:
     """Resolve a user-supplied project name/hash to a project directory.
 
-    Matches in priority order: exact folder name, then case-insensitive substring
+    Matches in priority order: exact folder name, casefold-equal hash name
+    (Windows drive-letter variants), then case-insensitive substring
     (so ``--project TCER`` resolves ``c--GitHub-TCER``). Returns None if no match.
     """
     dirs = list_projects()
     for d in dirs:
         if d.name == project:
+            return d
+    want = project_hash_key(project)
+    for d in dirs:
+        if project_hash_key(d.name) == want:
             return d
     needle = project.lower()
     matches = [d for d in dirs if needle in d.name.lower()]

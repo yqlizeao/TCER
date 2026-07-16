@@ -9,13 +9,19 @@ per-session + aggregate reports. The CLI and Tkinter GUI both call ``analyze_pro
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
+from typing import Callable
 
 from tcer.core import codex_reader, grok_reader, loc, metrics, opencode_reader, reader
 from tcer.core.models import ProjectRef, SessionMeta, SessionReport, TokenUsage
 from tcer.core.paths import resolve_project
+
+
+class AnalysisCancelled(Exception):
+    """Raised when a cooperative cancel check fires mid-analysis."""
 
 
 @dataclass
@@ -30,6 +36,192 @@ class ProjectAnalysis:
     project_ref: ProjectRef | None = None
 
 
+@dataclass(frozen=True)
+class _MetricCtx:
+    """Shared knobs for per-session ``metrics.compute`` across sources."""
+
+    loc_total: int | None
+    task_type: str
+    baseline_tcer: float
+    baseline_ncpi: float
+    baseline_cpe: float
+    auto_infer: bool = False
+
+
+def _make_cancel_check(
+    cancel_event: threading.Event | None,
+) -> Callable[[], None] | None:
+    if cancel_event is None:
+        return None
+
+    def _check() -> None:
+        if cancel_event.is_set():
+            raise AnalysisCancelled()
+
+    return _check
+
+
+def _filter_by_started_at(
+    files: list[Path],
+    usage_of: Callable[[Path], TokenUsage],
+    since: str | None,
+    until: str | None,
+) -> list[Path]:
+    """Keep files whose usage ``started_at`` falls in [since, until] (YYYY-MM-DD)."""
+    since_ms = _parse_date_to_ms(since) if since else None
+    until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
+    if not since_ms and not until_ms:
+        return files
+    filtered: list[Path] = []
+    for f in files:
+        u = usage_of(f)
+        if u.started_at is None:
+            continue
+        if since_ms and u.started_at < since_ms:
+            continue
+        if until_ms and u.started_at > until_ms:
+            continue
+        filtered.append(f)
+    return filtered
+
+
+def _mk_report(
+    meta: SessionMeta,
+    u: TokenUsage,
+    net: int | None,
+    added: int | None,
+    deleted: int | None,
+    *,
+    ctx: _MetricCtx,
+    n_sub: int = 0,
+    unseen: int = 0,
+    sloc: loc.SessionLoc | None = None,
+    set_subagent_density: bool = False,
+    task_type_override: str | None = None,
+) -> SessionReport:
+    """Build one SessionReport from usage + optional LOC (shared by all sources)."""
+    high_churn = 0
+    test_net = None
+    doc_net = None
+    reworked = None
+    if sloc:
+        high_churn = sloc.high_churn_files
+        test_net = sloc.test_added - sloc.test_deleted
+        doc_net = sloc.doc_added - sloc.doc_deleted
+        reworked = sloc.rework_deleted
+
+    if task_type_override:
+        tt = task_type_override
+    elif ctx.auto_infer:
+        tt = metrics.infer_task_type_from_usage(u, net_loc=net)
+    else:
+        tt = ctx.task_type
+
+    rep = metrics.compute(
+        meta, u, net,
+        loc_accumulated=ctx.loc_total,
+        task_type=tt,
+        code_added=added,
+        code_deleted=deleted,
+        code_reworked=reworked,
+        high_churn_files=high_churn,
+        test_net_loc=test_net,
+        doc_net_loc=doc_net,
+        tcer_baseline=ctx.baseline_tcer,
+        ncpi_baseline=ctx.baseline_ncpi,
+        cpe_baseline=ctx.baseline_cpe,
+    )
+    rep.subagent_count = n_sub
+    rep.unseen_writes = unseen
+    if sloc:
+        details = {fp: cnt for fp, cnt in sloc.file_edit_counts.items() if cnt >= 3}
+        if details:
+            rep.high_churn_details = dict(sorted(details.items(), key=lambda x: -x[1]))
+    if set_subagent_density and u.effective_turns:
+        rep.subagent_density = n_sub / u.effective_turns
+    return rep
+
+
+def _agg_sloc(
+    *,
+    added: int,
+    deleted: int,
+    unseen: int = 0,
+    rework: int = 0,
+    test_added: int = 0,
+    test_deleted: int = 0,
+    doc_added: int = 0,
+    doc_deleted: int = 0,
+    file_edit_counts: dict[str, int] | None = None,
+) -> loc.SessionLoc:
+    sl = loc.SessionLoc(
+        added=added,
+        deleted=deleted,
+        unseen_writes=unseen,
+        rework_deleted=rework,
+        test_added=test_added,
+        test_deleted=test_deleted,
+        doc_added=doc_added,
+        doc_deleted=doc_deleted,
+        file_edit_counts=dict(file_edit_counts or {}),
+    )
+    sl.recompute_high_churn()
+    return sl
+
+
+def _suppress_aggregate_session_metrics(agg: SessionReport) -> None:
+    """NCPI / CTEI / grade are per-session only — clear on project aggregates."""
+    agg.ncpi = None
+    agg.ctei = None
+    agg.grade = None
+
+
+def _accumulate_sloc_totals(
+    sloc: loc.SessionLoc,
+    totals: dict,
+) -> None:
+    """Add one session's LOC into running aggregate counters (mutates ``totals``)."""
+    totals["added"] += sloc.added
+    totals["deleted"] += sloc.deleted
+    totals["unseen"] += sloc.unseen_writes
+    totals["rework"] += sloc.rework_deleted
+    totals["test_added"] += sloc.test_added
+    totals["test_deleted"] += sloc.test_deleted
+    totals["doc_added"] += sloc.doc_added
+    totals["doc_deleted"] += sloc.doc_deleted
+    counts: dict[str, int] = totals["file_edit_counts"]
+    for fp, cnt in sloc.file_edit_counts.items():
+        counts[fp] = counts.get(fp, 0) + cnt
+
+
+def _empty_loc_totals() -> dict:
+    return {
+        "added": 0,
+        "deleted": 0,
+        "unseen": 0,
+        "rework": 0,
+        "test_added": 0,
+        "test_deleted": 0,
+        "doc_added": 0,
+        "doc_deleted": 0,
+        "file_edit_counts": {},
+    }
+
+
+def _totals_to_sloc(totals: dict) -> loc.SessionLoc:
+    return _agg_sloc(
+        added=totals["added"],
+        deleted=totals["deleted"],
+        unseen=totals["unseen"],
+        rework=totals["rework"],
+        test_added=totals["test_added"],
+        test_deleted=totals["test_deleted"],
+        doc_added=totals["doc_added"],
+        doc_deleted=totals["doc_deleted"],
+        file_edit_counts=totals["file_edit_counts"],
+    )
+
+
 def analyze_project(
     project: str,
     *,
@@ -40,12 +232,13 @@ def analyze_project(
     code_dir: str | Path | None = None,
     no_loc: bool = False,
     scan_code_dir: bool = False,
-    task_type: str = "feature",
+    task_type: str = metrics.DEFAULT_TASK_TYPE,
     baseline_tcer: float = metrics.TCER_BASELINE,
     baseline_ncpi: float = metrics.NCPI_BASELINE,
     baseline_cpe: float = metrics.CPE_BASELINE,
     since: str | None = None,
     until: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ProjectAnalysis:
     """Analyze one project (optionally one session) and return per-session + aggregate.
 
@@ -57,8 +250,18 @@ def analyze_project(
     ``started_at`` falls within the range (inclusive). Sessions without timestamps
     are excluded.
 
+    ``cancel_event``: optional cooperative cancel; when set, raises
+    :class:`AnalysisCancelled` between sessions / mid-JSONL scan.
+
     Raises ``FileNotFoundError`` if the project or any matching session is missing.
     """
+    auto_infer = metrics.is_auto_task_type(task_type)
+    if not auto_infer:
+        task_type = metrics.resolve_task_type(task_type)
+    else:
+        task_type = metrics.DEFAULT_TASK_TYPE  # placeholder; per-session inference wins
+    cancel_check = _make_cancel_check(cancel_event)
+
     if source == "codex" or (project_ref and project_ref.source == "codex"):
         return _analyze_codex_project(
             project_ref or project,
@@ -72,6 +275,8 @@ def analyze_project(
             baseline_cpe=baseline_cpe,
             since=since,
             until=until,
+            cancel_check=cancel_check,
+            auto_infer=auto_infer,
         )
     if source == "opencode" or (project_ref and project_ref.source == "opencode"):
         return _analyze_opencode_project(
@@ -86,6 +291,8 @@ def analyze_project(
             baseline_cpe=baseline_cpe,
             since=since,
             until=until,
+            cancel_check=cancel_check,
+            auto_infer=auto_infer,
         )
     if source == "grok" or (project_ref and project_ref.source == "grok"):
         return _analyze_grok_project(
@@ -100,6 +307,8 @@ def analyze_project(
             baseline_cpe=baseline_cpe,
             since=since,
             until=until,
+            cancel_check=cancel_check,
+            auto_infer=auto_infer,
         )
 
     proj = resolve_project(project)
@@ -112,32 +321,38 @@ def analyze_project(
     if no_subagents:
         files = [f for f in files if not reader.is_subagent(f)]
 
-    # Memoize per-file usage so the since/until filter and the main aggregation
-    # pass don't both parse every JSONL file end-to-end.
-    usage_cache: dict[Path, TokenUsage] = {}
+    # Per-call memo (also backed by process-level mtime cache in scan_session).
+    # User message bodies are omitted here — popup uses reader.read_user_messages.
+    # Key includes cwd so F1 disk prior for relative paths can be recomputed correctly.
+    scan_memo: dict[tuple[Path, str], tuple[TokenUsage, loc.SessionLoc | None]] = {}
+
+    def _scan_of(
+        f: Path, *, cwd: str | None = None,
+    ) -> tuple[TokenUsage, loc.SessionLoc | None]:
+        key = (f, cwd or "")
+        hit = scan_memo.get(key)
+        if hit is None:
+            if cancel_check:
+                cancel_check()
+            hit = reader.scan_session(
+                f,
+                with_loc=not no_loc,
+                include_user_texts=False,
+                cwd=cwd,
+                # Post-session disk is not a reliable Write prior (intermediate
+                # Writes + later Edits leave disk ≠ Write payload → false deletes).
+                # Opt into disk_prior=True only for deliberate F1 calibration.
+                disk_prior=False,
+                cancel_check=cancel_check,
+            )
+            scan_memo[key] = hit
+        return hit
 
     def _usage_of(f: Path) -> TokenUsage:
-        u = usage_cache.get(f)
-        if u is None:
-            u = reader.aggregate_usage(f)
-            usage_cache[f] = u
-        return u
+        # Date filter only needs usage; skip disk prior work when no_loc.
+        return _scan_of(f)[0]
 
-    # Time filtering: parse YYYY-MM-DD to ms timestamp, filter sessions by started_at.
-    since_ms = _parse_date_to_ms(since) if since else None
-    until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
-    if since_ms or until_ms:
-        filtered = []
-        for f in files:
-            u = _usage_of(f)
-            if u.started_at is None:
-                continue  # skip sessions with no timestamp
-            if since_ms and u.started_at < since_ms:
-                continue
-            if until_ms and u.started_at > until_ms:
-                continue
-            filtered.append(f)
-        files = filtered
+    files = _filter_by_started_at(files, _usage_of, since, until)
 
     # Group files by parent session id (subagents fold into the owning session).
     groups: dict[str, list[Path]] = {}
@@ -153,6 +368,8 @@ def analyze_project(
     metas: dict[str, SessionMeta] = {}
     cwd: Path | None = None
     for key, gfiles in groups.items():
+        if cancel_check:
+            cancel_check()
         main = next((f for f in gfiles if not reader.is_subagent(f)), None)
         meta = reader.read_session_meta(main) if main else _synth_meta(key, gfiles[0])
         metas[key] = meta
@@ -169,134 +386,77 @@ def analyze_project(
         if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
         else None
     )
-
-    def _mk(meta, u, net, added, deleted, n_sub, unseen, sloc=None) -> SessionReport:
-        # Extract file-level quality metrics from SessionLoc if available
-        high_churn = 0
-        test_net = None
-        doc_net = None
-        reworked = None
-        if sloc:
-            high_churn = sloc.high_churn_files
-            test_net = sloc.test_added - sloc.test_deleted
-            doc_net = sloc.doc_added - sloc.doc_deleted
-            reworked = sloc.rework_deleted
-
-        rep = metrics.compute(
-            meta, u, net,
-            loc_accumulated=loc_total, task_type=task_type,
-            code_added=added, code_deleted=deleted,
-            code_reworked=reworked,
-            high_churn_files=high_churn,
-            test_net_loc=test_net,
-            doc_net_loc=doc_net,
-            tcer_baseline=baseline_tcer, ncpi_baseline=baseline_ncpi,
-            cpe_baseline=baseline_cpe,
-        )
-        rep.subagent_count = n_sub
-        rep.unseen_writes = unseen
-        # Populate high-churn file details (path→count for files edited ≥3).
-        # For merged sessions, union across all slocs; counts are approximate
-        # (each sloc's file_edit_counts starts from scratch).
-        if sloc:
-            details = {}
-            for fp, cnt in sloc.file_edit_counts.items():
-                if cnt >= 3:
-                    details[fp] = details.get(fp, 0) + cnt
-            if details:
-                rep.high_churn_details = dict(sorted(details.items(), key=lambda x: -x[1]))
-        # Fill subagent_density (subagent_count / effective_turns)
-        if u.effective_turns:
-            rep.subagent_density = n_sub / u.effective_turns
-        return rep
+    ctx = _MetricCtx(
+        loc_total=loc_total,
+        task_type=task_type,
+        baseline_tcer=baseline_tcer,
+        baseline_ncpi=baseline_ncpi,
+        baseline_cpe=baseline_cpe,
+        auto_infer=auto_infer,
+    )
 
     # Second pass: merge usage + LOC per group, build one report per session.
     reports: list[SessionReport] = []
-    tot_added = tot_deleted = tot_unseen = 0
-    tot_rework = 0
-    tot_high_churn = 0
-    tot_test_added = tot_test_deleted = 0
-    tot_doc_added = tot_doc_deleted = 0
+    totals = _empty_loc_totals()
     total_subs = 0
-    tot_file_edit_counts: dict[str, int] = {}
     agg_u = TokenUsage()
     for key, gfiles in groups.items():
-        gu = reduce(lambda a, b: a.merge(b),
-                    (_usage_of(f) for f in gfiles), TokenUsage())
+        if cancel_check:
+            cancel_check()
+        sess_cwd = metas[key].cwd
+        gu = reduce(
+            lambda a, b: a.merge(b),
+            (_scan_of(f, cwd=sess_cwd)[0] for f in gfiles),
+            TokenUsage(),
+        )
         n_sub = sum(1 for f in gfiles if reader.is_subagent(f))
         total_subs += n_sub
         agg_u = agg_u.merge(gu)
         if no_loc:
-            reports.append(_mk(metas[key], gu, None, None, None, n_sub, unseen=0))
+            reports.append(_mk_report(
+                metas[key], gu, None, None, None, ctx=ctx,
+                n_sub=n_sub, unseen=0, set_subagent_density=True,
+            ))
             continue
-        # Sum LOC across all files in this group (main session + its subagents).
-        slocs = [loc.session_loc_full(f) for f in gfiles]
-        added = sum(s.added for s in slocs)
-        deleted = sum(s.deleted for s in slocs)
-        unseen = sum(s.unseen_writes for s in slocs)
-        rework = sum(s.rework_deleted for s in slocs)
-        # Aggregate file-level quality metrics
-        merged_sloc = loc.SessionLoc(
-            added=added,
-            deleted=deleted,
-            unseen_writes=unseen,
-            rework_deleted=rework,
-            high_churn_files=sum(s.high_churn_files for s in slocs),
-            test_added=sum(s.test_added for s in slocs),
-            test_deleted=sum(s.test_deleted for s in slocs),
-            doc_added=sum(s.doc_added for s in slocs),
-            doc_deleted=sum(s.doc_deleted for s in slocs),
-        )
-        # Merge file_edit_counts from all slocs so high_churn_details works.
-        for s in slocs:
-            for fp, cnt in s.file_edit_counts.items():
-                merged_sloc.file_edit_counts[fp] = merged_sloc.file_edit_counts.get(fp, 0) + cnt
-        tot_added += added
-        tot_deleted += deleted
-        tot_unseen += unseen
-        tot_rework += rework
-        tot_high_churn += merged_sloc.high_churn_files
-        tot_test_added += merged_sloc.test_added
-        tot_test_deleted += merged_sloc.test_deleted
-        tot_doc_added += merged_sloc.doc_added
-        tot_doc_deleted += merged_sloc.doc_deleted
-        for fp, cnt in merged_sloc.file_edit_counts.items():
-            tot_file_edit_counts[fp] = tot_file_edit_counts.get(fp, 0) + cnt
-        reports.append(_mk(metas[key], gu, added - deleted, added, deleted, n_sub, unseen, merged_sloc))
+        slocs = []
+        for f in gfiles:
+            _, sl = _scan_of(f, cwd=sess_cwd)
+            if sl is not None:
+                slocs.append(sl)
+        merged_sloc = loc.merge_session_locs(slocs)
+        _accumulate_sloc_totals(merged_sloc, totals)
+        reports.append(_mk_report(
+            metas[key], gu, merged_sloc.added - merged_sloc.deleted,
+            merged_sloc.added, merged_sloc.deleted, ctx=ctx,
+            n_sub=n_sub, unseen=merged_sloc.unseen_writes, sloc=merged_sloc,
+            set_subagent_density=True,
+        ))
 
     agg_meta = SessionMeta(
         session_id="(aggregate)", cwd=str(code_path) if code_path else None,
         title=None, path=proj, is_subagent=False,
     )
+    # Aggregate task type: majority of per-session inferences when auto.
+    agg_tt = (
+        metrics.majority_task_type([r.task_type for r in reports])
+        if auto_infer and reports else None
+    )
     if no_loc:
-        agg = _mk(agg_meta, agg_u, None, None, None, total_subs, unseen=0)
-    else:
-        agg_sloc = loc.SessionLoc(
-            added=tot_added,
-            deleted=tot_deleted,
-            unseen_writes=tot_unseen,
-            rework_deleted=tot_rework,
-            high_churn_files=tot_high_churn,
-            test_added=tot_test_added,
-            test_deleted=tot_test_deleted,
-            doc_added=tot_doc_added,
-            doc_deleted=tot_doc_deleted,
-            file_edit_counts=tot_file_edit_counts,
+        agg = _mk_report(
+            agg_meta, agg_u, None, None, None, ctx=ctx,
+            n_sub=total_subs, unseen=0, set_subagent_density=True,
+            task_type_override=agg_tt,
         )
-        agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, total_subs, tot_unseen, agg_sloc)
-
-    # NCPI / CTEI / grade are per-session concepts: NCPI = net_loc / current
-    # codebase size. For the aggregate, ``net_loc`` is the *sum* of every
-    # session's output over the whole project life (including rewrites and the F1
-    # Write-overwrite overcount), while the denominator is the codebase's *current*
-    # snapshot — so the ratio routinely exceeds 1 (a project writes more lines over
-    # its life than it currently contains) and the multiplicative CTEI then
-    # explodes. Suppress them at the aggregate level rather than show a misleading
-    # "优秀". Per-session NCPI/CTEI (shown in the ranking tab) stay valid; TCER /
-    # PSAC / NTCER remain meaningful as aggregates and are kept.
-    agg.ncpi = None
-    agg.ctei = None
-    agg.grade = None
+    else:
+        agg_sloc = _totals_to_sloc(totals)
+        agg = _mk_report(
+            agg_meta, agg_u, agg_sloc.added - agg_sloc.deleted,
+            agg_sloc.added, agg_sloc.deleted, ctx=ctx,
+            n_sub=total_subs, unseen=agg_sloc.unseen_writes, sloc=agg_sloc,
+            set_subagent_density=True,
+            task_type_override=agg_tt,
+        )
+    _suppress_aggregate_session_metrics(agg)
 
     # Project-level memory files (read from disk once for the aggregate).
     mem_dir = proj / "memory"
@@ -320,12 +480,14 @@ def _analyze_codex_project(
     code_dir: str | Path | None = None,
     no_loc: bool = False,
     scan_code_dir: bool = False,
-    task_type: str = "code_creation",
+    task_type: str = metrics.DEFAULT_TASK_TYPE,
     baseline_tcer: float = metrics.TCER_BASELINE,
     baseline_ncpi: float = metrics.NCPI_BASELINE,
     baseline_cpe: float = metrics.CPE_BASELINE,
     since: str | None = None,
     until: str | None = None,
+    cancel_check: Callable[[], None] | None = None,
+    auto_infer: bool = False,
 ) -> ProjectAnalysis:
     """Analyze a Codex cwd-grouped project."""
     ref = project if isinstance(project, ProjectRef) else codex_reader.resolve_project(project)
@@ -335,29 +497,27 @@ def _analyze_codex_project(
     if not files:
         raise FileNotFoundError(f"no Codex session files for '{ref.display_name}'")
 
-    usage_cache: dict[Path, TokenUsage] = {}
+    from tcer.core import file_cache
+
+    usage_memo: dict[Path, TokenUsage] = {}
 
     def _usage_of(f: Path) -> TokenUsage:
-        u = usage_cache.get(f)
+        u = usage_memo.get(f)
         if u is None:
-            u = codex_reader.aggregate_usage(f)
-            usage_cache[f] = u
+            if cancel_check:
+                cancel_check()
+            # Process-level mtime cache; skip when cancellable (partial walk risk).
+            if cancel_check is None:
+                u = file_cache.get_or_compute(
+                    f, ("codex_usage",),
+                    lambda: codex_reader.aggregate_usage(f),
+                )
+            else:
+                u = codex_reader.aggregate_usage(f)
+            usage_memo[f] = u
         return u
 
-    since_ms = _parse_date_to_ms(since) if since else None
-    until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
-    if since_ms or until_ms:
-        filtered = []
-        for f in files:
-            u = _usage_of(f)
-            if u.started_at is None:
-                continue
-            if since_ms and u.started_at < since_ms:
-                continue
-            if until_ms and u.started_at > until_ms:
-                continue
-            filtered.append(f)
-        files = filtered
+    files = _filter_by_started_at(files, _usage_of, since, until)
 
     if session:
         files = [
@@ -373,86 +533,66 @@ def _analyze_codex_project(
         if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
         else None
     )
-
-    def _mk(meta, u, net, added, deleted, sloc=None) -> SessionReport:
-        high_churn = sloc.high_churn_files if sloc else 0
-        test_net = (sloc.test_added - sloc.test_deleted) if sloc else None
-        doc_net = (sloc.doc_added - sloc.doc_deleted) if sloc else None
-        reworked = sloc.rework_deleted if sloc else None
-        rep = metrics.compute(
-            meta, u, net,
-            loc_accumulated=loc_total, task_type=task_type,
-            code_added=added, code_deleted=deleted, code_reworked=reworked,
-            high_churn_files=high_churn,
-            test_net_loc=test_net, doc_net_loc=doc_net,
-            tcer_baseline=baseline_tcer, ncpi_baseline=baseline_ncpi,
-            cpe_baseline=baseline_cpe,
-        )
-        if sloc:
-            details = {fp: cnt for fp, cnt in sloc.file_edit_counts.items() if cnt >= 3}
-            if details:
-                rep.high_churn_details = dict(sorted(details.items(), key=lambda x: -x[1]))
-        return rep
+    ctx = _MetricCtx(
+        loc_total=loc_total, task_type=task_type,
+        baseline_tcer=baseline_tcer, baseline_ncpi=baseline_ncpi,
+        baseline_cpe=baseline_cpe, auto_infer=auto_infer,
+    )
 
     reports: list[SessionReport] = []
     agg_u = TokenUsage()
-    tot_added = tot_deleted = tot_rework = 0
-    tot_high_churn = 0
-    tot_test_added = tot_test_deleted = 0
-    tot_doc_added = tot_doc_deleted = 0
-    tot_file_edit_counts: dict[str, int] = {}
-    all_loc_known = not no_loc
+    totals = _empty_loc_totals()
 
     for f in files:
+        if cancel_check:
+            cancel_check()
         meta = codex_reader.read_session_meta(f)
         u = _usage_of(f)
         agg_u = agg_u.merge(u)
         if no_loc:
-            reports.append(_mk(meta, u, None, None, None))
+            reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
             continue
-        # Single scan yields both the LOC and whether any patch existed; the old
-        # form called has_loc_signal then session_loc_full, walking the file twice.
-        sloc, has_signal = codex_reader._loc_scan(f)
+        # Single scan yields both the LOC and whether any patch existed.
+        if cancel_check is None:
+            sloc, has_signal = file_cache.get_or_compute(
+                f, ("codex_loc",),
+                lambda p=f: codex_reader._loc_scan(p),
+            )
+        else:
+            sloc, has_signal = codex_reader._loc_scan(f)
         if not has_signal:
-            all_loc_known = False
-            reports.append(_mk(meta, u, None, None, None))
-            continue
-        tot_added += sloc.added
-        tot_deleted += sloc.deleted
-        tot_rework += sloc.rework_deleted
-        tot_high_churn += sloc.high_churn_files
-        tot_test_added += sloc.test_added
-        tot_test_deleted += sloc.test_deleted
-        tot_doc_added += sloc.doc_added
-        tot_doc_deleted += sloc.doc_deleted
-        for fp, cnt in sloc.file_edit_counts.items():
-            tot_file_edit_counts[fp] = tot_file_edit_counts.get(fp, 0) + cnt
-        reports.append(_mk(meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted, sloc))
+            # No parseable apply_patch → known zero LOC (not unknown). Keeps
+            # project aggregate TCER valid when sibling sessions have patches.
+            sloc = loc.SessionLoc(added=0, deleted=0)
+        _accumulate_sloc_totals(sloc, totals)
+        reports.append(_mk_report(
+            meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted,
+            ctx=ctx, sloc=sloc, unseen=sloc.unseen_writes,
+        ))
 
     agg_meta = SessionMeta(
         session_id="(aggregate)", cwd=str(code_path) if code_path else ref.cwd,
         title=None, path=ref.path or (files[0].parent if files else Path(".")),
         is_subagent=False, entrypoint="codex", source="codex",
     )
-    if all_loc_known:
-        agg_sloc = loc.SessionLoc(
-            added=tot_added,
-            deleted=tot_deleted,
-            unseen_writes=0,
-            rework_deleted=tot_rework,
-            high_churn_files=tot_high_churn,
-            test_added=tot_test_added,
-            test_deleted=tot_test_deleted,
-            doc_added=tot_doc_added,
-            doc_deleted=tot_doc_deleted,
-            file_edit_counts=tot_file_edit_counts,
+    agg_tt = (
+        metrics.majority_task_type([r.task_type for r in reports])
+        if auto_infer and reports else None
+    )
+    if no_loc:
+        agg = _mk_report(
+            agg_meta, agg_u, None, None, None, ctx=ctx,
+            task_type_override=agg_tt,
         )
-        agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, agg_sloc)
     else:
-        agg = _mk(agg_meta, agg_u, None, None, None)
-    agg.ncpi = None
-    agg.ctei = None
-    agg.grade = None
+        agg_sloc = _totals_to_sloc(totals)
+        agg = _mk_report(
+            agg_meta, agg_u, agg_sloc.added - agg_sloc.deleted,
+            agg_sloc.added, agg_sloc.deleted, ctx=ctx, sloc=agg_sloc,
+            unseen=agg_sloc.unseen_writes,
+            task_type_override=agg_tt,
+        )
+    _suppress_aggregate_session_metrics(agg)
 
     return ProjectAnalysis(
         project_hash=ref.key,
@@ -473,12 +613,14 @@ def _analyze_opencode_project(
     code_dir: str | Path | None = None,
     no_loc: bool = False,
     scan_code_dir: bool = False,
-    task_type: str = "code_creation",
+    task_type: str = metrics.DEFAULT_TASK_TYPE,
     baseline_tcer: float = metrics.TCER_BASELINE,
     baseline_ncpi: float = metrics.NCPI_BASELINE,
     baseline_cpe: float = metrics.CPE_BASELINE,
     since: str | None = None,
     until: str | None = None,
+    cancel_check: Callable[[], None] | None = None,
+    auto_infer: bool = False,
 ) -> ProjectAnalysis:
     """Analyze an OpenCode project from its local SQLite database."""
     ref = project if isinstance(project, ProjectRef) else opencode_reader.resolve_project(project)
@@ -489,13 +631,15 @@ def _analyze_opencode_project(
         raise FileNotFoundError(f"no OpenCode sessions for '{ref.display_name}'")
 
     db_path = ref.path
-    usage_cache: dict[str, TokenUsage] = {}
+    usage_memo: dict[str, TokenUsage] = {}
 
     def _usage_of(sid: str) -> TokenUsage:
-        u = usage_cache.get(sid)
+        u = usage_memo.get(sid)
         if u is None:
+            if cancel_check:
+                cancel_check()
             u = opencode_reader.aggregate_usage(db_path, sid)
-            usage_cache[sid] = u
+            usage_memo[sid] = u
         return u
 
     since_ms = _parse_date_to_ms(since) if since else None
@@ -524,80 +668,58 @@ def _analyze_opencode_project(
         if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
         else None
     )
-
-    def _mk(meta, u, net, added, deleted, sloc=None) -> SessionReport:
-        high_churn = sloc.high_churn_files if sloc else 0
-        test_net = (sloc.test_added - sloc.test_deleted) if sloc else None
-        doc_net = (sloc.doc_added - sloc.doc_deleted) if sloc else None
-        reworked = sloc.rework_deleted if sloc else None
-        rep = metrics.compute(
-            meta, u, net,
-            loc_accumulated=loc_total, task_type=task_type,
-            code_added=added, code_deleted=deleted, code_reworked=reworked,
-            high_churn_files=high_churn,
-            test_net_loc=test_net, doc_net_loc=doc_net,
-            tcer_baseline=baseline_tcer, ncpi_baseline=baseline_ncpi,
-            cpe_baseline=baseline_cpe,
-        )
-        if sloc:
-            details = {fp: cnt for fp, cnt in sloc.file_edit_counts.items() if cnt >= 3}
-            if details:
-                rep.high_churn_details = dict(sorted(details.items(), key=lambda x: -x[1]))
-        return rep
+    ctx = _MetricCtx(
+        loc_total=loc_total, task_type=task_type,
+        baseline_tcer=baseline_tcer, baseline_ncpi=baseline_ncpi,
+        baseline_cpe=baseline_cpe, auto_infer=auto_infer,
+    )
 
     reports: list[SessionReport] = []
     agg_u = TokenUsage()
-    tot_added = tot_deleted = tot_rework = 0
-    tot_high_churn = 0
-    tot_test_added = tot_test_deleted = 0
-    tot_doc_added = tot_doc_deleted = 0
-    tot_file_edit_counts: dict[str, int] = {}
-    all_loc_known = not no_loc
+    totals = _empty_loc_totals()
 
     for sid in session_ids:
+        if cancel_check:
+            cancel_check()
         meta = opencode_reader.read_session_meta(db_path, sid)
         u = _usage_of(sid)
         agg_u = agg_u.merge(u)
-        if no_loc or not opencode_reader.has_loc_signal(db_path, sid):
-            all_loc_known = False
-            reports.append(_mk(meta, u, None, None, None))
+        if no_loc:
+            reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
             continue
-        sloc = opencode_reader.session_loc_full(db_path, sid)
-        tot_added += sloc.added
-        tot_deleted += sloc.deleted
-        tot_rework += sloc.rework_deleted
-        tot_high_churn += sloc.high_churn_files
-        tot_test_added += sloc.test_added
-        tot_test_deleted += sloc.test_deleted
-        tot_doc_added += sloc.doc_added
-        tot_doc_deleted += sloc.doc_deleted
-        for fp, cnt in sloc.file_edit_counts.items():
-            tot_file_edit_counts[fp] = tot_file_edit_counts.get(fp, 0) + cnt
-        reports.append(_mk(meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted, sloc))
+        # One SQLite pass for signal + LOC (same pattern as Codex/Grok).
+        sloc, has_signal = opencode_reader._loc_scan(db_path, sid)
+        if not has_signal:
+            # No summary and no edit tools → known zero (not unknown).
+            sloc = loc.SessionLoc(added=0, deleted=0)
+        _accumulate_sloc_totals(sloc, totals)
+        reports.append(_mk_report(
+            meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted,
+            ctx=ctx, sloc=sloc, unseen=sloc.unseen_writes,
+        ))
 
     agg_meta = SessionMeta(
         session_id="(aggregate)", cwd=str(code_path) if code_path else ref.cwd,
         title=None, path=db_path, is_subagent=False, entrypoint="opencode", source="opencode",
     )
-    if all_loc_known:
-        agg_sloc = loc.SessionLoc(
-            added=tot_added,
-            deleted=tot_deleted,
-            unseen_writes=0,
-            rework_deleted=tot_rework,
-            high_churn_files=tot_high_churn,
-            test_added=tot_test_added,
-            test_deleted=tot_test_deleted,
-            doc_added=tot_doc_added,
-            doc_deleted=tot_doc_deleted,
-            file_edit_counts=tot_file_edit_counts,
+    agg_tt = (
+        metrics.majority_task_type([r.task_type for r in reports])
+        if auto_infer and reports else None
+    )
+    if no_loc:
+        agg = _mk_report(
+            agg_meta, agg_u, None, None, None, ctx=ctx,
+            task_type_override=agg_tt,
         )
-        agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, agg_sloc)
     else:
-        agg = _mk(agg_meta, agg_u, None, None, None)
-    agg.ncpi = None
-    agg.ctei = None
-    agg.grade = None
+        agg_sloc = _totals_to_sloc(totals)
+        agg = _mk_report(
+            agg_meta, agg_u, agg_sloc.added - agg_sloc.deleted,
+            agg_sloc.added, agg_sloc.deleted, ctx=ctx, sloc=agg_sloc,
+            unseen=agg_sloc.unseen_writes,
+            task_type_override=agg_tt,
+        )
+    _suppress_aggregate_session_metrics(agg)
 
     return ProjectAnalysis(
         project_hash=ref.key,
@@ -618,12 +740,14 @@ def _analyze_grok_project(
     code_dir: str | Path | None = None,
     no_loc: bool = False,
     scan_code_dir: bool = False,
-    task_type: str = "code_creation",
+    task_type: str = metrics.DEFAULT_TASK_TYPE,
     baseline_tcer: float = metrics.TCER_BASELINE,
     baseline_ncpi: float = metrics.NCPI_BASELINE,
     baseline_cpe: float = metrics.CPE_BASELINE,
     since: str | None = None,
     until: str | None = None,
+    cancel_check: Callable[[], None] | None = None,
+    auto_infer: bool = False,
 ) -> ProjectAnalysis:
     """Analyze a Grok cwd-grouped project."""
     ref = project if isinstance(project, ProjectRef) else grok_reader.resolve_project(project)
@@ -633,29 +757,26 @@ def _analyze_grok_project(
     if not files:
         raise FileNotFoundError(f"no Grok session files for '{ref.display_name}'")
 
-    usage_cache: dict[Path, TokenUsage] = {}
+    from tcer.core import file_cache
+
+    usage_memo: dict[Path, TokenUsage] = {}
 
     def _usage_of(f: Path) -> TokenUsage:
-        u = usage_cache.get(f)
+        u = usage_memo.get(f)
         if u is None:
-            u = grok_reader.aggregate_usage(f)
-            usage_cache[f] = u
+            if cancel_check:
+                cancel_check()
+            if cancel_check is None:
+                u = file_cache.get_or_compute(
+                    f, ("grok_usage",),
+                    lambda: grok_reader.aggregate_usage(f),
+                )
+            else:
+                u = grok_reader.aggregate_usage(f)
+            usage_memo[f] = u
         return u
 
-    since_ms = _parse_date_to_ms(since) if since else None
-    until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
-    if since_ms or until_ms:
-        filtered = []
-        for f in files:
-            u = _usage_of(f)
-            if u.started_at is None:
-                continue
-            if since_ms and u.started_at < since_ms:
-                continue
-            if until_ms and u.started_at > until_ms:
-                continue
-            filtered.append(f)
-        files = filtered
+    files = _filter_by_started_at(files, _usage_of, since, until)
 
     if session:
         files = [
@@ -671,86 +792,65 @@ def _analyze_grok_project(
         if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
         else None
     )
-
-    def _mk(meta, u, net, added, deleted, sloc=None) -> SessionReport:
-        high_churn = sloc.high_churn_files if sloc else 0
-        test_net = (sloc.test_added - sloc.test_deleted) if sloc else None
-        doc_net = (sloc.doc_added - sloc.doc_deleted) if sloc else None
-        reworked = sloc.rework_deleted if sloc else None
-        rep = metrics.compute(
-            meta, u, net,
-            loc_accumulated=loc_total, task_type=task_type,
-            code_added=added, code_deleted=deleted, code_reworked=reworked,
-            high_churn_files=high_churn,
-            test_net_loc=test_net, doc_net_loc=doc_net,
-            tcer_baseline=baseline_tcer, ncpi_baseline=baseline_ncpi,
-            cpe_baseline=baseline_cpe,
-        )
-        if sloc:
-            details = {fp: cnt for fp, cnt in sloc.file_edit_counts.items() if cnt >= 3}
-            if details:
-                rep.high_churn_details = dict(sorted(details.items(), key=lambda x: -x[1]))
-        return rep
+    ctx = _MetricCtx(
+        loc_total=loc_total, task_type=task_type,
+        baseline_tcer=baseline_tcer, baseline_ncpi=baseline_ncpi,
+        baseline_cpe=baseline_cpe, auto_infer=auto_infer,
+    )
 
     reports: list[SessionReport] = []
     agg_u = TokenUsage()
-    tot_added = tot_deleted = tot_rework = 0
-    tot_high_churn = 0
-    tot_test_added = tot_test_deleted = 0
-    tot_doc_added = tot_doc_deleted = 0
-    tot_file_edit_counts: dict[str, int] = {}
-    all_loc_known = not no_loc
+    totals = _empty_loc_totals()
 
     for f in files:
+        if cancel_check:
+            cancel_check()
         meta = grok_reader.read_session_meta(f)
         u = _usage_of(f)
         agg_u = agg_u.merge(u)
         if no_loc:
-            reports.append(_mk(meta, u, None, None, None))
+            reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
             continue
-        # Single scan yields both the LOC and whether any edit existed; the old
-        # form called has_loc_signal then session_loc_full, walking the file twice.
-        sloc, has_signal = grok_reader._loc_scan(f)
+        sess_cwd = meta.cwd or ref.cwd
+        if cancel_check is None:
+            sloc, has_signal = file_cache.get_or_compute(
+                f, ("grok_loc", str(sess_cwd or ""), False),
+                lambda p=f, c=sess_cwd: grok_reader._loc_scan(p, cwd=c, disk_prior=False),
+            )
+        else:
+            sloc, has_signal = grok_reader._loc_scan(f, cwd=sess_cwd, disk_prior=False)
         if not has_signal:
-            all_loc_known = False
-            reports.append(_mk(meta, u, None, None, None))
-            continue
-        tot_added += sloc.added
-        tot_deleted += sloc.deleted
-        tot_rework += sloc.rework_deleted
-        tot_high_churn += sloc.high_churn_files
-        tot_test_added += sloc.test_added
-        tot_test_deleted += sloc.test_deleted
-        tot_doc_added += sloc.doc_added
-        tot_doc_deleted += sloc.doc_deleted
-        for fp, cnt in sloc.file_edit_counts.items():
-            tot_file_edit_counts[fp] = tot_file_edit_counts.get(fp, 0) + cnt
-        reports.append(_mk(meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted, sloc))
+            # No search_replace/write → known zero LOC (not unknown).
+            sloc = loc.SessionLoc(added=0, deleted=0)
+        _accumulate_sloc_totals(sloc, totals)
+        reports.append(_mk_report(
+            meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted,
+            ctx=ctx, sloc=sloc, unseen=sloc.unseen_writes,
+        ))
 
     agg_meta = SessionMeta(
         session_id="(aggregate)", cwd=str(code_path) if code_path else ref.cwd,
         title=None, path=ref.path or (files[0].parent if files else Path(".")),
         is_subagent=False, entrypoint="grok", source="grok",
     )
-    if all_loc_known:
-        agg_sloc = loc.SessionLoc(
-            added=tot_added,
-            deleted=tot_deleted,
-            unseen_writes=0,
-            rework_deleted=tot_rework,
-            high_churn_files=tot_high_churn,
-            test_added=tot_test_added,
-            test_deleted=tot_test_deleted,
-            doc_added=tot_doc_added,
-            doc_deleted=tot_doc_deleted,
-            file_edit_counts=tot_file_edit_counts,
+    agg_tt = (
+        metrics.majority_task_type([r.task_type for r in reports])
+        if auto_infer and reports else None
+    )
+    if no_loc:
+        agg = _mk_report(
+            agg_meta, agg_u, None, None, None, ctx=ctx,
+            task_type_override=agg_tt,
         )
-        agg = _mk(agg_meta, agg_u, tot_added - tot_deleted, tot_added, tot_deleted, agg_sloc)
     else:
-        agg = _mk(agg_meta, agg_u, None, None, None)
-    agg.ncpi = None
-    agg.ctei = None
-    agg.grade = None
+        agg_sloc = _totals_to_sloc(totals)
+        agg = _mk_report(
+            agg_meta, agg_u, agg_sloc.added - agg_sloc.deleted,
+            agg_sloc.added, agg_sloc.deleted, ctx=ctx, sloc=agg_sloc,
+            unseen=agg_sloc.unseen_writes,
+            task_type_override=agg_tt,
+        )
+    _suppress_aggregate_session_metrics(agg)
 
     return ProjectAnalysis(
         project_hash=ref.key,
