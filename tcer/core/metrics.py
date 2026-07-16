@@ -35,61 +35,28 @@ _COMPOSITE_CONFIG_PATH = Path(__file__).parent.parent / "config" / "composite_ba
 
 
 # ============================================================
-# 任务类型体系（只保留 3 个大类）
-# ============================================================
-
-TASK_CATEGORIES = {
-    "code_creation": {
-        "name": "代码创作",
-        "description": "产生新代码的任务（新功能开发、功能扩展、测试编写等）",
-        "ttaf": 1.0,
-        "typical_tcer_range": "60-120",
-        "behavior_hints": ["高 net_loc", "低 exploration_ratio", "低 edit_ratio（多用 Write）"],
-    },
-    "code_maintenance": {
-        "name": "代码维护",
-        "description": "修改/优化现有代码（调试排查、代码重构等）",
-        "ttaf": 0.45,
-        "typical_tcer_range": "25-65",
-        "behavior_hints": ["高 exploration_ratio", "高 edit_ratio", "低 net_loc"],
-    },
-    "non_coding": {
-        "name": "非编码",
-        "description": "不以代码产出为主要目标（代码审查、调研研究等）",
-        "ttaf": 0.2,
-        "typical_tcer_range": "0-30",
-        "behavior_hints": ["极高 read_write_ratio", "极高 exploration_ratio", "极低或零 net_loc"],
-    },
-}
-
-
-def get_task_category(task_type: str) -> str | None:
-    """获取任务类型所属的大类（现在 task_type 本身就是大类）"""
-    return task_type if task_type in TASK_CATEGORIES else None
-
-
-def get_task_ttaf(task_type: str) -> float | None:
-    """获取任务类型的 TTAF 系数"""
-    category_info = TASK_CATEGORIES.get(task_type)
-    return category_info["ttaf"] if category_info else None
-
-
-# ============================================================
-# Composite-layer config (backward compat)
+# Composite-layer config (SSOT: config/composite_baselines.json)
 # ============================================================
 
 @lru_cache(maxsize=1)
 def _load_composite_config() -> dict:
-    """Load composite-layer config (TTAF / baselines / PSAC / CHR weight)."""
+    """Load composite-layer config (task categories / baselines / PSAC / CHR weight)."""
     with _COMPOSITE_CONFIG_PATH.open("r", encoding="utf-8") as fh:
         return json.load(fh)
 
 
-# Composite-layer constants (loaded from config; expose module-level for backward compat).
+def _get_task_categories() -> dict[str, dict]:
+    """Task categories from config — single source of truth for names / TTAF / hints."""
+    raw = _load_composite_config().get("task_categories") or {}
+    out: dict[str, dict] = {}
+    for key, val in raw.items():
+        if isinstance(val, dict) and "ttaf" in val:
+            out[key] = val
+    return out
+
+
 def _get_ttaf() -> dict[str, float]:
-    config = _load_composite_config()
-    return {k: v["ttaf"] for k, v in config["task_categories"].items()
-            if isinstance(v, dict) and "ttaf" in v}
+    return {k: float(v["ttaf"]) for k, v in _get_task_categories().items()}
 
 
 def _get_baselines() -> dict[str, float]:
@@ -104,30 +71,290 @@ def _get_chr_weight() -> float:
     return _load_composite_config()["chr_weight"]
 
 
-# Module-level read-only views (for backward compat with existing callers that read these).
-# Force reload from new config structure
+def _refresh_composite_globals() -> None:
+    """Reload module-level constants from config (after cache clear / save)."""
+    global TASK_CATEGORIES, TTAF, TCER_BASELINE, NCPI_BASELINE, CPE_BASELINE
+    global PSAC_INTERCEPT, PSAC_SLOPE, CHR_WEIGHT
+    TASK_CATEGORIES = _get_task_categories()
+    TTAF = _get_ttaf()
+    b = _get_baselines()
+    TCER_BASELINE = b["tcer"]
+    NCPI_BASELINE = b["ncpi"]
+    CPE_BASELINE = b["cpe"]
+    p = _get_psac_params()
+    PSAC_INTERCEPT = p["intercept"]
+    PSAC_SLOPE = p["slope"]
+    CHR_WEIGHT = _get_chr_weight()
+
+
+# Module-level views (backward compat). Always rebuild after cache clear via
+# ``_refresh_composite_globals`` so TASK_CATEGORIES / TTAF stay in lockstep.
 _load_composite_config.cache_clear()
-TTAF = _get_ttaf()
-TCER_BASELINE = _get_baselines()["tcer"]
-NCPI_BASELINE = _get_baselines()["ncpi"]
-CPE_BASELINE = _get_baselines()["cpe"]
-PSAC_INTERCEPT = _get_psac_params()["intercept"]
-PSAC_SLOPE = _get_psac_params()["slope"]
-CHR_WEIGHT = _get_chr_weight()
+TASK_CATEGORIES: dict[str, dict] = {}
+TTAF: dict[str, float] = {}
+TCER_BASELINE = 0.0
+NCPI_BASELINE = 0.0
+CPE_BASELINE = 0.0
+PSAC_INTERCEPT = 0.0
+PSAC_SLOPE = 0.0
+CHR_WEIGHT = 0.0
+_refresh_composite_globals()
+
+# Default task type for analysis when none / unknown is supplied.
+DEFAULT_TASK_TYPE = "code_creation"
+
+# Sentinel: analyze infers a category per session from tool / LOC signals.
+AUTO_TASK_TYPE = "auto"
+
+# Personal CTEI baselines need enough complete sessions to be stable.
+MIN_BASELINE_SESSIONS = 10
+
+# Pre-v2 task type names still seen in tests / old callers → current keys.
+_TASK_TYPE_ALIASES = {
+    "feature": "code_creation",
+}
 
 
-def compute_baselines(reports) -> dict | None:
+def is_auto_task_type(task_type: str | None) -> bool:
+    """True when the caller asked for per-session task-type inference."""
+    if not task_type:
+        return False
+    t = task_type.strip().lower()
+    return t in (AUTO_TASK_TYPE, "自动", "auto")
+
+
+def resolve_task_type(task_type: str | None) -> str:
+    """Return a valid ``TASK_CATEGORIES`` key for analysis orchestration.
+
+    Empty / unknown values fall back to ``DEFAULT_TASK_TYPE`` so NTCER/TTAF
+    never silently go missing when the GUI or a script omits the param.
+    Legacy aliases (e.g. ``feature`` → ``code_creation``) are remapped.
+    """
+    if not task_type:
+        return DEFAULT_TASK_TYPE if DEFAULT_TASK_TYPE in TASK_CATEGORIES else next(iter(TASK_CATEGORIES), "code_creation")
+    if task_type in TASK_CATEGORIES:
+        return task_type
+    aliased = _TASK_TYPE_ALIASES.get(task_type)
+    if aliased and aliased in TASK_CATEGORIES:
+        return aliased
+    return DEFAULT_TASK_TYPE if DEFAULT_TASK_TYPE in TASK_CATEGORIES else next(iter(TASK_CATEGORIES), "code_creation")
+
+
+def coerce_task_type(task_type: str | None) -> str | None:
+    """Normalize a task type for metric formulas without inventing a default.
+
+    ``None`` stays ``None``. Known keys and legacy aliases map to a category key.
+    Unknown non-empty strings stay invalid (``None``) so ``normalized_tcer`` can
+    return ``None`` rather than silently applying the creation TTAF.
+    """
+    if task_type is None:
+        return None
+    if task_type in TASK_CATEGORIES:
+        return task_type
+    aliased = _TASK_TYPE_ALIASES.get(task_type)
+    if aliased and aliased in TASK_CATEGORIES:
+        return aliased
+    return None
+
+
+def get_task_category(task_type: str) -> str | None:
+    """获取任务类型所属的大类（现在 task_type 本身就是大类）"""
+    return coerce_task_type(task_type)
+
+
+def get_task_ttaf(task_type: str) -> float | None:
+    """获取任务类型的 TTAF 系数"""
+    key = coerce_task_type(task_type)
+    if key is None:
+        return None
+    category_info = TASK_CATEGORIES.get(key)
+    return float(category_info["ttaf"]) if category_info else None
+
+
+# Default thresholds for :func:`infer_task_type` (overridable via
+# ``composite_baselines.json`` → ``task_inference``).
+_INFER_DEFAULTS = {
+    "tcer_low": 20.0,       # below → lean non_coding / maintenance
+    "tcer_creation": 60.0,  # at/above → strong creation signal
+    "exp_mid": 0.15,
+    "exp_high": 0.40,
+    "edit_write_heavy": 0.30,  # edit_ratio ≤ this → Write-heavy → creation
+    "edit_maint": 0.60,        # edit_ratio ≥ this → maintenance
+    "rwr_maint": 2.0,
+    "rwr_noncoding": 5.0,
+}
+
+
+def _infer_thresholds() -> dict[str, float]:
+    """Merge config ``task_inference`` over hard-coded defaults."""
+    cfg = _load_composite_config().get("task_inference") or {}
+    out = dict(_INFER_DEFAULTS)
+    for k, default in _INFER_DEFAULTS.items():
+        if k in cfg:
+            try:
+                out[k] = float(cfg[k])
+            except (TypeError, ValueError):
+                out[k] = default
+    return out
+
+
+def infer_task_type(
+    *,
+    net_loc: int | None = None,
+    total_tokens: int = 0,
+    exploration_ratio: float | None = None,
+    edit_ratio: float | None = None,
+    read_write_ratio: float | None = None,
+) -> str:
+    """Heuristic task category from LOC + tool-behavior signals.
+
+    Aligns with the three-way taxonomy in ``TASK_CATEGORIES``:
+
+    - **code_creation** — material net LOC, low exploration, more Write than Edit
+    - **code_maintenance** — modest net LOC, high exploration / Edit share
+    - **non_coding** — little or no code output, heavy search/read
+
+    Thresholds default to :data:`_INFER_DEFAULTS` and may be overridden in
+    ``config/composite_baselines.json`` under ``task_inference``.
+
+    ``net_loc=None`` means LOC was not measured (``no_loc``, or source without
+    patch/summary signal) — **not** the same as zero output. Volume scoring is
+    skipped so ``task_type=auto`` does not collapse everything to non_coding.
+
+    Returns a key present in ``TASK_CATEGORIES`` (defaults to
+    ``DEFAULT_TASK_TYPE`` if the table is empty). Not a classifier — a
+    transparent scoring rule so NTCER is less wrong when the user picks「自动」.
+    """
+    th = _infer_thresholds()
+    total = max(int(total_tokens or 0), 0)
+    exp = float(exploration_ratio) if exploration_ratio is not None else None
+    edit = float(edit_ratio) if edit_ratio is not None else None
+    rwr = float(read_write_ratio) if read_write_ratio is not None else None
+
+    scores = {
+        "code_creation": 0.0,
+        "code_maintenance": 0.0,
+        "non_coding": 0.0,
+    }
+
+    # --- output volume (only when LOC is known) ---
+    if net_loc is not None:
+        net = int(net_loc)
+        # Pseudo-TCER (net lines per MTok) — same scale as the metric.
+        tcer_like = (
+            (net / (total / 1_000_000.0)) if total > 0
+            else (float("inf") if net > 0 else 0.0)
+        )
+        if net <= 0:
+            scores["non_coding"] += 3.0
+        elif tcer_like < th["tcer_low"]:
+            scores["non_coding"] += 1.0
+            scores["code_maintenance"] += 2.0
+        elif tcer_like < th["tcer_creation"]:
+            scores["code_maintenance"] += 1.5
+            scores["code_creation"] += 1.0
+        else:
+            scores["code_creation"] += 3.0
+
+    # --- exploration (Grep+Glob share) ---
+    if exp is not None:
+        if exp >= th["exp_high"]:
+            scores["non_coding"] += 2.0
+            scores["code_maintenance"] += 1.0
+        elif exp >= th["exp_mid"]:
+            scores["code_maintenance"] += 2.0
+        else:
+            scores["code_creation"] += 1.0
+
+    # --- edit vs write ---
+    if edit is not None:
+        if edit >= th["edit_maint"]:
+            scores["code_maintenance"] += 2.0
+        elif edit <= th["edit_write_heavy"]:
+            scores["code_creation"] += 1.5
+
+    # --- read/write ratio ---
+    if rwr is not None:
+        if rwr >= th["rwr_noncoding"]:
+            scores["non_coding"] += 2.0
+        elif rwr >= th["rwr_maint"]:
+            scores["code_maintenance"] += 1.0
+        elif rwr < 1.0:
+            scores["code_creation"] += 0.5
+
+    # Prefer keys that exist in the live config table.
+    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+    for key, _ in ranked:
+        if key in TASK_CATEGORIES:
+            return key
+    return DEFAULT_TASK_TYPE if DEFAULT_TASK_TYPE in TASK_CATEGORIES else next(
+        iter(TASK_CATEGORIES), DEFAULT_TASK_TYPE
+    )
+
+
+def infer_task_type_from_usage(
+    u: TokenUsage,
+    *,
+    net_loc: int | None,
+) -> str:
+    """Infer task type from a ``TokenUsage`` (+ optional net LOC)."""
+    tool_m = tool_usage_metrics(u)
+    return infer_task_type(
+        net_loc=net_loc,
+        total_tokens=u.total,
+        exploration_ratio=tool_m.get("exploration_ratio"),
+        edit_ratio=tool_m.get("edit_ratio"),
+        read_write_ratio=tool_m.get("read_write_ratio"),
+    )
+
+
+def majority_task_type(types: list[str | None]) -> str:
+    """Most common valid task type; ties broken by taxonomy order (creation first)."""
+    from collections import Counter
+
+    order = ("code_creation", "code_maintenance", "non_coding")
+    counts: Counter[str] = Counter()
+    for t in types:
+        key = coerce_task_type(t)
+        if key:
+            counts[key] += 1
+    if not counts:
+        return DEFAULT_TASK_TYPE
+    best_n = max(counts.values())
+    for key in order:
+        if counts.get(key, 0) == best_n and key in TASK_CATEGORIES:
+            return key
+    return counts.most_common(1)[0][0]
+
+
+def baseline_eligible_reports(reports) -> list:
+    """Sessions with complete TCER / NCPI / CPE (required for personal baselines)."""
+    return [
+        r for r in reports
+        if getattr(r, "tcer", None) is not None
+        and getattr(r, "ncpi", None) is not None
+        and getattr(r, "cpe", None) is not None
+    ]
+
+
+def compute_baselines(
+    reports,
+    *,
+    min_sessions: int | None = None,
+) -> dict | None:
     """Derive personal CTEI baselines (TCER/CPE median, NCPI mean) from sessions.
 
-    Returns None if no session has complete TCER/NCPI/CPE data. Framework §8.3
-    recommends building your own reference set once you have accumulated data.
+    Returns None if fewer than ``min_sessions`` (default
+    :data:`MIN_BASELINE_SESSIONS`) sessions have complete TCER/NCPI/CPE data.
+    Small samples make median/mean jump wildly; Framework §8.3 expects a real
+    reference set. Pass ``min_sessions=1`` in unit tests that only check the
+    arithmetic.
     """
     import statistics
-    valid = [r for r in reports
-             if getattr(r, "tcer", None) is not None
-             and getattr(r, "ncpi", None) is not None
-             and getattr(r, "cpe", None) is not None]
-    if not valid:
+
+    need = MIN_BASELINE_SESSIONS if min_sessions is None else max(0, int(min_sessions))
+    valid = baseline_eligible_reports(reports)
+    if len(valid) < need:
         return None
     return {
         "tcer": statistics.median(r.tcer for r in valid),
@@ -165,12 +392,7 @@ def save_baselines(values: dict) -> None:
         raise
 
     _load_composite_config.cache_clear()
-
-    global TCER_BASELINE, NCPI_BASELINE, CPE_BASELINE
-    b = _get_baselines()
-    TCER_BASELINE = b["tcer"]
-    NCPI_BASELINE = b["ncpi"]
-    CPE_BASELINE = b["cpe"]
+    _refresh_composite_globals()
 
 
 # ============================================================
@@ -290,11 +512,20 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
         # 行为特征
         total_tools = sum(mc._tool_calls.values())
         if total_tools > 0:
-            grep_glob = mc._tool_calls.get("Grep", 0) + mc._tool_calls.get("Glob", 0)
-            mc.exploration_ratio = grep_glob / total_tools
-            edit_write = mc._tool_calls.get("Edit", 0) + mc._tool_calls.get("Write", 0)
-            mc.edit_ratio = mc._tool_calls.get("Edit", 0) / edit_write if edit_write > 0 else None
-            mc.read_write_ratio = mc._tool_calls.get("Read", 0) / edit_write if edit_write > 0 else None
+            # Align with tool_usage_metrics (Grep/Glob/Web + MCP search aliases).
+            fake = TokenUsage()
+            fake.tool_calls = dict(mc._tool_calls)
+            tm = tool_usage_metrics(fake)
+            mc.exploration_ratio = tm.get("exploration_ratio")
+            edit_write = (
+                mc._tool_calls.get("Edit", 0)
+                + mc._tool_calls.get("MultiEdit", 0)
+                + mc._tool_calls.get("Write", 0)
+            )
+            edit = mc._tool_calls.get("Edit", 0) + mc._tool_calls.get("MultiEdit", 0)
+            mc.edit_ratio = edit / edit_write if edit_write > 0 else None
+            # Prefer the r/w ratio that includes MCP read/scrape aliases.
+            mc.read_write_ratio = tm.get("read_write_ratio")
             mc.tool_error_rate = mc._tool_errors / total_tools
         # 代码质量 (self-rework, consistent with compute()/SessionReport.churn_ratio)
         mc.churn_ratio = mc._code_reworked / mc._code_added if mc._code_added > 0 else None
@@ -353,6 +584,14 @@ def cost_by_model(u: TokenUsage) -> dict[str, float]:
     return {mid: _cost_from(mu, pricing.resolve(mid)) for mid, mu in u.per_model.items()}
 
 
+def unmatched_pricing_models(u: TokenUsage) -> list[str]:
+    """per_model keys priced via Anthropic default fallback (not in the table).
+
+    Useful for GUI banners / status so users know costs may be approximate.
+    """
+    return pricing.unmatched_models(u.per_model.keys())
+
+
 def cost_usd(u: TokenUsage, model: str | None = None) -> float:
     """Estimate USD cost at vendor list price (not subscription billing).
 
@@ -361,10 +600,24 @@ def cost_usd(u: TokenUsage, model: str | None = None) -> float:
     that model's rate. Falls back to a single resolved rate only when no
     per-model buckets exist (synthetic usage) — unknown / mixed there default to
     Anthropic list price.
+
+    ``model`` may be a non-empty id, or empty/None. Empty string is treated like
+    None so callers can pass raw ``per_model`` keys (including the ``""``
+    bucket). Works for both ``TokenUsage`` and ``ModelUsage``.
     """
-    if model is None and u.per_model:
+    model_key = model if model else None
+    # TokenUsage with per-model buckets: sum each bucket at its own rate.
+    per_model = getattr(u, "per_model", None)
+    if model_key is None and per_model:
         return sum(cost_by_model(u).values())
-    return _cost_from(u, _rates_for(u, model))
+    if model_key:
+        return _cost_from(u, pricing.resolve(model_key))
+    # No explicit id: TokenUsage may carry a single session model; ModelUsage
+    # (no ``models`` attr) falls through to default list price.
+    models = getattr(u, "models", None)
+    if models is not None and len(models) == 1:
+        return _cost_from(u, pricing.resolve(next(iter(models))))
+    return _cost_from(u, pricing.default_pricing())
 
 
 # --------------------------------------------------------------------------- #
@@ -377,19 +630,88 @@ def avg_turn_latency_sec(u: TokenUsage) -> float | None:
     return None
 
 
+def _tool_leaf(name: str) -> str:
+    """Normalize a tool id for alias matching.
+
+    ``mcp__server__tool`` → last segment; otherwise the lowercased full name.
+    Keeps raw ``tool_calls`` keys intact for the tools popup.
+    """
+    if not name:
+        return ""
+    if name.startswith("mcp__"):
+        return name.rsplit("__", 1)[-1].lower()
+    return name.lower()
+
+
+def _leaf_has_keyword(leaf: str, key: str) -> bool:
+    """True if *key* is a path segment of *leaf*, not a mid-word substring.
+
+    Substring matching mis-classifies live tools: ``GetTaskOutput`` matched
+    ``get`` (read), ``ReportFindings`` matched ``find`` (explore). Segments are
+    split on ``_`` / ``-`` after lowercasing (MCP leaves already use underscores).
+    """
+    if not leaf or not key:
+        return False
+    if leaf == key:
+        return True
+    segs = leaf.replace("-", "_").split("_")
+    return key in segs
+
+
+# Canonical TCER / built-in tools — never re-classify via leaf heuristics.
+# Includes Grok-build meta tools so GetTaskOutput/SearchTool never look like
+# Read/Grep via the ``get`` / ``search`` substring trap.
+_CANONICAL_TOOL_NAMES = frozenset({
+    "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+    "Grep", "Glob", "Bash", "PowerShell", "Task", "Agent",
+    "WebSearch", "WebFetch", "TodoWrite", "TodoRead",
+    "AskUserQuestion", "ToolSearch", "ExitPlanMode", "EnterPlanMode",
+    "GetTaskOutput", "KillTask", "SearchTool", "UseTool",
+    "SchedulerCreate", "SchedulerDelete", "ImageGen", "ImageEdit",
+    "MemorySearch", "MemoryGet", "LSP", "Thinking",
+})
+
+
 def tool_usage_metrics(u: TokenUsage) -> dict[str, float | None]:
-    """Read/Write ratio, Edit ratio, exploration density."""
+    """Read/Write ratio, Edit ratio, exploration density.
+
+    Counts are TCER-canonical tools plus light MCP / third-party aliases so
+    sessions that search via Tavily/Firecrawl (``mcp__…`` *or* bare
+    ``firecrawl_search``) still get a fair exploration_ratio. Raw names stay
+    in ``tool_calls`` for the tools popup.
+    """
     read = u.tool_calls.get("Read", 0)
     write = u.tool_calls.get("Write", 0)
-    edit = u.tool_calls.get("Edit", 0)
+    edit = u.tool_calls.get("Edit", 0) + u.tool_calls.get("MultiEdit", 0)
+    # Shell variants
+    bash = u.tool_calls.get("Bash", 0) + u.tool_calls.get("PowerShell", 0)
     grep = u.tool_calls.get("Grep", 0)
     glob = u.tool_calls.get("Glob", 0)
+    web = u.tool_calls.get("WebSearch", 0) + u.tool_calls.get("WebFetch", 0)
+
+    for name, cnt in u.tool_calls.items():
+        if name in _CANONICAL_TOOL_NAMES:
+            continue
+        leaf = _tool_leaf(name)
+        if not leaf:
+            continue
+        # Search-like MCP / bare tools → exploration (alongside Grep/Glob).
+        if any(_leaf_has_keyword(leaf, k) for k in ("search", "grep", "find", "query", "map")):
+            grep += cnt
+        # Read/scrape/extract → read-side signal for r/w ratio.
+        elif any(_leaf_has_keyword(leaf, k) for k in ("scrape", "fetch", "extract", "read", "get", "crawl")):
+            read += cnt
+
     total_tools = sum(u.tool_calls.values())
+    explore = grep + glob + web
 
     return {
         "read_write_ratio": read / (write + edit) if (write + edit) else None,
         "edit_ratio": edit / (edit + write) if (edit + write) else None,
-        "exploration_ratio": (grep + glob) / total_tools if total_tools else None,
+        "exploration_ratio": explore / total_tools if total_tools else None,
+        # exposed for debugging / future metrics (not required by callers)
+        "_bash_like": bash,
+        "_explore_count": explore,
     }
 
 
@@ -399,23 +721,40 @@ def cache_efficiency(u: TokenUsage) -> float | None:
     return (u.cache_read_input_tokens / cw) if cw else None
 
 
+def _is_code_search_tool(name: str) -> bool:
+    """True if *name* is a code/repo search tool for search_edit_ratio.
+
+    Built-in Grep/Glob plus the same MCP / bare search aliases used by
+    ``tool_usage_metrics`` (``firecrawl_search``, ``mcp__…__*_query``, …).
+    Canonical meta tools stay out: ``ToolSearch`` / ``WebSearch`` are not
+    repo-search follow-through signals.
+    """
+    if name in ("Grep", "Glob"):
+        return True
+    if name in _CANONICAL_TOOL_NAMES:
+        return False
+    leaf = _tool_leaf(name)
+    return any(_leaf_has_keyword(leaf, k) for k in ("search", "grep", "find", "query", "map"))
+
+
 def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
     """Temporal search-edit and read-before-write analysis.
 
-    search_edit_ratio: fraction of Grep/Glob calls that are *followed* by a
-    Write/Edit/MultiEdit within ``WINDOW`` assistant turns. This is turn-based,
-    not file-based: real Grep/Glob carry a ``path`` that is usually a directory
-    (or no path at all for a repo-wide search), so matching a search to the exact
-    file later edited is unreliable. Measuring follow-through in *time* captures
-    the intended workflow signal — "did searching lead to a change soon after, or
-    was it dead-end exploration?" — and works on real Claude Code data.
+    search_edit_ratio: fraction of code-search calls (Grep/Glob **and** search-like
+    MCP/bare tools) that are *followed* by a Write/Edit/MultiEdit within
+    ``WINDOW`` assistant turns. This is turn-based, not file-based: real
+    Grep/Glob carry a ``path`` that is usually a directory (or no path at all
+    for a repo-wide search), so matching a search to the exact file later edited
+    is unreliable. Measuring follow-through in *time* captures the intended
+    workflow signal — "did searching lead to a change soon after, or was it
+    dead-end exploration?" — and works on real Claude Code data (including
+    sessions that only search via Firecrawl/Tavily).
     read_before_write: fraction of Write/Edit targets where the same file was
     Read in a previous turn.
     """
     from collections import defaultdict
 
     _WRITE_EDIT = {"Write", "Edit", "MultiEdit"}
-    _SEARCH = {"Grep", "Glob"}
     WINDOW = 3
 
     # Group operations by file, preserving turn order
@@ -442,13 +781,13 @@ def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
                     break
     rbw = (read_first_files / write_edit_files) if write_edit_files else None
 
-    # Search-edit ratio: a search (Grep/Glob) is "productive" if any Write/Edit
+    # Search-edit ratio: a code-search is "productive" if any Write/Edit
     # happens within WINDOW turns after it. Path-agnostic (see docstring).
     edit_turns = sorted({op.turn for op in u.tool_ops if op.tool in _WRITE_EDIT})
     searches = 0
     searches_with_edit = 0
     for op in u.tool_ops:
-        if op.tool not in _SEARCH:
+        if not _is_code_search_tool(op.tool):
             continue
         searches += 1
         if any(op.turn < et <= op.turn + WINDOW for et in edit_turns):
@@ -487,12 +826,15 @@ def normalized_tcer(tcer: float | None, task_type: str | None) -> float | None:
     For example: debug TCER=30, TTAF=0.4, NTCER=75 — showing the efficiency
     is actually good for a debugging task.
     """
-    if tcer is None or not task_type:
+    if tcer is None:
         return None
-    factor = TASK_CATEGORIES.get(task_type, {}).get("ttaf")
+    key = coerce_task_type(task_type)
+    if not key:
+        return None
+    factor = TASK_CATEGORIES.get(key, {}).get("ttaf")
     if not factor:
         return None
-    return tcer / factor
+    return tcer / float(factor)
 
 
 def psac(loc_accumulated: int | None) -> float | None:
@@ -620,6 +962,11 @@ def compute(
         tcer = net_loc / total_mt if total_mt else None
         cpe = (cost / net_loc * 1000) if net_loc > 0 else None
 
+    # --- task type (coerce aliases; unknown → None so NTCER stays unset) ---
+    task_type = coerce_task_type(task_type)
+    task_category = get_task_category(task_type) if task_type else None
+    ttaf_value = get_task_ttaf(task_type) if task_type else None
+
     # --- composite layer ---
     ncpi_ = ncpi(net_loc, loc_accumulated)
     caf_ = caf(u)
@@ -628,10 +975,6 @@ def compute(
     tcer_phase = (tcer * psac_) if (tcer is not None and psac_ is not None) else None
     ctei_ = ctei(tcer, ncpi_, cpe, chr_, tcer_baseline=tcer_baseline,
                  ncpi_baseline=ncpi_baseline, cpe_baseline=cpe_baseline)
-
-    # --- task type info ---
-    task_category = get_task_category(task_type) if task_type else None
-    ttaf_value = get_task_ttaf(task_type) if task_type else None
 
     # --- timing metrics ---
     avg_turn_lat = avg_turn_latency_sec(u)
@@ -662,9 +1005,13 @@ def compute(
         u.patch_apply_success_count / u.patch_apply_count
         if u.patch_apply_count else None
     )
+    # Peak single-turn input ÷ window (not session-summed total_input, which
+    # inflates multi-turn Codex sessions to 50–200× and is not a utilization rate).
+    peak_in = u.peak_input_tokens or 0
     context_window_ratio = (
-        u.total_input / u.model_context_window
-        if u.model_context_window else None
+        peak_in / u.model_context_window
+        if u.model_context_window and peak_in > 0
+        else None
     )
     reasoning_ratio = (
         u.reasoning_output_tokens / u.output_tokens

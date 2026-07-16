@@ -235,8 +235,11 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 u.image_count += _list_len(payload.get("images"))
                 u.local_image_count += _list_len(payload.get("local_images"))
             elif ptype == "task_started":
+                # Codex turn lifecycle (agent turn began) — NOT Claude's Task
+                # subagent tool. Track via task_count only; never invent a
+                # tool_calls["Task"] entry (that inflated tool totals and
+                # zero-token sessions looked like they had tools).
                 u.task_count += 1
-                u.tool_calls["Task"] = u.tool_calls.get("Task", 0) + 1
                 _set_max(u, "model_context_window", payload.get("model_context_window"))
                 started = parse_timestamp_ms(payload.get("started_at"))
                 if started is not None:
@@ -300,9 +303,17 @@ def aggregate_usage(path: Path) -> TokenUsage:
         elif ptype == "web_search_call":
             u.web_search_count += 1
         elif ptype == "custom_tool_call":
+            # Same naming map as function_call (apply_patch → Edit, etc.).
             name = payload.get("name")
-            tool_name = str(name) if isinstance(name, str) and name else "CustomTool"
+            if isinstance(name, str) and name:
+                tool_name, path_hint = _classify_tool(name, payload.get("input") or payload.get("arguments"))
+            else:
+                tool_name, path_hint = "CustomTool", ""
             u.tool_calls[tool_name] = u.tool_calls.get(tool_name, 0) + 1
+            cid = payload.get("call_id") or payload.get("id")
+            if isinstance(cid, str):
+                call_id_to_name[cid] = tool_name
+            u.tool_ops.append(ToolOp(turn_idx, tool_name, path_hint))
         elif ptype == "custom_tool_call_output":
             output = payload.get("output")
             if isinstance(output, str) and ("error" in output.lower() or "failed" in output.lower()):
@@ -464,20 +475,35 @@ def _loc_scan(path: Path):
     code-file filtering, matching ``has_loc_signal``). Combining the LOC tally
     and the signal check into one scan avoids walking the file twice — the
     analyze loop needs both for every session.
+
+    Self-rework mirrors Claude ``_LocAccumulator``: lines this session added
+    to a file, later removed by a subsequent patch on the same path, count as
+    ``rework_deleted`` (not deletions of pre-session code).
     """
     from tcer.core.loc import SessionLoc, _is_code
 
-    added = deleted = 0
+    added = deleted = rework = 0
     has_signal = False
     file_edit_counts: dict[str, int] = {}
+    # Lines this session has authored per path (never includes pre-session code).
+    session_authored: dict[str, int] = {}
     test_added = test_deleted = doc_added = doc_deleted = 0
     for obj in iter_events(path):
         payload = obj.get("payload")
         if obj.get("type") != "response_item" or not isinstance(payload, dict):
             continue
-        if payload.get("type") != "function_call" or payload.get("name") != "apply_patch":
+        ptype = payload.get("type")
+        name = payload.get("name")
+        # Live Codex often records apply_patch as custom_tool_call with the
+        # patch text in ``input`` (not function_call / arguments).
+        if name != "apply_patch":
             continue
-        patch = _extract_patch(payload.get("arguments"))
+        if ptype == "function_call":
+            patch = _extract_patch(payload.get("arguments"))
+        elif ptype == "custom_tool_call":
+            patch = _extract_patch(payload.get("input") or payload.get("arguments"))
+        else:
+            continue
         if not patch:
             continue
         has_signal = True
@@ -486,6 +512,10 @@ def _loc_scan(path: Path):
                 continue
             added += a
             deleted += d
+            auth_before = session_authored.get(fp, 0)
+            rework_part = min(d, auth_before)
+            rework += rework_part
+            session_authored[fp] = max(0, auth_before - rework_part + a)
             file_edit_counts[fp] = file_edit_counts.get(fp, 0) + 1
             norm = fp.replace("\\", "/").lower()
             if "/test/" in norm or "/tests/" in norm or norm.endswith("_test.py") or ".test." in norm:
@@ -498,7 +528,7 @@ def _loc_scan(path: Path):
         added=added,
         deleted=deleted,
         unseen_writes=0,
-        rework_deleted=0,
+        rework_deleted=rework,
         high_churn_files=sum(1 for c in file_edit_counts.values() if c >= 3),
         test_added=test_added,
         test_deleted=test_deleted,
@@ -535,6 +565,8 @@ def _add_token_usage(u: TokenUsage, usage: dict, model: str) -> None:
     u.cache_read_input_tokens += cr
     u.output_tokens += o
     u.reasoning_output_tokens += reasoning
+    # Codex input_tokens already includes cache; i+cr restores full turn input.
+    u.peak_input_tokens = max(u.peak_input_tokens, i + cr + cw)
     key = model or ""
     u.bucket(key).add(i, cw, cr, o)
 
@@ -558,22 +590,38 @@ def _set_max(u: TokenUsage, attr: str, value) -> None:
     setattr(u, attr, n if current is None else max(current, n))
 
 
+# Codex function names that should appear under TCER-canonical tool keys so
+# exploration / edit / read-write ratios stay comparable across sources.
+_CODEX_NAME_MAP = {
+    "apply_patch": "Edit",
+    "shell_command": "Bash",
+    "write_stdin": "Bash",
+    "update_plan": "TodoWrite",
+    "request_user_input": "AskUserQuestion",
+    "view_image": "Read",
+}
+
+
 def _classify_tool(name: str, arguments) -> tuple[str, str]:
-    if name == "apply_patch":
-        return "Edit", ""
-    if name != "exec_command":
+    mapped = _CODEX_NAME_MAP.get(name)
+    if mapped is not None:
+        if mapped == "Edit":
+            # apply_patch has no file_path arg — path lives inside the patch body.
+            return mapped, _path_from_apply_patch(arguments)
+        return mapped, _path_hint(arguments)
+    if name not in ("exec_command", "shell_command"):
         return name, _path_hint(arguments)
     cmd = ""
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
         if isinstance(args, dict):
-            cmd = str(args.get("cmd") or "")
+            cmd = str(args.get("cmd") or args.get("command") or "")
     except json.JSONDecodeError:
         pass
     lowered = cmd.strip().lower()
     first = lowered.split(maxsplit=1)[0] if lowered else ""
     if "apply_patch" in lowered or "applypatch" in lowered or "*** begin patch" in lowered:
-        return "Edit", ""
+        return "Edit", _path_from_apply_patch(arguments)
     if first in {"rg", "grep", "select-string"}:
         return "Grep", ""
     if first in {"find", "get-childitem", "dir", "ls"} or "rg --files" in lowered:
@@ -597,12 +645,46 @@ def _path_hint(arguments) -> str:
     return ""
 
 
+def _path_from_apply_patch(arguments) -> str:
+    """First file path mentioned in an apply_patch body (for ToolOp hints).
+
+    Multi-file patches only expose the first path on ``ToolOp.path``; full
+    per-file tallies still come from ``session_loc_full`` / ``_patch_file_deltas``.
+    """
+    patch = _extract_patch(arguments)
+    if not patch:
+        return _path_hint(arguments)
+    for line in patch.splitlines():
+        for prefix in ("*** Update File: ", "*** Add File: ", "*** Delete File: "):
+            if line.startswith(prefix):
+                fp = line.removeprefix(prefix).strip()
+                if fp:
+                    return fp
+    return ""
+
+
 def _extract_patch(arguments) -> str:
+    """Pull unified-diff patch text from function_call or custom_tool_call payloads.
+
+    - ``function_call.arguments``: JSON string/object with a ``patch`` field
+    - ``custom_tool_call.input``: often the raw ``*** Begin Patch`` text itself
+    """
     if isinstance(arguments, str):
-        try:
-            args = json.loads(arguments)
-        except json.JSONDecodeError:
-            return arguments if "*** Begin Patch" in arguments else ""
+        # Raw patch body (custom_tool_call.input) — prefer before JSON parse
+        # so a non-JSON patch is not discarded.
+        if "*** Begin Patch" in arguments:
+            try:
+                args = json.loads(arguments)
+            except json.JSONDecodeError:
+                return arguments
+            # JSON string that embeds Begin Patch only inside a field — fall through
+            if not isinstance(args, dict):
+                return arguments
+        else:
+            try:
+                args = json.loads(arguments)
+            except json.JSONDecodeError:
+                return ""
     else:
         args = arguments
     if isinstance(args, dict):

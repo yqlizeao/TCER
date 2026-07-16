@@ -45,6 +45,21 @@ def test_io_ratio_formula():
     assert r.io_ratio == pytest_approx(10 / 5)
 
 
+def test_context_window_used_uses_peak_not_session_sum():
+    """Multi-turn sessions must not report 50× window as 'utilization'."""
+    u = _u(i=900, cw=0, cr=100, o=50)  # session-summed total_input = 1000
+    u.model_context_window = 200
+    u.peak_input_tokens = 150  # busiest single turn
+    r = metrics.compute(META, u, net_loc=None)
+    assert r.context_window_used_ratio == pytest_approx(150 / 200)
+    # Without peak, ratio is unknown (not total_input/window)
+    u2 = _u(i=900, o=50)
+    u2.model_context_window = 200
+    u2.peak_input_tokens = 0
+    r2 = metrics.compute(META, u2, net_loc=None)
+    assert r2.context_window_used_ratio is None
+
+
 def test_tcer_and_cpe():
     # total = 1Mt tokens, net_loc = 500 → TCER = 500 LOC/Mt
     u = _u(i=500_000, o=500_000)  # total 1,000,000
@@ -204,6 +219,107 @@ def test_ta_tcer_debug_example():
     assert metrics.normalized_tcer(35.0, "code_maintenance") == pytest_approx(35.0 / 0.45)
     assert metrics.normalized_tcer(35.0, "code_creation") == pytest_approx(35.0)  # TTAF 1.0
     assert metrics.normalized_tcer(35.0, "unknown") is None  # unknown task type
+    # Legacy alias used by older callers / tests
+    assert metrics.normalized_tcer(35.0, "feature") == pytest_approx(35.0)
+    assert metrics.resolve_task_type("feature") == "code_creation"
+    assert metrics.coerce_task_type("unknown") is None
+
+
+def test_tool_usage_metrics_counts_mcp_search_as_exploration():
+    u = TokenUsage()
+    u.tool_calls = {
+        "Read": 1,
+        "Grep": 1,
+        "mcp__tavily__tavily_search": 2,
+        "mcp__firecrawl__firecrawl_scrape": 1,
+        "Edit": 1,
+    }
+    m = metrics.tool_usage_metrics(u)
+    # Grep(1)+mcp search(2)+Glob(0)+Web(0) = 3 explore / 6 total
+    assert m["exploration_ratio"] == pytest_approx(3 / 6)
+    # Read(1)+mcp scrape(1) / (Edit+Write=1) = 2.0
+    assert m["read_write_ratio"] == pytest_approx(2.0)
+
+
+def test_tool_usage_metrics_bare_firecrawl_aliases():
+    """Some sessions log firecrawl_* without the mcp__server__ prefix."""
+    u = TokenUsage()
+    u.tool_calls = {
+        "Read": 1,
+        "firecrawl_search": 3,
+        "firecrawl_scrape": 2,
+        "Write": 1,
+    }
+    m = metrics.tool_usage_metrics(u)
+    # explore = firecrawl_search(3) / 7
+    assert m["exploration_ratio"] == pytest_approx(3 / 7)
+    # read = Read(1)+scrape(2)=3 / Write(1) = 3
+    assert m["read_write_ratio"] == pytest_approx(3.0)
+
+
+def test_tool_usage_metrics_no_midword_false_aliases():
+    """Segment match only: GetTaskOutput≠get-read, ReportFindings≠find-explore."""
+    u = TokenUsage()
+    u.tool_calls = {
+        "Read": 2,
+        "Edit": 2,
+        "GetTaskOutput": 19,  # live Grok — must not inflate read
+        "ReportFindings": 10,  # live Claude skill — must not inflate explore
+        "Grep": 1,
+    }
+    m = metrics.tool_usage_metrics(u)
+    # explore = Grep only (1) / total 34
+    assert m["exploration_ratio"] == pytest_approx(1 / 34)
+    # read = Read(2) only / Edit(2) = 1.0  (GetTaskOutput ignored)
+    assert m["read_write_ratio"] == pytest_approx(1.0)
+
+
+def test_leaf_has_keyword_segments():
+    assert metrics._leaf_has_keyword("firecrawl_search", "search")
+    assert metrics._leaf_has_keyword("llm_wiki_read_file", "read")
+    assert not metrics._leaf_has_keyword("gettaskoutput", "get")
+    assert not metrics._leaf_has_keyword("reportfindings", "find")
+
+
+def test_infer_task_type_creation_vs_non_coding():
+    # High net / low exploration → creation
+    assert metrics.infer_task_type(
+        net_loc=500, total_tokens=1_000_000,
+        exploration_ratio=0.05, edit_ratio=0.2, read_write_ratio=0.5,
+    ) == "code_creation"
+    # No net, heavy search → non_coding
+    assert metrics.infer_task_type(
+        net_loc=0, total_tokens=500_000,
+        exploration_ratio=0.5, edit_ratio=None, read_write_ratio=8.0,
+    ) == "non_coding"
+    # Modest net + high edit share → maintenance
+    assert metrics.infer_task_type(
+        net_loc=40, total_tokens=1_000_000,
+        exploration_ratio=0.25, edit_ratio=0.8, read_write_ratio=2.5,
+    ) == "code_maintenance"
+
+
+def test_infer_task_type_none_net_loc_does_not_force_non_coding():
+    """LOC unknown (no_loc / no patch signal) must not score as zero output."""
+    # Write-heavy tools, low exploration — should lean creation, not non_coding.
+    assert metrics.infer_task_type(
+        net_loc=None, total_tokens=1_000_000,
+        exploration_ratio=0.05, edit_ratio=0.2, read_write_ratio=0.5,
+    ) == "code_creation"
+    # Explicit zero LOC still non_coding when search-heavy.
+    assert metrics.infer_task_type(
+        net_loc=0, total_tokens=500_000,
+        exploration_ratio=0.5, edit_ratio=None, read_write_ratio=8.0,
+    ) == "non_coding"
+
+
+def test_majority_task_type():
+    assert metrics.majority_task_type(
+        ["code_maintenance", "code_maintenance", "code_creation"]
+    ) == "code_maintenance"
+    assert metrics.majority_task_type([]) == "code_creation"
+    assert metrics.is_auto_task_type("auto") and metrics.is_auto_task_type("自动")
+    assert not metrics.is_auto_task_type("code_creation")
 
 
 @pytest.mark.parametrize("task_type,expected_factor", [
@@ -439,6 +555,22 @@ def test_search_edit_ratio_outside_window():
     ]
     r = metrics.compute(META, u, net_loc=10)
     assert r.search_edit_ratio == pytest_approx(0.0)
+
+
+def test_search_edit_ratio_counts_mcp_and_bare_search_aliases():
+    """Live sessions often search only via firecrawl_search / mcp query tools."""
+    u = _u(i=500_000, o=500_000)
+    u.tool_ops = [
+        ToolOp(0, "firecrawl_search", ""),
+        ToolOp(1, "Edit", "/a.py"),  # follow-up ✓
+        ToolOp(5, "mcp__tavily__tavily_search", ""),
+        ToolOp(10, "Write", "/b.py"),  # outside window ✗
+        ToolOp(11, "ToolSearch", ""),  # meta — must not count
+        ToolOp(12, "Edit", "/c.py"),
+    ]
+    r = metrics.compute(META, u, net_loc=10)
+    # 2 code-searches; 1 productive → 0.5
+    assert r.search_edit_ratio == pytest_approx(0.5)
 
 
 def test_file_quality_no_searches():

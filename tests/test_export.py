@@ -28,6 +28,15 @@ def test_models_label_empty():
     assert fmt.models_label(TokenUsage()) == "-"
 
 
+def test_fmt_dt_none_and_non_positive():
+    assert fmt.fmt_dt(None) == "-"
+    assert fmt.fmt_dt(0) == "-"
+    assert fmt.fmt_dt(-1) == "-"
+    # A plausible 2026-ish epoch ms should format without error
+    s = fmt.fmt_dt(1_735_689_600_000)  # ~2025-01-01 UTC area
+    assert s != "-" and len(s) >= 10
+
+
 # --------------------------------------------------------------------------- #
 # export.ctei_ranking / text_ctei_chart
 # --------------------------------------------------------------------------- #
@@ -59,6 +68,23 @@ def test_text_ctei_chart_empty_message():
                        path=Path("/tmp/s.jsonl"), is_subagent=False)
     r = metrics.compute(meta, TokenUsage(input_tokens=10, output_tokens=5), net_loc=None)
     assert "no per-session score" in export.text_ctei_chart([r])
+
+
+def test_text_ctei_chart_caps_scale_on_extreme_outlier():
+    """One CTEI≈1000 must not collapse peer bars to a single block (live TCER)."""
+    # Five bulk sessions ~1–2 plus one explosion (cost_factor blow-up).
+    reports = [
+        _report(1000, sid=f"b{i}") for i in range(5)
+    ] + [_report(1_000_000, sid="boom")]  # net_loc huge → extreme CTEI
+    out = export.text_ctei_chart(reports, width=40)
+    assert "bar scale capped" in out
+    assert "boom" in out
+    # Peer session should get more than a single block (scale ~ bulk, not max).
+    bulk_line = next(ln for ln in out.splitlines() if ln.startswith("b0"))
+    bar = bulk_line.split()[1] if "█" in bulk_line else ""
+    # Find continuous bar segment
+    n_blocks = bulk_line.count("█")
+    assert n_blocks >= 5, bulk_line
 
 
 # --------------------------------------------------------------------------- #

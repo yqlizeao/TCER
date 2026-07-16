@@ -52,5 +52,16 @@
     "_note": "Project-Stage Adjustment Coefficient regression (framework §6.5): TCER ≈ -slope * LOC_accum + intercept. Neutralizes the structural TCER decline of larger codebases."
   },
   "chr_weight": 0.5,
-  "_chr_note": "CHR reward factor = 1 + CHR * chr_weight (framework §6.3). A 10% CHR increase yields a 5% CTEI boost."
+  "_chr_note": "CHR reward factor = 1 + CHR * chr_weight (framework §6.3). A 10% CHR increase yields a 5% CTEI boost.",
+  "task_inference": {
+    "_note": "Optional thresholds for metrics.infer_task_type (GUI「自动」). Omit a key to keep the code default.",
+    "tcer_low": 20.0,
+    "tcer_creation": 60.0,
+    "exp_mid": 0.15,
+    "exp_high": 0.40,
+    "edit_write_heavy": 0.30,
+    "edit_maint": 0.60,
+    "rwr_maint": 2.0,
+    "rwr_noncoding": 5.0
+  }
 }

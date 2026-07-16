@@ -110,6 +110,32 @@ def test_discover_sessions_recurses_grok_home(tmp_path, monkeypatch):
     assert grok_reader.discover_sessions() == [p]
 
 
+def test_classify_grok_tool_aliases_short_names():
+    """Live sessions emit ``grep`` / case variants — must map to TCER Grep."""
+    assert grok_reader._classify_grok_tool("grep") == "Grep"
+    assert grok_reader._classify_grok_tool("grep_search") == "Grep"
+    assert grok_reader._classify_grok_tool("GREP") == "Grep"
+    assert grok_reader._classify_grok_tool("read_file") == "Read"
+    assert grok_reader._classify_grok_tool("unknown_xyz") == "unknown_xyz"
+    assert grok_reader._classify_grok_tool("get_command_or_subagent_output") == "GetTaskOutput"
+
+
+def test_resolve_grok_tool_name_backend_websearch():
+    """Backend WebSearch has no x.ai/tool — only kind + rawInput.variant."""
+    update = {
+        "sessionUpdate": "tool_call",
+        "kind": "search",
+        "title": "Web search:",
+        "_meta": {"backend": True},
+        "rawInput": {"variant": "WebSearch", "backend": True},
+    }
+    assert grok_reader._resolve_grok_tool_name(update) == "WebSearch"
+    # kind alone
+    assert grok_reader._resolve_grok_tool_name(
+        {"kind": "search", "title": "Web search:"}
+    ) == "WebSearch"
+
+
 def test_aggregate_usage_maps_grok_tokens_and_tools(tmp_path):
     p = _write_jsonl(tmp_path / "updates.jsonl", _grok_lines())
     u = grok_reader.aggregate_usage(p)
@@ -189,10 +215,38 @@ def test_search_replace_loc_counts_line_deltas(tmp_path):
     p = _write_jsonl(tmp_path / "updates.jsonl", _grok_lines())
     sloc = grok_reader.session_loc_full(p)
     assert grok_reader.has_loc_signal(p) is True
-    # old_string "old\n" = 1 line; new_string "new\nline\n" = 2 lines.
-    assert sloc.added == 2
-    assert sloc.deleted == 1
+    # Claude Edit net semantics via _LocAccumulator: old 1 line → new 2 lines
+    # yields net +1 added (not gross 2/1).
+    assert sloc.added == 1
+    assert sloc.deleted == 0
     assert sloc.file_edit_counts == {"app.py": 1}
+
+
+def test_search_replace_self_rework_via_loc_accumulator(tmp_path):
+    """Grok rework is no longer hard-coded 0 — same self-rework as Claude Edit."""
+    lines = [
+        _notif(_T0, {
+            "sessionUpdate": "tool_call", "toolCallId": "c1", "title": "edit",
+            "rawInput": {
+                "file_path": "a.py",
+                "old_string": "",
+                "new_string": "1\n2\n3\n4\n5\n",
+            },
+            "_meta": {"x.ai/tool": {"name": "search_replace", "kind": "edit"}},
+        }),
+        _notif(_T0 + 1, {
+            "sessionUpdate": "tool_call", "toolCallId": "c2", "title": "edit",
+            "rawInput": {
+                "file_path": "a.py",
+                "old_string": "1\n2\n3\n",
+                "new_string": "one\n",
+            },
+            "_meta": {"x.ai/tool": {"name": "search_replace", "kind": "edit"}},
+        }),
+    ]
+    p = _write_jsonl(tmp_path / "updates.jsonl", lines)
+    sloc = grok_reader.session_loc_full(p)
+    assert sloc.rework_deleted == 2  # net -2 of session-authored lines
 
 
 def test_write_counts_unseen_writes(tmp_path):
@@ -272,5 +326,7 @@ def test_analyze_grok_project_without_loc_keeps_token_metrics(tmp_path, monkeypa
     assert result.source == "grok"
     assert result.n_sessions == 1
     assert result.aggregate.usage.total > 0
-    assert result.aggregate.net_loc is None  # no edit tools → no LOC signal
-    assert result.reports[0].tcer is None
+    # No search_replace/write → known zero LOC (not unknown).
+    assert result.aggregate.net_loc == 0
+    assert result.reports[0].net_loc == 0
+    assert result.reports[0].tcer == 0.0

@@ -11,9 +11,15 @@ JSONL — not from git. This makes measurement:
   rewrote (iterations included), which is the real Token→Code work, rather than
   only what was eventually committed.
 
-Caveat: a ``Write`` that overwrites a file written in an *earlier* session can't
-see that file's prior length (per-session state), so it counts the full content as
-added. Within a session, overwrites are tracked exactly.
+Caveat (F1): a ``Write`` that overwrites a file from an *earlier* session used to
+assume prior length 0 (full content counted as added). With ``disk_prior=True``
+(default), the first Write to a path seeds the prior line count from disk when
+the target is readable **and the on-disk text differs from this Write payload**
+(true overwrite of something else). If disk text **equals** the Write content —
+the usual case when replaying a finished session whose files still exist —
+prior stays 0 so net LOC is not zeroed out (post-session disk is not a baseline).
+``unseen_writes`` still counts Writes where the prior could not be resolved.
+Within a session, overwrites are tracked exactly via in-memory state.
 
 ``tree_loc`` measures accumulated codebase size by scanning the working directory.
 """
@@ -117,20 +123,237 @@ class SessionLoc:
     doc_deleted: int = 0
     file_edit_counts: dict[str, int] = field(default_factory=dict)  # internal: path → edit count
 
+    def recompute_high_churn(self, threshold: int = 3) -> None:
+        """Set ``high_churn_files`` from ``file_edit_counts`` (unique paths)."""
+        self.high_churn_files = high_churn_from_counts(self.file_edit_counts, threshold)
 
-def session_loc_full(path: Path) -> SessionLoc:
+
+def high_churn_from_counts(counts: dict[str, int], threshold: int = 3) -> int:
+    """Number of distinct paths edited at least ``threshold`` times."""
+    return sum(1 for c in counts.values() if c >= threshold)
+
+
+def merge_session_locs(slocs: list[SessionLoc]) -> SessionLoc:
+    """Sum LOC counters and merge per-path edit counts (recompute high_churn).
+
+    Used when folding subagent files into a parent session or building a project
+    aggregate. ``high_churn_files`` is derived from the *merged* edit counts so
+    the same path edited in main + subagent is one file, not two.
+    """
+    if not slocs:
+        return SessionLoc(added=0, deleted=0)
+    if len(slocs) == 1:
+        s = slocs[0]
+        # Defensive: ensure high_churn matches counts even if caller left it stale.
+        out = SessionLoc(
+            added=s.added,
+            deleted=s.deleted,
+            unseen_writes=s.unseen_writes,
+            rework_deleted=s.rework_deleted,
+            high_churn_files=s.high_churn_files,
+            test_added=s.test_added,
+            test_deleted=s.test_deleted,
+            doc_added=s.doc_added,
+            doc_deleted=s.doc_deleted,
+            file_edit_counts=dict(s.file_edit_counts),
+        )
+        out.recompute_high_churn()
+        return out
+
+    merged_counts: dict[str, int] = {}
+    added = deleted = unseen = rework = 0
+    test_a = test_d = doc_a = doc_d = 0
+    for s in slocs:
+        added += s.added
+        deleted += s.deleted
+        unseen += s.unseen_writes
+        rework += s.rework_deleted
+        test_a += s.test_added
+        test_d += s.test_deleted
+        doc_a += s.doc_added
+        doc_d += s.doc_deleted
+        for fp, cnt in s.file_edit_counts.items():
+            merged_counts[fp] = merged_counts.get(fp, 0) + cnt
+    out = SessionLoc(
+        added=added,
+        deleted=deleted,
+        unseen_writes=unseen,
+        rework_deleted=rework,
+        test_added=test_a,
+        test_deleted=test_d,
+        doc_added=doc_a,
+        doc_deleted=doc_d,
+        file_edit_counts=merged_counts,
+    )
+    out.recompute_high_churn()
+    return out
+
+
+def _resolve_path(file_path: str, cwd: str | Path | None) -> Path | None:
+    if not file_path or not isinstance(file_path, str):
+        return None
+    p = Path(file_path)
+    if not p.is_absolute():
+        if cwd is None:
+            return None
+        p = Path(cwd) / p
+    return p
+
+
+def disk_line_count(file_path: str, cwd: str | Path | None = None) -> tuple[int, bool]:
+    """Best-effort on-disk line count for F1 Write baseline correction.
+
+    Returns ``(lines, resolved)``:
+    - ``resolved=True`` and ``lines=N`` — file exists and was readable;
+    - ``resolved=True`` and ``lines=0`` — path resolved but file missing (new file);
+    - ``resolved=False`` and ``lines=0`` — could not resolve/read (relative path
+      without cwd, permission error, …). Callers should treat this as the classic
+      F1 exposure (assume old=0 and count ``unseen_writes``).
+
+    Uses current disk state (not historical). Offline, stdlib only.
+    """
+    text, resolved = disk_file_text(file_path, cwd)
+    if not resolved:
+        return 0, False
+    if text is None:
+        return 0, True  # missing file
+    return _nlines(text), True
+
+
+def disk_file_text(
+    file_path: str, cwd: str | Path | None = None,
+) -> tuple[str | None, bool]:
+    """Read on-disk text for *file_path*.
+
+    Returns ``(text, resolved)``:
+    - ``(text, True)`` — file exists and was readable;
+    - ``(None, True)`` — path resolved but file missing (new file);
+    - ``(None, False)`` — could not resolve/read.
+    """
+    p = _resolve_path(file_path, cwd)
+    if p is None:
+        return None, False
+    try:
+        if not p.is_file():
+            return None, True
+        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(), True
+    except OSError:
+        return None, False
+
+
+def _text_equiv(a: str, b: str) -> bool:
+    """Compare tool payload vs disk, ignoring newline style only."""
+    if a == b:
+        return True
+    return a.replace("\r\n", "\n").replace("\r", "\n") == b.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class _LocAccumulator:
+    """Incremental LOC state while replaying edit tool_use blocks (single-pass)."""
+
+    __slots__ = (
+        "file_lines", "session_authored", "file_edits",
+        "added", "deleted", "unseen", "rework",
+        "test_added", "test_deleted", "doc_added", "doc_deleted",
+        "cwd", "disk_prior",
+    )
+
+    def __init__(
+        self,
+        *,
+        cwd: str | Path | None = None,
+        disk_prior: bool = False,
+    ) -> None:
+        self.file_lines: dict[str, int] = {}  # current line estimate (incl. disk seed)
+        # Lines this session has authored into the file (never includes disk prior).
+        self.session_authored: dict[str, int] = {}
+        self.file_edits: dict[str, int] = {}
+        self.added = self.deleted = self.unseen = self.rework = 0
+        self.test_added = self.test_deleted = 0
+        self.doc_added = self.doc_deleted = 0
+        self.cwd = cwd
+        self.disk_prior = disk_prior
+
+    def on_tool_use(self, name: str, inp: dict) -> None:
+        if name not in _EDIT_TOOLS:
+            return
+        fp = inp.get("file_path") or inp.get("notebook_path") or ""
+        if not isinstance(fp, str) or not _is_code(fp):
+            return
+        self.file_edits[fp] = self.file_edits.get(fp, 0) + 1
+        # First Write to a path: optionally seed prior from disk (F1 mitigation).
+        # If on-disk text *equals* this Write payload, the usual post-session
+        # case for files the model just created — do NOT seed prior (would
+        # zero net LOC). Only seed when disk differs (true overwrite of other
+        # content still sitting on disk, e.g. tests that leave pre-write files).
+        if name == "Write" and fp not in self.file_lines:
+            if self.disk_prior:
+                content = inp.get("content")
+                disk_text, resolved = disk_file_text(fp, self.cwd)
+                if not resolved:
+                    self.unseen += 1  # assume old=0
+                elif disk_text is None:
+                    pass  # missing file → prior 0, full add
+                elif isinstance(content, str) and _text_equiv(disk_text, content):
+                    pass  # post-session match → authored from empty
+                else:
+                    self.file_lines[fp] = _nlines(disk_text)  # different content
+            else:
+                self.unseen += 1
+        # Self-rework only against lines this session already wrote — never the
+        # disk prior seed (deleting pre-existing code is a normal edit).
+        authored_before = self.session_authored.get(fp, 0)
+        a, d = _delta_for_tool(name, inp, self.file_lines, fp)
+        self.added += a
+        self.deleted += d
+        rework_part = min(d, authored_before)
+        self.rework += rework_part
+        if name == "Write":
+            # Whole-file rewrite: session now owns the entire new content.
+            self.session_authored[fp] = self.file_lines.get(fp, 0)
+        else:
+            # Edit/MultiEdit/Notebook: add new lines, lose only reworked deletes.
+            self.session_authored[fp] = max(0, authored_before - rework_part + a)
+        if _is_test_file(fp):
+            self.test_added += a
+            self.test_deleted += d
+        elif _is_doc_file(fp):
+            self.doc_added += a
+            self.doc_deleted += d
+
+    def finish(self) -> SessionLoc:
+        return SessionLoc(
+            added=self.added,
+            deleted=self.deleted,
+            unseen_writes=self.unseen,
+            rework_deleted=self.rework,
+            high_churn_files=high_churn_from_counts(self.file_edits),
+            test_added=self.test_added,
+            test_deleted=self.test_deleted,
+            doc_added=self.doc_added,
+            doc_deleted=self.doc_deleted,
+            file_edit_counts=self.file_edits,
+        )
+
+
+def session_loc_full(
+    path: Path,
+    *,
+    cwd: str | Path | None = None,
+    disk_prior: bool = False,
+) -> SessionLoc:
     """Full LOC breakdown for one session (added / deleted / unseen_writes).
 
     Replays Write/Edit/MultiEdit/NotebookEdit in order. Net LOC = added - deleted;
     churn = deleted / added. Only paths with a code suffix are counted.
-    """
-    file_lines: dict[str, int] = {}  # intra-session current line count per file
-    file_edits: dict[str, int] = {}  # edit count per file
-    added = deleted = unseen = 0
-    rework = 0
-    test_added = test_deleted = 0
-    doc_added = doc_deleted = 0
 
+    ``disk_prior``: default **False** (generation effort: count what Write wrote).
+    Set True only when on-disk files still reflect *pre-Write* baselines (e.g.
+    lab fixtures). Post-session analysis with disk_prior=True and intermediate
+    Writes often fabricates large deletes. Relative paths need ``cwd``.
+    """
+    acc = _LocAccumulator(cwd=cwd, disk_prior=disk_prior)
     for obj in reader.iter_messages(path):
         msg = obj.get("message")
         if not isinstance(msg, dict):
@@ -142,54 +365,13 @@ def session_loc_full(path: Path) -> SessionLoc:
             if not isinstance(item, dict) or item.get("type") != "tool_use":
                 continue
             name = item.get("name")
-            if name not in _EDIT_TOOLS:
+            if not isinstance(name, str):
                 continue
             inp = item.get("input") or {}
-            fp = inp.get("file_path") or inp.get("notebook_path") or ""
-            if not _is_code(fp):
-                continue
-
-            # Track edit count per file
-            file_edits[fp] = file_edits.get(fp, 0) + 1
-
-            # A Write to a file not yet seen in this session assumes old=0 — the
-            # F1 exposure. (Edit/MultiEdit only use deltas, so they're immune and
-            # don't count here.)
-            if name == "Write" and fp not in file_lines:
-                unseen += 1
-            # ``file_lines[fp]`` before this op = how many lines *this session* has
-            # already written into the file. A deletion only counts as rework up to
-            # that amount — deleting more means deleting pre-existing code, which is
-            # a normal edit, not the model reworking its own output.
-            authored_before = file_lines.get(fp, 0)
-            a, d = _delta_for_tool(name, inp, file_lines, fp)
-            added += a
-            deleted += d
-            rework += min(d, authored_before)
-
-            # Classify by file type
-            if _is_test_file(fp):
-                test_added += a
-                test_deleted += d
-            elif _is_doc_file(fp):
-                doc_added += a
-                doc_deleted += d
-
-    # Count high-churn files (edited ≥3 times)
-    high_churn = sum(1 for count in file_edits.values() if count >= 3)
-
-    return SessionLoc(
-        added=added,
-        deleted=deleted,
-        unseen_writes=unseen,
-        rework_deleted=rework,
-        high_churn_files=high_churn,
-        test_added=test_added,
-        test_deleted=test_deleted,
-        doc_added=doc_added,
-        doc_deleted=doc_deleted,
-        file_edit_counts=file_edits,
-    )
+            if not isinstance(inp, dict):
+                inp = {}
+            acc.on_tool_use(name, inp)
+    return acc.finish()
 
 
 def session_loc(path: Path) -> tuple[int, int]:

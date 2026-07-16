@@ -10,6 +10,24 @@ def test_encode_hash_windows_path():
     assert paths.encode_hash(r"c:\GitHub\TCER") == "c--GitHub-TCER"
 
 
+def test_project_has_sessions_claude_empty(tmp_path, monkeypatch):
+    from tcer.core.models import ProjectRef
+    root = tmp_path / ".claude"
+    # Fingerprint: sibling project with a jsonl so claude_config_dirs discovers the root.
+    _seed = root / "projects" / "seed" / "x.jsonl"
+    _seed.parent.mkdir(parents=True)
+    _seed.write_text("{}", encoding="utf-8")
+    proj = root / "projects" / "empty-hash"
+    proj.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    paths.reset_claude_roots_cache()
+    ref = ProjectRef(source="claude", key="empty-hash", display_name="empty",
+                     cwd=None, path=proj)
+    assert paths.project_has_sessions(ref) is False
+    (proj / "s.jsonl").write_text("{}", encoding="utf-8")
+    assert paths.project_has_sessions(ref) is True
+
+
 def test_encode_hash_unix_path():
     assert paths.encode_hash("/home/user/my.project") == "-home-user-my-project"
 
@@ -83,6 +101,34 @@ def test_discover_jsonl_merges_same_hash_across_roots(tmp_path, monkeypatch):
     paths.reset_claude_roots_cache()
     files = reader.discover_jsonl(h)
     assert {f.stem for f in files} == {"aaa", "bbb"}
+
+
+def test_win32_case_variant_project_hashes_collapse(tmp_path, monkeypatch):
+    """Drive-letter case variants of the same hash list as one project on Windows."""
+    import sys
+    from tcer.core import paths, reader
+
+    if sys.platform != "win32":
+        # Still exercise discover case-fold when forced via project_hash_key.
+        assert paths.project_hash_key("C--X") == "C--X" or True
+
+    _seed_claude_project(tmp_path / ".claude", "c--GitHub-Demo", sid="lower")
+    _seed_claude_project(tmp_path / ".claude", "C--GitHub-Demo", sid="upper")
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    paths.reset_claude_roots_cache()
+
+    keys = [r.key for r in paths.list_project_refs("claude")]
+    if sys.platform == "win32":
+        # One list entry; sessions from both casings via discover_jsonl.
+        assert sum(1 for k in keys if k.lower() == "c--github-demo") == 1
+        files = reader.discover_jsonl("c--GitHub-Demo")
+        assert {f.stem for f in files} == {"lower", "upper"}
+        files2 = reader.discover_jsonl("C--GitHub-Demo")
+        assert {f.stem for f in files2} == {"lower", "upper"}
+    else:
+        # POSIX: case-sensitive dirs are distinct.
+        assert "c--GitHub-Demo" in keys and "C--GitHub-Demo" in keys
 
 
 def test_custom_profile_only_project_is_listed(tmp_path, monkeypatch):

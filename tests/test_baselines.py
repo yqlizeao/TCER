@@ -19,7 +19,8 @@ def _report(net_loc: int):
 def test_compute_baselines_uses_median_and_mean():
     # tcer values 80, 40, 120 → median 80; cpe varies; ncpi varies
     reports = [_report(n) for n in (400, 200, 600)]
-    out = metrics.compute_baselines(reports)
+    # Unit test uses min_sessions=1 to check arithmetic only.
+    out = metrics.compute_baselines(reports, min_sessions=1)
     assert out is not None
     assert set(out) == {"tcer", "ncpi", "cpe"}
     tcer_vals = sorted(r.tcer for r in reports)
@@ -31,7 +32,15 @@ def test_compute_baselines_none_when_no_complete_data():
     meta = SessionMeta(session_id="s", cwd=None, title=None,
                        path=Path("/tmp/s.jsonl"), is_subagent=False)
     r = metrics.compute(meta, TokenUsage(input_tokens=10, output_tokens=5), net_loc=None)
-    assert metrics.compute_baselines([r]) is None
+    assert metrics.compute_baselines([r], min_sessions=1) is None
+
+
+def test_compute_baselines_requires_min_sessions_by_default():
+    """Default MIN_BASELINE_SESSIONS guards against tiny, jumpy samples."""
+    reports = [_report(n) for n in (400, 200, 600)]
+    assert len(reports) < metrics.MIN_BASELINE_SESSIONS
+    assert metrics.compute_baselines(reports) is None
+    assert metrics.compute_baselines(reports, min_sessions=3) is not None
 
 
 def test_save_baselines_writes_and_refreshes_globals(tmp_path):
@@ -52,4 +61,4 @@ def test_save_baselines_writes_and_refreshes_globals(tmp_path):
     finally:
         metrics._COMPOSITE_CONFIG_PATH = real_path
         metrics._load_composite_config.cache_clear()
-        metrics.TCER_BASELINE, metrics.NCPI_BASELINE, metrics.CPE_BASELINE = orig
+        metrics._refresh_composite_globals()
