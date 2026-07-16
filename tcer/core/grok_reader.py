@@ -236,6 +236,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
     current_model = ""
     api_duration_ms = 0
     call_id_to_name: dict[str, str] = {}
+    in_user_run = False  # coalesce consecutive user chunks into one message
 
     for obj in iter_updates(path):
         ts = parse_timestamp_ms(obj.get("timestamp"))
@@ -246,6 +247,8 @@ def aggregate_usage(path: Path) -> TokenUsage:
         meta = _meta_of(obj)
         update = _update_of(obj)
         su = update.get("sessionUpdate")
+        if su != "user_message_chunk":
+            in_user_run = False  # any other update ends the user-chunk run
 
         if su == "turn_completed":
             api_duration_ms += _add_turn_usage(u, update.get("usage"), current_model)
@@ -254,8 +257,13 @@ def aggregate_usage(path: Path) -> TokenUsage:
         if su == "user_message_chunk":
             text = _chunk_text(update)
             if text and text.strip():
-                turn_idx += 1
-                u.user_msgs += 1
+                # One user message may arrive as several chunks (and grok build
+                # occasionally re-emits a chunk); a run of consecutive user
+                # chunks is ONE message — same coalescing as read_conversation.
+                if not in_user_run:
+                    turn_idx += 1
+                    u.user_msgs += 1
+                in_user_run = True
                 mid = meta.get("modelId")
                 if isinstance(mid, str) and mid:
                     current_model = pricing.normalize(mid)
@@ -629,11 +637,6 @@ def _chunk_text(update: dict) -> str:
                     parts.append(inner["text"])
         return "\n".join(parts)
     return ""
-
-
-def _nlines(s) -> int:
-    """Line count of a string (0 for empty / non-string). Mirrors ``loc._nlines``."""
-    return len(s.splitlines()) if isinstance(s, str) else 0
 
 
 def _as_int(v) -> int:
