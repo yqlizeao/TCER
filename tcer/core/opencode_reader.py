@@ -280,8 +280,12 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
         elif ptype == "compaction":
             u.compaction_count += 1
 
-    # No step-finish parts (legacy / sparse sessions): fall back to session total.
-    if u.peak_input_tokens <= 0 and u.total_input > 0:
+    # No step-finish parts (legacy / sparse sessions): the session total is a
+    # multi-step sum, so it only approximates a single-turn peak when the
+    # session has at most one assistant turn. Multi-turn sessions without
+    # step snapshots keep peak at 0 → context_window_used_ratio stays None
+    # instead of being inflated by the summed total.
+    if u.peak_input_tokens <= 0 and u.total_input > 0 and u.assistant_msgs <= 1:
         u.peak_input_tokens = u.total_input
 
     return u
