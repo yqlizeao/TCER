@@ -34,6 +34,39 @@ def _notif(ts: int, update: dict, params_meta: dict | None = None) -> dict:
     return {"timestamp": ts, "method": "session/update", "params": params}
 
 
+def test_read_conversation_coalesces_grok_chunks(tmp_path):
+    p = _write_jsonl(tmp_path / "updates.jsonl", [
+        # Two user chunks coalesce into one block.
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "实现 "}}),
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "Grok"}}),
+        _notif(_T0 + 1, {"sessionUpdate": "agent_thought_chunk",
+                         "content": {"type": "text", "text": "思考"}}),
+        _notif(_T0 + 2, {"sessionUpdate": "agent_message_chunk",
+                         "content": {"type": "text", "text": "好的"}}),
+        _notif(_T0 + 3, {"sessionUpdate": "tool_call", "toolCallId": "c1",
+                         "rawInput": {"file_path": "a.py"},
+                         "_meta": {"x.ai/tool": {"name": "read_file"}}}),
+        _notif(_T0 + 4, {"sessionUpdate": "tool_call_update", "toolCallId": "c1",
+                         "status": "completed",
+                         "rawOutput": {"exit_code": 0, "output": "内容"}}),
+    ])
+    convo = grok_reader.read_conversation(p)
+    kinds = [(b["role"], b["type"]) for b in convo]
+    assert kinds == [
+        ("user", "text"),
+        ("assistant", "thinking"),
+        ("assistant", "text"),
+        ("assistant", "tool_use"),
+        ("tool", "tool_result"),
+    ]
+    assert convo[0]["text"] == "实现 Grok"  # chunks joined
+    assert convo[3]["name"] == "Read"       # canonical tool name
+    assert convo[4]["is_error"] is False
+    assert convo[4]["text"] == "内容"
+
+
 def _grok_lines() -> list[dict]:
     """A realistic single-turn Grok session: msg → thought → read → edit → error → turn_completed."""
     return [
