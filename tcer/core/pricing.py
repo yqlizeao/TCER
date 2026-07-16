@@ -1,7 +1,7 @@
 """Per-model token pricing, loaded from ``data/model_pricing.json``.
 
 The price table is sourced verbatim from cc-switch's ``seed_model_pricing()``
-(vendor official list prices, ~162 models); see the JSON's ``_meta`` block for
+(vendor official list prices, ~177 models); see the JSON's ``_meta`` block for
 provenance. This module resolves a Claude Code model id (``message.model``) to
 its four ``$/MTok`` rates, falling back to the Anthropic list-price ``default``
 for any model not in the table.

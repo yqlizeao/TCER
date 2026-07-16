@@ -12,8 +12,7 @@ JSONL — not from git. This makes measurement:
   only what was eventually committed.
 
 Caveat (F1): a ``Write`` that overwrites a file from an *earlier* session used to
-assume prior length 0 (full content counted as added). With ``disk_prior=True``
-(default), the first Write to a path seeds the prior line count from disk when
+assume prior length 0 (full content counted as added). With ``disk_prior=True`` (non-default; the default is ``False``), the first Write to a path seeds the prior line count from disk when
 the target is readable **and the on-disk text differs from this Write payload**
 (true overwrite of something else). If disk text **equals** the Write content —
 the usual case when replaying a finished session whose files still exist —
