@@ -157,6 +157,43 @@ def test_aggregate_usage_maps_codex_tokens_and_tools(tmp_path):
     assert codex_reader.read_user_messages(p) == ["实现 Codex 支持"]
 
 
+def test_read_conversation_maps_codex_turns(tmp_path):
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"timestamp": "2026-06-29T01:00:00Z", "type": "response_item",
+         "payload": {"type": "message", "role": "developer",
+                     "content": [{"type": "input_text", "text": "系统提示"}]}},
+        {"timestamp": "2026-06-29T01:00:01Z", "type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "实现功能"}]}},
+        {"timestamp": "2026-06-29T01:00:02Z", "type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "好的，我来做"}]}},
+        {"timestamp": "2026-06-29T01:00:03Z", "type": "response_item",
+         "payload": {"type": "function_call", "name": "exec_command",
+                     "call_id": "c1",
+                     "arguments": json.dumps({"cmd": "rg foo"})}},
+        {"timestamp": "2026-06-29T01:00:04Z", "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "c1",
+                     "output": "Process exited with code 1"}},
+        # agent_message duplicates response_item.message — must NOT be emitted.
+        {"timestamp": "2026-06-29T01:00:05Z", "type": "event_msg",
+         "payload": {"type": "agent_message", "message": "好的，我来做"}},
+    ])
+    convo = codex_reader.read_conversation(p)
+    kinds = [(b["role"], b["type"]) for b in convo]
+    # developer message skipped; agent_message not double-counted.
+    assert kinds == [
+        ("user", "text"),
+        ("assistant", "text"),
+        ("assistant", "tool_use"),
+        ("tool", "tool_result"),
+    ]
+    assert convo[0]["text"] == "实现功能"
+    assert convo[2]["name"] == "Grep"
+    assert convo[2]["input"] == {"cmd": "rg foo"}
+    assert convo[3]["is_error"] is True
+
+
 def test_codex_task_complete_duration_is_used(tmp_path):
     lines = _codex_lines() + [
         {
