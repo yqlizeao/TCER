@@ -1031,7 +1031,7 @@ class UploadDialog:
         # -- Options card --
         card2 = self._card(inner, "上传选项")
         self.anon_var = tk.BooleanVar(value=bool(prefs.get("anonymous")))
-        self._check(card2, "匿名上传（按账号生成稳定的匿名代号，便于 web 端归并）",
+        self._check(card2, "匿名上传（生成稳定匿名代号；并隐去标题/路径等标识——但附带对话内容时不再隐去）",
                     self.anon_var)
 
         # -- Project multi-select listbox --
@@ -1080,7 +1080,7 @@ class UploadDialog:
         # 勾选后额外附带该会话的逐条用户对话内容，否则仅上传指标。
         self.all_sessions_var = tk.BooleanVar(
             value=bool(prefs.get("all_sessions") or prefs.get("detail")))
-        self._check(card2, "附带会话对话内容（默认各会话仅上传指标；后端按 session-id 去重）",
+        self._check(card2, "附带会话对话内容（上传完整用户消息原文，且匿名模式的隐去失效；默认仅上传指标）",
                     self.all_sessions_var)
 
         # -- Auto-upload card --
