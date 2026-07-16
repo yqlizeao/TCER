@@ -708,11 +708,17 @@ class CteiFactor:
     formula: str    # short formula shown beside the bar
 
 
+def _chr_weight_label() -> str:
+    """Render the live CHR weight so the formula text tracks config overrides."""
+    w = _metrics.CHR_WEIGHT
+    return f"{w:g}"
+
+
 CTEI_FACTORS: list[CteiFactor] = [
     CteiFactor("eff_factor", "效率因子", "TCER÷基准"),
     CteiFactor("density_factor", "产出密度", "NCPI÷基准"),
     CteiFactor("cost_factor", "成本效率", "基准÷CPE"),
-    CteiFactor("cache_factor", "缓存因子", "1+CHR×0.5"),
+    CteiFactor("cache_factor", "缓存因子", f"1+CHR×{_chr_weight_label()}"),
 ]
 
 # A factor ≥ this sits at/above baseline (good); below it drags CTEI down.
