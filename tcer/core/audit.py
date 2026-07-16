@@ -19,6 +19,14 @@ Or from code / tests::
 
 Exit code of the CLI is 0 only when every check passes (or there was nothing
 to audit). Failures print a compact report; ``--json`` dumps structured rows.
+
+**Scope / limits**: the recount uses the SAME reader primitives as analyze, so
+this audit catches orchestration drift (merge / fold / aggregate / pricing
+wiring) and value-range regressions — it can NOT catch a semantic bug inside a
+reader itself (both sides would agree on the same wrong number). Reader
+semantics need independent-source cross-checks (e.g. Codex ``total_token_usage``
+vs summed ``last``, raw chunk counts) — see tests and CLAUDE.md 注意事项.
+Note ``--ci`` runs ``--top 1 --no-loc``: one session per project, LOC unchecked.
 """
 from __future__ import annotations
 
@@ -139,16 +147,6 @@ def _truth(name: str, ok: bool, *, detail: str = "", level: str = "error") -> Ch
 
 
 # --------------------------------------------------------------------------- recount helpers
-
-def independent_claude_usage(path: Path) -> TokenUsage:
-    """Re-implement Claude usage aggregation for cross-check (not via analyze).
-
-    Intentionally duplicates the *documented* rules (message.id dedup, zero-usage
-    release, tool counts on every line) so a regression in ``reader.aggregate_usage``
-    can still be spotted when both are compared to each other on fixtures.
-    """
-    return reader.aggregate_usage(path)  # same code path; group-level check is the key
-
 
 def _merge_usages(usages: Iterable[TokenUsage]) -> TokenUsage:
     return reduce(lambda a, b: a.merge(b), usages, TokenUsage())
