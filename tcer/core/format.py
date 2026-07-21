@@ -33,8 +33,12 @@ def fmt_money(x: float | None) -> str:
 
 
 def fmt_dt(ms: int | None, fmt: str = "%Y-%m-%d %H:%M") -> str:
-    """Epoch-milliseconds → local-time string. ``"-"`` on None or bad range."""
-    if ms is None:
+    """Epoch-milliseconds → local-time string. ``"-"`` on None / non-positive / bad range.
+
+    Treats ``0`` and negatives as missing: Unix epoch display (1970-…) is almost
+    never a real session start and confuses the timeline UI.
+    """
+    if ms is None or ms <= 0:
         return "-"
     try:
         return _dt.datetime.fromtimestamp(ms / 1000).strftime(fmt)

@@ -159,5 +159,5 @@ x.ai 的 grok build CLI 把会话持久化在 `~/.grok/sessions/`（`GROK_HOME` 
 
 ### LOC
 
-`search_replace` 与 Claude 的 `Edit` 同构（`file_path` / `old_string` / `new_string`），净增 = `new_string` 行数 − `old_string` 行数；`write` 整文件写入计入 `unseen_writes`（同 F1 风险）。无 `search_replace`/`write` 的会话 TCER/CPE/CTEI 显示为 `-`。返工率首版置 0（与 Codex 同款简化；`search_replace` 数据上可后续支持自返工计算）。
+`search_replace` / `write` 经与 Claude 相同的 `_LocAccumulator` 回放：`search_replace`→Edit（净增行差 + 自返工）、`write`→Write（`unseen_writes` / F1 同 Claude）。无编辑工具的会话 `net_loc=0`（已知零）。
 

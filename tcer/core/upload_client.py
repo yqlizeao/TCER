@@ -148,11 +148,43 @@ def build_payload(
                 # replies, thinking, tool calls + their results) so the web session
                 # view can replay it. ``user_messages`` is kept for backward
                 # compatibility with the existing server/web fields.
-                row["user_messages"] = list(r.usage.user_message_texts)
+                texts = list(r.usage.user_message_texts)
+                if not texts:
+                    texts = _lazy_user_messages(r)
+                row["user_messages"] = texts
                 row["conversation"] = _read_conversation(r)
             sessions.append(row)
         payload["sessions"] = sessions
     return payload
+
+
+def _lazy_user_messages(report: SessionReport) -> list[str]:
+    """Load user message bodies when analysis omitted them (Claude lazy path)."""
+    from tcer.core import codex_reader, grok_reader, opencode_reader, reader
+
+    source = report.meta.source or "claude"
+    path = report.meta.path
+    if path is None:
+        return []
+    try:
+        if source == "codex":
+            return codex_reader.read_user_messages(path)
+        if source == "opencode" and report.meta.session_id:
+            return opencode_reader.read_user_messages(path, report.meta.session_id)
+        if source == "grok":
+            return grok_reader.read_user_messages(path)
+        # Claude: main + subagents under session dir
+        _, main, session_dir = reader.session_artifacts(path)
+        msgs: list[str] = []
+        if main.is_file():
+            msgs.extend(reader.read_user_messages(main))
+        sub = session_dir / "subagents"
+        if sub.is_dir():
+            for f in sorted(sub.glob("*.jsonl")):
+                msgs.extend(reader.read_user_messages(f))
+        return msgs
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _read_conversation(report: SessionReport) -> list[dict]:
@@ -193,6 +225,16 @@ def _read_conversation(report: SessionReport) -> list[dict]:
     paths = list(getattr(meta, "session_paths", ()) or ())
     if not paths and getattr(meta, "path", None) is not None:
         paths = [meta.path]
+    # If only the main path is recorded, still pull subagent jsonl for Claude.
+    if len(paths) == 1 and (meta.source or "claude") == "claude":
+        try:
+            _, main, session_dir = reader.session_artifacts(paths[0])
+            paths = [main] if main.is_file() else []
+            sub = session_dir / "subagents"
+            if sub.is_dir():
+                paths.extend(sorted(sub.glob("*.jsonl")))
+        except Exception:  # noqa: BLE001
+            pass
     convo: list[dict] = []
     for p in paths:
         try:

@@ -1,7 +1,7 @@
 """Per-model token pricing, loaded from ``data/model_pricing.json``.
 
 The price table is sourced verbatim from cc-switch's ``seed_model_pricing()``
-(vendor official list prices, ~162 models); see the JSON's ``_meta`` block for
+(vendor official list prices, ~177 models); see the JSON's ``_meta`` block for
 provenance. This module resolves a Claude Code model id (``message.model``) to
 its four ``$/MTok`` rates, falling back to the Anthropic list-price ``default``
 for any model not in the table.
@@ -72,6 +72,49 @@ def _norm_index() -> dict[str, str]:
     return {n: ks[0] for n, ks in buckets.items() if len(ks) == 1}
 
 
+# Mode / UI suffixes that are *not* distinct priced SKUs in our table, but are
+# appended to a base id (observed: ``claude-opus-4-6-thinking``). Stripped only
+# as *extra candidates after* the raw id is tried, so real table keys that end
+# in these tokens (e.g. ``kimi-k2-thinking``) still exact-match first.
+# Deliberately does NOT strip ``-high``/``-low``/``-reasoning`` — those often
+# name separate table rows (gpt-5.2-high, grok-4-1-fast-reasoning).
+_MODE_SUFFIXES = (
+    "-thinking",
+    "-reasoner",
+    "-think",
+)
+
+
+def _strip_mode_suffix(model: str) -> str | None:
+    """Return *model* without a known mode suffix, or None if unchanged."""
+    low = model.lower()
+    for suf in _MODE_SUFFIXES:
+        if low.endswith(suf) and len(model) > len(suf):
+            return model[: -len(suf)]
+    return None
+
+
+def _match_candidates(model: str) -> list[str]:
+    """Ordered ids to try: raw → vendor path tail → mode-suffix stripped forms."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(s: str) -> None:
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    _add(model)
+    if "/" in model:
+        _add(model.rsplit("/", 1)[-1])
+    # Suffix-stripped variants of every candidate so far (not recursive).
+    for base in list(out):
+        stripped = _strip_mode_suffix(base)
+        if stripped:
+            _add(stripped)
+    return out
+
+
 @lru_cache(maxsize=512)
 def _match_id(model: str) -> str | None:
     """Resolve a model string to a table key, with bidirectional prefix matching.
@@ -91,21 +134,14 @@ def _match_id(model: str) -> str | None:
        When multiple table keys share the same prefix, the **shortest** match wins
        (closest to the caller's string, least ambiguous).
 
-    Each strategy is tried first on the raw ``model``, then on its last ``/``
-    segment (to strip a vendor path prefix like ``z-ai/`` or
-    ``accounts/fireworks/models/``). Returns ``None`` if nothing in the table
-    matches, or if *model* is empty.
+    Candidates tried in order: raw id → last ``/`` segment (vendor path) →
+    mode-suffix stripped forms (``-thinking``). Returns ``None`` if nothing in
+    the table matches, or if *model* is empty.
     """
     if not model:
         return None
     models = _load()["models"]
-    # Candidates: the raw id, plus its last path segment if a vendor prefixed it
-    # ("z-ai/glm-5.2" -> also try "glm-5.2"). Raw is tried first to preserve the
-    # long-standing [1m]/date-suffix behaviour exactly.
-    candidates = [model]
-    if "/" in model:
-        candidates.append(model.rsplit("/", 1)[-1])
-    for cand in candidates:
+    for cand in _match_candidates(model):
         # 1. Exact
         if cand in models:
             return cand
@@ -177,3 +213,30 @@ def label(model: str | None) -> str:
 
 def model_count() -> int:
     return len(_load()["models"])
+
+
+_SKIP_UNMATCHED = frozenset({"", "<synthetic>"})
+
+
+def is_table_priced(model: str | None) -> bool:
+    """True if *model* resolves to an explicit table entry (not default fallback)."""
+    if not model or model in _SKIP_UNMATCHED:
+        return True  # empty / synthetic are not "unmatched vendor models"
+    return table_key(model) is not None
+
+
+def unmatched_models(model_ids) -> list[str]:
+    """Model ids that fall back to Anthropic default list price.
+
+    Sorted for stable display. Skips empty / ``<synthetic>`` buckets.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for mid in model_ids:
+        if not isinstance(mid, str) or mid in _SKIP_UNMATCHED or mid in seen:
+            continue
+        if table_key(mid) is None:
+            seen.add(mid)
+            out.append(mid)
+    out.sort(key=str.lower)
+    return out

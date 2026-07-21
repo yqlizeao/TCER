@@ -1,3 +1,5 @@
+![Fable 5 Verified](img/Fable-5_Verified.png)
+
 # TCER
 
 > **Token-to-Code Efficiency Ratio** — 度量 AI 编程效率的离线分析工具
@@ -20,6 +22,16 @@ python -m tcer
 ```
 
 Tkinter 桌面界面，纯离线运行。需要 Python ≥3.11 标准库，零依赖，免安装。
+
+**闭环审计**（对照本地真实会话文件重算，改 core 后建议跑）：
+
+```bash
+python -m tcer.audit --list
+python -m tcer.audit --source claude --project TCER --top 5
+python -m tcer.audit --all-projects --top 1 --no-loc   # 批跑全部本地项目
+# CI 推荐（一行结果 + 摘要 JSON，退出码 0/1）：
+python -m tcer.audit --all-projects --skip-empty --top 1 --no-loc -q --summary-json audit-summary.json
+```
 
 默认在统一项目列表中展示 Claude / Codex / OpenCode 项目，可通过顶部「来源」切换。Codex 与 OpenCode 均为只读分析：Codex 读取本地 JSONL，OpenCode 读取官方本地 SQLite（兼容旧 storage JSON 发现）；支持会话、Token、成本、模型、工具行为、趋势、运行环境、推理输出、图片输入等信号。Codex 仅在会话包含可解析 `apply_patch` 记录时计算 LOC/TCER；OpenCode 优先使用 session summary 中的 diff 统计。
 

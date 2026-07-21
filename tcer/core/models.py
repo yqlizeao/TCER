@@ -13,7 +13,7 @@ class ProjectRef:
     are virtual groups of session JSONL files sharing the same cwd.
     """
 
-    source: str  # "claude" / "codex"
+    source: str  # "claude" / "codex" / "opencode" / "grok"
     key: str
     display_name: str
     cwd: str | None
@@ -73,7 +73,7 @@ class TokenUsage:
     output_tokens: int = 0
     models: set[str] = field(default_factory=set)
     per_model: dict[str, ModelUsage] = field(default_factory=dict)
-    assistant_msgs: int = 0  # total assistant turns (incl. zero-usage stubs)
+    assistant_msgs: int = 0  # assistant turns with real token usage (zero-usage stubs excluded)
     empty_usage_skipped: int = 0  # assistant turns with all-zero usage
     started_at: int | None = None  # epoch ms of first counted assistant turn
     ended_at: int | None = None  # epoch ms of last counted assistant turn
@@ -88,6 +88,10 @@ class TokenUsage:
     user_message_texts: list[str] = field(default_factory=list)  # extracted user message text
     reasoning_output_tokens: int = 0  # Codex exposes this separately; output_tokens already includes it
     model_context_window: int | None = None
+    # Max single-turn input (input + cache write + cache read). Used for
+    # context_window_used_ratio so multi-turn sessions don't look like 50–200×
+    # the window (session-summed total_input / window is not a utilization rate).
+    peak_input_tokens: int = 0
     time_to_first_token_ms: int | None = None
     task_count: int = 0
     completed_task_count: int = 0
@@ -171,6 +175,7 @@ class TokenUsage:
             user_message_texts=self.user_message_texts + other.user_message_texts,
             reasoning_output_tokens=self.reasoning_output_tokens + other.reasoning_output_tokens,
             model_context_window=_max_ms(self.model_context_window, other.model_context_window),
+            peak_input_tokens=max(self.peak_input_tokens, other.peak_input_tokens),
             time_to_first_token_ms=_min_ms(self.time_to_first_token_ms, other.time_to_first_token_ms),
             task_count=self.task_count + other.task_count,
             completed_task_count=self.completed_task_count + other.completed_task_count,
@@ -233,7 +238,7 @@ class SessionMeta:
     path: Path
     is_subagent: bool
     entrypoint: str | None = None  # "claude-vscode" / "claude-cli" / etc.
-    source: str = "claude"  # "claude" / "codex"
+    source: str = "claude"  # "claude" / "codex" / "opencode" / "grok"
     cli_version: str | None = None
     model_provider: str | None = None
     thread_source: str | None = None
