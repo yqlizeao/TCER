@@ -17,8 +17,8 @@
 
 成本按模型分别计价再求和。每个模型的 token 用各自 `$/MTok` 价表算钱。
 
-价表来源：cc-switch 的 `seed_model_pricing()`（≈162 模型），落盘为 `tcer/config/model_pricing.json`。
-解析：`pricing.resolve(model)` 按「精确 id → 最长前缀 id → default」。
+价表来源：cc-switch 的 `seed_model_pricing()`（≈177 模型），落盘为 `tcer/config/model_pricing.json`。
+解析：`pricing.resolve(model)` 按「精确 → 归一化精确 → 前缀 → 反向前缀 → default」四级匹配（详见 CLAUDE.md 注意事项 3）。
 未知模型回退 default（Anthropic 标价 input $3 / output $15 / cache-write $3.75 / cache-read $0.30 每百万 Token）。
 
 ```python
@@ -93,7 +93,7 @@ NCPI, CAF, churn, TA-TCER, PSAC。
 | CPE | 3.645 / 400 × 1000 | $9.11/千行 |
 | NCPI | 400 / 10,000 | 0.040 |
 | CAF | 4,900,000 / 200,000 | 24.5 |
-| churn | 20 / 420 | 4.8% |
+| churn | 20 / 420（此例假设 20 行删除全为自返工；实际以 rework_deleted 为分子，缺失时才回退用 deleted） | 4.8% |
 | PSAC | 83.64 / (83.64 − 8.66) | 1.115 |
 | CHR_factor | 1 + 0.959×0.5 | 1.480 |
 | **CTEI** | (80/76.59)×(0.040/0.101)×(8.22/9.11)×1.480 | **≈ 0.55 → 中等** |

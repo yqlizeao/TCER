@@ -265,6 +265,8 @@ class ModelsPopup:
                 for mu in per_model.values()
             )
             total_cost = metrics_mod.cost_usd(usage)
+            from tcer.core import pricing as pricing_mod
+            unmatched = metrics_mod.unmatched_pricing_models(usage)
 
             # Summary header
             head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
@@ -272,6 +274,18 @@ class ModelsPopup:
             tk.Label(head, text=f"总计 {total_tokens:,} Token · {fmt_money(total_cost)} · "
                                 f"{len(per_model)} 个模型",
                      bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+            if unmatched:
+                warn = tk.Frame(inner, bg="#3a2a1a", padx=10, pady=6)
+                warn.pack(fill="x", pady=(0, 4))
+                names = "、".join(pricing_mod.label(m) for m in unmatched[:6])
+                more = f" 等 {len(unmatched)} 个" if len(unmatched) > 6 else ""
+                tk.Label(
+                    warn,
+                    text=f"⚠ {len(unmatched)} 个模型未在价表中（按默认 list 价）：{names}{more}\n"
+                         f"成本可能偏差；可在 tcer/config/model_pricing.json 补充条目。",
+                    bg="#3a2a1a", fg=theme.WARNING,
+                    font=theme.FONT_UI, justify="left", wraplength=500,
+                ).pack(anchor="w")
 
             # Per-model blocks sorted by token count descending
             items = []
@@ -285,13 +299,16 @@ class ModelsPopup:
             for model_id, mu, tok, cost in items:
                 pct = tok / total_tokens * 100 if total_tokens else 0
                 name = model_label(model_id) if model_id else "(未记录)"
+                on_default = model_id in unmatched
 
                 # --- Header row: model name + total + cost ---
                 tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
                 hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
                 hdr.pack(fill="x")
-                tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
-                         font=theme.FONT_VALUE).pack(side="left")
+                title = f"{name} · 默认价" if on_default else name
+                tk.Label(hdr, text=title, bg=theme.PANEL,
+                         fg=theme.WARNING if on_default else theme.FG,
+                         anchor="w", font=theme.FONT_VALUE).pack(side="left")
                 tk.Label(hdr, text=f"{tok:,} Token · {fmt_money(cost)}（{pct:.1f}%）",
                          bg=theme.PANEL, fg=theme.MUTED, anchor="e",
                          font=theme.FONT_MONO).pack(side="right")
@@ -358,6 +375,7 @@ class CostBreakdownPopup:
             return
 
         total_cost = metrics_mod.cost_usd(usage)
+        unmatched = set(metrics_mod.unmatched_pricing_models(usage))
 
         # Build items: (model_id, cost, total_tokens, tokens_per_dollar)
         items = []
@@ -382,12 +400,22 @@ class CostBreakdownPopup:
         head.pack(fill="x", pady=10)
         tk.Label(head, text=f"总计 {fmt_money(total_cost)} · {len(per_model)} 个模型",
                  bg="#2a2a2e", fg=self._COLOR, font=theme.FONT_UI_BOLD).pack()
+        if unmatched:
+            warn = tk.Frame(inner, bg="#3a2a1a", padx=10, pady=6)
+            warn.pack(fill="x", pady=(0, 4))
+            tk.Label(
+                warn,
+                text=f"⚠ {len(unmatched)} 个模型未在价表中，成本按默认 list 价估算（见各行「默认价」标记）。",
+                bg="#3a2a1a", fg=theme.WARNING, font=theme.FONT_UI, wraplength=500, justify="left",
+            ).pack(anchor="w")
 
         max_cost = items[0][1] if items else 1
 
         for model_id, cost, tok, tpd in items:
             pct = cost / total_cost * 100 if total_cost else 0
             name = model_label(model_id) if model_id else "(未记录)"
+            if model_id in unmatched:
+                name = f"{name} · 默认价"
 
             # Header row
             tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
@@ -1008,9 +1036,11 @@ class UploadDialog:
         # -- 上传选项卡 --
         card2 = self._card(inner, "上传选项")
         self.anon_var = tk.BooleanVar(value=bool(prefs.get("anonymous")))
-        # 匿名上传：勾选后无需账号密码直接上传（后端接受无 token 的匿名请求）。
+        # 匿名上传：勾选后无需账号密码直接上传（后端接受无 token 的匿名请求）；
+        # 生成稳定匿名代号并隐去标题/路径——但附带对话内容时隐去失效（main 的隐私告知）。
         tk.Checkbutton(
-            card2, text="匿名上传（无需账号密码，生成稳定匿名代号便于 web 端归并）",
+            card2,
+            text="匿名上传（无需账号密码；生成稳定匿名代号并隐去标题/路径——但附带对话内容时隐去失效）",
             variable=self.anon_var, bg=theme.PANEL, fg=theme.FG,
             selectcolor="#1e1e1e", activebackground=theme.PANEL,
             activeforeground=theme.FG, font=theme.FONT_UI, anchor="w",
@@ -1047,7 +1077,7 @@ class UploadDialog:
         self.all_sessions_var = tk.BooleanVar(
             value=bool(prefs.get("all_sessions") or prefs.get("detail")))
         self._all_sessions_chk = tk.Checkbutton(
-            card2, text="附带会话详情（默认各会话仅上传指标；后端按 session-id 去重）",
+            card2, text="附带会话详情（上传完整用户消息原文；匿名模式下隐去失效；默认仅上传指标）",
             variable=self.all_sessions_var, bg=theme.PANEL, fg=theme.FG,
             selectcolor="#1e1e1e", activebackground=theme.PANEL,
             activeforeground=theme.FG, font=theme.FONT_UI, anchor="w")

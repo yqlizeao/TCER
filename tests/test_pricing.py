@@ -80,6 +80,41 @@ def test_table_key_distinguishes_default():
     assert pricing.table_key("") is None
 
 
+def test_thinking_suffix_maps_to_base_opus():
+    """Claude Code / proxies append ``-thinking``; must not fall back to default."""
+    base = pricing.table_key("claude-opus-4-6")
+    assert base == "claude-opus-4-6-20260206"
+    assert pricing.table_key("claude-opus-4-6-thinking") == base
+    # Real table key that ends in -thinking must still exact-match itself.
+    if "kimi-k2-thinking" in pricing._load()["models"]:
+        assert pricing.table_key("kimi-k2-thinking") == "kimi-k2-thinking"
+    # Effort tiers are real SKUs — must NOT be stripped to a shorter key.
+    assert pricing.table_key("gpt-5.2-high") == "gpt-5.2-high"
+
+
+def test_unmatched_models_lists_default_fallback_only():
+    ids = [
+        "claude-opus-4-8",
+        "totally-made-up-model",
+        "another-unknown-v2",
+        "",
+        "<synthetic>",
+        "totally-made-up-model",  # dedupe
+    ]
+    got = pricing.unmatched_models(ids)
+    assert got == ["another-unknown-v2", "totally-made-up-model"]
+    assert pricing.is_table_priced("claude-opus-4-8")
+    assert not pricing.is_table_priced("totally-made-up-model")
+
+
+def test_unmatched_pricing_models_from_usage():
+    u = TokenUsage()
+    u.bucket("claude-opus-4-8").add(10, 0, 0, 5)
+    u.bucket("mystery-lab-model").add(20, 0, 0, 5)
+    u.bucket("").add(1, 0, 0, 0)
+    assert metrics.unmatched_pricing_models(u) == ["mystery-lab-model"]
+
+
 def test_unknown_falls_back_to_default():
     assert pricing.resolve("totally-made-up-model") == pricing.default_pricing()
     assert pricing.default_pricing() == {

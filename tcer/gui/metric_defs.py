@@ -110,9 +110,14 @@ GROUPS: list[Group] = [
                "本地代理单独暴露的推理输出 Token；它已包含在「输出」中，这里只作为推理占比分析，不重复计费。", "basic"),
         Metric("context_window", "上下文窗口", "",
                "本地代理上报的 model_context_window，表示当前模型上下文窗口大小。", "basic"),
+        Metric("peak_input", "峰值输入", "",
+               "单轮输入 Token 峰值 = max(每轮 input + cache_write + cache_read)。\n"
+               "窗口使用率的分子。Claude/Codex/Grok 按 API 回合统计；OpenCode 来自 step-finish 快照"
+               "（禁止用会话累计总输入当峰值，否则多轮会虚高几十倍）。", "basic"),
         Metric("context_window_used", "窗口使用率", "",
-               "公式：总输入 ÷ 上下文窗口\n"
-               "说明：粗略衡量本会话输入规模相对模型窗口的压力；多轮累计输入可能超过单轮窗口，趋势参考优先。", "basic", "down"),
+               "公式：峰值输入 ÷ 上下文窗口\n"
+               "说明：衡量「最挤的一轮」相对模型窗口的压力；≈1 表示顶满窗口，>1 偶见（上报窗口偏小或含系统开销）。"
+               "不用会话累计总输入，避免多轮会话虚高到几十倍。", "basic", "down"),
     ]),
     Group("G3", "缓存效率", [
         Metric("chr", "缓存命中率", "",
@@ -353,7 +358,7 @@ _SESSION_FMT: dict[str, str] = {
     # G2
     "total_tokens": "int", "input": "int", "output": "int",
     "cache_write": "int", "cache_read": "int", "reasoning_tokens": "int",
-    "context_window": "int", "context_window_used": "pct",
+    "context_window": "int", "peak_input": "int", "context_window_used": "pct",
     # G3
     "chr": "pct", "io_ratio": "float:0.1", "caf": "float:0.00",
     "cache_efficiency": "float:0.00", "cache_write_ratio": "pct",
@@ -395,6 +400,7 @@ _USAGE_ATTR = {
     "user_msgs": "user_msgs", "thinking_count": "thinking_count",
     "reasoning_tokens": "reasoning_output_tokens",
     "context_window": "model_context_window",
+    "peak_input": "peak_input_tokens",
     "compactions": "compaction_count",
     "web_searches": "web_search_count",
     "aborted_tasks": "aborted_task_count",
@@ -702,11 +708,17 @@ class CteiFactor:
     formula: str    # short formula shown beside the bar
 
 
+def _chr_weight_label() -> str:
+    """Render the live CHR weight so the formula text tracks config overrides."""
+    w = _metrics.CHR_WEIGHT
+    return f"{w:g}"
+
+
 CTEI_FACTORS: list[CteiFactor] = [
     CteiFactor("eff_factor", "效率因子", "TCER÷基准"),
     CteiFactor("density_factor", "产出密度", "NCPI÷基准"),
     CteiFactor("cost_factor", "成本效率", "基准÷CPE"),
-    CteiFactor("cache_factor", "缓存因子", "1+CHR×0.5"),
+    CteiFactor("cache_factor", "缓存因子", f"1+CHR×{_chr_weight_label()}"),
 ]
 
 # A factor ≥ this sits at/above baseline (good); below it drags CTEI down.

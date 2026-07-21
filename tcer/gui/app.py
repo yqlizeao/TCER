@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 from tcer.core import analyze, export as export_mod, metrics
 from tcer.core import upload_client, upload_prefs
 from tcer.core.calibrate import calibrate_project
-from tcer.core.paths import list_project_refs
+from tcer.core.paths import list_project_refs, project_has_sessions
 from tcer.core.reader import discover_jsonl
 from . import popups, theme, views
 from .views import CteiRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
@@ -38,6 +38,7 @@ class TcerGui:
         self._no_loc: bool = False
         self._scan_code_dir: bool = False
         self._analysis_generation = 0
+        self._analysis_cancel = threading.Event()
         self._upload_prefs: dict = upload_prefs.load()
         self._auto_upload_after: str | None = None
 
@@ -97,21 +98,24 @@ class TcerGui:
 
     # --------------------------------------------------------------- projects
     def refresh_projects(self) -> None:
+        self._analysis_cancel.set()
+        self._analysis_cancel = threading.Event()
         self._analysis_generation += 1
         source = self.filter.get_source()
         self._selected_project_idx = None
         self._clear_analysis_view()
         self._projects = list_project_refs(source)
-        # 标记哪些项目没有会话数据（置灰显示）
+        # 标记无会话项目（Claude / Codex / OpenCode / Grok 统一判定）
         self._empty_projects = {
             i for i, p in enumerate(self._projects)
-            if p.source == "claude" and not discover_jsonl(p.key)
+            if not project_has_sessions(p)
         }
         self.project_col.update(self._projects, self._empty_projects)
         n_empty = len(self._empty_projects)
+        n_live = len(self._projects) - n_empty
         status = f"发现 {len(self._projects)} 个项目"
         if n_empty:
-            status += f"（{n_empty} 个无会话数据）"
+            status += f"（{n_live} 有数据 · {n_empty} 无会话）"
         self.filter.set_status(status)
 
     def _clear_analysis_view(self) -> None:
@@ -140,6 +144,10 @@ class TcerGui:
         if proj is None:
             return
         self.filter.set_status(f"分析中… {views.project_label(proj)}")
+        # Cancel any in-flight analysis so we don't pile up full JSONL walks.
+        self._analysis_cancel.set()
+        self._analysis_cancel = threading.Event()
+        cancel_event = self._analysis_cancel
         self._analysis_generation += 1
         generation = self._analysis_generation
         params = self.filter.get_params()
@@ -153,15 +161,26 @@ class TcerGui:
             code_dir=self._code_dir,
             no_loc=self._no_loc,
             scan_code_dir=self._scan_code_dir,
+            cancel_event=cancel_event,
         )
-        threading.Thread(target=self._worker, args=(generation, args), daemon=True).start()
+        threading.Thread(target=self._worker, args=(generation, args, cancel_event), daemon=True).start()
 
-    def _worker(self, generation: int, args: dict) -> None:
+    def _worker(self, generation: int, args: dict, cancel_event: threading.Event) -> None:
         try:
             result = analyze.analyze_project(**args)
+            if cancel_event.is_set():
+                return  # superseded by a newer reanalyze
             self._q.put(("ok", generation, result))
+        except analyze.AnalysisCancelled:
+            return
         except Exception as e:  # noqa: BLE001 — surface any failure in the UI
-            self._q.put(("err", generation, f"{e}\n{traceback.format_exc()}"))
+            if cancel_event.is_set():
+                return
+            # User-facing message first; full traceback only for copy/debug.
+            self._q.put((
+                "err", generation,
+                f"{type(e).__name__}: {e}\n\n—— 诊断信息 ——\n{traceback.format_exc()}",
+            ))
 
     def _poll(self) -> None:
         try:
@@ -230,7 +249,20 @@ class TcerGui:
         self._render_session_views()
         self._render_metrics()
         self._update_tab_names()
-        self.filter.set_status(f"完成 · 共 {a.n_sessions} 个会话")
+        status = f"完成 · 共 {a.n_sessions} 个会话"
+        if self.filter.get_params().get("task_type") == metrics.AUTO_TASK_TYPE and a.reports:
+            from collections import Counter
+            counts = Counter(r.task_type for r in a.reports if r.task_type)
+            if counts:
+                parts = "、".join(
+                    f"{metrics.TASK_CATEGORIES.get(k, {}).get('name', k)}×{n}"
+                    for k, n in counts.most_common()
+                )
+                status += f" · 自动任务类型：{parts}"
+        unmatched = metrics.unmatched_pricing_models(a.aggregate.usage)
+        if unmatched:
+            status += f" · ⚠ {len(unmatched)} 个模型默认价（点「模型」查看）"
+        self.filter.set_status(status)
 
     # --------------------------------------------------------------- sessions / view
     def on_select_session(self, sid: str) -> None:
@@ -375,22 +407,22 @@ class TcerGui:
 
     def show_user_msgs(self) -> None:
         report = self._rendered_report
-        if report and report.meta.source == "codex":
+        if not report:
+            messagebox.showinfo("用户消息", "当前会话未记录到用户消息。")
+            return
+        source = report.meta.source or "claude"
+        msgs: list[str] = []
+
+        if source == "codex":
             from tcer.core import codex_reader
-            msgs: list[str] = []
             if report.meta.session_id == "(aggregate)" and self._current:
                 for r in self._current.reports:
                     msgs.extend(codex_reader.read_user_messages(r.meta.path))
             else:
                 msgs = codex_reader.read_user_messages(report.meta.path)
-            if msgs:
-                popups.UserMsgsPopup(self.root, msgs)
-            else:
-                messagebox.showinfo("用户消息", "当前 Codex 会话未记录到用户消息。")
-            return
-        if report and report.meta.source == "opencode":
+            label = "Codex"
+        elif source == "opencode":
             from tcer.core import opencode_reader
-            msgs: list[str] = []
             if report.meta.session_id == "(aggregate)" and self._current:
                 for r in self._current.reports:
                     sid = r.meta.session_id
@@ -398,28 +430,51 @@ class TcerGui:
                         msgs.extend(opencode_reader.read_user_messages(r.meta.path, sid))
             elif report.meta.session_id:
                 msgs = opencode_reader.read_user_messages(report.meta.path, report.meta.session_id)
-            if msgs:
-                popups.UserMsgsPopup(self.root, msgs)
-            else:
-                messagebox.showinfo("用户消息", "当前 OpenCode 会话未记录到用户消息。")
-            return
-        if report and report.meta.source == "grok":
+            label = "OpenCode"
+        elif source == "grok":
             from tcer.core import grok_reader
-            msgs: list[str] = []
             if report.meta.session_id == "(aggregate)" and self._current:
                 for r in self._current.reports:
                     msgs.extend(grok_reader.read_user_messages(r.meta.path))
             else:
                 msgs = grok_reader.read_user_messages(report.meta.path)
-            if msgs:
-                popups.UserMsgsPopup(self.root, msgs)
-            else:
-                messagebox.showinfo("用户消息", "当前 Grok 会话未记录到用户消息。")
-            return
-        if report and report.usage.user_message_texts:
-            popups.UserMsgsPopup(self.root, report.usage.user_message_texts)
+            label = "Grok"
         else:
-            messagebox.showinfo("用户消息", "当前会话未记录到用户消息。")
+            # Claude: prefer cached texts (legacy), else lazy-read main + subagent files.
+            from tcer.core import reader
+            if report.usage.user_message_texts:
+                msgs = list(report.usage.user_message_texts)
+            elif report.meta.session_id == "(aggregate)" and self._current:
+                for r in self._current.reports:
+                    msgs.extend(self._claude_user_messages(r))
+            else:
+                msgs = self._claude_user_messages(report)
+            label = "Claude"
+
+        if msgs:
+            popups.UserMsgsPopup(self.root, msgs)
+        else:
+            messagebox.showinfo("用户消息", f"当前 {label} 会话未记录到用户消息。")
+
+    @staticmethod
+    def _claude_user_messages(report) -> list[str]:
+        """Lazy-load Claude user texts for one session (main + subagent jsonl)."""
+        from tcer.core import reader
+        path = report.meta.path
+        if path is None:
+            return []
+        try:
+            _, main, session_dir = reader.session_artifacts(path)
+        except Exception:  # noqa: BLE001
+            return reader.read_user_messages(path) if path.is_file() else []
+        msgs: list[str] = []
+        if main.is_file():
+            msgs.extend(reader.read_user_messages(main))
+        sub_dir = session_dir / "subagents"
+        if sub_dir.is_dir():
+            for f in sorted(sub_dir.glob("*.jsonl")):
+                msgs.extend(reader.read_user_messages(f))
+        return msgs
 
     def show_files_touched(self) -> None:
         report = self._rendered_report
@@ -468,16 +523,30 @@ class TcerGui:
         if not self._current:
             messagebox.showinfo("计算基准", "请先分析一个项目。")
             return
+        eligible = metrics.baseline_eligible_reports(self._current.reports)
+        need = metrics.MIN_BASELINE_SESSIONS
         values = metrics.compute_baselines(self._current.reports)
         if values is None:
-            messagebox.showinfo("计算基准", "没有足够数据的会话来计算基准。")
+            # Need scan_code_dir for NCPI, and enough complete sessions.
+            if len(eligible) == 0:
+                msg = (
+                    "没有可参与计算的会话（需同时具备 TCER、NCPI、CPE）。\n"
+                    "提示：在「高级选项」开启「扫描代码目录」以填充 NCPI。"
+                )
+            else:
+                msg = (
+                    f"有效会话不足：需要至少 {need} 个完整会话，"
+                    f"当前仅 {len(eligible)} 个。\n"
+                    "样本过少时中位数波动很大，暂不建议写入个人基准。"
+                )
+            messagebox.showinfo("计算基准", msg)
             return
 
         def _apply(v):
             metrics.save_baselines(v)
             self.reanalyze()
 
-        popups.BaselinesPopup(self.root, values, self._current.n_sessions, _apply)
+        popups.BaselinesPopup(self.root, values, len(eligible), _apply)
 
     def show_advanced(self) -> None:
         def _apply(code_dir, no_loc, scan_code_dir):

@@ -38,20 +38,41 @@ _GROK_TOOL_MAP = {
     "search_replace": "Edit",
     "write": "Write",
     "grep_search": "Grep",
+    # Live grok build sessions sometimes emit short names (observed 2026-07).
+    "grep": "Grep",
     "list_dir": "Glob",
     "bash": "Bash",
     "run_terminal_command": "Bash",
     "task": "Task",
     "kill_task": "KillTask",
     "get_task_output": "GetTaskOutput",
+    # Alternate spawn API names (same semantics as get_task_output / kill_task).
+    "get_command_or_subagent_output": "GetTaskOutput",
+    "kill_command_or_subagent": "KillTask",
     "web_search": "WebSearch",
+    "websearch": "WebSearch",
     "web_fetch": "WebFetch",
+    "webfetch": "WebFetch",
     "todo_write": "TodoWrite",
     "memory_search": "MemorySearch",
     "memory_get": "MemoryGet",
     "lsp": "LSP",
     "search_tool": "SearchTool",
     "use_tool": "UseTool",
+    "image_gen": "ImageGen",
+    "image_edit": "ImageEdit",
+    "scheduler_create": "SchedulerCreate",
+    "scheduler_delete": "SchedulerDelete",
+}
+
+# ACP ``kind`` field when ``x.ai/tool`` is missing (backend WebSearch etc.).
+_GROK_KIND_MAP = {
+    "search": "WebSearch",
+    "fetch": "WebFetch",
+    "edit": "Edit",
+    "read": "Read",
+    "execute": "Bash",
+    "think": "Thinking",
 }
 
 
@@ -215,6 +236,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
     current_model = ""
     api_duration_ms = 0
     call_id_to_name: dict[str, str] = {}
+    in_user_run = False  # coalesce consecutive user chunks into one message
 
     for obj in iter_updates(path):
         ts = parse_timestamp_ms(obj.get("timestamp"))
@@ -225,6 +247,8 @@ def aggregate_usage(path: Path) -> TokenUsage:
         meta = _meta_of(obj)
         update = _update_of(obj)
         su = update.get("sessionUpdate")
+        if su != "user_message_chunk":
+            in_user_run = False  # any other update ends the user-chunk run
 
         if su == "turn_completed":
             api_duration_ms += _add_turn_usage(u, update.get("usage"), current_model)
@@ -233,8 +257,13 @@ def aggregate_usage(path: Path) -> TokenUsage:
         if su == "user_message_chunk":
             text = _chunk_text(update)
             if text and text.strip():
-                turn_idx += 1
-                u.user_msgs += 1
+                # One user message may arrive as several chunks (and grok build
+                # occasionally re-emits a chunk); a run of consecutive user
+                # chunks is ONE message — same coalescing as read_conversation.
+                if not in_user_run:
+                    turn_idx += 1
+                    u.user_msgs += 1
+                in_user_run = True
                 mid = meta.get("modelId")
                 if isinstance(mid, str) and mid:
                     current_model = pricing.normalize(mid)
@@ -245,10 +274,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
             continue
 
         if su == "tool_call":
-            tool_meta = update.get("_meta", {})
-            xt = tool_meta.get("x.ai/tool") if isinstance(tool_meta, dict) else None
-            name = xt.get("name") if isinstance(xt, dict) else None
-            canonical = _classify_grok_tool(name)
+            canonical = _resolve_grok_tool_name(update)
             raw_input = update.get("rawInput")
             u.tool_calls[canonical] = u.tool_calls.get(canonical, 0) + 1
             u.tool_ops.append(ToolOp(turn_idx, canonical, _path_hint(raw_input)))
@@ -392,20 +418,23 @@ def read_conversation(path: Path) -> list[dict]:
     return convo
 
 
-def _loc_scan(path: Path):
+def _loc_scan(
+    path: Path,
+    *,
+    cwd: str | Path | None = None,
+    disk_prior: bool = False,
+):
     """Single pass over updates returning ``(SessionLoc, has_signal)``.
 
     ``has_signal`` is True if any parseable ``search_replace``/``write`` edit
-    exists (independent of code-file filtering, matching Codex's
-    ``has_loc_signal``). Combining the LOC tally and the signal check into one
-    scan avoids walking the file twice — the analyze loop needs both.
+    exists (independent of code-file filtering). LOC is replayed through the
+    same ``_LocAccumulator`` as Claude so self-rework (churn) and high-churn
+    files match Edit/Write semantics — not a permanent rework_deleted=0 stub.
     """
-    from tcer.core.loc import SessionLoc, _is_code, _is_doc_file, _is_test_file
+    from tcer.core.loc import SessionLoc, _LocAccumulator, _is_code
 
-    added = deleted = unseen = 0
+    acc = _LocAccumulator(cwd=cwd, disk_prior=disk_prior)
     has_signal = False
-    file_edit_counts: dict[str, int] = {}
-    test_added = test_deleted = doc_added = doc_deleted = 0
 
     for obj in iter_updates(path):
         update = _update_of(obj)
@@ -420,56 +449,38 @@ def _loc_scan(path: Path):
 
         if name == "search_replace":
             fp = _first_str(raw_input.get("file_path")) or ""
+            if not fp:
+                continue
+            # Signal even for non-code paths (has_loc_signal); LOC filters inside.
+            has_signal = True
             if not _is_code(fp):
                 continue
-            has_signal = True
-            a = _nlines(raw_input.get("new_string"))
-            d = _nlines(raw_input.get("old_string"))
-            added += a
-            deleted += d
-            file_edit_counts[fp] = file_edit_counts.get(fp, 0) + 1
-            if _is_test_file(fp):
-                test_added += a
-                test_deleted += d
-            elif _is_doc_file(fp):
-                doc_added += a
-                doc_deleted += d
+            acc.on_tool_use("Edit", {
+                "file_path": fp,
+                "old_string": raw_input.get("old_string"),
+                "new_string": raw_input.get("new_string"),
+            })
         elif name == "write":
-            # Whole-file write — structurally like Claude's Write. The prior
-            # size is unknown (per-session state), so count content as added
-            # and flag the F1 exposure via unseen_writes.
             fp = _first_str(raw_input.get("file_path")) or ""
-            if not _is_code(fp):
+            if not fp:
                 continue
             has_signal = True
+            if not _is_code(fp):
+                continue
             content = _first_str(raw_input.get("content"), raw_input.get("file_text"))
-            added += _nlines(content)
-            unseen += 1
-            file_edit_counts[fp] = file_edit_counts.get(fp, 0) + 1
-            if _is_test_file(fp):
-                test_added += _nlines(content)
-            elif _is_doc_file(fp):
-                doc_added += _nlines(content)
+            acc.on_tool_use("Write", {
+                "file_path": fp,
+                "content": content if content is not None else "",
+            })
 
-    sloc = SessionLoc(
-        added=added,
-        deleted=deleted,
-        unseen_writes=unseen,
-        rework_deleted=0,  # first cut matches Codex; search_replace makes this
-                           # computable later (self-rework via old/new deltas)
-        high_churn_files=sum(1 for c in file_edit_counts.values() if c >= 3),
-        test_added=test_added,
-        test_deleted=test_deleted,
-        doc_added=doc_added,
-        doc_deleted=doc_deleted,
-        file_edit_counts=file_edit_counts,
-    )
+    # has_signal may be True with only non-code paths → empty SessionLoc.
+    sloc = acc.finish() if has_signal else SessionLoc(added=0, deleted=0)
     return sloc, has_signal
 
 
-def session_loc_full(path: Path):
+def session_loc_full(path: Path, *, cwd: str | Path | None = None, disk_prior: bool = False):
     """Return LOC from parseable Grok ``search_replace``/``write`` calls only."""
-    return _loc_scan(path)[0]
+    return _loc_scan(path, cwd=cwd, disk_prior=disk_prior)[0]
 
 
 def has_loc_signal(path: Path) -> bool:
@@ -491,28 +502,36 @@ def _add_turn_usage(u: TokenUsage, usage, default_model: str) -> int:
         u.empty_usage_skipped += 1
         return 0
     added_any = False
+    turn_input = 0
     model_usage = usage.get("modelUsage")
     if isinstance(model_usage, dict) and model_usage:
         for model, mu in model_usage.items():
             if isinstance(mu, dict):
                 key = pricing.normalize(model) if isinstance(model, str) and model else default_model
-                if _bucket_add(u, mu, key):
+                added, tin = _bucket_add(u, mu, key)
+                if added:
                     added_any = True
+                    turn_input += tin
     else:
-        if _bucket_add(u, usage, default_model):
+        added, tin = _bucket_add(u, usage, default_model)
+        if added:
             added_any = True
+            turn_input += tin
     if added_any:
         u.assistant_msgs += 1
+        if turn_input > 0:
+            u.peak_input_tokens = max(u.peak_input_tokens, turn_input)
     else:
         u.empty_usage_skipped += 1
     return _as_int(usage.get("apiDurationMs"))
 
 
-def _bucket_add(u: TokenUsage, mu: dict, model: str) -> bool:
-    """Add one model's token counts to ``u``; return False if all-zero.
+def _bucket_add(u: TokenUsage, mu: dict, model: str) -> tuple[bool, int]:
+    """Add one model's token counts to ``u``.
 
-    Grok splits cached input out as ``cachedReadTokens``; the non-cached input
-    is ``inputTokens - cachedReadTokens`` (matches Claude/Codex semantics).
+    Returns ``(added, turn_input)`` where *turn_input* is non-cached + cache-read
+    for peak window tracking. Grok splits cached input out as
+    ``cachedReadTokens``; non-cached input is ``inputTokens - cachedReadTokens``.
     """
     cached = _as_int(mu.get("cachedReadTokens"))
     raw_input = _as_int(mu.get("inputTokens"))
@@ -521,7 +540,11 @@ def _bucket_add(u: TokenUsage, mu: dict, model: str) -> bool:
     o = _as_int(mu.get("outputTokens"))
     reasoning = _as_int(mu.get("reasoningTokens"))
     if i + cr + o == 0:
-        return False
+        # Still fold reasoning tokens (billable) even when the visible
+        # counters are zero, so an error turn with reasoning-only usage
+        # is not silently dropped.
+        u.reasoning_output_tokens += reasoning
+        return False, 0
     u.input_tokens += i
     u.cache_read_input_tokens += cr
     u.output_tokens += o
@@ -529,13 +552,62 @@ def _bucket_add(u: TokenUsage, mu: dict, model: str) -> bool:
     if model:
         u.models.add(model)
     u.bucket(model or "").add(i, 0, cr, o)
-    return True
+    return True, i + cr
+
+
+def _resolve_grok_tool_name(update: dict) -> str:
+    """Map a ``tool_call`` update to a TCER-canonical tool name.
+
+    Prefer ``_meta["x.ai/tool"].name``; fall back to ``rawInput.variant``,
+    ACP ``kind``, then title heuristics. Backend WebSearch often has no
+    ``x.ai/tool`` block — only ``kind=search`` + ``rawInput.variant=WebSearch``.
+    """
+    tool_meta = update.get("_meta", {})
+    xt = tool_meta.get("x.ai/tool") if isinstance(tool_meta, dict) else None
+    name = xt.get("name") if isinstance(xt, dict) else None
+    if isinstance(name, str) and name.strip():
+        return _classify_grok_tool(name)
+
+    raw_input = update.get("rawInput")
+    if isinstance(raw_input, dict):
+        variant = raw_input.get("variant") or raw_input.get("name")
+        if isinstance(variant, str) and variant.strip():
+            return _classify_grok_tool(variant)
+
+    kind = update.get("kind")
+    if isinstance(kind, str) and kind.strip():
+        mapped = _GROK_KIND_MAP.get(kind.strip().lower())
+        if mapped:
+            return mapped
+
+    title = update.get("title")
+    if isinstance(title, str):
+        t = title.strip().lower()
+        if t.startswith("web search"):
+            return "WebSearch"
+        if t.startswith("web fetch") or t.startswith("fetch "):
+            return "WebFetch"
+
+    return "Tool"
 
 
 def _classify_grok_tool(name) -> str:
     if not isinstance(name, str) or not name:
         return "Tool"
-    return _GROK_TOOL_MAP.get(name, name)
+    if name in _GROK_TOOL_MAP:
+        return _GROK_TOOL_MAP[name]
+    # Case-insensitive fallback (e.g. ``Grep`` / ``GREP`` already canonical).
+    low = name.lower()
+    if low in _GROK_TOOL_MAP:
+        return _GROK_TOOL_MAP[low]
+    # Identity for already-canonical TCER names (Read/Edit/…).
+    for canon in (
+        "Read", "Edit", "Write", "Grep", "Glob", "Bash", "Task",
+        "WebSearch", "WebFetch", "TodoWrite",
+    ):
+        if name == canon or low == canon.lower():
+            return canon
+    return name
 
 
 def _path_hint(raw_input) -> str:
@@ -569,11 +641,6 @@ def _chunk_text(update: dict) -> str:
                     parts.append(inner["text"])
         return "\n".join(parts)
     return ""
-
-
-def _nlines(s) -> int:
-    """Line count of a string (0 for empty / non-string). Mirrors ``loc._nlines``."""
-    return len(s.splitlines()) if isinstance(s, str) else 0
 
 
 def _as_int(v) -> int:

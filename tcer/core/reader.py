@@ -36,16 +36,59 @@ def discover_jsonl(project_hash: str | None = None) -> list[Path]:
     Searches every Claude config root (see :func:`paths.claude_config_dirs`) so a
     project hash present in multiple custom profiles (e.g. ``.claude`` and
     ``.zclaude``) yields the union of its session files across roots.
+
+    On Windows, also unions folders whose names match *project_hash* case-
+    insensitively (``C--GitHub-X`` vs ``c--GitHub-X`` drive-letter variants).
     """
+    import sys
+
+    from tcer.core.paths import project_hash_key
+
     files: list[Path] = []
     for root in claude_config_dirs():
-        base = root / "projects"
-        if project_hash:
-            base = base / project_hash
-        if not base.is_dir():
+        projs = root / "projects"
+        if not projs.is_dir():
             continue
-        files.extend(base.rglob("*.jsonl"))
-    return sorted(files)
+        if project_hash:
+            targets: list[Path] = []
+            exact = projs / project_hash
+            if exact.is_dir():
+                targets.append(exact)
+            if sys.platform == "win32":
+                want = project_hash_key(project_hash)
+                try:
+                    for d in projs.iterdir():
+                        if (
+                            d.is_dir()
+                            and project_hash_key(d.name) == want
+                            and d not in targets
+                        ):
+                            targets.append(d)
+                except OSError:
+                    pass
+            for base in targets:
+                try:
+                    files.extend(base.rglob("*.jsonl"))
+                except OSError:
+                    continue
+        else:
+            try:
+                files.extend(projs.rglob("*.jsonl"))
+            except OSError:
+                continue
+    # Dedupe by resolved path (same file via two casings is rare but possible).
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for f in sorted(files):
+        try:
+            rp = f.resolve()
+        except OSError:
+            rp = f
+        if rp in seen:
+            continue
+        seen.add(rp)
+        out.append(f)
+    return out
 
 
 def is_subagent(path: Path) -> bool:
@@ -134,8 +177,63 @@ def iter_messages(path: Path):
             yield obj
 
 
-def aggregate_usage(path: Path) -> TokenUsage:
+def aggregate_usage(
+    path: Path,
+    *,
+    include_user_texts: bool = True,
+) -> TokenUsage:
     """Sum token usage across all assistant turns in one session file.
+
+    See :func:`scan_session` for dedup / empty-usage / tool-call semantics.
+    ``include_user_texts`` defaults True for backward-compatible callers; the
+    analyze path uses False and loads bodies via :func:`read_user_messages`.
+    """
+    u, _ = scan_session(
+        path, with_loc=False, include_user_texts=include_user_texts,
+    )
+    return u
+
+
+def read_user_messages(path: Path) -> list[str]:
+    """Extract Claude user-message text on demand (popup / upload).
+
+    Mirrors Codex privacy boundary: analysis keeps only ``user_msgs`` counts;
+    full bodies are read when the user opens the popup.
+    """
+    messages: list[str] = []
+    for obj in iter_messages(path):
+        msg = obj.get("message")
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        is_real_user = False
+        if isinstance(content, str) and content.strip():
+            is_real_user = True
+        elif isinstance(content, list):
+            is_real_user = any(
+                isinstance(it, dict) and it.get("type") == "text" for it in content
+            )
+        if not is_real_user:
+            continue
+        txt = extract_text(content).strip()
+        if txt:
+            txt = _strip_tags(txt)
+        if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
+            messages.append(txt[:500])
+    return messages
+
+
+def scan_session(
+    path: Path,
+    *,
+    with_loc: bool = True,
+    include_user_texts: bool = True,
+    cwd: str | Path | None = None,
+    disk_prior: bool = False,
+    cancel_check=None,
+    use_cache: bool = True,
+) -> tuple[TokenUsage, "SessionLoc | None"]:
+    """Single-pass scan: token usage and (optionally) git-free LOC.
 
     **Dedup by ``message.id``**: one assistant API response is often split across
     several JSONL lines — one per content block (thinking / text / each tool_use) —
@@ -158,20 +256,79 @@ def aggregate_usage(path: Path) -> TokenUsage:
 
     **Tool calls**: counts each tool_use block by name (NOT deduped by message.id,
     since multiple tool_use blocks in one response are genuine separate calls).
+
+    When ``with_loc=True``, Write/Edit/MultiEdit/NotebookEdit are also replayed
+    into a :class:`~tcer.core.loc.SessionLoc` in the same pass (avoids a second
+    full JSONL walk). ``cancel_check`` if set is a zero-arg callable that raises
+    when the caller wants to abort mid-file (e.g. GUI generation cancel).
+
+    ``include_user_texts``: when False, only ``user_msgs`` is counted (cheaper /
+    smaller reports); use :func:`read_user_messages` for bodies.
+
+    ``cwd`` / ``disk_prior``: when computing LOC, seed first Write from on-disk
+    line counts (F1 mitigation); relative paths need ``cwd``.
+
+    ``use_cache``: process-level mtime/size cache (see ``file_cache``). Disabled
+    when ``cancel_check`` is set so a cancelled mid-scan never poisons the cache.
     """
+    from tcer.core import file_cache
+
+    # Cooperative cancel must not leave a partial result in the cache.
+    can_cache = use_cache and cancel_check is None
+    cwd_key = str(cwd) if cwd is not None else ""
+    extra = (
+        "scan_session",
+        bool(with_loc),
+        bool(include_user_texts),
+        bool(disk_prior),
+        cwd_key,
+    )
+
+    def _compute():
+        return _scan_session_uncached(
+            path,
+            with_loc=with_loc,
+            include_user_texts=include_user_texts,
+            cwd=cwd,
+            disk_prior=disk_prior,
+            cancel_check=cancel_check,
+        )
+
+    if can_cache:
+        return file_cache.get_or_compute(path, extra, _compute)
+    return _compute()
+
+
+def _scan_session_uncached(
+    path: Path,
+    *,
+    with_loc: bool,
+    include_user_texts: bool,
+    cwd: str | Path | None,
+    disk_prior: bool,
+    cancel_check,
+) -> tuple[TokenUsage, "SessionLoc | None"]:
+    # Lazy import: loc imports reader at module level.
+    from tcer.core.loc import SessionLoc, _LocAccumulator
+
     u = TokenUsage()
+    loc_acc = (
+        _LocAccumulator(cwd=cwd, disk_prior=disk_prior) if with_loc else None
+    )
     seen: set[str] = set()
     call_id_to_name: dict[str, str] = {}  # tool_use_id → tool_name for error attribution
     turn_idx = 0  # next turn number to assign to a new response
     current_turn = 0  # turn number of the response whose lines we are currently reading
     for obj in iter_messages(path):
+        if cancel_check is not None:
+            cancel_check()
         msg = obj.get("message")
         if not isinstance(msg, dict):
             continue
 
         role = msg.get("role")
 
-        # Count user messages and extract text
+        # Count user messages and (optionally) extract text
         if role == "user":
             content = msg.get("content")
             # Only count real user messages (with text), not tool_result returns.
@@ -187,12 +344,12 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 )
             if is_real_user:
                 u.user_msgs += 1
-                # Extract user message text for popup display
-                txt = extract_text(content).strip()
-                if txt:
-                    txt = _strip_tags(txt)
-                if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
-                    u.user_message_texts.append(txt[:500])
+                if include_user_texts:
+                    txt = extract_text(content).strip()
+                    if txt:
+                        txt = _strip_tags(txt)
+                    if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
+                        u.user_message_texts.append(txt[:500])
             # Count tool_result errors (from ALL user-role messages)
             if isinstance(content, list):
                 for item in content:
@@ -252,6 +409,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
                     u.cache_creation_input_tokens += cw
                     u.cache_read_input_tokens += cr
                     u.output_tokens += o
+                    u.peak_input_tokens = max(u.peak_input_tokens, i + cw + cr)
                 model = msg.get("model")
                 # Skip synthetic stubs (ccswitch 429 errors, "No response requested")
                 # — they use the same message.model field but are not real model turns.
@@ -285,11 +443,14 @@ def aggregate_usage(path: Path) -> TokenUsage:
                                 fp = inp.get("file_path") or inp.get("notebook_path")
                             else:
                                 fp = None
+                                inp = {}
                             u.tool_ops.append(ToolOp(
                                 turn=current_turn,
                                 tool=tool_name,
                                 path=fp if isinstance(fp, str) else "",
                             ))
+                            if loc_acc is not None and isinstance(inp, dict):
+                                loc_acc.on_tool_use(tool_name, inp)
                     elif item_type == "thinking":
                         u.thinking_count += 1
 
@@ -297,7 +458,8 @@ def aggregate_usage(path: Path) -> TokenUsage:
     if u.started_at and u.ended_at:
         u.session_duration_ms = u.ended_at - u.started_at
 
-    return u
+    sloc: SessionLoc | None = loc_acc.finish() if loc_acc is not None else None
+    return u, sloc
 
 
 def read_conversation(path: Path) -> list[dict]:

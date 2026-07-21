@@ -107,12 +107,15 @@ class FilterBar:
 
         # -- Filters --
         tk.Label(bar, text="任务类型:", bg=theme.BG, fg=theme.FG).pack(side="left")
-        self.task_var = tk.StringVar(value="代码创作")
+        # Display names from config SSOT (+「自动」per-session inference).
         self._task_display_names = {
-            "code_creation": "代码创作",
-            "code_maintenance": "代码维护",
-            "non_coding": "非编码",
+            metrics.AUTO_TASK_TYPE: "自动",
+            **{k: (v.get("name") or k) for k, v in metrics.TASK_CATEGORIES.items()},
         }
+        default_task = metrics.DEFAULT_TASK_TYPE
+        default_label = self._task_display_names.get(
+            default_task, next(iter(self._task_display_names.values()), "代码创作"))
+        self.task_var = tk.StringVar(value=default_label)
         self._task_reverse_map = {v: k for k, v in self._task_display_names.items()}
         task_cb = ttk.Combobox(bar, textvariable=self.task_var, width=10,
                                values=list(self._task_display_names.values()), state="readonly")
@@ -254,10 +257,14 @@ class FilterBar:
 
     def _generate_task_type_tooltip(self) -> str:
         """生成任务类型的简要说明"""
-        lines = []
+        lines = [
+            "【自动】按会话工具/产出信号推断类型（创作/维护/非编码），NTCER 更公平。",
+        ]
         for cat_key, cat_info in metrics.TASK_CATEGORIES.items():
             display_name = self._task_display_names.get(cat_key, cat_key)
-            lines.append(f"【{display_name}】系数 {cat_info['ttaf']}，TCER {cat_info['typical_tcer_range']}")
+            lines.append(
+                f"【{display_name}】系数 {cat_info['ttaf']}，TCER {cat_info['typical_tcer_range']}"
+            )
         return "\n".join(lines)
 
     def get_params(self) -> dict:
@@ -506,9 +513,8 @@ class SessionColumn:
             command=lambda: popups.ToolCallsPopup(
                 self.controller.root, report.usage, f" · {sid[:16]}…"),
         )
-        has_user_msgs = bool(report.usage.user_message_texts) or (
-            report.meta.source in ("codex", "opencode", "grok") and report.usage.user_msgs > 0
-        )
+        # All sources keep a count; bodies are lazy-loaded on popup open.
+        has_user_msgs = report.usage.user_msgs > 0
         menu.add_command(
             label=f"💬 查看用户消息（{report.usage.user_msgs} 条）",
             command=lambda: self._show_user_msgs(report),

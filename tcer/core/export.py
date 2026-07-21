@@ -73,6 +73,28 @@ def ctei_decompose_avg(reports: list[SessionReport]) -> dict[str, float] | None:
     return {k: sum(d[k] for d in all_factors) / n for k in keys}
 
 
+def _ctei_bar_scale(values: list[float]) -> float:
+    """Bar-length scale that resists a single extreme CTEI collapsing peers.
+
+    Live projects can have one session with CTEI ≫ 100 (very low CPE) while
+    the rest sit near 0–20. Scaling bars to max makes every peer a single
+    block. When the max is far above the bulk (P90), use P90 as the scale;
+    outliers still print their true CTEI and fill the bar width.
+    """
+    if not values:
+        return 1.0
+    top = max(values)
+    if top <= 0:
+        return 1.0
+    if len(values) < 5:
+        return top
+    ordered = sorted(values)
+    p90 = ordered[max(0, min(len(ordered) - 1, int(0.90 * (len(ordered) - 1))))]
+    if top > max(5.0, p90 * 4):
+        return max(p90, 1.0)
+    return top
+
+
 def text_ctei_chart(reports: list[SessionReport], width: int = 40) -> str:
     """Plain-ASCII CTEI bar chart (no ANSI) for embedding in Markdown exports."""
     ranking = ctei_ranking(reports)
@@ -81,15 +103,18 @@ def text_ctei_chart(reports: list[SessionReport], width: int = 40) -> str:
             "CTEI chart: no per-session score available\n"
             "  (sessions produced no measurable net code, or LOC is disabled)"
         )
-    top = max(c for _, c, _ in ranking)
-    scale = top if top > 0 else 1.0
+    scores = [c for _, c, _ in ranking]
+    top = max(scores)
+    scale = _ctei_bar_scale(scores)
     label_w = max(len(label) for label, _, _ in ranking)
     out = [
         "CTEI per session  (优秀>2.0  良好1–2  中等0.5–1  低效0.1–0.5  极端低效<0.1)",
-        "-" * (label_w + width + 20),
     ]
+    if scale + 1e-12 < top:
+        out.append(f"  (bar scale capped at {scale:.3f}; max CTEI={top:.3f} — values unchanged)")
+    out.append("-" * (label_w + width + 20))
     for label, ctei, grade in ranking:
-        n = max(1, round(ctei / scale * width))
+        n = max(1, min(width, round(ctei / scale * width))) if scale else 1
         bar = "█" * n
         pad = " " * (width - n)
         out.append(f"{label.ljust(label_w)}  {bar}{pad}  {ctei:6.3f}  {grade}")
@@ -174,6 +199,7 @@ def report_row_dict(r: SessionReport) -> dict:
         "reasoning_output_tokens": u.reasoning_output_tokens,
         "reasoning_output_ratio": r.reasoning_output_ratio,
         "model_context_window": u.model_context_window,
+        "peak_input_tokens": u.peak_input_tokens,
         "context_window_used_ratio": r.context_window_used_ratio,
         "time_to_first_token_sec": r.time_to_first_token_sec,
         "task_count": u.task_count,
@@ -222,7 +248,7 @@ _CSV_FIELDS = [
     "cli_version", "model_provider", "thread_source", "git_branch", "git_commit",
     "approval_policy", "sandbox_policy", "collaboration_mode", "reasoning_effort",
     "thinking_count", "reasoning_output_tokens", "reasoning_output_ratio",
-    "model_context_window", "context_window_used_ratio", "time_to_first_token_sec",
+    "model_context_window", "peak_input_tokens", "context_window_used_ratio", "time_to_first_token_sec",
     "task_count", "completed_task_count", "aborted_task_count", "task_completion_rate",
     "compaction_count", "web_search_count", "image_count", "local_image_count",
     "patch_apply_count", "patch_apply_success_count", "patch_apply_success_rate",
