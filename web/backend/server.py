@@ -158,15 +158,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "invalid credentials"}, 401)
 
     def _h_upload(self) -> None:
-        user = self._auth_user()
-        if not user:
-            self._send_json({"error": "unauthorized"}, 401)
-            return
+        # Read the body first so we can decide auth from the payload: anonymous
+        # uploads are accepted WITHOUT a bearer token (no account/password), so
+        # the client never has to call /api/login. Non-anonymous uploads still
+        # require a valid token.
         data = self._read_json()
         if data is None:
             self._send_json({"error": "invalid or too-large body"}, 400)
             return
+        user = self._auth_user()
         anonymous = bool(data.get("anonymous"))
+        if not user and not anonymous:
+            self._send_json({"error": "unauthorized"}, 401)
+            return
         # For anonymous uploads the client sends a stable pseudonym in ``user``
         # (e.g. "匿名-ab12cd34") so one user's anonymized rows still group under a
         # single person instead of collapsing into 未标注. Honor whatever the
@@ -182,7 +186,7 @@ class Handler(BaseHTTPRequestHandler):
         generated_at = data.get("generated_at")
         try:
             n = db.insert_records(
-                uploaded_by=user, person=person, project=project,
+                uploaded_by=user or "anonymous", person=person, project=project,
                 aggregate=aggregate, sessions=sessions,
                 generated_at=int(generated_at) if generated_at else None,
             )
