@@ -974,48 +974,97 @@ class UploadDialog:
     network itself. ``projects`` is a list of ``(key, display)`` tuples.
     """
 
+    # 自动上传间隔预选：显示串 ↔ 分钟数。
+    _INTERVALS = [("5 分钟", 5), ("10 分钟", 10), ("15 分钟", 15),
+                  ("30 分钟", 30), ("1 小时", 60)]
+    _MIN_BY_LABEL = {l: m for l, m in _INTERVALS}
+    _LABEL_BY_MIN = {m: l for l, m in _INTERVALS}
+
     def __init__(self, parent, *, prefs: dict, projects: list[tuple[str, str]],
                  default_project: str | None, on_upload, on_save_prefs) -> None:
         self._on_upload = on_upload
         self._on_save_prefs = on_save_prefs
         self._projects = projects
 
-        win = _new_window(parent, "上传到 TCER Web", "480x680")
+        win = _new_window(parent, "上传到 TCER Web", "480x720")
         self._win = win
         tk.Label(win, text="上传到 TCER Web", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
 
         sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 4))
+        self._sf = sf  # 供 _fit_window 读取表单实际高度
+        # ScrollFrame 内部已把 canvas 以 side="left" pack；此处必须先 forget 再以 side="top"
+        # 重排——否则 canvas 留在左侧，后续状态行/按钮会被挤到它右边（左右布局 bug）。
+        sf.canvas.pack_forget()
+        sf.canvas.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 4))
         inner = sf.inner
 
-        # -- Server + credentials card --
-        card1 = self._card(inner, "服务器与账号")
-        self.server_var = tk.StringVar(value=prefs.get("server_url", ""))
+        # -- 服务器卡 --
+        card1 = self._card(inner, "服务器")
+        self.server_var = tk.StringVar(
+            value=prefs.get("server_url") or "http://127.0.0.1:8899")
         self._entry(card1, "服务器地址", self.server_var)
-        self.user_var = tk.StringVar(value=prefs.get("username", ""))
-        self._entry(card1, "账号", self.user_var)
-        self.pwd_var = tk.StringVar(value=prefs.get("password", ""))
-        self._entry(card1, "密码", self.pwd_var, show="*")
-        self.remember_var = tk.BooleanVar(value=bool(prefs.get("remember_password")))
-        self._check(card1, "记住密码（明文 base64 混淆存储，非加密）", self.remember_var)
 
-        # -- Options card --
+        # -- 上传选项卡 --
         card2 = self._card(inner, "上传选项")
         self.anon_var = tk.BooleanVar(value=bool(prefs.get("anonymous")))
-        self._check(card2, "匿名上传（按账号生成稳定的匿名代号，便于 web 端归并）",
-                    self.anon_var)
+        # 匿名上传：勾选后无需账号密码直接上传（后端接受无 token 的匿名请求）。
+        tk.Checkbutton(
+            card2, text="匿名上传（无需账号密码，生成稳定匿名代号便于 web 端归并）",
+            variable=self.anon_var, bg=theme.PANEL, fg=theme.FG,
+            selectcolor="#1e1e1e", activebackground=theme.PANEL,
+            activeforeground=theme.FG, font=theme.FONT_UI, anchor="w",
+            command=self._apply_anon_state).pack(anchor="w", pady=(2, 0))
+        self.user_var = tk.StringVar(value=prefs.get("username", ""))
+        self.pwd_var = tk.StringVar(value=prefs.get("password", ""))
+        self.remember_var = tk.BooleanVar(value=bool(prefs.get("remember_password")))
 
-        # -- Project multi-select listbox --
-        tk.Label(card2, text="选择项目（可多选，Ctrl/Shift 点选）",
-                 bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI,
-                 anchor="w").pack(anchor="w", pady=(6, 0))
+        # 凭据行（账号 + 密码 一行内并排）——非匿名时才显示。先构造好，再插到「会话详情」
+        # 之前，这样 pack_forget 后重新 pack 仍保持「匿名→账号密码→记住密码→会话详情」顺序。
+        cred_row = tk.Frame(card2, bg=theme.PANEL)
+        self._cred_row = cred_row
+        tk.Label(cred_row, text="账号", bg=theme.PANEL, fg=theme.FG,
+                 font=theme.FONT_UI).pack(side="left")
+        tk.Entry(cred_row, textvariable=self.user_var, width=14, bg="#1e1e1e",
+                 fg=theme.FG, insertbackground=theme.FG, relief="flat",
+                 highlightthickness=1, highlightbackground="#3e3e42"
+                 ).pack(side="left", padx=(4, 14))
+        tk.Label(cred_row, text="密码", bg=theme.PANEL, fg=theme.FG,
+                 font=theme.FONT_UI).pack(side="left")
+        tk.Entry(cred_row, textvariable=self.pwd_var, width=14, show="*",
+                 bg="#1e1e1e", fg=theme.FG, insertbackground=theme.FG, relief="flat",
+                 highlightthickness=1, highlightbackground="#3e3e42"
+                 ).pack(side="left", padx=4)
+        # 记住密码（与凭据行同进同出）。
+        self._remember_chk = tk.Checkbutton(
+            card2, text="记住密码（明文 base64 混淆存储，非加密）",
+            variable=self.remember_var, bg=theme.PANEL, fg=theme.FG,
+            selectcolor="#1e1e1e", activebackground=theme.PANEL,
+            activeforeground=theme.FG, font=theme.FONT_UI, anchor="w")
+
+        # 会话详情：每个会话始终作为独立指标行上传（后端按 session-id 去重）；勾选后额外
+        # 附带该会话的逐条对话内容，否则仅上传指标。先 pack 作为凭据行的锚点。
+        self.all_sessions_var = tk.BooleanVar(
+            value=bool(prefs.get("all_sessions") or prefs.get("detail")))
+        self._all_sessions_chk = tk.Checkbutton(
+            card2, text="附带会话详情（默认各会话仅上传指标；后端按 session-id 去重）",
+            variable=self.all_sessions_var, bg=theme.PANEL, fg=theme.FG,
+            selectcolor="#1e1e1e", activebackground=theme.PANEL,
+            activeforeground=theme.FG, font=theme.FONT_UI, anchor="w")
+        self._all_sessions_chk.pack(anchor="w", pady=(4, 0))
+        # 凭据行/记住密码插到「会话详情」之前，再按匿名状态决定显隐。
+        cred_row.pack(before=self._all_sessions_chk, fill="x", pady=(2, 0))
+        self._remember_chk.pack(before=self._all_sessions_chk, anchor="w", pady=(4, 0))
+        self._apply_anon_state()
+
+        # -- 项目选择卡（标题即提示，多选列表紧随其下） --
+        card3 = self._card(inner, "项目选择（可多选，Ctrl/Shift 点选）")
         self._proj_keys = [k for k, _ in projects]
         proj_displays = [d for _, d in projects]
-        lb_frame = tk.Frame(card2, bg=theme.PANEL)
-        lb_frame.pack(fill="x", pady=(2, 2))
+        lb_frame = tk.Frame(card3, bg=theme.PANEL)
+        lb_frame.pack(fill="x")
         self._proj_lb = tk.Listbox(
-            lb_frame, selectmode="extended", height=6, exportselection=False,
+            lb_frame, selectmode="extended", height=7, exportselection=False,
             bg="#1e1e1e", fg=theme.FG, relief="flat", highlightthickness=1,
             highlightbackground="#3e3e42", selectbackground=theme.ACCENT,
             selectforeground="#ffffff", font=theme.FONT_UI, activestyle="none")
@@ -1037,7 +1086,7 @@ class UploadDialog:
         if selected_idx:
             self._proj_lb.see(selected_idx[0])
 
-        sel_btn_row = tk.Frame(card2, bg=theme.PANEL)
+        sel_btn_row = tk.Frame(card3, bg=theme.PANEL)
         sel_btn_row.pack(anchor="w", pady=(0, 4))
         tk.Button(sel_btn_row, text="全选",
                   command=lambda: self._proj_lb.selection_set(0, "end"),
@@ -1048,40 +1097,49 @@ class UploadDialog:
                   bg=theme.PANEL_2, fg=theme.FG, relief="flat", padx=8,
                   font=theme.FONT_UI_SMALL).pack(side="left")
 
-        # 会话对话内容：每个会话始终作为独立指标行上传（后端按 session-id 去重）；
-        # 勾选后额外附带该会话的逐条用户对话内容，否则仅上传指标。
-        self.all_sessions_var = tk.BooleanVar(
-            value=bool(prefs.get("all_sessions") or prefs.get("detail")))
-        self._check(card2, "附带会话对话内容（默认各会话仅上传指标；后端按 session-id 去重）",
-                    self.all_sessions_var)
-
-        # -- Auto-upload card --
-        card3 = self._card(inner, "自动上传")
-        self.auto_var = tk.BooleanVar(value=bool(prefs.get("auto_upload")))
-        self._check(card3, "启用后台定时上传", self.auto_var)
-        int_row = tk.Frame(card3, bg=theme.PANEL)
-        int_row.pack(anchor="w", pady=(2, 0))
-        tk.Label(int_row, text="间隔（分钟）", bg=theme.PANEL, fg=theme.MUTED,
-                 font=theme.FONT_UI).pack(side="left")
-        self.interval_var = tk.StringVar(value=str(prefs.get("interval_min", 30)))
-        tk.Entry(int_row, textvariable=self.interval_var, width=6, bg="#1e1e1e",
-                 fg=theme.FG, insertbackground=theme.FG, relief="flat",
-                 highlightthickness=1, highlightbackground="#3e3e42").pack(side="left", padx=6)
-
-        # -- Status line --
+        # -- 状态行 --
         self._status = tk.Label(win, text="", bg=theme.BG, fg=theme.MUTED,
                                 font=theme.FONT_UI, wraplength=440, justify="left")
         self._status.pack(fill="x", padx=12, pady=(2, 0))
 
-        # -- Buttons --
-        btn_bar = tk.Frame(win, bg=theme.BG)
-        btn_bar.pack(pady=8)
-        self._upload_btn = tk.Button(btn_bar, text="完成上传", command=self._do_upload,
-                                     bg=theme.ACCENT, fg=theme.FG, relief="flat",
-                                     padx=16, pady=4)
-        self._upload_btn.pack(side="left", padx=4)
-        tk.Button(btn_bar, text="关闭", command=win.destroy, bg=theme.PANEL,
-                  fg=theme.FG, relief="flat", padx=16, pady=4).pack(side="left", padx=4)
+        # -- 底部操作区（纵向：自动上传开关在上、立即上传在下） --
+        action = tk.Frame(win, bg=theme.BG)
+        action.pack(fill="x", padx=16, pady=(4, 8))
+
+        # 自动上传 = 复选框 + 间隔下拉，勾选即生效（落盘并重排后台定时器）。
+        auto_row = tk.Frame(action, bg=theme.BG)
+        auto_row.pack(fill="x", pady=(0, 6))
+        self.auto_var = tk.BooleanVar(value=bool(prefs.get("auto_upload")))
+        tk.Checkbutton(auto_row, text="自动上传", variable=self.auto_var,
+                       bg=theme.BG, fg=theme.FG, selectcolor="#1e1e1e",
+                       activebackground=theme.BG, activeforeground=theme.FG,
+                       font=theme.FONT_UI, command=self._on_auto_toggle
+                       ).pack(side="left")
+        tk.Label(auto_row, text="间隔", bg=theme.BG, fg=theme.MUTED,
+                 font=theme.FONT_UI).pack(side="left", padx=(12, 4))
+        init_min = prefs.get("interval_min", 30)
+        try:
+            init_min = int(init_min)
+        except (TypeError, ValueError):
+            init_min = 30
+        self.interval_cb = ttk.Combobox(
+            auto_row, state="readonly", width=8,
+            values=[l for l, _ in self._INTERVALS])
+        self.interval_cb.set(self._LABEL_BY_MIN.get(init_min, "30 分钟"))
+        self.interval_cb.pack(side="left")
+        self.interval_cb.bind("<<ComboboxSelected>>",
+                              lambda e: self._on_interval_change())
+
+        self._upload_btn = tk.Button(
+            action, text="立即上传", command=self._do_upload, bg=theme.ACCENT,
+            fg="#ffffff", relief="flat", padx=16, pady=6, font=theme.FONT_UI_BOLD,
+            cursor="hand2")
+        self._upload_btn.pack(fill="x")
+
+        # 已去掉显式关闭按钮；保留 Esc 退出，并用标题栏 × 关闭。
+        win.bind("<Escape>", lambda e: win.destroy())
+        # 按表单实际高度收紧窗口，消除底部留白。
+        self._fit_window()
 
     # -- small builders --
     def _card(self, inner, title: str) -> tk.Frame:
@@ -1101,20 +1159,58 @@ class UploadDialog:
                  insertbackground=theme.FG, relief="flat", highlightthickness=1,
                  highlightbackground="#3e3e42", show=show).pack(anchor="w")
 
-    def _check(self, card, label: str, var) -> None:
-        tk.Checkbutton(card, text=label, variable=var, bg=theme.PANEL, fg=theme.FG,
-                       selectcolor="#1e1e1e", activebackground=theme.PANEL,
-                       activeforeground=theme.FG, font=theme.FONT_UI,
-                       anchor="w").pack(anchor="w", pady=(4, 0))
+    def _fit_window(self) -> None:
+        """按表单实际高度收紧窗口，消除底部留白。
+
+        三张卡的高度随项目数稳定（列表框固定 7 行），随匿名开关小幅变化；按当前内容
+        自然高度 + 标题/状态/操作区固有高度定窗口高，使滚动 canvas 恰好等高内容——
+        既无留白，内容偏多时仍可滚动。封顶 760 防过高。
+        """
+        win = self._win
+        win.update_idletasks()
+        canv = self._sf.canvas
+        inner_h = self._sf.inner.winfo_reqheight()
+        top = canv.winfo_y()                       # 标题区 + canvas 上边距
+        status_h = self._status.winfo_reqheight() + 2
+        action_h = next((w.winfo_reqheight() for w in win.winfo_children()
+                         if isinstance(w, tk.Frame) and w is not canv), 0)
+        win_h = max(380, min(top + inner_h + status_h + action_h + 14, 760))
+        cur_h = win.winfo_height()
+        adj = (cur_h - win_h) // 2 if cur_h > 200 else 0
+        win.geometry(f"480x{int(win_h)}+{int(win.winfo_x())}+{int(win.winfo_y() + adj)}")
+
+    def _apply_anon_state(self) -> None:
+        """匿名勾选时隐藏账号/密码/记住密码；取消勾选时恢复（保持原顺序）。"""
+        if not self._cred_row.winfo_exists():
+            return
+        if self.anon_var.get():
+            self._cred_row.pack_forget()
+            self._remember_chk.pack_forget()
+        else:
+            self._cred_row.pack(before=self._all_sessions_chk, fill="x", pady=(2, 0))
+            self._remember_chk.pack(before=self._all_sessions_chk, anchor="w", pady=(4, 0))
+
+    def _on_auto_toggle(self) -> None:
+        """自动上传复选框：勾选/取消即落盘并重排后台定时器。"""
+        prefs = self._collect()
+        self._on_save_prefs(prefs)
+        if prefs["auto_upload"]:
+            self.set_status(f"已启用自动上传，每 {prefs['interval_min']} 分钟一次")
+        else:
+            self.set_status("已关闭自动上传")
+
+    def _on_interval_change(self) -> None:
+        """间隔下拉变更：仅当自动上传已启用时即时刷新定时器。"""
+        if self.auto_var.get():
+            prefs = self._collect()
+            self._on_save_prefs(prefs)
+            self.set_status(f"已更新自动上传间隔为 {prefs['interval_min']} 分钟")
 
     # -- prefs / status --
     def _collect(self) -> dict:
-        try:
-            interval = max(1, int(self.interval_var.get().strip() or "30"))
-        except ValueError:
-            interval = 30
         proj_keys = [self._proj_keys[i] for i in self._proj_lb.curselection()]
         all_sessions = bool(self.all_sessions_var.get())
+        interval = self._MIN_BY_LABEL.get(self.interval_cb.get(), 30)
         return {
             "server_url": self.server_var.get().strip(),
             "username": self.user_var.get().strip(),
@@ -1123,7 +1219,7 @@ class UploadDialog:
             "anonymous": bool(self.anon_var.get()),
             "last_projects": proj_keys,
             "all_sessions": all_sessions,
-            "detail": all_sessions,  # 全部会话 ⇒ 上传明细
+            "detail": all_sessions,  # 附带会话详情 ⇒ 上传明细
             "auto_upload": bool(self.auto_var.get()),
             "interval_min": interval,
         }
@@ -1135,8 +1231,11 @@ class UploadDialog:
 
     def _do_upload(self) -> None:
         prefs = self._collect()
-        if not prefs["server_url"] or not prefs["username"]:
-            self.set_status("请填写服务器地址与账号", error=True)
+        if not prefs["server_url"]:
+            self.set_status("请填写服务器地址", error=True)
+            return
+        if not prefs["anonymous"] and not prefs["username"]:
+            self.set_status("请填写账号，或勾选「匿名上传」", error=True)
             return
         if not prefs["last_projects"]:
             self.set_status("请至少选择一个项目", error=True)
