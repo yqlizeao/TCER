@@ -235,8 +235,14 @@ def login_and_upload(
     anonymous: bool,
     detail: bool,
 ) -> int:
-    """One-shot: login, build payload, upload. Returns inserted row count."""
-    token = login(server_url, username, password)
+    """One-shot: login (skipped for anonymous), build payload, upload.
+
+    Anonymous uploads need no credentials — the server accepts them without a
+    bearer token — so ``login`` is skipped and ``upload`` is called with
+    ``token=None``. Non-anonymous uploads exchange credentials first.
+    Returns inserted row count.
+    """
+    token = None if anonymous else login(server_url, username, password)
     payload = build_payload(
         aggregate=aggregate, reports=reports, n_sessions=n_sessions,
         project=project, user=user, anonymous=anonymous, detail=detail,
