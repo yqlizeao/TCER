@@ -665,15 +665,20 @@ class TcerGui:
         detail = bool(prefs.get("detail"))
         server_url = prefs["server_url"]
 
-        try:
-            token = upload_client.login(server_url, prefs["username"],
-                                        prefs.get("password", ""))
-        except upload_client.UploadError as e:
-            self._q.put(("upload", dialog, False, f"登录失败：{e}"))
-            return
-        except Exception as e:  # noqa: BLE001
-            self._q.put(("upload", dialog, False, f"登录出错：{e}"))
-            return
+        # Anonymous uploads skip login entirely — the server accepts them with no
+        # bearer token. Non-anonymous uploads still exchange credentials first.
+        if anonymous:
+            token = None
+        else:
+            try:
+                token = upload_client.login(server_url, prefs["username"],
+                                            prefs.get("password", ""))
+            except upload_client.UploadError as e:
+                self._q.put(("upload", dialog, False, f"登录失败：{e}"))
+                return
+            except Exception as e:  # noqa: BLE001
+                self._q.put(("upload", dialog, False, f"登录出错：{e}"))
+                return
 
         total_inserted = 0
         ok_projects = 0
@@ -722,8 +727,8 @@ class TcerGui:
         """Timer callback: silently upload remembered projects, then re-arm."""
         self._auto_upload_after = None
         prefs = self._upload_prefs
-        if (prefs.get("server_url") and prefs.get("username")
-                and prefs.get("last_projects")):
+        if (prefs.get("server_url") and prefs.get("last_projects")
+                and (prefs.get("anonymous") or prefs.get("username"))):
             self._start_upload(prefs, dialog=None)
         self._schedule_auto_upload()
 
