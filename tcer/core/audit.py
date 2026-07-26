@@ -335,6 +335,38 @@ def _append_metric_bound_checks(sa: SessionAudit, report) -> None:
                 f"peak={peak} window={report.usage.model_context_window}"
             ),
         ))
+    u = report.usage
+    # 1h 缓存写是 cache_creation 的子集（计价分档正确性前提）。
+    sa.checks.append(_truth(
+        "cache_write_1h_subset",
+        u.cache_write_1h_tokens <= u.cache_creation_input_tokens,
+        detail=f"1h={u.cache_write_1h_tokens} cw={u.cache_creation_input_tokens}",
+    ))
+    # 逐回合时间线与会话总量一致：Claude/Codex/Grok 的 turn_stats 与总量同源
+    # （逐响应/差分/逐 turn），求和必须相等；OpenCode 来自 step-finish 快照，
+    # 与 session 列独立，只作信息记录不判失败。
+    if u.turn_stats:
+        ts_total = sum(t.input_tokens + t.cache_write + t.cache_read
+                       + t.output_tokens for t in u.turn_stats)
+        strict = sa.source in ("claude", "codex", "grok")
+        sa.checks.append(_truth(
+            "turn_stats_match_total",
+            (ts_total == u.total) if strict else True,
+            detail=f"turn_stats_sum={ts_total:,} total={u.total:,}",
+            level="error" if strict else "info",
+        ))
+    # structuredPatch 独立差分 vs 回放 LOC 的偏差率（纯信息：两套语义本就不同，
+    # 回放计生成量、补丁计真实 diff；比值异常波动是 reader 回归的早期信号）。
+    if u.patch_diff_added and report.code_added:
+        sa.info["patch_vs_replay_added_ratio"] = round(
+            report.code_added / u.patch_diff_added, 3)
+    # 配额峰值占用应在 [0, 2]（>1 偶见于上报口径，>2 视为解析错误）。
+    if u.rate_limit_peak_used is not None:
+        sa.checks.append(_truth(
+            "rate_limit_peak_sane",
+            0.0 <= u.rate_limit_peak_used <= 2.0,
+            detail=f"peak_used={u.rate_limit_peak_used}",
+        ))
 
 
 def _audit_file_session(

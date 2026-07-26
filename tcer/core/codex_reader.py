@@ -630,6 +630,7 @@ def _add_token_usage_with_stat(
             input_tokens=after[0] - before[0],
             cache_read=after[1] - before[1],
             output_tokens=after[2] - before[2],
+            model=model or "",
         ))
 
 

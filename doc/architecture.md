@@ -12,13 +12,20 @@
 | `tcer/core/loc.py` | git-free 代码量统计：session_loc（工具调用统计增删）+ tree_loc（扫描工作目录） |
 | `tcer/core/metrics.py` | 全部公式：TCER/CHR/CPE/CAF/TTAF/TA-TCER/PSAC/NCPI/churn/CTEI + 评级 + 逐模型成本 |
 | `tcer/core/pricing.py` | 逐模型计价：从 `tcer/config/model_pricing.json`（≈162 模型）解析 $/MTok |
-| `tcer/core/models.py` | 数据类：TokenUsage / ModelUsage / SessionMeta / SessionReport |
-| `tcer/core/analyze.py` | 编排层：项目→会话→指标，GUI 调用 |
-| `tcer/core/calibrate.py` | LOC 精度校准（库，GUI 不暴露——纯离线工具不依赖 git） |
+| `tcer/core/models.py` | 数据类：TokenUsage / ModelUsage / TurnStat / ToolOp / SessionMeta / SessionReport |
+| `tcer/core/analyze.py` | 编排层：Claude 独立路径（子代理折叠）+ 非 Claude 三源共享骨架 `_analyze_source_project` + `_SourceAdapter` 钩子（见下） |
+| `tcer/core/parse_util.py` | 跨 reader 共享解析小工具（as_int / first_str） |
+| `tcer/core/file_cache.py` | 进程级 mtime/size LRU 缓存（scan/usage/loc） |
+| `tcer/core/calibrate.py` | LOC 精度校准（对标 git 历史；GUI 工具菜单「LOC 校准」调用——唯一使用 subprocess/git 的模块，属用户显式操作） |
 | `tcer/core/format.py` | 纯值格式化器（千分位/百分比/时间戳/模型名） |
-| `tcer/core/export.py` | JSON/CSV/Markdown 序列化 + CTEI 排名数据 + 文本条形图 |
+| `tcer/core/export.py` | JSON/CSV/Markdown 序列化 + CTEI 排名数据 + 文本条形图（`_CSV_FIELDS`/`_CSV_EXCLUDED` 有漂移护栏测试） |
 | `tcer/core/audit.py` | 闭环审计：`analyze` 结果对照原始会话文件重算（`python -m tcer.audit`） |
+| `tcer/core/upload_client.py` / `upload_prefs.py` | 显式 opt-in 的上传（纯离线原则的唯一例外，另有负责人） |
 | `tcer/gui/` | Tkinter 图形界面（MVC 架构） |
+
+### 非 Claude 源的 SourceAdapter
+
+Codex / OpenCode / Grok 共享 `analyze._analyze_source_project` 一条「逐会话 → 聚合」流水线；源差异收敛为 `_SourceAdapter` 的六个钩子：`resolve`（项目解析）、`sessions`（会话句柄枚举——Codex/Grok 为文件 Path，OpenCode 为 session id）、`read_meta`、`usage_of`、`loc_of`、`session_key`。file_cache 的失效 key 在钩子内构造（如 Grok 必须并入 signals.json / events.jsonl 旁路文件签名）。**新增数据源 = 实现一个 adapter**。Claude 因子代理折叠与 cwd-keyed 扫描保持独立路径，但复用 `_mk_report` / `_MetricCtx` / LOC 聚合等共享件。
 
 ## GUI MVC 架构
 
@@ -27,11 +34,14 @@ tcer/gui/
 ├── __init__.py     # main() 入口
 ├── __main__.py     # python -m tcer.gui 兼容入口
 ├── app.py          # 控制器：状态/后台线程/事件装配
-├── theme.py        # 颜色/字体/Style 常量
-├── metric_defs.py  # 指标元数据单一数据源（中文标签/单位/说明/分层）
+├── theme.py        # 颜色/字体/Style 常量（无 Tk 依赖）
+├── platform.py     # 跨平台字体/文件管理器/滚轮（无 Tk 依赖）
+├── metric_defs.py  # 指标元数据 SSOT（标签/单位/说明/格式/好坏方向/源支持,无 Tk 依赖）
 ├── widgets.py      # 通用组件：Tooltip/ScrollFrame/Card/MetricCell
-├── views.py        # 面板：FilterBar/ProjectColumn/SessionColumn/MetricPanel + 图表
-└── popups.py       # 弹窗：模型详情/工具调用/高频改动文件
+├── views.py        # 面板：FilterBar/ProjectColumn/SessionColumn(含搜索)/MetricPanel/排名/模型对比
+├── charts.py       # 图表：TrendChart(趋势/散点/仪表板/时段热力四模式)/选择器/悬浮提示
+├── popups.py       # 弹窗：详情/工具/模型/成本/校准/基准/对比/时间线/序列/总览/上传等
+└── html_report.py  # 自包含 HTML 报告渲染（项目级/会话级,无 Tk 依赖,可无头测试）
 ```
 
 ### 分层职责
@@ -101,4 +111,4 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 
 ## 测试覆盖
 
-测试覆盖 reader / codex_reader / opencode_reader / grok_reader / paths / metrics / pricing / loc / export / baselines / metric_defs / calibrate / audit。Codex fixture 覆盖 cwd 分组、标题读取、token 去重、缓存映射、工具失败、apply_patch（含 custom_tool_call）LOC 与 ToolOp 路径、运行环境、上下文窗口峰值、首字延迟、限流、Web 搜索、图片输入和补丁成功率；OpenCode fixture 覆盖 SQLite 项目发现（含 directory 分组）、session 元数据、Token/缓存/推理折入输出、step-finish 峰值、工具错误、用户消息、图片输入、summary 为空时 tool 回放 LOC 与 analyze 聚合；Grok fixture 覆盖 turn_completed token/缓存/推理聚合、按模型分桶、多 turn 累加、错误回合空 usage 跳过、工具映射与错误归因、search_replace/write LOC、URL 编码 cwd 分组、summary 元数据读取与 analyze 聚合。闭环审计见 `python -m tcer.audit`（`tcer/core/audit.py`）。
+测试覆盖 reader / codex_reader / opencode_reader / grok_reader / paths / metrics / pricing / loc / export / baselines / metric_defs / calibrate / audit / analyze / html_report，另有三道护栏：`test_models_merge.py`（反射断言 `TokenUsage.merge` 覆盖全部字段）、`test_gui_smoke.py`（无头构建全部图表模式与弹窗，无显示环境自动 skip）、`test_export.py` 的 CSV 字段漂移断言。Codex fixture 覆盖 cwd 分组、标题读取、token 去重、缓存映射、工具失败、apply_patch（含 custom_tool_call）LOC 与 ToolOp 路径、运行环境、上下文窗口峰值、首字延迟、限流、Web 搜索、图片输入和补丁成功率；OpenCode fixture 覆盖 SQLite 项目发现（含 directory 分组）、session 元数据、Token/缓存/推理折入输出、step-finish 峰值、工具错误、用户消息、图片输入、summary 为空时 tool 回放 LOC 与 analyze 聚合；Grok fixture 覆盖 turn_completed token/缓存/推理聚合、按模型分桶、多 turn 累加、错误回合空 usage 跳过、工具映射与错误归因、search_replace/write LOC、URL 编码 cwd 分组、summary 元数据读取与 analyze 聚合。闭环审计见 `python -m tcer.audit`（`tcer/core/audit.py`）。

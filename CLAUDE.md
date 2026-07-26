@@ -38,7 +38,7 @@ python -m tcer.audit --ci --summary-json audit-summary.json   # 等价 CI 预设
 TCER/
 ├── tcer/                  Python 包
 │   ├── core/              核心库（reader / loc / metrics / pricing / models / paths / analyze / export / format / audit …）
-│   ├── gui/               GUI（app / theme / metric_defs / widgets / views / charts / popups / html_report）
+│   ├── gui/               GUI（app / theme / metric_defs / widgets / views / charts / popups / popups_analysis / html_report）
 │   └── config/            配置（model_pricing.json / composite_baselines.json）
 ├── tests/                 测试（``python -m pytest tests/``）
 └── doc/                   详细文档

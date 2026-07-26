@@ -77,6 +77,7 @@ class TurnStat:
     duration_ms: int | None = None
     tool_calls: int = 0
     errors: int = 0
+    model: str = ""                  # 该回合的模型（归一化 id；混用/未知为 ""）
 
 
 @dataclass
@@ -150,12 +151,19 @@ class TokenUsage:
     permission_wait_ms_total: int = 0  # 审批等待总毫秒（人卡住 AI 的时间）
     itl_p50_ms: int | None = None      # inter-token latency P50
     itl_p99_ms: int | None = None
+    # --- prompt 行为信号（只计数，不存正文） ---
+    slash_command_count: int = 0    # 以 / 开头或 <command-name> 的用户消息数
+    correction_msg_count: int = 0   # 含纠正措辞（不对/重来/撤销/undo…）的用户消息数
+    first_prompt_chars: int = 0     # 首条真实用户消息的字符数（0=未知）
     # --- Claude 深挖第三批 ---
     mcp_calls_by_attr: dict[str, int] = field(default_factory=dict)  # "server/tool" → 次数（精确 MCP 归因）
     hook_run_count: int = 0            # stop hook 执行次数
     hook_error_count: int = 0          # stop hook 失败次数
     hook_duration_ms_total: int = 0    # stop hook 累计耗时
     queued_input_count: int = 0        # 用户在 AI 运行时排队输入的次数（打断/并行输入）
+    plan_mode_count: int = 0           # 计划模式进入次数（attachment plan_mode）
+    read_truncation_count: int = 0     # 读文件被截断次数（上下文浪费信号）
+    reasoning_ms_total: int = 0        # 思考耗时累计毫秒（OpenCode reasoning part）
     # --- 采纳信号 ---
     user_modified_count: int = 0       # AI 写入后被用户手动修改的工具结果数（Claude）
     revert_events: int = 0             # 会话被回退的事件数（OpenCode revert / Grok hasReverted）
@@ -216,7 +224,7 @@ class TokenUsage:
         rebased_other_stats = [
             TurnStat(t.turn + self_max_ts_turn + 1, t.ts, t.input_tokens,
                      t.cache_write, t.cache_read, t.output_tokens,
-                     t.duration_ms, t.tool_calls, t.errors)
+                     t.duration_ms, t.tool_calls, t.errors, t.model)
             for t in other.turn_stats
         ]
 
@@ -279,11 +287,18 @@ class TokenUsage:
             # 分位数不可加，聚合取最差值（max）
             itl_p50_ms=_max_ms(self.itl_p50_ms, other.itl_p50_ms),
             itl_p99_ms=_max_ms(self.itl_p99_ms, other.itl_p99_ms),
+            slash_command_count=self.slash_command_count + other.slash_command_count,
+            correction_msg_count=self.correction_msg_count + other.correction_msg_count,
+            # 首条消息长度：主会话优先（merge 左侧），子代理不覆盖
+            first_prompt_chars=self.first_prompt_chars or other.first_prompt_chars,
             mcp_calls_by_attr=_merge_dicts(self.mcp_calls_by_attr, other.mcp_calls_by_attr),
             hook_run_count=self.hook_run_count + other.hook_run_count,
             hook_error_count=self.hook_error_count + other.hook_error_count,
             hook_duration_ms_total=self.hook_duration_ms_total + other.hook_duration_ms_total,
             queued_input_count=self.queued_input_count + other.queued_input_count,
+            plan_mode_count=self.plan_mode_count + other.plan_mode_count,
+            read_truncation_count=self.read_truncation_count + other.read_truncation_count,
+            reasoning_ms_total=self.reasoning_ms_total + other.reasoning_ms_total,
             user_modified_count=self.user_modified_count + other.user_modified_count,
             revert_events=self.revert_events + other.revert_events,
             patch_diff_added=self.patch_diff_added + other.patch_diff_added,

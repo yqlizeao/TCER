@@ -493,3 +493,32 @@ def test_claude_third_batch_signals(tmp_path):
     assert u.queued_input_count == 2
     assert (u.hook_run_count, u.hook_error_count, u.hook_duration_ms_total) == (2, 1, 1500)
     assert u.mcp_calls_by_attr == {"monolith/editor_query": 1}
+
+
+def test_prompt_behavior_signals(tmp_path):
+    """slash 命令 / 纠正措辞 / 首条消息长度(只计数,不存正文)。"""
+    import json as _json
+
+    def _user(text):
+        return {"type": "user",
+                "message": {"role": "user",
+                            "content": [{"type": "text", "text": text}]}}
+    lines = [
+        _user("帮我实现一个解析器,要求如下:支持 JSONL"),   # 首条(19 字)
+        _user("/compact"),                                  # slash
+        _user("<command-name>/model</command-name>"),        # 命令面板
+        _user("不对,重来,应该用差分"),                       # 纠正
+        _user("好的继续"),                                   # 普通
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0}}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert u.slash_command_count == 2
+    assert u.correction_msg_count == 1
+    assert u.first_prompt_chars == len("帮我实现一个解析器,要求如下:支持 JSONL")
+    assert u.user_msgs == 5
