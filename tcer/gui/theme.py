@@ -9,6 +9,17 @@ from __future__ import annotations
 
 from .platform import FONT_CJK, FONT_MONO_NAME
 
+# 间距节奏（px）：容器/组件 padding 统一从这四档取值，保持视觉一致。
+PAD_XS = 2
+PAD_S = 4
+PAD_M = 8
+PAD_L = 12
+
+# 交互反馈色（hover 态），与 flat_button / Card 共用。
+HOVER_BG = "#33333a"
+HOVER_ACCENT = "#1a8ce0"
+BORDER = "#3e3e42"
+
 # Base palette (dark, VS Code-ish).
 BG = "#1e1e1e"
 FG = "#e0e0e0"
@@ -87,6 +98,22 @@ def setup_style(ttk) -> None:
               background=[("active", "#3d3d3d"), ("pressed", "#2b2b2b")],
               foreground=[("active", FG)],
               relief=[("active", "flat"), ("pressed", "flat")])
+
+    # 下拉框深色化 — 默认白底在深色主题里非常突兀（下拉列表颜色需另经
+    # root.option_add 设置，见 app.__init__）。
+    style.configure("TCombobox", fieldbackground=PANEL, background=PANEL_2,
+                    foreground=FG, arrowcolor=MUTED, bordercolor=BORDER,
+                    lightcolor=PANEL, darkcolor=PANEL, insertcolor=FG)
+    style.map("TCombobox",
+              fieldbackground=[("readonly", PANEL)],
+              foreground=[("readonly", FG)],
+              selectbackground=[("readonly", PANEL)],
+              selectforeground=[("readonly", FG)])
+
+    # 滚动条深色化（ScrollFrame 的按需显示滚动条用）
+    style.configure("Vertical.TScrollbar", background=PANEL_2, troughcolor=BG,
+                    bordercolor=BG, arrowcolor=MUTED, relief="flat")
+    style.map("Vertical.TScrollbar", background=[("active", "#4a4a50")])
 
     # Notebook (tab) styling — dark theme matching left panel
     style.configure("TNotebook", background=BG, borderwidth=0)

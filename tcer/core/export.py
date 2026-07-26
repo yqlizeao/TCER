@@ -33,7 +33,7 @@ def ctei_ranking(reports: list[SessionReport]) -> list[tuple[str, float, str]]:
 
 
 def ctei_decompose(report: SessionReport) -> dict[str, float] | None:
-    """Return CTEI's 4 multiplicative factors for one session.
+    """Return CTEI's 3 multiplicative factors for one session.
 
     Each factor is normalized so 1.0 = the neutral/baseline point.
     Returns None when the session has no CTEI score.
@@ -41,19 +41,15 @@ def ctei_decompose(report: SessionReport) -> dict[str, float] | None:
     if report.ctei is None:
         return None
     tcer = report.tcer
-    ncpi_ = report.ncpi
     cpe = report.cpe
     chr_ = report.chr
     bl_t = metrics.TCER_BASELINE
-    bl_n = metrics.NCPI_BASELINE
     bl_c = metrics.CPE_BASELINE
     eff = (tcer / bl_t) if (tcer is not None and bl_t) else 0.0
-    dens = (ncpi_ / bl_n) if (ncpi_ is not None and bl_n) else 0.0
     cost = (bl_c / cpe) if cpe else 0.0
     cache = metrics.chr_factor(chr_)
     return {
         "eff_factor": eff,
-        "density_factor": dens,
         "cost_factor": cost,
         "cache_factor": cache,
     }
@@ -68,7 +64,7 @@ def ctei_decompose_avg(reports: list[SessionReport]) -> dict[str, float] | None:
             all_factors.append(f)
     if not all_factors:
         return None
-    keys = ("eff_factor", "density_factor", "cost_factor", "cache_factor")
+    keys = ("eff_factor", "cost_factor", "cache_factor")
     n = len(all_factors)
     return {k: sum(d[k] for d in all_factors) / n for k in keys}
 
@@ -148,13 +144,9 @@ def report_row_dict(r: SessionReport) -> dict:
         "tcer": r.tcer,
         "cpe": r.cpe,
         "net_loc": r.net_loc,
-        "loc_accumulated": r.loc_accumulated,
-        "ncpi": r.ncpi,
         "caf": r.caf,
         "task_type": r.task_type,
         "ta_tcer": r.ta_tcer,
-        "psac": r.psac,
-        "tcer_phase_adj": r.tcer_phase_adj,
         "ctei": r.ctei,
         "grade": r.grade,
         "code_added": r.code_added,
@@ -278,8 +270,8 @@ _CSV_FIELDS = [
     "session_id", "source", "is_subagent", "subagent_count", "assistant_turns", "input_tokens",
     "cache_write_tokens", "cache_read_tokens", "output_tokens",
     "total_tokens", "chr", "io_ratio", "cost_usd", "cost_per_mt",
-    "tcer", "cpe", "net_loc", "loc_accumulated", "ncpi", "caf",
-    "task_type", "ta_tcer", "psac", "tcer_phase_adj", "ctei", "grade",
+    "tcer", "cpe", "net_loc", "caf",
+    "task_type", "ta_tcer", "ctei", "grade",
     "code_added", "code_deleted", "churn_ratio", "unseen_writes",
     "avg_turn_latency_sec", "session_duration_minutes",
     "read_write_ratio", "edit_ratio", "exploration_ratio",
@@ -334,7 +326,7 @@ def to_csv(reports: list[SessionReport]) -> str:
 
 
 def to_markdown(reports: list[SessionReport], agg: SessionReport, n_sessions: int,
-                code_dir: Path | None, project_name: str = "Project") -> str:
+                project_name: str = "Project") -> str:
     """Lightweight Markdown report (summary + per-session table + ASCII CTEI chart).
 
     Designed for embedding in PRs, docs, or wiki pages.
@@ -366,7 +358,7 @@ def to_markdown(reports: list[SessionReport], agg: SessionReport, n_sessions: in
             "",
             "**LOC 统计假设**：Write 工具调用假设写入的是新文件（原大小 = 0）。",
             "若 Write 覆盖已有文件，added 会高估、deleted 会遗漏。Edit 不受影响。",
-            "上述计数是潜在高估的上界。若需精确量化偏差，使用 GUI 的「校准 LOC」对标 git 历史。",
+            "上述计数是残留高估的上界（会话数据带 originalFile 时已自动修正）。",
             "",
         ]
 

@@ -9,14 +9,13 @@
 | `tcer/core/opencode_reader.py` | OpenCode SQLite/旧 storage JSON 发现、project/session/message/part 读取、Token/工具/summary diff 聚合 |
 | `tcer/core/grok_reader.py` | Grok（grok build CLI）`updates.jsonl` ACP 流发现/解析、URL 编码 cwd 分组、`turn_completed` token 聚合、工具映射、search_replace LOC |
 | `tcer/core/paths.py` | 定位 `~/.claude`（含 `.zclaude` 等自定义 `CLAUDE_CONFIG_DIR` 兄弟目录自动识别）/ `~/.codex` / `~/.local/share/opencode` / `~/.grok`、项目哈希编解码、统一项目引用 |
-| `tcer/core/loc.py` | git-free 代码量统计：session_loc（工具调用统计增删）+ tree_loc（扫描工作目录） |
-| `tcer/core/metrics.py` | 全部公式：TCER/CHR/CPE/CAF/TTAF/TA-TCER/PSAC/NCPI/churn/CTEI + 评级 + 逐模型成本 |
+| `tcer/core/loc.py` | git-free 代码量统计：session_loc（会话内工具调用回放，含 originalFile F1 修正；不读磁盘） |
+| `tcer/core/metrics.py` | 全部公式：TCER/CHR/CPE/CAF/TTAF/TA-TCER/churn/CTEI(三因子) + 评级 + 逐模型成本 |
 | `tcer/core/pricing.py` | 逐模型计价：从 `tcer/config/model_pricing.json`（≈162 模型）解析 $/MTok |
 | `tcer/core/models.py` | 数据类：TokenUsage / ModelUsage / TurnStat / ToolOp / SessionMeta / SessionReport |
 | `tcer/core/analyze.py` | 编排层：Claude 独立路径（子代理折叠）+ 非 Claude 三源共享骨架 `_analyze_source_project` + `_SourceAdapter` 钩子（见下） |
 | `tcer/core/parse_util.py` | 跨 reader 共享解析小工具（as_int / first_str） |
 | `tcer/core/file_cache.py` | 进程级 mtime/size LRU 缓存（scan/usage/loc） |
-| `tcer/core/calibrate.py` | LOC 精度校准（对标 git 历史；GUI 工具菜单「LOC 校准」调用——唯一使用 subprocess/git 的模块，属用户显式操作） |
 | `tcer/core/format.py` | 纯值格式化器（千分位/百分比/时间戳/模型名） |
 | `tcer/core/export.py` | JSON/CSV/Markdown 序列化 + CTEI 排名数据 + 文本条形图（`_CSV_FIELDS`/`_CSV_EXCLUDED` 有漂移护栏测试） |
 | `tcer/core/audit.py` | 闭环审计：`analyze` 结果对照原始会话文件重算（`python -m tcer.audit`） |
@@ -40,7 +39,7 @@ tcer/gui/
 ├── widgets.py      # 通用组件：Tooltip/ScrollFrame/Card/MetricCell
 ├── views.py        # 面板：FilterBar/ProjectColumn/SessionColumn(含搜索)/MetricPanel/排名/模型对比
 ├── charts.py       # 图表：TrendChart(趋势/散点/仪表板/时段热力四模式)/选择器/悬浮提示
-├── popups.py       # 弹窗：详情/工具/模型/成本/校准/基准/对比/时间线/序列/总览/上传等
+├── popups.py       # 弹窗：详情/工具/模型/成本/基准/记忆/雷达/上传等
 └── html_report.py  # 自包含 HTML 报告渲染（项目级/会话级,无 Tk 依赖,可无头测试）
 ```
 
@@ -79,7 +78,7 @@ OpenCode 当前本地数据目录按官方文档位于 `~/.local/share/opencode/
 
 OpenCode 会话**优先按 `session.directory` 分组**（`project.worktree` 常为 `/` 的 global 项目会误合并无关目录）；展示路径取有效 cwd。Token 使用 `session.tokens_*` 汇总：OpenCode 把 `tokens_reasoning` 存在输出之外，reader **折入 `output_tokens`**（仍单独记 `reasoning_output_tokens`），使成本按输出价计推理、且 `reasoning_output_ratio` ∈ [0,1]。峰值输入来自 `part` 的 `step-finish.tokens`（input+cache），禁止用会话累计当峰值。模型使用 `session.model` 与 assistant message 中的 provider/model；用户消息正文从 user text part 按需读取。工具行为来自 `part`（live 嵌套 `state.input` + camelCase `filePath`/`oldString`/`newString`），映射到 TCER 通用工具名。
 
-OpenCode LOC：有 `summary_additions/deletions/files` 时用 summary；**live 数据 summary 常为 0** 时回放 edit/write tool part（与 Claude Edit 同构）。仅无 summary 且无编辑工具的会话将 TCER / CPE / CTEI 显示为 `-`。OpenCode 与 Codex 一样只读分析，不删除会话、不做 LOC 校准。
+OpenCode LOC：有 `summary_additions/deletions/files` 时用 summary；**live 数据 summary 常为 0** 时回放 edit/write tool part（与 Claude Edit 同构）。仅无 summary 且无编辑工具的会话将 TCER / CPE / CTEI 显示为 `-`。OpenCode 与 Codex 一样只读分析，不删除会话。
 
 ## Grok 支持
 
@@ -87,7 +86,7 @@ Grok（x.ai 的 grok build CLI）会话按 `~/.grok/sessions/<URL编码cwd>/<UUI
 
 Grok 的权威对话日志是 `updates.jsonl`——一条 ACP / JSON-RPC 通知流。Token 用量来自每个 turn 恰好一条的 `turn_completed.usage`：`cachedReadTokens` 映射为缓存命中，缓存创建记为 0，`reasoningTokens` 单独展示且按输出价计费；`modelUsage` 提供按模型分桶（混用多模型精确），`apiDurationMs` 累加为会话活动时长。**无 Claude 式多行重复携带 usage 的去重问题**——直接累加即可；错误回合的空 usage 计入 `empty_usage_skipped` 不虚增回合数。工具调用来自 `tool_call` 的 `_meta["x.ai/tool"].name`（`read_file`→Read、`search_replace`→Edit、`write`→Write、`grep_search`→Grep、`list_dir`→Glob、`bash`→Bash、`task`→Task），错误按 `tool_call_update.rawOutput.exit_code` 归因。用户消息正文从 `user_message_chunk.content.text` 按需读取。
 
-LOC 只从可解析的 `search_replace` / `write` 计算，经与 Claude 相同的 `_LocAccumulator` 回放（Edit/Write 语义：净增行差 + 自返工 `rework_deleted` + high_churn）。无编辑工具的会话 net_loc=0（已知零，不污染项目聚合）。Grok 与 Codex/OpenCode 一样只读分析，不删除会话、不做 LOC 校准。详见 [doc/data-format.md](data-format.md#grok-数据格式grok-build-cli)。
+LOC 只从可解析的 `search_replace` / `write` 计算，经与 Claude 相同的 `_LocAccumulator` 回放（Edit/Write 语义：净增行差 + 自返工 `rework_deleted` + high_churn）。无编辑工具的会话 net_loc=0（已知零，不污染项目聚合）。Grok 与 Codex/OpenCode 一样只读分析，不删除会话。详见 [doc/data-format.md](data-format.md#grok-数据格式grok-build-cli)。
 
 ## 关键设计决策
 
@@ -95,7 +94,7 @@ LOC 只从可解析的 `search_replace` / `write` 计算，经与 Claude 相同�
 
 净增 LOC 来自会话自身文件改写工具调用，不依赖 git。历史方案曾用 `git log --numstat`，已废弃：git 净增只反映最终提交、受提交习惯影响、且时间窗归因不可靠。
 
-默认 **`disk_prior=False`**：首次 `Write` 假定 old=0，并计入 `unseen_writes`（F1 上界——覆写既有文件会高估）。**不要**对已结束会话用当前磁盘作 Write 先验：磁盘通常是会话**之后**的状态；中间 Write + 后续 Edit 时若 `disk_prior=True`，会把更长的磁盘内容当成先验、把较短的 Write 误判成大量删除。`disk_prior=True` 仅用于磁盘仍是 Write 前基线的校准（且磁盘文本等于 Write 载荷时不再种子化，避免「写出后仍在磁盘」被算成 0 净增）。Edit / `search_replace` 始终用 old/new 行差，不受此开关影响。
+首次 `Write` 假定 old=0 并计入 `unseen_writes`（F1 暴露）；当工具结果行携带 `toolUseResult.originalFile`（Claude）时按**会话数据**回溯修正真实原行数。产品边界：TCER **绝不读取用户的真实仓库/工作目录**——磁盘先验、tree_loc 全树扫描、git 校准均已按产品定位移除，全部计量只来自会话数据。Edit / `search_replace` 始终用 old/new 行差。
 
 ### 按 message.id 去重
 
@@ -111,4 +110,4 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 
 ## 测试覆盖
 
-测试覆盖 reader / codex_reader / opencode_reader / grok_reader / paths / metrics / pricing / loc / export / baselines / metric_defs / calibrate / audit / analyze / html_report，另有三道护栏：`test_models_merge.py`（反射断言 `TokenUsage.merge` 覆盖全部字段）、`test_gui_smoke.py`（无头构建全部图表模式与弹窗，无显示环境自动 skip）、`test_export.py` 的 CSV 字段漂移断言。Codex fixture 覆盖 cwd 分组、标题读取、token 去重、缓存映射、工具失败、apply_patch（含 custom_tool_call）LOC 与 ToolOp 路径、运行环境、上下文窗口峰值、首字延迟、限流、Web 搜索、图片输入和补丁成功率；OpenCode fixture 覆盖 SQLite 项目发现（含 directory 分组）、session 元数据、Token/缓存/推理折入输出、step-finish 峰值、工具错误、用户消息、图片输入、summary 为空时 tool 回放 LOC 与 analyze 聚合；Grok fixture 覆盖 turn_completed token/缓存/推理聚合、按模型分桶、多 turn 累加、错误回合空 usage 跳过、工具映射与错误归因、search_replace/write LOC、URL 编码 cwd 分组、summary 元数据读取与 analyze 聚合。闭环审计见 `python -m tcer.audit`（`tcer/core/audit.py`）。
+测试覆盖 reader / codex_reader / opencode_reader / grok_reader / paths / metrics / pricing / loc / export / baselines / metric_defs / audit / analyze / html_report，另有三道护栏：`test_models_merge.py`（反射断言 `TokenUsage.merge` 覆盖全部字段）、`test_gui_smoke.py`（无头构建全部图表模式与弹窗，无显示环境自动 skip）、`test_export.py` 的 CSV 字段漂移断言。Codex fixture 覆盖 cwd 分组、标题读取、token 去重、缓存映射、工具失败、apply_patch（含 custom_tool_call）LOC 与 ToolOp 路径、运行环境、上下文窗口峰值、首字延迟、限流、Web 搜索、图片输入和补丁成功率；OpenCode fixture 覆盖 SQLite 项目发现（含 directory 分组）、session 元数据、Token/缓存/推理折入输出、step-finish 峰值、工具错误、用户消息、图片输入、summary 为空时 tool 回放 LOC 与 analyze 聚合；Grok fixture 覆盖 turn_completed token/缓存/推理聚合、按模型分桶、多 turn 累加、错误回合空 usage 跳过、工具映射与错误归因、search_replace/write LOC、URL 编码 cwd 分组、summary 元数据读取与 analyze 聚合。闭环审计见 `python -m tcer.audit`（`tcer/core/audit.py`）。

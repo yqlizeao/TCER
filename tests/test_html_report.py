@@ -20,7 +20,7 @@ def _report(net_loc: int, sid: str = "sess", model: str = "claude-opus-4-8",
                    ended_at=1_770_003_600_000)
     u.per_model = {model: TokenUsage(input_tokens=500_000, output_tokens=500_000)}
     r = metrics.compute(meta, u, net_loc=net_loc,
-                        loc_accumulated=10_000, task_type="feature")
+                        task_type="feature")
     r.unseen_writes = unseen
     return r
 
@@ -32,10 +32,7 @@ def _agg(reports) -> metrics.SessionReport:
     for r in reports:
         u = u.merge(r.usage)
     agg = metrics.compute(meta, u, net_loc=sum(r.net_loc or 0 for r in reports),
-                          loc_accumulated=10_000, task_type="feature")
-    agg.ncpi = None
-    agg.ctei = None
-    agg.grade = None
+                          task_type="feature")
     return agg
 
 

@@ -49,16 +49,36 @@ class ScrollFrame:
     """
 
     def __init__(self, parent, bg: str = theme.PANEL) -> None:
+        from tkinter import ttk as _ttk
+
         self.canvas = tk.Canvas(parent, bg=bg, highlightthickness=0)
         self.inner = tk.Frame(self.canvas, bg=bg)
         self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self._reset_pending = False
+        # 按需显示的深色滚动条：内容装得下就隐藏（可视位置提示 + 拖拽滚动）。
+        self.vbar = _ttk.Scrollbar(parent, orient="vertical",
+                                   command=self.canvas.yview)
+        self._vbar_visible = False
+        self.canvas.configure(yscrollcommand=self._on_scroll_set)
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_resize)
         self._unbind_wheel = None
         self.canvas.bind("<Enter>", self._on_enter)
         self.canvas.bind("<Leave>", self._on_leave)
         self.canvas.pack(side="left", fill="both", expand=True)
+
+    def _on_scroll_set(self, first, last) -> None:
+        try:
+            need = not (float(first) <= 0.0 and float(last) >= 1.0)
+        except (TypeError, ValueError):
+            need = False
+        if need and not self._vbar_visible:
+            self.vbar.pack(side="right", fill="y", before=self.canvas)
+            self._vbar_visible = True
+        elif not need and self._vbar_visible:
+            self.vbar.pack_forget()
+            self._vbar_visible = False
+        self.vbar.set(first, last)
 
     def _on_resize(self, event) -> None:
         self.canvas.itemconfig(self._win, width=event.width)
@@ -102,13 +122,26 @@ class Card:
     def __init__(self, parent, on_click, on_right_click=None,
                  bg: str = theme.PANEL_2, padx: int = 2, pady: int = 2) -> None:
         self.frame = tk.Frame(parent, bg=bg, relief="flat", borderwidth=1,
-                              highlightthickness=1, highlightbackground="#3e3e42")
+                              highlightthickness=1, highlightbackground=theme.BORDER,
+                              cursor="hand2")
         self.frame.pack(fill="x", padx=padx, pady=pady)
         self._on_click = on_click
         self._on_right_click = on_right_click
+        self._selected = False
         self.frame.bind("<Button-1>", lambda e: on_click(self))
+        # hover 反馈：未选中时边框提亮，可点击感（Enter/Leave 覆盖整卡含子组件）。
+        self.frame.bind("<Enter>", self._on_hover, add="+")
+        self.frame.bind("<Leave>", self._on_unhover, add="+")
         if on_right_click:
             self.frame.bind("<Button-3>", on_right_click)
+
+    def _on_hover(self, _e=None) -> None:
+        if not self._selected:
+            self.frame.configure(highlightbackground="#5a5a60")
+
+    def _on_unhover(self, _e=None) -> None:
+        if not self._selected:
+            self.frame.configure(highlightbackground=theme.BORDER)
 
     def bind_to(self, widget) -> None:
         widget.bind("<Button-1>", lambda e: self._on_click(self))
@@ -117,7 +150,8 @@ class Card:
         return widget
 
     def set_selected(self, selected: bool) -> None:
-        self.frame.configure(highlightbackground=theme.ACCENT if selected else "#3e3e42",
+        self._selected = selected
+        self.frame.configure(highlightbackground=theme.ACCENT if selected else theme.BORDER,
                              highlightthickness=2 if selected else 1)
 
 
@@ -178,6 +212,24 @@ class MetricCell:
             except (ValueError, TypeError):
                 fg = theme.VALUE_NEUTRAL
         self.value.config(fg=fg)
+
+
+def flat_button(parent, text, command=None, *, primary=False, padx=None, **kw):
+    """统一扁平按钮：一致的配色/内边距/hover 反馈（按钮效果一致性的单一来源）。
+
+    ``primary=True`` 用主题强调色（主操作），否则面板灰（普通操作）。
+    """
+    base_bg = theme.ACCENT if primary else theme.PANEL
+    hover_bg = theme.HOVER_ACCENT if primary else theme.HOVER_BG
+    fg = "#ffffff" if primary else theme.FG
+    btn = tk.Button(parent, text=text, command=command, relief="flat",
+                    bg=base_bg, fg=fg, bd=0, cursor="hand2",
+                    activebackground=hover_bg, activeforeground=fg,
+                    padx=theme.PAD_M if padx is None else padx,
+                    pady=theme.PAD_XS, font=theme.FONT_UI, **kw)
+    btn.bind("<Enter>", lambda _e: btn.config(bg=hover_bg), add="+")
+    btn.bind("<Leave>", lambda _e: btn.config(bg=base_bg), add="+")
+    return btn
 
 
 def new_window(parent, title, size, bg=theme.BG):

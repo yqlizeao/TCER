@@ -8,7 +8,6 @@ per-session + aggregate reports. The CLI and Tkinter GUI both call ``analyze_pro
 """
 from __future__ import annotations
 
-import sys
 import threading
 from dataclasses import dataclass
 from functools import reduce
@@ -29,7 +28,7 @@ class ProjectAnalysis:
     project_hash: str
     reports: list[SessionReport]  # one per real session (subagents folded in)
     aggregate: SessionReport
-    code_dir: Path | None  # directory scanned for accumulated LOC (None if unknown)
+    code_dir: Path | None  # 项目工作目录（仅展示用途；TCER 不读取真实仓库）
     n_sessions: int  # number of real sessions (not counting subagents separately)
     n_subagents: int  # total subagent files folded into the sessions above
     source: str = "claude"
@@ -40,10 +39,8 @@ class ProjectAnalysis:
 class _MetricCtx:
     """Shared knobs for per-session ``metrics.compute`` across sources."""
 
-    loc_total: int | None
     task_type: str
     baseline_tcer: float
-    baseline_ncpi: float
     baseline_cpe: float
     auto_infer: bool = False
 
@@ -120,7 +117,6 @@ def _mk_report(
 
     rep = metrics.compute(
         meta, u, net,
-        loc_accumulated=ctx.loc_total,
         task_type=tt,
         code_added=added,
         code_deleted=deleted,
@@ -129,7 +125,6 @@ def _mk_report(
         test_net_loc=test_net,
         doc_net_loc=doc_net,
         tcer_baseline=ctx.baseline_tcer,
-        ncpi_baseline=ctx.baseline_ncpi,
         cpe_baseline=ctx.baseline_cpe,
     )
     rep.subagent_count = n_sub
@@ -173,13 +168,6 @@ def _agg_sloc(
     )
     sl.recompute_high_churn()
     return sl
-
-
-def _suppress_aggregate_session_metrics(agg: SessionReport) -> None:
-    """NCPI / CTEI / grade are per-session only — clear on project aggregates."""
-    agg.ncpi = None
-    agg.ctei = None
-    agg.grade = None
 
 
 def _accumulate_sloc_totals(
@@ -235,12 +223,9 @@ def analyze_project(
     project_ref: ProjectRef | None = None,
     session: str | None = None,
     no_subagents: bool = False,
-    code_dir: str | Path | None = None,
     no_loc: bool = False,
-    scan_code_dir: bool = False,
     task_type: str = metrics.DEFAULT_TASK_TYPE,
     baseline_tcer: float | None = None,
-    baseline_ncpi: float | None = None,
     baseline_cpe: float | None = None,
     since: str | None = None,
     until: str | None = None,
@@ -265,8 +250,6 @@ def analyze_project(
     # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
     if baseline_tcer is None:
         baseline_tcer = metrics.TCER_BASELINE
-    if baseline_ncpi is None:
-        baseline_ncpi = metrics.NCPI_BASELINE
     if baseline_cpe is None:
         baseline_cpe = metrics.CPE_BASELINE
     auto_infer = metrics.is_auto_task_type(task_type)
@@ -282,12 +265,9 @@ def analyze_project(
                 adapter,
                 project_ref or project,
                 session=session,
-                code_dir=code_dir,
                 no_loc=no_loc,
-                scan_code_dir=scan_code_dir,
                 task_type=task_type,
                 baseline_tcer=baseline_tcer,
-                baseline_ncpi=baseline_ncpi,
                 baseline_cpe=baseline_cpe,
                 since=since,
                 until=until,
@@ -307,14 +287,10 @@ def analyze_project(
 
     # Per-call memo (also backed by process-level mtime cache in scan_session).
     # User message bodies are omitted here — popup uses reader.read_user_messages.
-    # Key includes cwd so F1 disk prior for relative paths can be recomputed correctly.
-    scan_memo: dict[tuple[Path, str], tuple[TokenUsage, loc.SessionLoc | None]] = {}
+    scan_memo: dict[Path, tuple[TokenUsage, loc.SessionLoc | None]] = {}
 
-    def _scan_of(
-        f: Path, *, cwd: str | None = None,
-    ) -> tuple[TokenUsage, loc.SessionLoc | None]:
-        key = (f, cwd or "")
-        hit = scan_memo.get(key)
+    def _scan_of(f: Path) -> tuple[TokenUsage, loc.SessionLoc | None]:
+        hit = scan_memo.get(f)
         if hit is None:
             if cancel_check:
                 cancel_check()
@@ -322,14 +298,9 @@ def analyze_project(
                 f,
                 with_loc=not no_loc,
                 include_user_texts=False,
-                cwd=cwd,
-                # Post-session disk is not a reliable Write prior (intermediate
-                # Writes + later Edits leave disk ≠ Write payload → false deletes).
-                # Opt into disk_prior=True only for deliberate F1 calibration.
-                disk_prior=False,
                 cancel_check=cancel_check,
             )
-            scan_memo[key] = hit
+            scan_memo[f] = hit
         return hit
 
     # Group files by parent session id (subagents fold into the owning session).
@@ -337,9 +308,8 @@ def analyze_project(
     for f in files:
         groups.setdefault(reader.parent_session_id(f), []).append(f)
 
-    # First pass: per-group metadata (cheap head/tail read) to discover cwds
-    # BEFORE the date filter, so the filter scans with the same cwd-keyed
-    # memo/cache key as the second pass (one scan per file, not two).
+    # First pass: per-group metadata (cheap head/tail read) to discover the
+    # project cwd for display.
     metas: dict[str, SessionMeta] = {}
     for key, gfiles in groups.items():
         if cancel_check:
@@ -348,7 +318,7 @@ def analyze_project(
         metas[key] = reader.read_session_meta(main) if main else _synth_meta(key, gfiles[0])
 
     def _usage_of(f: Path) -> TokenUsage:
-        return _scan_of(f, cwd=metas[reader.parent_session_id(f)].cwd)[0]
+        return _scan_of(f)[0]
 
     files = _filter_by_started_at(files, _usage_of, since, until)
     if since or until:
@@ -367,21 +337,10 @@ def analyze_project(
             cwd = Path(metas[key].cwd)
             break
 
-    code_path = Path(code_dir) if code_dir else cwd
-    # tree_loc scans the whole code dir to size the codebase (NCPI denominator).
-    # Opt-in (scan_code_dir): large repos (e.g. Rust `target/`, vendored deps)
-    # can take minutes and freeze the UI, so it stays off by default. no_loc
-    # suppresses it too (it skips all LOC, session-level included).
-    loc_total = (
-        loc.tree_loc(code_path)
-        if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
-        else None
-    )
+    code_path = cwd  # 项目工作目录（仅展示；产品定位：不扫描真实仓库）
     ctx = _MetricCtx(
-        loc_total=loc_total,
         task_type=task_type,
         baseline_tcer=baseline_tcer,
-        baseline_ncpi=baseline_ncpi,
         baseline_cpe=baseline_cpe,
         auto_infer=auto_infer,
     )
@@ -394,10 +353,9 @@ def analyze_project(
     for key, gfiles in groups.items():
         if cancel_check:
             cancel_check()
-        sess_cwd = metas[key].cwd
         gu = reduce(
             lambda a, b: a.merge(b),
-            (_scan_of(f, cwd=sess_cwd)[0] for f in gfiles),
+            (_scan_of(f)[0] for f in gfiles),
             TokenUsage(),
         )
         n_sub = sum(1 for f in gfiles if reader.is_subagent(f))
@@ -411,7 +369,7 @@ def analyze_project(
             continue
         slocs = []
         for f in gfiles:
-            _, sl = _scan_of(f, cwd=sess_cwd)
+            _, sl = _scan_of(f)
             if sl is not None:
                 slocs.append(sl)
         merged_sloc = loc.merge_session_locs(slocs)
@@ -447,7 +405,6 @@ def analyze_project(
             set_subagent_density=True,
             task_type_override=agg_tt,
         )
-    _suppress_aggregate_session_metrics(agg)
 
     # Project-level memory files (read from disk once for the aggregate).
     mem_dir = proj / "memory"
@@ -499,12 +456,9 @@ def _analyze_source_project(
     project: str | ProjectRef,
     *,
     session: str | None = None,
-    code_dir: str | Path | None = None,
     no_loc: bool = False,
-    scan_code_dir: bool = False,
     task_type: str = metrics.DEFAULT_TASK_TYPE,
     baseline_tcer: float | None = None,
-    baseline_ncpi: float | None = None,
     baseline_cpe: float | None = None,
     since: str | None = None,
     until: str | None = None,
@@ -516,8 +470,6 @@ def _analyze_source_project(
     # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
     if baseline_tcer is None:
         baseline_tcer = metrics.TCER_BASELINE
-    if baseline_ncpi is None:
-        baseline_ncpi = metrics.NCPI_BASELINE
     if baseline_cpe is None:
         baseline_cpe = metrics.CPE_BASELINE
     ref = project if isinstance(project, ProjectRef) else adapter.resolve(project)
@@ -545,16 +497,11 @@ def _analyze_source_project(
         if not handles:
             raise FileNotFoundError(adapter.no_match.format(session=session))
 
-    code_path = Path(code_dir) if code_dir else (Path(ref.cwd) if ref.cwd else None)
-    loc_total = (
-        loc.tree_loc(code_path)
-        if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
-        else None
-    )
+    code_path = Path(ref.cwd) if ref.cwd else None  # 仅展示；不扫描真实仓库
     ctx = _MetricCtx(
-        loc_total=loc_total, task_type=task_type,
-        baseline_tcer=baseline_tcer, baseline_ncpi=baseline_ncpi,
-        baseline_cpe=baseline_cpe, auto_infer=auto_infer,
+        task_type=task_type,
+        baseline_tcer=baseline_tcer, baseline_cpe=baseline_cpe,
+        auto_infer=auto_infer,
     )
 
     reports: list[SessionReport] = []
@@ -606,7 +553,6 @@ def _analyze_source_project(
             unseen=agg_sloc.unseen_writes,
             task_type_override=agg_tt,
         )
-    _suppress_aggregate_session_metrics(agg)
 
     return ProjectAnalysis(
         project_hash=ref.key,
@@ -663,12 +609,9 @@ def _opencode_usage_of(ref: ProjectRef, sid: str) -> TokenUsage:
 
 def _opencode_loc_of(ref: ProjectRef, sid: str, meta: SessionMeta):
     from tcer.core import file_cache
-    sess_cwd = meta.cwd or ref.cwd
     return file_cache.get_or_compute(
-        _opencode_cache_file(ref, sid),
-        ("opencode_loc", sid, str(sess_cwd or ""), False),
-        lambda: opencode_reader._loc_scan(
-            ref.path, sid, cwd=sess_cwd, disk_prior=False))
+        _opencode_cache_file(ref, sid), ("opencode_loc", sid),
+        lambda: opencode_reader._loc_scan(ref.path, sid))
 
 
 _OPENCODE = _SourceAdapter(
@@ -712,10 +655,8 @@ def _grok_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
 
 def _grok_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
     from tcer.core import file_cache
-    sess_cwd = meta.cwd or ref.cwd
     return file_cache.get_or_compute(
-        f, ("grok_loc", str(sess_cwd or ""), False),
-        lambda: grok_reader._loc_scan(f, cwd=sess_cwd, disk_prior=False))
+        f, ("grok_loc",), lambda: grok_reader._loc_scan(f))
 
 
 _GROK = _SourceAdapter(
@@ -738,69 +679,6 @@ def _synth_meta(session_id: str, sample: Path) -> SessionMeta:
     """Metadata for a session whose main file is missing (orphan subagents only)."""
     return SessionMeta(session_id=session_id, cwd=None, title=None,
                        path=sample, is_subagent=False)
-
-
-# Project marker files that indicate a real project root.
-_PROJECT_MARKERS = frozenset({
-    ".git", ".hg", ".svn",
-    "package.json", "pyproject.toml", "setup.py", "setup.cfg",
-    "Cargo.toml", "go.mod", "go.sum",
-    "pom.xml", "build.gradle", "build.gradle.kts",
-    "Makefile", "CMakeLists.txt", "meson.build",
-    "Gemfile", "composer.json", "mix.exs",
-    ".claude",  # Claude Code project directory
-})
-
-
-def _is_project_dir(path: Path) -> bool:
-    """True if *path* looks like an actual project directory worth scanning for LOC.
-
-    Returns False for home directories, drive roots, and system directories —
-    places where a Claude Code session might happen to run (``cd ~``) but that
-    are not themselves a codebase.  The heuristic is: any directory containing a
-    project marker file (``.git``, ``package.json``, ``pyproject.toml``, etc.)
-    is accepted; directories that match known non-project patterns are rejected.
-    """
-    resolved = path.resolve()
-
-    # Home directory (e.g. C:\Users\Administrator, /home/alice)
-    try:
-        if resolved == Path.home().resolve():
-            return False
-    except Exception:
-        pass
-
-    # Drive roots: C:\, D:\, /, etc.
-    if resolved == resolved.root or resolved == resolved.anchor.rstrip("\\/"):
-        return False
-
-    # Windows system directories
-    parts_lower = [p.lower() for p in resolved.parts]
-    if sys.platform == "win32":
-        if any(s in parts_lower for s in ("windows", "program files", "program files (x86)")):
-            return False
-
-    # Linux/macOS top-level directories
-    if len(resolved.parts) <= 2 and resolved.parts[0] == "/":
-        if resolved.name in ("usr", "tmp", "var", "etc", "opt", "root", "proc", "sys"):
-            return False
-
-    # Positive check: project marker present → definitely a project
-    try:
-        children = set(entry.name for entry in resolved.iterdir())
-    except OSError:
-        return False
-    if children & _PROJECT_MARKERS:
-        return True
-
-    # No markers found and path is very shallow (e.g. C:\Users\Administrator
-    # which has only user-profile subdirs) → treat as non-project.
-    # Real projects without markers are still accepted if they have code files.
-    return any(
-        loc._is_code(fn)
-        for fn in children
-        if "." in fn
-    )
 
 
 def _parse_date_to_ms(date_str: str, end_of_day: bool = False) -> int:

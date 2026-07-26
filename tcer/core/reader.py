@@ -237,8 +237,6 @@ def scan_session(
     *,
     with_loc: bool = True,
     include_user_texts: bool = True,
-    cwd: str | Path | None = None,
-    disk_prior: bool = False,
     cancel_check=None,
     use_cache: bool = True,
 ) -> tuple[TokenUsage, "SessionLoc | None"]:
@@ -260,8 +258,7 @@ def scan_session(
 
     **Time window**: tracks ``started_at`` / ``ended_at`` from *all* assistant turns
     (including zero-usage ones) so sessions with only zero-usage replies still get
-    timestamps (needed for accurate git-ground-truth in calibration and for GUI time
-    sorting).
+    timestamps (needed for GUI time sorting).
 
     **Tool calls**: counts each tool_use block by name (NOT deduped by message.id,
     since multiple tool_use blocks in one response are genuine separate calls).
@@ -274,9 +271,6 @@ def scan_session(
     ``include_user_texts``: when False, only ``user_msgs`` is counted (cheaper /
     smaller reports); use :func:`read_user_messages` for bodies.
 
-    ``cwd`` / ``disk_prior``: when computing LOC, seed first Write from on-disk
-    line counts (F1 mitigation); relative paths need ``cwd``.
-
     ``use_cache``: process-level mtime/size cache (see ``file_cache``). Safe with
     ``cancel_check``: a cancel raises inside the factory, so a partial scan never
     reaches the cache — only completed scans are stored.
@@ -284,22 +278,13 @@ def scan_session(
     from tcer.core import file_cache
 
     can_cache = use_cache
-    cwd_key = str(cwd) if cwd is not None else ""
-    extra = (
-        "scan_session",
-        bool(with_loc),
-        bool(include_user_texts),
-        bool(disk_prior),
-        cwd_key,
-    )
+    extra = ("scan_session", bool(with_loc), bool(include_user_texts))
 
     def _compute():
         return _scan_session_uncached(
             path,
             with_loc=with_loc,
             include_user_texts=include_user_texts,
-            cwd=cwd,
-            disk_prior=disk_prior,
             cancel_check=cancel_check,
         )
 
@@ -313,8 +298,6 @@ def _scan_session_uncached(
     *,
     with_loc: bool,
     include_user_texts: bool,
-    cwd: str | Path | None,
-    disk_prior: bool,
     cancel_check,
 ) -> tuple[TokenUsage, "SessionLoc | None"]:
     # Lazy import: loc imports reader at module level.
@@ -322,9 +305,7 @@ def _scan_session_uncached(
     from tcer.core.models import TurnStat
 
     u = TokenUsage()
-    loc_acc = (
-        _LocAccumulator(cwd=cwd, disk_prior=disk_prior) if with_loc else None
-    )
+    loc_acc = _LocAccumulator() if with_loc else None
     seen: set[str] = set()
     call_id_to_name: dict[str, str] = {}  # tool_use_id → tool_name for error attribution
     turn_idx = 0  # next turn number to assign to a new response

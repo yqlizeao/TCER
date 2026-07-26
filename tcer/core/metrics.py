@@ -1,14 +1,14 @@
 """TCER core metric formulas and pricing.
 
 Basic formulas follow CLAUDE.md. The 综合评分 group (G6) — TTAF / NTCER /
-PSAC / CAF / CTEI — follows the metric framework (§6.2–6.5), which is the
+CAF / CTEI — follows the metric framework (§6.2–6.5), which is the
 authoritative original framework.
 
 Costs are priced per model via ``pricing`` (each model's tokens at its own
 $/MTok rate), falling back to the Anthropic list-price ``default`` for unknown
 or mixed-model usage; see ``cost_usd``.
 
-Composite-layer constants (TTAF, CTEI baselines, PSAC regression, CHR weight)
+Composite-layer constants (TTAF, CTEI baselines, CHR weight)
 are loaded from ``config/composite_baselines.json`` — a hand-editable config so
 you can override the framework's reference-dataset defaults with your own
 accumulated data.
@@ -40,7 +40,7 @@ _COMPOSITE_CONFIG_PATH = Path(__file__).parent.parent / "config" / "composite_ba
 
 @lru_cache(maxsize=1)
 def _load_composite_config() -> dict:
-    """Load composite-layer config (task categories / baselines / PSAC / CHR weight)."""
+    """Load composite-layer config (task categories / baselines / CHR weight)."""
     with _COMPOSITE_CONFIG_PATH.open("r", encoding="utf-8") as fh:
         return json.load(fh)
 
@@ -63,27 +63,18 @@ def _get_baselines() -> dict[str, float]:
     return _load_composite_config()["ctei_baselines"]
 
 
-def _get_psac_params() -> dict[str, float]:
-    return _load_composite_config()["psac"]
-
-
 def _get_chr_weight() -> float:
     return _load_composite_config()["chr_weight"]
 
 
 def _refresh_composite_globals() -> None:
     """Reload module-level constants from config (after cache clear / save)."""
-    global TASK_CATEGORIES, TTAF, TCER_BASELINE, NCPI_BASELINE, CPE_BASELINE
-    global PSAC_INTERCEPT, PSAC_SLOPE, CHR_WEIGHT
+    global TASK_CATEGORIES, TTAF, TCER_BASELINE, CPE_BASELINE, CHR_WEIGHT
     TASK_CATEGORIES = _get_task_categories()
     TTAF = _get_ttaf()
     b = _get_baselines()
     TCER_BASELINE = b["tcer"]
-    NCPI_BASELINE = b["ncpi"]
     CPE_BASELINE = b["cpe"]
-    p = _get_psac_params()
-    PSAC_INTERCEPT = p["intercept"]
-    PSAC_SLOPE = p["slope"]
     CHR_WEIGHT = _get_chr_weight()
 
 
@@ -93,10 +84,7 @@ _load_composite_config.cache_clear()
 TASK_CATEGORIES: dict[str, dict] = {}
 TTAF: dict[str, float] = {}
 TCER_BASELINE = 0.0
-NCPI_BASELINE = 0.0
 CPE_BASELINE = 0.0
-PSAC_INTERCEPT = 0.0
-PSAC_SLOPE = 0.0
 CHR_WEIGHT = 0.0
 _refresh_composite_globals()
 
@@ -360,11 +348,10 @@ def majority_task_type(types: list[str | None]) -> str:
 
 
 def baseline_eligible_reports(reports) -> list:
-    """Sessions with complete TCER / NCPI / CPE (required for personal baselines)."""
+    """Sessions with complete TCER / CPE (required for personal baselines)."""
     return [
         r for r in reports
         if getattr(r, "tcer", None) is not None
-        and getattr(r, "ncpi", None) is not None
         and getattr(r, "cpe", None) is not None
     ]
 
@@ -374,10 +361,10 @@ def compute_baselines(
     *,
     min_sessions: int | None = None,
 ) -> dict | None:
-    """Derive personal CTEI baselines (TCER/CPE median, NCPI mean) from sessions.
+    """Derive personal CTEI baselines (TCER/CPE median) from sessions.
 
     Returns None if fewer than ``min_sessions`` (default
-    :data:`MIN_BASELINE_SESSIONS`) sessions have complete TCER/NCPI/CPE data.
+    :data:`MIN_BASELINE_SESSIONS`) sessions have complete TCER/CPE data.
     Small samples make median/mean jump wildly; Framework §8.3 expects a real
     reference set. Pass ``min_sessions=1`` in unit tests that only check the
     arithmetic.
@@ -390,7 +377,6 @@ def compute_baselines(
         return None
     return {
         "tcer": statistics.median(r.tcer for r in valid),
-        "ncpi": statistics.mean(r.ncpi for r in valid),
         "cpe": statistics.median(r.cpe for r in valid),
     }
 
@@ -875,13 +861,6 @@ def caf(u: TokenUsage) -> float | None:
     return (u.total_input / denom) if denom else None
 
 
-def ncpi(net_loc: int | None, loc_accumulated: int | None) -> float | None:
-    """Net Code Production Index = net_loc / accumulated codebase LOC."""
-    if net_loc is None or not loc_accumulated:
-        return None
-    return net_loc / loc_accumulated
-
-
 def normalized_tcer(tcer: float | None, task_type: str | None) -> float | None:
     """Normalized TCER (NTCER) = TCER / TTAF_task.
 
@@ -898,18 +877,6 @@ def normalized_tcer(tcer: float | None, task_type: str | None) -> float | None:
     if not factor:
         return None
     return tcer / float(factor)
-
-
-def psac(loc_accumulated: int | None) -> float | None:
-    """Project-Stage Adjustment Coefficient (framework §6.5).
-
-    PSAC = intercept / (intercept - slope * LOC_current). Multiply TCER by this
-    to neutralize the structural TCER decline of larger codebases.
-    """
-    if loc_accumulated is None:
-        return None
-    denom = PSAC_INTERCEPT - PSAC_SLOPE * loc_accumulated
-    return (PSAC_INTERCEPT / denom) if denom else None
 
 
 def chr_factor(chr_: float | None) -> float:
@@ -938,27 +905,23 @@ def churn_ratio(added: int | None, reworked: int | None) -> float | None:
 
 def ctei(
     tcer: float | None,
-    ncpi_: float | None,
     cpe: float | None,
     chr_: float | None,
     *,
     tcer_baseline: float = TCER_BASELINE,
-    ncpi_baseline: float = NCPI_BASELINE,
     cpe_baseline: float = CPE_BASELINE,
 ) -> float | None:
-    """Composite Token Efficiency Index (framework §6.3).
+    """Composite Token Efficiency Index（三因子）。
 
-    CTEI = (TCER/baseline) × (NCPI/baseline) × (CPE_baseline/CPE) × (1+CHR*0.5)
-    Reproduces the framework's published per-session scores to <0.1%.
+    CTEI = (TCER/基准) × (CPE基准/CPE) × (1+CHR×0.5)
+
+    历史上还有第四个「产出密度」因子（NCPI/基准）——其分母是真实代码库总行数，
+    需要扫描本地仓库，与「纯离线、仅分析会话数据」的产品定位冲突，已移除。
+    三个因子都可聚合，项目聚合视图同样有效（聚合层不再禁用 CTEI/评级）。
     """
-    if tcer is None or ncpi_ is None or not cpe:
+    if tcer is None or not cpe:
         return None
-    return (
-        (tcer / tcer_baseline)
-        * (ncpi_ / ncpi_baseline)
-        * (cpe_baseline / cpe)
-        * chr_factor(chr_)
-    )
+    return (tcer / tcer_baseline) * (cpe_baseline / cpe) * chr_factor(chr_)
 
 
 # CTEI rating bands (framework §6.3), best → worst: ``(label, lower_bound)``.
@@ -992,7 +955,6 @@ def compute(
     u: TokenUsage,
     net_loc: int | None,
     *,
-    loc_accumulated: int | None = None,
     task_type: str | None = None,
     code_added: int | None = None,
     code_deleted: int | None = None,
@@ -1001,14 +963,12 @@ def compute(
     test_net_loc: int | None = None,
     doc_net_loc: int | None = None,
     tcer_baseline: float = TCER_BASELINE,
-    ncpi_baseline: float = NCPI_BASELINE,
     cpe_baseline: float = CPE_BASELINE,
 ) -> SessionReport:
     """Compute the full per-session report from accumulated usage + net LOC.
 
-    Composite fields (NCPI / CAF / NTCER / PSAC / CTEI / grade) and the
-    churn ratio are filled in opportunistically: each is None unless its inputs
-    are available.
+    Composite fields (CAF / NTCER / CTEI / grade) and the churn ratio are
+    filled in opportunistically: each is None unless its inputs are available.
     """
     total_input = u.total_input
     total = u.total
@@ -1031,13 +991,10 @@ def compute(
     ttaf_value = get_task_ttaf(task_type) if task_type else None
 
     # --- composite layer ---
-    ncpi_ = ncpi(net_loc, loc_accumulated)
     caf_ = caf(u)
     ta = normalized_tcer(tcer, task_type)
-    psac_ = psac(loc_accumulated)
-    tcer_phase = (tcer * psac_) if (tcer is not None and psac_ is not None) else None
-    ctei_ = ctei(tcer, ncpi_, cpe, chr_, tcer_baseline=tcer_baseline,
-                 ncpi_baseline=ncpi_baseline, cpe_baseline=cpe_baseline)
+    ctei_ = ctei(tcer, cpe, chr_, tcer_baseline=tcer_baseline,
+                 cpe_baseline=cpe_baseline)
 
     # --- timing metrics ---
     avg_turn_lat = avg_turn_latency_sec(u)
@@ -1105,16 +1062,12 @@ def compute(
         net_loc=net_loc,
         tcer=tcer,
         cpe=cpe,
-        loc_accumulated=loc_accumulated,
-        ncpi=ncpi_,
         caf=caf_,
         task_type=task_type,
         task_category=task_category,
         ttaf=ttaf_value,
         ntcer=ta,
         ta_tcer=ta,  # backward compat
-        psac=psac_,
-        tcer_phase_adj=tcer_phase,
         ctei=ctei_,
         grade=grade(ctei_),
         code_added=code_added,

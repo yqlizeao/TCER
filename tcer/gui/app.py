@@ -16,8 +16,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from tcer.core import analyze, export as export_mod, metrics
-from tcer.core import upload_client, upload_prefs
-from tcer.core.calibrate import calibrate_project
+from tcer.core import ui_prefs, upload_client, upload_prefs
 from tcer.core.paths import list_project_refs, project_has_sessions
 from tcer.core.reader import discover_jsonl
 from . import html_report, popups, theme, views
@@ -34,9 +33,7 @@ class TcerGui:
         self._selected_session_id: str | None = None
         self.view_mode = tk.StringVar(value="project")
         self._rendered_report = None  # last report rendered in MetricPanel (for popups)
-        self._code_dir: str | None = None
         self._no_loc: bool = False
-        self._scan_code_dir: bool = False
         self._analysis_generation = 0
         self._analysis_cancel = threading.Event()
         self._upload_prefs: dict = upload_prefs.load()
@@ -45,19 +42,47 @@ class TcerGui:
         root.title("TCER — Token 转码效率计量")
         root.configure(bg=theme.BG)
         theme.setup_style(ttk)
+        # Combobox 下拉列表是独立 Listbox，不吃 ttk style，只能经 option db 深色化。
+        for opt, val in (("*TCombobox*Listbox*background", theme.PANEL),
+                         ("*TCombobox*Listbox*foreground", theme.FG),
+                         ("*TCombobox*Listbox*selectBackground", theme.ACCENT),
+                         ("*TCombobox*Listbox*selectForeground", "#ffffff")):
+            root.option_add(opt, val)
 
-        # Center window on screen (shifted up slightly to account for taskbar)
-        w, h = 1600, 900
-        sx = root.winfo_screenwidth()
-        sy = root.winfo_screenheight()
-        root.geometry(f"{w}x{h}+{(sx - w) // 2}+{(sy - h) // 2 - 40}")
+        # 界面偏好：恢复上次窗口几何，否则居中（略上移避开任务栏）。
+        self._ui_prefs = ui_prefs.load()
+        self._restore_project_key = self._ui_prefs.get("last_project")
+        if ui_prefs.valid_geometry(self._ui_prefs.get("geometry")):
+            root.geometry(self._ui_prefs["geometry"])
+        else:
+            w, h = 1600, 900
+            sx = root.winfo_screenwidth()
+            sy = root.winfo_screenheight()
+            root.geometry(f"{w}x{h}+{(sx - w) // 2}+{(sy - h) // 2 - 40}")
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.filter = FilterBar(root, self)
+        self.filter.restore_prefs(self._ui_prefs)
         self._build_body(root)
         self.refresh_projects()
         root.after(100, self._poll)
         if self._upload_prefs.get("auto_upload"):
             self._schedule_auto_upload()
+
+    def _on_close(self) -> None:
+        """关闭时保存界面偏好（几何/分栏/筛选/项目），失败不拦退出。"""
+        try:
+            proj = self._selected_project()
+            ui_prefs.save({
+                "geometry": self.root.geometry(),
+                "sashes": [self._paned.sash_coord(i)[0] for i in (0, 1)],
+                "source": self.filter.get_source(),
+                "task_type": self.filter.get_params().get("task_type"),
+                "last_project": getattr(proj, "key", None),
+            })
+        except tk.TclError:
+            pass
+        self.root.destroy()
 
     # --------------------------------------------------------------- layout
     def _build_body(self, root) -> None:
@@ -92,9 +117,18 @@ class TcerGui:
         self.trend_chart = TrendChart(tab_t, controller=self)
         self.model_compare = ModelCompareView(tab_c, controller=self)
 
+        self._paned = paned
         root.update_idletasks()
         paned.sash_place(0, 190, 0)
         paned.sash_place(1, 420, 0)
+        # 恢复上次的分栏位置（覆盖默认值；数据异常则保持默认）。
+        saved = self._ui_prefs.get("sashes")
+        if isinstance(saved, list) and len(saved) == 2:
+            try:
+                paned.sash_place(0, int(saved[0]), 0)
+                paned.sash_place(1, int(saved[1]), 0)
+            except (TypeError, ValueError, tk.TclError):
+                pass
 
     # --------------------------------------------------------------- projects
     def refresh_projects(self) -> None:
@@ -110,7 +144,11 @@ class TcerGui:
             i for i, p in enumerate(self._projects)
             if not project_has_sessions(p)
         }
-        self.project_col.update(self._projects, self._empty_projects)
+        # 启动时恢复上次选中的项目（一次性；之后的刷新回到默认选首个）。
+        preferred = self._restore_project_key
+        self._restore_project_key = None
+        self.project_col.update(self._projects, self._empty_projects,
+                                preferred_key=preferred)
         n_empty = len(self._empty_projects)
         n_live = len(self._projects) - n_empty
         status = f"发现 {len(self._projects)} 个项目"
@@ -158,9 +196,7 @@ class TcerGui:
             task_type=params["task_type"],
             since=params["since"],
             until=params["until"],
-            code_dir=self._code_dir,
             no_loc=self._no_loc,
-            scan_code_dir=self._scan_code_dir,
             cancel_event=cancel_event,
         )
         threading.Thread(target=self._worker, args=(generation, args, cancel_event), daemon=True).start()
@@ -197,16 +233,6 @@ class TcerGui:
                     if generation == self._analysis_generation:
                         self.filter.set_status("出错")
                         messagebox.showerror("TCER 分析出错", payload)
-                elif kind == "calibration":
-                    _, payload = item
-                    cals, text_report = payload
-                    self.filter.set_status("校准完成")
-                    popups.CalibratePopup(self.root, cals, text_report)
-                elif kind == "calibration_err":
-                    # calibration is user-initiated — no generation gate
-                    _, payload = item
-                    self.filter.set_status("校准出错")
-                    messagebox.showerror("LOC 校准出错", payload)
                 elif kind == "overview":
                     _, rows, errors = item
                     note = f"（{errors} 个项目分析失败）" if errors else ""
@@ -522,32 +548,6 @@ class TcerGui:
             messagebox.showinfo("项目记忆文件", "当前项目没有 memory/ 目录或目录为空。")
 
     # --------------------------------------------------------------- tools
-    def run_calibration(self) -> None:
-        proj = self._selected_project()
-        if proj is None:
-            messagebox.showinfo("LOC 校准", "请先选择一个项目。")
-            return
-        if proj.source in ("codex", "opencode", "grok"):
-            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok"}.get(proj.source, proj.source)
-            messagebox.showinfo("LOC 校准", f"{label} 会话当前仅支持只读分析，暂不支持 LOC 校准。")
-            return
-        self.filter.set_status("校准中…")
-        threading.Thread(target=self._calibration_worker, args=(proj.key,),
-                         daemon=True).start()
-
-    def _calibration_worker(self, project: str) -> None:
-        try:
-            cals = calibrate_project(project, code_dir=self._code_dir)
-            lines = []
-            for cal in cals:
-                lines.append(f"{cal.session_id[:38]}  "
-                             f"工具 +{cal.tcer_added} -{cal.tcer_deleted}  "
-                             f"git +{cal.git_added} -{cal.git_deleted}  "
-                             f"偏差 {cal.net_deviation:+d}")
-            self._q.put(("calibration", (cals, "\n".join(lines))))
-        except Exception as e:  # noqa: BLE001
-            self._q.put(("calibration_err", f"校准出错: {e}"))
-
     def compute_baselines(self) -> None:
         if not self._current:
             messagebox.showinfo("计算基准", "请先分析一个项目。")
@@ -556,12 +556,8 @@ class TcerGui:
         need = metrics.MIN_BASELINE_SESSIONS
         values = metrics.compute_baselines(self._current.reports)
         if values is None:
-            # Need scan_code_dir for NCPI, and enough complete sessions.
             if len(eligible) == 0:
-                msg = (
-                    "没有可参与计算的会话（需同时具备 TCER、NCPI、CPE）。\n"
-                    "提示：在「高级选项」开启「扫描代码目录」以填充 NCPI。"
-                )
+                msg = "没有可参与计算的会话（需同时具备 TCER 与 CPE，即有效净增行与成本）。"
             else:
                 msg = (
                     f"有效会话不足：需要至少 {need} 个完整会话，"
@@ -638,14 +634,11 @@ class TcerGui:
                                    preselect_sid=self._selected_session_id)
 
     def show_advanced(self) -> None:
-        def _apply(code_dir, no_loc, scan_code_dir):
-            self._code_dir = code_dir
+        def _apply(no_loc):
             self._no_loc = no_loc
-            self._scan_code_dir = scan_code_dir
             self.reanalyze()
 
-        popups.AdvancedPopup(self.root, self._code_dir or "", self._no_loc,
-                             self._scan_code_dir, _apply)
+        popups.AdvancedPopup(self.root, self._no_loc, _apply)
 
     # --------------------------------------------------------------- export
     def export(self, fmt: str, scope: str = "project") -> None:
@@ -686,7 +679,7 @@ class TcerGui:
                     content = export_mod.session_to_json(report)
                 else:
                     content = export_mod.to_markdown(
-                        [report], report, 1, a.code_dir, project_name=proj_name)
+                        [report], report, 1, project_name=proj_name)
             elif fmt == "html":
                 content = html_report.render_project_html(
                     a.reports, a.aggregate, project_name=proj_name,
@@ -698,7 +691,7 @@ class TcerGui:
                 content = export_mod.to_csv(a.reports)
             else:
                 content = export_mod.to_markdown(a.reports, a.aggregate, a.n_sessions,
-                                                 a.code_dir, project_name=proj_name)
+                                                 project_name=proj_name)
             Path(path).write_text(content, encoding="utf-8")
             self.filter.set_status(f"已导出 → {Path(path).name}")
         except OSError as e:
@@ -762,9 +755,7 @@ class TcerGui:
             task_type=params["task_type"],
             since=params["since"],
             until=params["until"],
-            code_dir=self._code_dir,
             no_loc=self._no_loc,
-            scan_code_dir=self._scan_code_dir,
         )
         threading.Thread(
             target=self._upload_worker,
@@ -859,7 +850,32 @@ class TcerGui:
         except ImportError:
             print("error: tkinter is not available in this Python build.")
             return 1
+        _enable_windows_hidpi()
         root = tk.Tk()
+        _apply_tk_scaling(root)
         cls(root)
         root.mainloop()
         return 0
+
+
+def _enable_windows_hidpi() -> None:
+    """Windows 高 DPI 感知。必须在创建 Tk 之前调用——否则系统把 96 DPI
+    位图拉伸到高分屏，整个界面发糊（观感上「不精致」的最大来源）。"""
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # SYSTEM_DPI_AWARE
+    except (OSError, AttributeError):
+        pass
+
+
+def _apply_tk_scaling(root) -> None:
+    """按实际 DPI 设置 Tk 缩放，点单位字体随之放大到物理正确尺寸。"""
+    try:
+        dpi = root.winfo_fpixels("1i")
+        if dpi > 0:
+            root.tk.call("tk", "scaling", dpi / 72.0)
+    except tk.TclError:
+        pass

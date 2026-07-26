@@ -11,16 +11,14 @@ JSONL — not from git. This makes measurement:
   rewrote (iterations included), which is the real Token→Code work, rather than
   only what was eventually committed.
 
-Caveat (F1): a ``Write`` that overwrites a file from an *earlier* session used to
-assume prior length 0 (full content counted as added). With ``disk_prior=True`` (non-default; the default is ``False``), the first Write to a path seeds the prior line count from disk when
-the target is readable **and the on-disk text differs from this Write payload**
-(true overwrite of something else). If disk text **equals** the Write content —
-the usual case when replaying a finished session whose files still exist —
-prior stays 0 so net LOC is not zeroed out (post-session disk is not a baseline).
-``unseen_writes`` still counts Writes where the prior could not be resolved.
-Within a session, overwrites are tracked exactly via in-memory state.
+Caveat (F1): a ``Write`` that overwrites a file from an *earlier* session first
+assumes prior length 0 (full content counted as added, ``unseen_writes``++). When
+the tool-result line carries ``toolUseResult.originalFile`` (Claude), the prior is
+corrected retroactively from **session data** via ``note_write_original`` — no
+disk access. Within a session, overwrites are tracked exactly via in-memory state.
 
-``tree_loc`` measures accumulated codebase size by scanning the working directory.
+产品边界：本模块只消费会话数据，绝不读取用户的真实仓库/工作目录
+（磁盘先验与 tree_loc 全树扫描已按产品定位移除）。
 """
 from __future__ import annotations
 
@@ -38,21 +36,6 @@ CODE_SUFFIXES = {
     ".c", ".cpp", ".cc", ".h", ".hpp", ".cs", ".rb", ".php", ".swift", ".kt",
     ".scala", ".sh", ".bash", ".sql", ".vue", ".svelte", ".md", ".json", ".yaml",
     ".yml", ".toml", ".html", ".css",
-}
-
-# Directories skipped when scanning a working tree for accumulated LOC.
-# Build outputs, tooling caches, and vendored dependency trees — never
-# hand-written source, and the big ones (Rust `target/`, `node_modules/`,
-# CocoaPods `Pods/`, Xcode `DerivedData/`) can hold hundreds of thousands of
-# generated files that would stall tree_loc for minutes on large repos.
-EXCLUDE_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "bower_components",
-    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    "venv", ".venv", "env", ".tox", "site-packages",
-    "target", ".gradle", "build", "dist", "DerivedData", "Pods",
-    ".dart_tool", ".next", ".nuxt", ".svelte-kit", ".turbo", ".angular",
-    ".parcel-cache", ".webpack", "coverage", ".cache", ".caches",
-    ".idea", ".vscode",
 }
 
 # Tool names that mutate files (so their token cost should produce LOC).
@@ -104,8 +87,8 @@ class SessionLoc:
     genuinely new file that assumption is correct; for a Write that overwrites an
     *existing* file it is wrong: the whole new content is counted as added and the
     deletion is missed (the F1 bug — see the module docstring). This count is an
-    upper bound on F1 exposure, not the inflation itself; quantify the real gap
-    with the GUI's「校准 LOC」feature (git ground truth) when exactness matters.
+    upper bound on the *residual* F1 exposure (Writes whose originalFile never
+    arrived in the session data).
     """
 
     added: int
@@ -188,66 +171,6 @@ def merge_session_locs(slocs: list[SessionLoc]) -> SessionLoc:
     return out
 
 
-def _resolve_path(file_path: str, cwd: str | Path | None) -> Path | None:
-    if not file_path or not isinstance(file_path, str):
-        return None
-    p = Path(file_path)
-    if not p.is_absolute():
-        if cwd is None:
-            return None
-        p = Path(cwd) / p
-    return p
-
-
-def disk_line_count(file_path: str, cwd: str | Path | None = None) -> tuple[int, bool]:
-    """Best-effort on-disk line count for F1 Write baseline correction.
-
-    Returns ``(lines, resolved)``:
-    - ``resolved=True`` and ``lines=N`` — file exists and was readable;
-    - ``resolved=True`` and ``lines=0`` — path resolved but file missing (new file);
-    - ``resolved=False`` and ``lines=0`` — could not resolve/read (relative path
-      without cwd, permission error, …). Callers should treat this as the classic
-      F1 exposure (assume old=0 and count ``unseen_writes``).
-
-    Uses current disk state (not historical). Offline, stdlib only.
-    """
-    text, resolved = disk_file_text(file_path, cwd)
-    if not resolved:
-        return 0, False
-    if text is None:
-        return 0, True  # missing file
-    return _nlines(text), True
-
-
-def disk_file_text(
-    file_path: str, cwd: str | Path | None = None,
-) -> tuple[str | None, bool]:
-    """Read on-disk text for *file_path*.
-
-    Returns ``(text, resolved)``:
-    - ``(text, True)`` — file exists and was readable;
-    - ``(None, True)`` — path resolved but file missing (new file);
-    - ``(None, False)`` — could not resolve/read.
-    """
-    p = _resolve_path(file_path, cwd)
-    if p is None:
-        return None, False
-    try:
-        if not p.is_file():
-            return None, True
-        with open(p, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read(), True
-    except OSError:
-        return None, False
-
-
-def _text_equiv(a: str, b: str) -> bool:
-    """Compare tool payload vs disk, ignoring newline style only."""
-    if a == b:
-        return True
-    return a.replace("\r\n", "\n").replace("\r", "\n") == b.replace("\r\n", "\n").replace("\r", "\n")
-
-
 class _LocAccumulator:
     """Incremental LOC state while replaying edit tool_use blocks (single-pass)."""
 
@@ -255,15 +178,10 @@ class _LocAccumulator:
         "file_lines", "session_authored", "file_edits",
         "added", "deleted", "unseen", "rework",
         "test_added", "test_deleted", "doc_added", "doc_deleted",
-        "cwd", "disk_prior", "pending_f1",
+        "pending_f1",
     )
 
-    def __init__(
-        self,
-        *,
-        cwd: str | Path | None = None,
-        disk_prior: bool = False,
-    ) -> None:
+    def __init__(self) -> None:
         self.file_lines: dict[str, int] = {}  # current line estimate (incl. disk seed)
         # Lines this session has authored into the file (never includes disk prior).
         self.session_authored: dict[str, int] = {}
@@ -271,8 +189,6 @@ class _LocAccumulator:
         self.added = self.deleted = self.unseen = self.rework = 0
         self.test_added = self.test_deleted = 0
         self.doc_added = self.doc_deleted = 0
-        self.cwd = cwd
-        self.disk_prior = disk_prior
         # F1 待修正：首个 Write 按 old=0 记账的 (path → 该 Write 的新行数)。
         # Claude 的 toolUseResult.originalFile 到达后经 note_write_original 修正。
         self.pending_f1: dict[str, int] = {}
@@ -284,27 +200,11 @@ class _LocAccumulator:
         if not isinstance(fp, str) or not _is_code(fp):
             return
         self.file_edits[fp] = self.file_edits.get(fp, 0) + 1
-        # First Write to a path: optionally seed prior from disk (F1 mitigation).
-        # If on-disk text *equals* this Write payload, the usual post-session
-        # case for files the model just created — do NOT seed prior (would
-        # zero net LOC). Only seed when disk differs (true overwrite of other
-        # content still sitting on disk, e.g. tests that leave pre-write files).
+        # First Write to a path: assume old=0 and remember it in pending_f1 —
+        # a later toolUseResult.originalFile (session data, not disk) corrects it.
         if name == "Write" and fp not in self.file_lines:
-            if self.disk_prior:
-                content = inp.get("content")
-                disk_text, resolved = disk_file_text(fp, self.cwd)
-                if not resolved:
-                    self.unseen += 1  # assume old=0
-                    self.pending_f1[fp] = _nlines(inp.get("content"))
-                elif disk_text is None:
-                    pass  # missing file → prior 0, full add
-                elif isinstance(content, str) and _text_equiv(disk_text, content):
-                    pass  # post-session match → authored from empty
-                else:
-                    self.file_lines[fp] = _nlines(disk_text)  # different content
-            else:
-                self.unseen += 1
-                self.pending_f1[fp] = _nlines(inp.get("content"))
+            self.unseen += 1
+            self.pending_f1[fp] = _nlines(inp.get("content"))
         # Self-rework only against lines this session already wrote — never the
         # disk prior seed (deleting pre-existing code is a normal edit).
         authored_before = self.session_authored.get(fp, 0)
@@ -369,23 +269,14 @@ class _LocAccumulator:
         )
 
 
-def session_loc_full(
-    path: Path,
-    *,
-    cwd: str | Path | None = None,
-    disk_prior: bool = False,
-) -> SessionLoc:
+def session_loc_full(path: Path) -> SessionLoc:
     """Full LOC breakdown for one session (added / deleted / unseen_writes).
 
-    Replays Write/Edit/MultiEdit/NotebookEdit in order. Net LOC = added - deleted;
-    churn = deleted / added. Only paths with a code suffix are counted.
-
-    ``disk_prior``: default **False** (generation effort: count what Write wrote).
-    Set True only when on-disk files still reflect *pre-Write* baselines (e.g.
-    lab fixtures). Post-session analysis with disk_prior=True and intermediate
-    Writes often fabricates large deletes. Relative paths need ``cwd``.
+    Replays Write/Edit/MultiEdit/NotebookEdit in order (with originalFile F1
+    correction). Net LOC = added - deleted; churn = deleted / added. Only paths
+    with a code suffix are counted. Session data only — never touches disk.
     """
-    acc = _LocAccumulator(cwd=cwd, disk_prior=disk_prior)
+    acc = _LocAccumulator()
     for obj in reader.iter_messages(path):
         # Write 结果行的 originalFile → F1 修正（与 reader.scan_session 一致，
         # 保证审计交叉验证时两条路径逐字节相同）。
@@ -457,29 +348,3 @@ def net_loc(path: Path) -> int:
     """Net code LOC for one session (added - deleted)."""
     a, d = session_loc(path)
     return a - d
-
-
-def tree_loc(root: Path) -> int | None:
-    """Accumulated code LOC of a working directory (recursive, code suffixes only).
-
-    Skips ``EXCLUDE_DIRS``. Returns None if ``root`` doesn't exist. Feeds NCPI
-    (net / total) and PSAC (project-phase coefficient).
-    """
-    if not root.is_dir():
-        return None
-    total = 0
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
-        for fn in filenames:
-            if Path(fn).suffix.lower() not in CODE_SUFFIXES:
-                continue
-            fpath = Path(dirpath) / fn
-            try:
-                # Text mode with universal newlines so the count matches
-                # ``_nlines`` (splitlines): \r\n and lone \r are normalized to \n
-                # before splitting, the same as session_loc's line accounting.
-                with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
-                    total += sum(1 for _ in fh)
-            except OSError:
-                continue
-    return total

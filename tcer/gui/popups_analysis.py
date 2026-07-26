@@ -12,7 +12,7 @@ from tkinter import ttk
 from tcer.core import format as fmt
 from . import theme
 from .metric_defs import GROUPS
-from .widgets import ScrollFrame, Tooltip, new_window as _new_window
+from .widgets import ScrollFrame, Tooltip, flat_button, new_window as _new_window
 
 
 class SessionComparePopup:
@@ -379,9 +379,7 @@ class ProjectOverviewPopup:
                       f"{fmt.fmt_money(total_cost)} · 净增 {total_net:,} 行 · 点击表头排序",
                  bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
                      side="left", padx=12)
-        tk.Button(head, text="导出 HTML", relief="flat", bg=theme.PANEL, fg=theme.FG,
-                  padx=6, command=self._export_html,
-                  activebackground=theme.BG, activeforeground=theme.FG).pack(side="right")
+        flat_button(head, "导出 HTML", self._export_html).pack(side="right")
 
         self._data = []
         for p, a in rows:

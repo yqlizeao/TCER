@@ -510,12 +510,7 @@ def read_conversation(path: Path) -> list[dict]:
     return convo
 
 
-def _loc_scan(
-    path: Path,
-    *,
-    cwd: str | Path | None = None,
-    disk_prior: bool = False,
-):
+def _loc_scan(path: Path):
     """Single pass over updates returning ``(SessionLoc, has_signal)``.
 
     ``has_signal`` is True if any parseable ``search_replace``/``write`` edit
@@ -525,7 +520,7 @@ def _loc_scan(
     """
     from tcer.core.loc import SessionLoc, _LocAccumulator, _is_code
 
-    acc = _LocAccumulator(cwd=cwd, disk_prior=disk_prior)
+    acc = _LocAccumulator()
     has_signal = False
 
     for obj in iter_updates(path):
@@ -570,9 +565,9 @@ def _loc_scan(
     return sloc, has_signal
 
 
-def session_loc_full(path: Path, *, cwd: str | Path | None = None, disk_prior: bool = False):
+def session_loc_full(path: Path):
     """Return LOC from parseable Grok ``search_replace``/``write`` calls only."""
-    return _loc_scan(path, cwd=cwd, disk_prior=disk_prior)[0]
+    return _loc_scan(path)[0]
 
 
 def has_loc_signal(path: Path) -> bool:

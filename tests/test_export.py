@@ -13,7 +13,7 @@ def _report(net_loc: int, sub: bool = False, sid: str = "sess") -> metrics.Sessi
                        path=Path(f"/tmp/{sid}.jsonl"), is_subagent=sub)
     u = TokenUsage(input_tokens=500_000, output_tokens=500_000)  # total 1Mt
     return metrics.compute(meta, u, net_loc=net_loc,
-                           loc_accumulated=10_000, task_type="feature")
+                           task_type="feature")
 
 
 # --------------------------------------------------------------------------- #
@@ -112,7 +112,7 @@ def test_to_csv_has_each_field_once():
 
 def test_to_markdown_contains_key_sections():
     r = _report(500, sid="abc12345")
-    md = export.to_markdown([r], r, 1, code_dir=Path("/tmp"))
+    md = export.to_markdown([r], r, 1)
     assert "# TCER Report" in md
     assert "## Summary" in md
     assert "## Sessions" in md
@@ -131,3 +131,19 @@ def test_csv_fields_cover_all_row_keys():
     # 反向:清单里不能有已消失的键
     stale = [k for k in export._CSV_FIELDS if k not in row]
     assert not stale, f"_CSV_FIELDS 含已不存在的键: {stale}"
+
+
+def test_ui_prefs_roundtrip(tmp_path, monkeypatch):
+    from tcer.core import ui_prefs
+    monkeypatch.setattr(ui_prefs, "_PATH", tmp_path / "tcer_ui.json")
+    assert ui_prefs.load() == {}
+    ui_prefs.save({"geometry": "1600x900+10+10", "sashes": [190, 420]})
+    assert ui_prefs.load()["sashes"] == [190, 420]
+    # 损坏文件容错
+    (tmp_path / "tcer_ui.json").write_text("{broken", encoding="utf-8")
+    assert ui_prefs.load() == {}
+    # 几何串校验
+    assert ui_prefs.valid_geometry("1600x900+160+40")
+    assert ui_prefs.valid_geometry("1600x900+-160-40")
+    assert not ui_prefs.valid_geometry("garbage")
+    assert not ui_prefs.valid_geometry(None)
