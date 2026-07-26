@@ -108,3 +108,27 @@ def test_session_to_json_single_row():
     payload = json.loads(export.session_to_json(r))
     assert payload["session_id"] == "only"
     assert "cost_by_model" in payload
+
+
+def test_project_html_contains_mini_timeline():
+    from tcer.core.models import TurnStat
+
+    r = _report(300, sid="s1")
+    r.usage.turn_stats = [TurnStat(0, ts=1_770_000_000_000, input_tokens=100,
+                                   output_tokens=50),
+                          TurnStat(1, input_tokens=200, output_tokens=80, errors=1)]
+    out = html_report.render_project_html([r], _agg([r]), project_name="P")
+    assert "vertical-align:bottom" in out  # 缩略条 span
+    assert "回合 2" in out
+
+
+def test_render_overview_html():
+    rows = [{"source": "Claude", "name": "P1", "sessions": 3, "tokens": 1000,
+             "cost": 1.5, "net": 200, "tcer": 60.0, "chr": 0.9, "churn": 0.05},
+            {"source": "Grok", "name": "<x>", "sessions": 1, "tokens": 500,
+             "cost": None, "net": None, "tcer": None, "chr": None, "churn": None}]
+    rows[1]["cost"] = 0.0
+    out = html_report.render_overview_html(rows)
+    assert "TCER 项目总览" in out and "P1" in out
+    assert "&lt;x&gt;" in out  # 转义
+    assert "sortable" in out

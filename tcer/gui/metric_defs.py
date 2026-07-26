@@ -94,6 +94,15 @@ GROUPS: list[Group] = [
                "本地代理会话开始时记录的工作分支。", "basic"),
         Metric("git_commit", "Git 提交", "",
                "本地代理会话开始时记录的提交。", "basic"),
+        Metric("plan_modes", "计划模式", "",
+               "会话中进入计划模式（plan mode）的次数——先规划后动手的工作流信号。", "basic"),
+        Metric("slash_commands", "斜杠命令", "",
+               "以 / 开头或经命令面板发送的用户消息数——工作流自动化程度的信号。", "basic"),
+        Metric("correction_msgs", "纠正消息", "",
+               "含显式纠正措辞（不对/重来/撤销/undo…）的用户消息数。\n"
+               "偏高 = 输出方向频繁跑偏；保守词表匹配，仅作趋势参考。", "basic", "down"),
+        Metric("first_prompt_chars", "首条消息长度", "字",
+               "首条真实用户消息的字符数——任务描述的投入度；过短的开场常伴随更多来回澄清。", "basic"),
         Metric("hook_overhead", "钩子开销", "",
                "stop hook（lint/test 等用户配置的钩子）的累计耗时与失败次数——"
                "「你自己装的钩子拖慢了多少」。", "basic", "down"),
@@ -202,6 +211,11 @@ GROUPS: list[Group] = [
                    "公式：搜索（Grep/Glob）后 3 回合内发生 Edit/Write 的占比\n"
                    "推荐：越高越好\n"
                    "说明：衡量「搜完是否跟进修改」的工作流;按回合就近匹配(不绑定具体文件，因 Grep 的 path 多为目录)；偏低=搜索后未动手(探索过度)。", "basic", "up"),
+            Metric("read_truncations", "读取截断", "",
+                   "Read 结果因过长被截断的次数——每次截断都读入了用不上的内容又要重读，"
+                   "是上下文浪费的直接信号。", "basic", "down"),
+            Metric("reasoning_time", "思考耗时", "秒",
+                   "推理（reasoning）内容块的累计生成耗时。", "basic"),
             Metric("thinking_count", "思考次数", "",
                    "AI 输出 thinking（推理）内容块的次数,消耗 output token。⚠️ 对推理类模型(mimo/glm/带思考的 Claude)几乎每回合都有,≈回合数,并非「复杂度」信号;关闭思考的会话则恒为 0。", "basic"),
             Metric("reasoning_ratio", "推理输出占比", "",
@@ -431,6 +445,8 @@ _SESSION_FMT: dict[str, str] = {
     "ratings": "text", "permission_wait": "text",
     "itl_p50": "int", "itl_p99": "int",
     "hook_overhead": "text", "queued_inputs": "int",
+    "slash_commands": "int", "correction_msgs": "int", "first_prompt_chars": "int",
+    "plan_modes": "int", "read_truncations": "int", "reasoning_time": "text",
     # G5
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
     # G6
@@ -475,6 +491,11 @@ _USAGE_ATTR = {
     "itl_p50": "itl_p50_ms",
     "itl_p99": "itl_p99_ms",
     "queued_inputs": "queued_input_count",
+    "slash_commands": "slash_command_count",
+    "correction_msgs": "correction_msg_count",
+    "first_prompt_chars": "first_prompt_chars",
+    "plan_modes": "plan_mode_count",
+    "read_truncations": "read_truncation_count",
 }
 # key → callable returning the current baseline constant (read-only reference).
 _BASELINE = {
@@ -539,6 +560,9 @@ _DISPLAY_EXTRACTORS = {
     "permission_wait": lambda r: (
         f"{r.usage.permission_wait_ms_total / 1000:.1f}（{r.usage.permission_request_count} 次）"
         if r.usage.permission_request_count else "-"),
+    "reasoning_time": lambda r: (
+        f"{r.usage.reasoning_ms_total / 1000:.1f}"
+        if r.usage.reasoning_ms_total else "-"),
     "hook_overhead": lambda r: (
         f"{r.usage.hook_duration_ms_total / 1000:.1f}s"
         f"（{r.usage.hook_run_count} 次"
@@ -619,6 +643,9 @@ def raw_value(report, key: str) -> float | None:
         if key == "hook_overhead":
             return (u.hook_duration_ms_total / 1000
                     if u.hook_run_count else None)
+        if key == "reasoning_time":
+            return (u.reasoning_ms_total / 1000
+                    if u.reasoning_ms_total else None)
         if key in _USAGE_ATTR:
             v = getattr(u, _USAGE_ATTR[key])
             return float(v) if v is not None else None
@@ -697,6 +724,12 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "revert_events": frozenset({"opencode", "grok"}),
     "hook_overhead": frozenset({"claude"}),
     "queued_inputs": frozenset({"claude"}),
+    "slash_commands": frozenset({"claude"}),
+    "correction_msgs": frozenset({"claude"}),
+    "first_prompt_chars": frozenset({"claude"}),
+    "plan_modes": frozenset({"claude"}),
+    "read_truncations": frozenset({"claude"}),
+    "reasoning_time": frozenset({"opencode"}),
     "git_commits": frozenset({"grok"}),
     "ratings": frozenset({"grok"}),
     "permission_wait": frozenset({"grok"}),

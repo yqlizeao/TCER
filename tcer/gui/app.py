@@ -493,7 +493,8 @@ class TcerGui:
             return []
         try:
             _, main, session_dir = reader.session_artifacts(path)
-        except Exception:  # noqa: BLE001
+        except (OSError, ValueError, IndexError):
+            # 路径形态异常（非标准会话布局）→ 退回按单文件读取。
             return reader.read_user_messages(path) if path.is_file() else []
         msgs: list[str] = []
         if main.is_file():

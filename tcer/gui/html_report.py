@@ -251,6 +251,31 @@ def _models_section(reports: list[SessionReport]) -> str:
     return f'<div class="scroll"><table>{head}{"".join(body)}</table></div>{note}'
 
 
+def _mini_timeline(report: SessionReport, cap: int = 200) -> str:
+    """每会话折叠区内的时间线缩略条：逐回合竖条，高∝Token，红=有工具错误。"""
+    stats = report.usage.turn_stats
+    if not stats:
+        return ""
+    shown = stats[:cap]
+    max_tok = max((t.input_tokens + t.cache_write + t.cache_read
+                   + t.output_tokens) for t in shown) or 1
+    spans = []
+    for t in shown:
+        tot = t.input_tokens + t.cache_write + t.cache_read + t.output_tokens
+        h = max(2, round(tot / max_tok * 24))
+        color = theme.ERROR if t.errors else theme.ACCENT
+        tip = f"回合 {t.turn + 1} · {tot:,} tok"
+        if t.duration_ms is not None:
+            tip += f" · {t.duration_ms / 1000:.1f}s"
+        spans.append(
+            f'<span title="{_esc(tip)}" style="display:inline-block;width:3px;'
+            f'margin-right:1px;height:{h}px;background:{color};'
+            f'vertical-align:bottom"></span>')
+    note = (f'<span style="color:{theme.MUTED};font-size:11px"> 前 {cap}/{len(stats)} 回合</span>'
+            if len(stats) > cap else "")
+    return (f'<div style="line-height:0;padding:6px 14px 0">{"".join(spans)}{note}</div>')
+
+
 def _session_details_section(reports: list[SessionReport]) -> str:
     parts = []
     for r in reports:
@@ -258,7 +283,8 @@ def _session_details_section(reports: list[SessionReport]) -> str:
                    f'<span style="color:{theme.MUTED}"> · {_esc(fmt.fmt_dt(r.usage.started_at))}'
                    f" · {_esc(metric_defs.display(r, 'total_tokens'))} tok"
                    f" · {_esc(metric_defs.display(r, 'cost'))}</span>")
-        parts.append(f"<details><summary>{summary}</summary>{_groups_section(r)}</details>")
+        parts.append(f"<details><summary>{summary}</summary>"
+                     f"{_mini_timeline(r)}{_groups_section(r)}</details>")
     return "".join(parts)
 
 
@@ -396,6 +422,46 @@ def render_session_html(
         "不依赖 git · 成本按 API 官方标价估算，非订阅实际扣费。</footer>",
     ]
     return _shell(f"TCER 会话报告 · {title[:40]}", "\n".join(body))
+
+
+def render_overview_html(rows: list[dict]) -> str:
+    """项目总览自包含 HTML：全部项目可排序对比表（与总览弹窗同一数据）。
+
+    ``rows`` 为弹窗 ``ProjectOverviewPopup._data`` 形状的 dict 列表
+    （source/name/sessions/tokens/cost/net/tcer/chr/churn）。
+    """
+    total_cost = sum(d["cost"] or 0 for d in rows)
+    total_tok = sum(d["tokens"] or 0 for d in rows)
+    total_net = sum(d["net"] or 0 for d in rows)
+    head = ("<tr><th>来源</th><th>项目</th><th class='num'>会话</th>"
+            "<th class='num'>总 Token</th><th class='num'>成本</th>"
+            "<th class='num'>净增行</th><th class='num'>TCER</th>"
+            "<th class='num'>缓存命中</th><th class='num'>返工率</th></tr>")
+    body = []
+    for d in sorted(rows, key=lambda x: -(x["cost"] or 0)):
+        body.append(
+            "<tr>"
+            f"<td>{_esc(d['source'])}</td><td>{_esc(d['name'])}</td>"
+            + _num_td(d["sessions"], str(d["sessions"]))
+            + _num_td(d["tokens"], f"{d['tokens']:,}")
+            + _num_td(d["cost"], fmt.fmt_money(d["cost"]))
+            + _num_td(d["net"], fmt.fmt_int(d["net"]))
+            + _num_td(d["tcer"], fmt.fmt_float(d["tcer"], "0.0"))
+            + _num_td(d["chr"], fmt.fmt_pct(d["chr"]))
+            + _num_td(d["churn"], fmt.fmt_pct(d["churn"]))
+            + "</tr>")
+    body_html = [
+        "<h1>TCER 项目总览</h1>",
+        f'<div class="meta">{len(rows)} 个项目 ｜ <b>{total_tok:,}</b> Token ｜ '
+        f"<b>{_esc(fmt.fmt_money(total_cost))}</b> ｜ 净增 <b>{total_net:,}</b> 行 ｜ "
+        f"生成于 <b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</b>"
+        f" · TCER v{_esc(_version())}</div>",
+        f'<div class="scroll"><table class="sortable"><thead>{head}</thead>'
+        f'<tbody>{"".join(body)}</tbody></table></div>',
+        '<p class="note">点击表头排序。综合效率分/评级为单会话指标，项目聚合不显示。</p>',
+        f"<footer>由 TCER v{_esc(_version())} 生成 · 聚合口径与桌面端项目总览一致。</footer>",
+    ]
+    return _shell("TCER 项目总览", "\n".join(body_html))
 
 
 def _version() -> str:

@@ -285,6 +285,13 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
         turn = turn_by_message.get(mid, max(0, assistant_seen - 1))
         if ptype == "reasoning":
             u.thinking_count += 1
+            # reasoning part 带 time.{start,end} → 思考耗时。
+            t = data.get("time")
+            if isinstance(t, dict):
+                start = _as_int(t.get("start"))
+                end = _as_int(t.get("end"))
+                if end > start > 0:
+                    u.reasoning_ms_total += end - start
         elif ptype == "file":
             if _is_image_mime(data.get("mime")):
                 u.image_count += 1

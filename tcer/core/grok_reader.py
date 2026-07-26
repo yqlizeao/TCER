@@ -266,6 +266,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
                     cache_read=after[2] - before[2],
                     output_tokens=after[3] - before[3],
                     duration_ms=api_ms or None,
+                    model=current_model,
                 ))
             continue
 

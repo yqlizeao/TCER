@@ -25,6 +25,14 @@ TITLE_MAX_CHARS = 80
 
 _TAG_RE = re.compile(r'<[^>]+>')
 
+# 纠正措辞（保守清单）：用户对上一轮输出不满意的显式信号。只在消息前 200 字符
+# 内匹配，避免长引用文本误报；命中即计入 correction_msg_count。
+_CORRECTION_RE = re.compile(
+    r"不对|错了|不是这样|重来|重新来|重新做|撤销|回退|回滚|别这么|别这样"
+    r"|\bundo\b|\brevert\b|\bwrong\b|\bredo\b",
+    re.IGNORECASE,
+)
+
 
 def _strip_tags(txt: str) -> str:
     """Remove XML/HTML-like tags (e.g. ``<ide_opened_file>…</ide_opened_file>``)."""
@@ -330,6 +338,16 @@ def _scan_session_uncached(
             u.queued_input_count += 1
             continue
 
+        # attachment 子类型：计划模式使用、读取截断（上下文浪费）。
+        if obj.get("type") == "attachment":
+            att = obj.get("attachment")
+            sub = att.get("type") if isinstance(att, dict) else None
+            if sub == "plan_mode":
+                u.plan_mode_count += 1
+            elif sub == "read_truncation_notice":
+                u.read_truncation_count += 1
+            continue
+
         # 非 message 行：system 子类型携带真实回合耗时 / 限流 / 压缩信号。
         if obj.get("type") == "system":
             sub = obj.get("subtype")
@@ -412,8 +430,16 @@ def _scan_session_uncached(
                 )
             if is_real_user:
                 u.user_msgs += 1
+                # prompt 行为信号：只计数，不存正文（隐私边界与懒加载一致）。
+                txt = extract_text(content).strip()
+                if txt.startswith("/") or txt.startswith("<command-name>"):
+                    u.slash_command_count += 1
+                elif _CORRECTION_RE.search(txt[:200]):
+                    u.correction_msg_count += 1
+                if (u.first_prompt_chars == 0 and txt
+                        and not txt.startswith(_TITLE_NOISE_PREFIXES)):
+                    u.first_prompt_chars = len(txt)
                 if include_user_texts:
-                    txt = extract_text(content).strip()
                     if txt:
                         txt = _strip_tags(txt)
                     if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
@@ -485,10 +511,14 @@ def _scan_session_uncached(
                     u.output_tokens += o
                     u.cache_write_1h_tokens += cw1h
                     u.peak_input_tokens = max(u.peak_input_tokens, i + cw + cr)
+                    model_raw = msg.get("model")
                     u.turn_stats.append(TurnStat(
                         turn=current_turn, ts=ts,
                         input_tokens=i, cache_write=cw, cache_read=cr,
                         output_tokens=o,
+                        model=(pricing.normalize(model_raw)
+                               if isinstance(model_raw, str) and model_raw
+                               and model_raw != "<synthetic>" else ""),
                     ))
                 # Claude 的网页搜索/抓取计数在 usage.server_tool_use 里（每响应一次）。
                 stu = usage.get("server_tool_use")

@@ -178,3 +178,22 @@ class MetricCell:
             except (ValueError, TypeError):
                 fg = theme.VALUE_NEUTRAL
         self.value.config(fg=fg)
+
+
+def new_window(parent, title, size, bg=theme.BG):
+    """Create a centered Toplevel relative to *parent* (shared popup shell)."""
+    import tkinter as tk
+
+    win = tk.Toplevel(parent)
+    win.title(title)
+    win.configure(bg=bg)
+    parent.update_idletasks()
+    pw = parent.winfo_width()
+    ph = parent.winfo_height()
+    px = parent.winfo_rootx()
+    py = parent.winfo_rooty()
+    wpx, hpx = (int(x) for x in size.split("x"))
+    x = px + (pw - wpx) // 2
+    y = py + (ph - hpx) // 2
+    win.geometry(f"{wpx}x{hpx}+{x}+{y}")
+    return win
