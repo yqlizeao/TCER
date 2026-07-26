@@ -11,13 +11,18 @@ import re
 from pathlib import Path
 
 from tcer.core import pricing
-from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp
+from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
 from tcer.core.paths import codex_dir, codex_sessions_dir, encode_hash
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
 _NO_CWD_KEY = "__codex_no_cwd__"
 _NO_CWD_LABEL = "Codex 无工作目录"
-_EXIT_RE = re.compile(r"Process exited with code\s+(-?\d+)")
+# 两种实测格式：function_call_output 用 "Process exited with code N"，
+# custom_tool_call_output 用 "Exit code: N"。
+_EXIT_RES = (
+    re.compile(r"Process exited with code\s+(-?\d+)"),
+    re.compile(r"\bExit code:\s*(-?\d+)"),
+)
 
 
 def iter_events(path: Path):
@@ -208,6 +213,10 @@ def aggregate_usage(path: Path) -> TokenUsage:
     call_id_to_name: dict[str, str] = {}
     active_duration_ms = 0
     prev_total: dict[str, int] = {}  # running total_token_usage baseline for deltas
+    # 权威回合分组：task_started = 一个 agent 回合开始。出现过 task_started 时，
+    # turn_idx 由回合边界驱动（该回合内的工具调用与 token 差分步共享同一回合号）；
+    # 旧格式（无 task_started）回退为每个 token 差分步 +1 的人造计数。
+    saw_task_started = False
 
     for obj in iter_events(path):
         ts = parse_timestamp_ms(obj.get("timestamp"))
@@ -241,6 +250,9 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 # tool_calls["Task"] entry (that inflated tool totals and
                 # zero-token sessions looked like they had tools).
                 u.task_count += 1
+                if saw_task_started:
+                    turn_idx += 1
+                saw_task_started = True
                 _set_max(u, "model_context_window", payload.get("model_context_window"))
                 started = parse_timestamp_ms(payload.get("started_at"))
                 if started is not None:
@@ -250,7 +262,11 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 completed = parse_timestamp_ms(payload.get("completed_at"))
                 if completed is not None:
                     u.ended_at = completed if u.ended_at is None else max(u.ended_at, completed)
-                active_duration_ms += _as_int(payload.get("duration_ms"))
+                dur = _as_int(payload.get("duration_ms"))
+                active_duration_ms += dur
+                # 回合权威耗时回填到该 task 的最后一个 token 步。
+                if dur and u.turn_stats and u.turn_stats[-1].duration_ms is None:
+                    u.turn_stats[-1].duration_ms = dur
                 ttft = _as_int(payload.get("time_to_first_token_ms"))
                 if ttft > 0:
                     u.time_to_first_token_ms = ttft if u.time_to_first_token_ms is None else min(u.time_to_first_token_ms, ttft)
@@ -284,13 +300,17 @@ def aggregate_usage(path: Path) -> TokenUsage:
                     if all(v >= 0 for v in delta.values()):
                         prev_total = {k: _as_int(total.get(k)) for k in _TOKEN_FIELDS}
                         if any(delta.values()):
-                            _add_token_usage(u, delta, current_model)
-                            turn_idx += 1
+                            _add_token_usage_with_stat(u, delta, current_model,
+                                                       turn_idx, ts)
+                            if not saw_task_started:
+                                turn_idx += 1
                         continue
                     prev_total = {k: _as_int(total.get(k)) for k in _TOKEN_FIELDS}
                 if isinstance(usage, dict):
-                    _add_token_usage(u, usage, current_model)
-                    turn_idx += 1
+                    _add_token_usage_with_stat(u, usage, current_model,
+                                               turn_idx, ts)
+                    if not saw_task_started:
+                        turn_idx += 1
             continue
 
         if typ != "response_item" or not isinstance(payload, dict):
@@ -307,12 +327,15 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 if isinstance(cid, str):
                     call_id_to_name[cid] = tool_name
                 u.tool_ops.append(ToolOp(turn_idx, tool_name, path_hint))
-        elif ptype == "function_call_output":
+        elif ptype in ("function_call_output", "custom_tool_call_output"):
             output = payload.get("output")
-            code = _exit_code(output if isinstance(output, str) else "")
-            if code is not None and code != 0:
+            out_s = output if isinstance(output, str) else ""
+            code = _exit_code(out_s)
+            # exit code 权威；无码时按显式失败前缀兜底（见 _output_is_error）。
+            is_err = (code != 0) if code is not None else _output_is_error(out_s)
+            if is_err:
                 u.tool_errors += 1
-                cid = payload.get("call_id")
+                cid = payload.get("call_id") or payload.get("id")
                 tname = call_id_to_name.get(cid) if isinstance(cid, str) else None
                 if tname:
                     u.tool_errors_by_tool[tname] = u.tool_errors_by_tool.get(tname, 0) + 1
@@ -332,10 +355,6 @@ def aggregate_usage(path: Path) -> TokenUsage:
             if isinstance(cid, str):
                 call_id_to_name[cid] = tool_name
             u.tool_ops.append(ToolOp(turn_idx, tool_name, path_hint))
-        elif ptype == "custom_tool_call_output":
-            output = payload.get("output")
-            if isinstance(output, str) and ("error" in output.lower() or "failed" in output.lower()):
-                u.tool_errors += 1
 
     if u.web_search_count == 0 and u.web_search_end_count:
         u.web_search_count = u.web_search_end_count
@@ -594,6 +613,22 @@ def _add_token_usage(u: TokenUsage, usage: dict, model: str) -> None:
     u.bucket(key).add(i, cw, cr, o)
 
 
+def _add_token_usage_with_stat(
+    u: TokenUsage, usage: dict, model: str, turn: int, ts: int | None,
+) -> None:
+    """``_add_token_usage`` + 逐步 TurnStat（时间线用；耗时由 task_complete 回填）。"""
+    before = (u.input_tokens, u.cache_read_input_tokens, u.output_tokens)
+    _add_token_usage(u, usage, model)
+    after = (u.input_tokens, u.cache_read_input_tokens, u.output_tokens)
+    if after != before:
+        u.turn_stats.append(TurnStat(
+            turn=turn, ts=ts,
+            input_tokens=after[0] - before[0],
+            cache_read=after[1] - before[1],
+            output_tokens=after[2] - before[2],
+        ))
+
+
 def _add_rate_limit(u: TokenUsage, rate_limits) -> None:
     if not isinstance(rate_limits, dict):
         return
@@ -749,8 +784,25 @@ def _patch_file_deltas(patch: str) -> list[tuple[str, int, int]]:
 
 
 def _exit_code(output: str) -> int | None:
-    m = _EXIT_RE.search(output)
-    return int(m.group(1)) if m else None
+    for rx in _EXIT_RES:
+        m = rx.search(output)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _output_is_error(output: str) -> bool:
+    """无 exit code 时的兜底：只认显式失败前缀。
+
+    旧逻辑对 output 全文做 "error"/"failed" 子串匹配，正常输出提到这两个词
+    也会被记为工具错误（误报），而 "execution error: Io(...)" 这类无退出码的
+    真失败又因发生在 function_call_output 分支而漏报。前缀匹配两头都修。
+    """
+    head = output.lstrip().lower()
+    return head.startswith((
+        "execution error", "error:", "failed:",
+        "traceback (most recent call last)",
+    ))
 
 
 def _as_int(v) -> int:

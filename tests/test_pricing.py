@@ -199,3 +199,54 @@ def test_per_model_survives_merge():
     # buckets doubled; cost doubles and stays per-model accurate
     assert m.per_model["glm-5.2"].output_tokens == 2_000_000
     assert metrics.cost_usd(m) == 2 * (25.0 + 4.4)
+
+
+def test_cache_write_1h_premium():
+    """1h 缓存写 = 5m 率 × 1.6（Anthropic 1h 2×input vs 5m 1.25×input）。"""
+    from tcer.core.metrics import CACHE_1H_PREMIUM, cost_usd
+    from tcer.core.models import TokenUsage
+
+    base = TokenUsage(cache_creation_input_tokens=1_000_000,
+                      models={"claude-opus-4-8"})
+    hot = TokenUsage(cache_creation_input_tokens=1_000_000,
+                     cache_write_1h_tokens=1_000_000,
+                     models={"claude-opus-4-8"})
+    c_base = cost_usd(base)
+    c_hot = cost_usd(hot)
+    assert c_hot > c_base
+    assert abs(c_hot - c_base * (1 + CACHE_1H_PREMIUM)) < 1e-9
+
+
+def test_cache_write_1h_flows_through_scan_and_merge(tmp_path):
+    """reader 解析 cache_creation.ephemeral_1h 分档并进 per_model 桶与 merge。"""
+    import json
+
+    from tcer.core import reader
+    from tcer.core.metrics import cost_by_model, cost_usd
+
+    line = {
+        "type": "assistant",
+        "timestamp": "2026-07-01T10:00:00Z",
+        "message": {
+            "role": "assistant", "id": "m1", "model": "claude-opus-4-8",
+            "usage": {
+                "input_tokens": 10, "output_tokens": 5,
+                "cache_creation_input_tokens": 1000,
+                "cache_read_input_tokens": 0,
+                "cache_creation": {"ephemeral_5m_input_tokens": 200,
+                                   "ephemeral_1h_input_tokens": 800},
+            },
+        },
+    }
+    p = tmp_path / "s.jsonl"
+    p.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert u.cache_write_1h_tokens == 800
+    mu = u.per_model[next(iter(u.per_model))]
+    assert mu.cache_write_1h_tokens == 800
+    # merge 保持子集
+    m = u.merge(u)
+    assert m.cache_write_1h_tokens == 1600
+    assert m.per_model[next(iter(m.per_model))].cache_write_1h_tokens == 1600
+    # 逐模型成本加总 == 总成本（审计一致性）
+    assert abs(sum(cost_by_model(m).values()) - cost_usd(m)) < 1e-9

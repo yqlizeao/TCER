@@ -38,12 +38,16 @@ class ModelUsage:
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     output_tokens: int = 0
+    # cache_creation 中走 1h TTL 的子集（Anthropic 1h 写单价 2×input，5m 为
+    # 1.25×input）。计价时对该子集加溢价；无分档信息的源保持 0（按 5m 价）。
+    cache_write_1h_tokens: int = 0
 
-    def add(self, i: int, cw: int, cr: int, o: int) -> None:
+    def add(self, i: int, cw: int, cr: int, o: int, cw1h: int = 0) -> None:
         self.input_tokens += i
         self.cache_creation_input_tokens += cw
         self.cache_read_input_tokens += cr
         self.output_tokens += o
+        self.cache_write_1h_tokens += cw1h
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,27 @@ class ToolOp:
     turn: int       # assistant message sequence (0-based)
     tool: str       # "Read" / "Write" / "Edit" / "Grep" / "Glob" / …
     path: str       # file_path from tool input ("" if unavailable)
+
+
+@dataclass
+class TurnStat:
+    """Per-turn token/timing record for the session timeline view.
+
+    One entry per assistant turn with real usage. ``duration_ms`` comes from
+    authoritative per-turn events when the source provides them (Claude
+    ``system/turn_duration``, Codex ``task_complete.duration_ms``, Grok
+    ``turn_completed``); None otherwise.
+    """
+
+    turn: int
+    ts: int | None = None            # epoch ms of the turn's first line
+    input_tokens: int = 0
+    cache_write: int = 0
+    cache_read: int = 0
+    output_tokens: int = 0
+    duration_ms: int | None = None
+    tool_calls: int = 0
+    errors: int = 0
 
 
 @dataclass
@@ -71,6 +96,7 @@ class TokenUsage:
     cache_creation_input_tokens: int = 0  # cache writes, $3.75/MTok
     cache_read_input_tokens: int = 0  # cache reads, $0.30/MTok
     output_tokens: int = 0
+    cache_write_1h_tokens: int = 0  # cache_creation 中 1h TTL 子集（计价加溢价）
     models: set[str] = field(default_factory=set)
     per_model: dict[str, ModelUsage] = field(default_factory=dict)
     assistant_msgs: int = 0  # assistant turns with real token usage (zero-usage stubs excluded)
@@ -85,6 +111,7 @@ class TokenUsage:
     tool_errors_by_tool: dict[str, int] = field(default_factory=dict)  # tool_name → error count
     thinking_count: int = 0  # count of thinking content blocks
     tool_ops: list[ToolOp] = field(default_factory=list)  # ordered tool calls for temporal analysis
+    turn_stats: list[TurnStat] = field(default_factory=list)  # per-turn timeline records
     user_message_texts: list[str] = field(default_factory=list)  # extracted user message text
     reasoning_output_tokens: int = 0  # Codex exposes this separately; output_tokens already includes it
     model_context_window: int | None = None
@@ -107,6 +134,26 @@ class TokenUsage:
     rate_limit_snapshots: int = 0
     rate_limit_reached_count: int = 0
     rate_limit_names: set[str] = field(default_factory=set)
+    # --- Grok signals.json / events.jsonl（会话级聚合信号与事件） ---
+    cancellation_count: int = 0        # 用户取消回合次数
+    regeneration_count: int = 0        # 重新生成次数
+    positive_ratings: int = 0          # 用户显式好评
+    negative_ratings: int = 0          # 用户显式差评
+    git_commit_count: int = 0          # 会话内 git 提交数（工具侧记录，非调 git）
+    pr_created_count: int = 0
+    pr_merged_count: int = 0
+    reverted_lines: int = 0            # AI 写入后被回退的行数（agentLinesAddedReverted）
+    permission_request_count: int = 0  # 工具审批请求次数
+    permission_wait_ms_total: int = 0  # 审批等待总毫秒（人卡住 AI 的时间）
+    itl_p50_ms: int | None = None      # inter-token latency P50
+    itl_p99_ms: int | None = None
+    # --- 采纳信号 ---
+    user_modified_count: int = 0       # AI 写入后被用户手动修改的工具结果数（Claude）
+    revert_events: int = 0             # 会话被回退的事件数（OpenCode revert / Grok hasReverted）
+    # --- structuredPatch 独立差分（Claude 自算 diff 的 +/- 行，仅代码后缀文件）。
+    # 与回放 LOC 相互独立的第二套估计，用于交叉校验；不参与 TCER 计算。
+    patch_diff_added: int = 0
+    patch_diff_deleted: int = 0
 
     @property
     def total_input(self) -> int:
@@ -152,6 +199,14 @@ class TokenUsage:
             ToolOp(op.turn + self_max_turn + 1, op.tool, op.path)
             for op in other.tool_ops
         ]
+        # turn_stats 同步 rebase（拼接时间线；聚合对象的时间线是串接而非并发）
+        self_max_ts_turn = max((t.turn for t in self.turn_stats), default=-1)
+        rebased_other_stats = [
+            TurnStat(t.turn + self_max_ts_turn + 1, t.ts, t.input_tokens,
+                     t.cache_write, t.cache_read, t.output_tokens,
+                     t.duration_ms, t.tool_calls, t.errors)
+            for t in other.turn_stats
+        ]
 
         return TokenUsage(
             input_tokens=self.input_tokens + other.input_tokens,
@@ -159,6 +214,7 @@ class TokenUsage:
             + other.cache_creation_input_tokens,
             cache_read_input_tokens=self.cache_read_input_tokens + other.cache_read_input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
+            cache_write_1h_tokens=self.cache_write_1h_tokens + other.cache_write_1h_tokens,
             models=self.models | other.models,
             per_model=_merge_per_model(self.per_model, other.per_model),
             assistant_msgs=self.assistant_msgs + other.assistant_msgs,
@@ -172,6 +228,7 @@ class TokenUsage:
             tool_errors_by_tool=_merge_dicts(self.tool_errors_by_tool, other.tool_errors_by_tool),
             thinking_count=self.thinking_count + other.thinking_count,
             tool_ops=self.tool_ops + rebased_other_ops,
+            turn_stats=self.turn_stats + rebased_other_stats,
             user_message_texts=self.user_message_texts + other.user_message_texts,
             reasoning_output_tokens=self.reasoning_output_tokens + other.reasoning_output_tokens,
             model_context_window=_max_ms(self.model_context_window, other.model_context_window),
@@ -191,6 +248,25 @@ class TokenUsage:
             rate_limit_snapshots=self.rate_limit_snapshots + other.rate_limit_snapshots,
             rate_limit_reached_count=self.rate_limit_reached_count + other.rate_limit_reached_count,
             rate_limit_names=self.rate_limit_names | other.rate_limit_names,
+            cancellation_count=self.cancellation_count + other.cancellation_count,
+            regeneration_count=self.regeneration_count + other.regeneration_count,
+            positive_ratings=self.positive_ratings + other.positive_ratings,
+            negative_ratings=self.negative_ratings + other.negative_ratings,
+            git_commit_count=self.git_commit_count + other.git_commit_count,
+            pr_created_count=self.pr_created_count + other.pr_created_count,
+            pr_merged_count=self.pr_merged_count + other.pr_merged_count,
+            reverted_lines=self.reverted_lines + other.reverted_lines,
+            permission_request_count=self.permission_request_count
+            + other.permission_request_count,
+            permission_wait_ms_total=self.permission_wait_ms_total
+            + other.permission_wait_ms_total,
+            # 分位数不可加，聚合取最差值（max）
+            itl_p50_ms=_max_ms(self.itl_p50_ms, other.itl_p50_ms),
+            itl_p99_ms=_max_ms(self.itl_p99_ms, other.itl_p99_ms),
+            user_modified_count=self.user_modified_count + other.user_modified_count,
+            revert_events=self.revert_events + other.revert_events,
+            patch_diff_added=self.patch_diff_added + other.patch_diff_added,
+            patch_diff_deleted=self.patch_diff_deleted + other.patch_diff_deleted,
         )
 
 
@@ -206,7 +282,8 @@ def _merge_per_model(
                 dst = ModelUsage()
                 out[model] = dst
             dst.add(mu.input_tokens, mu.cache_creation_input_tokens,
-                    mu.cache_read_input_tokens, mu.output_tokens)
+                    mu.cache_read_input_tokens, mu.output_tokens,
+                    mu.cache_write_1h_tokens)
     return out
 
 
@@ -313,6 +390,9 @@ class SessionReport:
     thinking_count: int = 0  # thinking content blocks
     search_edit_ratio: float | None = None  # edits / (searches + edits)
     read_before_write: float | None = None  # files read before being written/edited
+    edit_verify_ratio: float | None = None  # Write/Edit 后 3 回合内跑 Bash 的占比（改→验闭环）
+    first_edit_turn: int | None = None      # 首次 Write/Edit 的回合号（1-based；None=未动手）
+    bash_ratio: float | None = None         # Bash/PowerShell ÷ 总工具调用（盲区暴露面）
     memory_files: list[str] | None = None   # project memory/*.md paths (project-level only)
     memory_dir: str | None = None           # absolute path to the memory/ directory
     # --- Codex/local-agent runtime metrics ---

@@ -268,13 +268,13 @@ def scan_session(
     ``cwd`` / ``disk_prior``: when computing LOC, seed first Write from on-disk
     line counts (F1 mitigation); relative paths need ``cwd``.
 
-    ``use_cache``: process-level mtime/size cache (see ``file_cache``). Disabled
-    when ``cancel_check`` is set so a cancelled mid-scan never poisons the cache.
+    ``use_cache``: process-level mtime/size cache (see ``file_cache``). Safe with
+    ``cancel_check``: a cancel raises inside the factory, so a partial scan never
+    reaches the cache — only completed scans are stored.
     """
     from tcer.core import file_cache
 
-    # Cooperative cancel must not leave a partial result in the cache.
-    can_cache = use_cache and cancel_check is None
+    can_cache = use_cache
     cwd_key = str(cwd) if cwd is not None else ""
     extra = (
         "scan_session",
@@ -309,7 +309,8 @@ def _scan_session_uncached(
     cancel_check,
 ) -> tuple[TokenUsage, "SessionLoc | None"]:
     # Lazy import: loc imports reader at module level.
-    from tcer.core.loc import SessionLoc, _LocAccumulator
+    from tcer.core.loc import SessionLoc, _is_code, _LocAccumulator
+    from tcer.core.models import TurnStat
 
     u = TokenUsage()
     loc_acc = (
@@ -322,6 +323,51 @@ def _scan_session_uncached(
     for obj in iter_messages(path):
         if cancel_check is not None:
             cancel_check()
+
+        # 非 message 行：system 子类型携带真实回合耗时 / 限流 / 压缩信号。
+        if obj.get("type") == "system":
+            sub = obj.get("subtype")
+            if sub == "turn_duration":
+                # 权威的每回合耗时（不含用户暂停），回填到最近一个回合。
+                dur = _as_int(obj.get("durationMs"))
+                if dur and u.turn_stats and u.turn_stats[-1].duration_ms is None:
+                    u.turn_stats[-1].duration_ms = dur
+            elif sub == "api_error":
+                err = obj.get("error")
+                status = _as_int(err.get("status")) if isinstance(err, dict) else 0
+                if status == 429:
+                    u.rate_limit_reached_count += 1
+                    u.rate_limit_names.add("api-429")
+            elif sub == "compact_boundary":
+                u.compaction_count += 1
+            continue
+
+        # 工具结果行的 toolUseResult：originalFile → LOC F1 修正；
+        # userModified → 「AI 写完后被人改过」采纳信号。
+        tur = obj.get("toolUseResult")
+        if isinstance(tur, dict):
+            if loc_acc is not None and "originalFile" in tur:
+                loc_acc.note_write_original(tur.get("filePath"),
+                                            tur.get("originalFile"))
+            if tur.get("userModified") is True:
+                u.user_modified_count += 1
+            # structuredPatch：Claude 自算 diff 的 +/- 行数，作为回放 LOC 的
+            # 独立交叉校验（同样只计代码后缀文件）。
+            sp = tur.get("structuredPatch")
+            fp_sp = tur.get("filePath")
+            if (isinstance(sp, list) and isinstance(fp_sp, str)
+                    and _is_code(fp_sp)):
+                for hunk in sp:
+                    lines = hunk.get("lines") if isinstance(hunk, dict) else None
+                    if not isinstance(lines, list):
+                        continue
+                    for ln in lines:
+                        if isinstance(ln, str) and ln:
+                            if ln[0] == "+":
+                                u.patch_diff_added += 1
+                            elif ln[0] == "-":
+                                u.patch_diff_deleted += 1
+
         msg = obj.get("message")
         if not isinstance(msg, dict):
             continue
@@ -357,6 +403,8 @@ def _scan_session_uncached(
                             and item.get("type") == "tool_result"
                             and item.get("is_error")):
                         u.tool_errors += 1
+                        if u.turn_stats:
+                            u.turn_stats[-1].errors += 1
                         # Attribute error to specific tool via call_id mapping
                         tid = item.get("tool_use_id")
                         if isinstance(tid, str):
@@ -390,6 +438,10 @@ def _scan_session_uncached(
                 cw = _as_int(usage.get("cache_creation_input_tokens"))
                 cr = _as_int(usage.get("cache_read_input_tokens"))
                 o = _as_int(usage.get("output_tokens"))
+                # 缓存写 TTL 分档：1h 写单价是 5m 的 1.6 倍，计价时加溢价。
+                cc = usage.get("cache_creation")
+                cw1h = (min(_as_int(cc.get("ephemeral_1h_input_tokens")), cw)
+                        if isinstance(cc, dict) else 0)
                 # Count assistant turns: only lines with real usage count as turns.
                 # Zero-usage stubs (mimo thinking blocks, synthetic stubs) are tracked
                 # separately in empty_usage_skipped and do not inflate assistant_msgs.
@@ -409,7 +461,18 @@ def _scan_session_uncached(
                     u.cache_creation_input_tokens += cw
                     u.cache_read_input_tokens += cr
                     u.output_tokens += o
+                    u.cache_write_1h_tokens += cw1h
                     u.peak_input_tokens = max(u.peak_input_tokens, i + cw + cr)
+                    u.turn_stats.append(TurnStat(
+                        turn=current_turn, ts=ts,
+                        input_tokens=i, cache_write=cw, cache_read=cr,
+                        output_tokens=o,
+                    ))
+                # Claude 的网页搜索/抓取计数在 usage.server_tool_use 里（每响应一次）。
+                stu = usage.get("server_tool_use")
+                if isinstance(stu, dict):
+                    u.web_search_count += (_as_int(stu.get("web_search_requests"))
+                                           + _as_int(stu.get("web_fetch_requests")))
                 model = msg.get("model")
                 # Skip synthetic stubs (ccswitch 429 errors, "No response requested")
                 # — they use the same message.model field but are not real model turns.
@@ -418,7 +481,7 @@ def _scan_session_uncached(
                     bucket_key = pricing.normalize(model)
                 else:
                     bucket_key = ""
-                u.bucket(bucket_key).add(i, cw, cr, o)
+                u.bucket(bucket_key).add(i, cw, cr, o, cw1h)
 
             # Extract tool_use / thinking from content on EVERY line of the
             # response — continuation lines (dedup duplicates) carry the tool_use
@@ -449,6 +512,8 @@ def _scan_session_uncached(
                                 tool=tool_name,
                                 path=fp if isinstance(fp, str) else "",
                             ))
+                            if u.turn_stats and u.turn_stats[-1].turn == current_turn:
+                                u.turn_stats[-1].tool_calls += 1
                             if loc_acc is not None and isinstance(inp, dict):
                                 loc_acc.on_tool_use(tool_name, inp)
                     elif item_type == "thinking":
@@ -563,6 +628,10 @@ def read_session_meta(path: Path) -> SessionMeta:
     session_id: str | None = None
     cwd: str | None = None
     entrypoint: str | None = None
+    cli_version: str | None = None
+    git_branch: str | None = None
+    reasoning_effort: str | None = None
+    permission_mode: str | None = None
 
     # Newest ai-title in the tail wins. Keep overwriting → the last non-empty
     # aiTitle in the tail is the freshest the file has.
@@ -600,6 +669,15 @@ def read_session_meta(path: Path) -> SessionMeta:
             ep = obj.get("entrypoint")
             if isinstance(ep, str):
                 entrypoint = ep
+        # 行级元数据：每条 assistant/user 行都携带（cc 2.x）。取首个非空值。
+        if cli_version is None and isinstance(obj.get("version"), str):
+            cli_version = obj["version"] or None
+        if git_branch is None and isinstance(obj.get("gitBranch"), str):
+            git_branch = obj["gitBranch"] or None
+        if reasoning_effort is None and isinstance(obj.get("effort"), str):
+            reasoning_effort = obj["effort"] or None
+        if permission_mode is None and isinstance(obj.get("permissionMode"), str):
+            permission_mode = obj["permissionMode"] or None
         # First real user message — only used when no ai-title exists at all.
         if fallback_title is None:
             msg = obj.get("message")
@@ -623,6 +701,10 @@ def read_session_meta(path: Path) -> SessionMeta:
         path=path,
         is_subagent=is_subagent(path),
         entrypoint=entrypoint,
+        cli_version=cli_version,
+        git_branch=git_branch,
+        reasoning_effort=reasoning_effort,
+        permission_profile=permission_mode,
     )
 
 

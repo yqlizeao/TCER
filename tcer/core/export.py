@@ -137,6 +137,7 @@ def report_row_dict(r: SessionReport) -> dict:
         "assistant_turns": u.assistant_msgs,
         "input_tokens": u.input_tokens,
         "cache_write_tokens": u.cache_creation_input_tokens,
+        "cache_write_1h_tokens": u.cache_write_1h_tokens,
         "cache_read_tokens": u.cache_read_input_tokens,
         "output_tokens": u.output_tokens,
         "total_tokens": u.total,
@@ -216,13 +217,37 @@ def report_row_dict(r: SessionReport) -> dict:
         "rate_limit_snapshots": u.rate_limit_snapshots,
         "rate_limit_reached_count": u.rate_limit_reached_count,
         "rate_limit_names": sorted(u.rate_limit_names),
+        "cancellation_count": u.cancellation_count,
+        "regeneration_count": u.regeneration_count,
+        "positive_ratings": u.positive_ratings,
+        "negative_ratings": u.negative_ratings,
+        "git_commit_count": u.git_commit_count,
+        "pr_created_count": u.pr_created_count,
+        "pr_merged_count": u.pr_merged_count,
+        "reverted_lines": u.reverted_lines,
+        "permission_request_count": u.permission_request_count,
+        "permission_wait_ms_total": u.permission_wait_ms_total,
+        "itl_p50_ms": u.itl_p50_ms,
+        "itl_p99_ms": u.itl_p99_ms,
+        "user_modified_count": u.user_modified_count,
+        "revert_events": u.revert_events,
+        "patch_diff_added": u.patch_diff_added,
+        "patch_diff_deleted": u.patch_diff_deleted,
         "files_touched": r.files_touched,
         "search_edit_ratio": r.search_edit_ratio,
         "read_before_write": r.read_before_write,
+        "edit_verify_ratio": r.edit_verify_ratio,
+        "first_edit_turn": r.first_edit_turn,
+        "bash_ratio": r.bash_ratio,
         "models": sorted(u.models),
         "models_label": fmt.models_label(u),
         "cost_by_model": {m: round(c, 6) for m, c in sorted(metrics.cost_by_model(u).items())},
     }
+
+
+def session_to_json(r: SessionReport) -> str:
+    """单会话 JSON 导出：一份完整的 report_row_dict（不含冗余聚合包装）。"""
+    return json.dumps(report_row_dict(r), indent=2, ensure_ascii=False, default=str)
 
 
 def to_json(reports: list[SessionReport], agg: SessionReport, n_sessions: int) -> str:

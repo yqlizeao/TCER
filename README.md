@@ -1,10 +1,10 @@
-![Fable 5 Verified](img/Fable-5_Verified.png)
+<img src="img/Fable-5_Verified.png" width="200" alt="Fable-5 Verified">
 
 # TCER
 
 > **Token-to-Code Efficiency Ratio** — 度量 AI 编程效率的离线分析工具
 
-基于 Claude Code（`~/.claude/`）、Codex（`~/.codex/`）与 OpenCode（`~/.local/share/opencode/`）本地会话数据，多维度量化「每消耗多少 Token、产出多少有效代码」。
+基于 Claude Code（`~/.claude/`）、Codex（`~/.codex/`）、OpenCode（`~/.local/share/opencode/`）与 Grok（`~/.grok/`）本地会话数据，多维度量化「每消耗多少 Token、产出多少有效代码」。
 
 ![主界面](img/主界面.png)
 
@@ -72,6 +72,14 @@ python -m tcer.audit --all-projects --skip-empty --top 1 --no-loc -q --summary-j
 **六维效率雷达**：综合效率、缓存命中、千行成本、返工率、读写比、编码效率六维可视化。
 
 ![子窗口-雷达图](img/子窗口-雷达图.png)
+
+**会话对比**：工具菜单 → 会话对比，选 2~3 个会话并排对比全部指标，金色标注每行最优值。
+
+**时段效率分析**：趋势页「时段」模式，按星期 × 小时热力图展示会话分布与 TCER/成本/返工率等指标的时段规律。
+
+**HTML 报告导出**：导出菜单支持项目级 / 会话级自包含单文件 HTML 报告（深色主题、可排序会话表、CTEI 排名条、模型对比表），零依赖、可直接分享；另有 Markdown / JSON / CSV。
+
+**源能力感知**：四个数据源字段支持不同（如上下文窗口 / 首字延迟 / 限流为 Codex 独有），不支持的指标显示灰色「不适用」而非误导性的 0。
 
 ## 文档
 

@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from tcer.core import pricing
-from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp
+from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
 from tcer.core.paths import encode_hash, grok_sessions_dir
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
@@ -251,7 +251,21 @@ def aggregate_usage(path: Path) -> TokenUsage:
             in_user_run = False  # any other update ends the user-chunk run
 
         if su == "turn_completed":
-            api_duration_ms += _add_turn_usage(u, update.get("usage"), current_model)
+            before = (u.input_tokens, u.cache_creation_input_tokens,
+                      u.cache_read_input_tokens, u.output_tokens)
+            api_ms = _add_turn_usage(u, update.get("usage"), current_model)
+            api_duration_ms += api_ms
+            after = (u.input_tokens, u.cache_creation_input_tokens,
+                     u.cache_read_input_tokens, u.output_tokens)
+            if after != before:
+                u.turn_stats.append(TurnStat(
+                    turn=turn_idx, ts=ts,
+                    input_tokens=after[0] - before[0],
+                    cache_write=after[1] - before[1],
+                    cache_read=after[2] - before[2],
+                    output_tokens=after[3] - before[3],
+                    duration_ms=api_ms or None,
+                ))
             continue
 
         if su == "user_message_chunk":
@@ -307,7 +321,83 @@ def aggregate_usage(path: Path) -> TokenUsage:
         u.session_duration_ms = api_duration_ms
     elif u.started_at and u.ended_at:
         u.session_duration_ms = u.ended_at - u.started_at
+    _apply_signals(u, path.parent)
+    _apply_events(u, path.parent)
     return u
+
+
+def _apply_signals(u: TokenUsage, session_dir: Path) -> None:
+    """Fold grok build 的 ``signals.json``（会话级聚合信号，一次 json.load）。
+
+    只取 updates.jsonl 推不出来的字段：上下文窗口、TTFT/ITL 延迟、取消/重开、
+    显式评价、git 落地数、AI 行回退。行级 token 仍以 turn_completed 为权威。
+    """
+    p = session_dir / "signals.json"
+    if not p.is_file():
+        return
+    try:
+        sig = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(sig, dict):
+        return
+    cwt = _as_int(sig.get("contextWindowTokens"))
+    if cwt > 0:
+        u.model_context_window = max(u.model_context_window or 0, cwt)
+    # Grok 的 turn_completed.usage 是回合内多次补全的总和，按回合累计的
+    # peak_input 会虚高十倍以上（如 5.5M vs 500K 窗口）。signals 的
+    # contextTokensUsed 是权威的上下文占用（会话末快照，压缩后可能低于真实
+    # 峰值，作近似），有则覆盖。
+    ctu = _as_int(sig.get("contextTokensUsed"))
+    if ctu > 0:
+        u.peak_input_tokens = ctu
+    ttft = _as_int(sig.get("minTimeToFirstTokenMs"))
+    if ttft > 0:
+        u.time_to_first_token_ms = (
+            ttft if u.time_to_first_token_ms is None
+            else min(u.time_to_first_token_ms, ttft))
+    u.cancellation_count += _as_int(sig.get("cancellationCount"))
+    u.regeneration_count += _as_int(sig.get("regenerationCount"))
+    u.positive_ratings += _as_int(sig.get("positiveRatings"))
+    u.negative_ratings += _as_int(sig.get("negativeRatings"))
+    u.git_commit_count += _as_int(sig.get("gitCommitCount"))
+    u.pr_created_count += _as_int(sig.get("prCreatedCount"))
+    u.pr_merged_count += _as_int(sig.get("prMergedCount"))
+    u.reverted_lines += (_as_int(sig.get("agentLinesAddedReverted"))
+                         + _as_int(sig.get("agentLinesRemovedReverted")))
+    if sig.get("hasReverted") is True:
+        u.revert_events += 1
+    p50 = _as_int(sig.get("itlP50Ms"))
+    p99 = _as_int(sig.get("itlP99Ms"))
+    if p50 > 0:
+        u.itl_p50_ms = p50
+    if p99 > 0:
+        u.itl_p99_ms = p99
+
+
+def _apply_events(u: TokenUsage, session_dir: Path) -> None:
+    """从 ``events.jsonl`` 收集审批等待（permission_resolved.wait_ms）。
+
+    文件可能含上万条 phase_changed，先做子串预筛再解析，保持单遍轻量。
+    """
+    p = session_dir / "events.jsonl"
+    if not p.is_file():
+        return
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"permission_resolved"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") != "permission_resolved":
+                    continue
+                u.permission_request_count += 1
+                u.permission_wait_ms_total += _as_int(obj.get("wait_ms"))
+    except OSError:
+        return
 
 
 def read_user_messages(path: Path) -> list[str]:
