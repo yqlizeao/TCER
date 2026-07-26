@@ -455,6 +455,18 @@ class SessionColumn:
         self.count_label = tk.Label(header, text="会话", bg=theme.PANEL, fg=theme.FG,
                                     font=theme.FONT_HEADING, anchor="w")
         self.count_label.pack(side="left")
+        # 搜索框：按标题 / 会话 ID 过滤卡片
+        self._filter_var = tk.StringVar(value="")
+        search = tk.Entry(header, textvariable=self._filter_var, width=12,
+                          bg=theme.PANEL_2, fg=theme.FG, insertbackground=theme.FG,
+                          relief="flat", highlightthickness=1,
+                          highlightbackground="#3e3e42", font=theme.FONT_UI_SMALL)
+        search.pack(side="right", padx=(4, 0))
+        tk.Label(header, text="🔍", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL).pack(side="right")
+        Tooltip(search, "按标题 / 会话 ID 过滤（实时）")
+        self._filter_var.trace_add("write", lambda *_a: self._render())
+        self._all_reports: list = []
 
         sf = ScrollFrame(col, bg=theme.PANEL)
         sf.canvas.pack(fill="both", expand=True, padx=6, pady=4)
@@ -462,17 +474,32 @@ class SessionColumn:
         self.container = sf.inner
 
     def update(self, reports) -> None:
+        self._all_reports = sorted(reports,
+                                   key=lambda r: r.usage.ended_at or r.usage.started_at or 0,
+                                   reverse=True)
+        self._render(reset=True)
+
+    def _render(self, reset: bool = False) -> None:
+        needle = self._filter_var.get().strip().casefold()
         for card in self._cards:
             card.frame.destroy()
         self._cards.clear()
         self._selected = None
-        self._reports = sorted(reports,
-                               key=lambda r: r.usage.ended_at or r.usage.started_at or 0,
-                               reverse=True)
+        if needle:
+            self._reports = [
+                r for r in self._all_reports
+                if needle in (r.meta.title or "").casefold()
+                or needle in (r.meta.session_id or r.meta.path.stem).casefold()
+            ]
+        else:
+            self._reports = list(self._all_reports)
         for r in self._reports:
             self._cards.append(self._make_card(r))
-        self.count_label.config(text=f"会话（{len(self._reports)}）")
-        self.scroll.update_scroll(reset=True)
+        n_all = len(self._all_reports)
+        label = (f"会话（{len(self._reports)}/{n_all}）" if needle
+                 else f"会话（{n_all}）")
+        self.count_label.config(text=label)
+        self.scroll.update_scroll(reset=reset)
 
     def _make_card(self, r):
         sid = r.meta.session_id or r.meta.path.stem

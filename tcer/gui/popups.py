@@ -547,7 +547,9 @@ class BaselinesPopup:
         tk.Label(head, text=f"基于 {n_sessions} 个会话计算",
                  bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
 
-        # Baseline cards
+        # Baseline cards（含与当前生效基准的对比）
+        current = {"tcer": metrics.TCER_BASELINE, "ncpi": metrics.NCPI_BASELINE,
+                   "cpe": metrics.CPE_BASELINE}
         for key, method in [("tcer", "中位数"), ("ncpi", "均值"), ("cpe", "中位数")]:
             val = values[key]
             tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
@@ -563,8 +565,23 @@ class BaselinesPopup:
             tk.Label(hdr, text=f"{val:.3f}", bg=theme.PANEL, fg=self._COLOR,
                      anchor="e", font=theme.FONT_MONO).pack(side="right")
 
-            tk.Label(card, text=f"计算方式: {method}", bg=theme.PANEL, fg=theme.MUTED,
-                     font=(theme.FONT_MONO_NAME, 8)).pack(anchor="w")
+            cur = current.get(key)
+            if cur:
+                diff_pct = (val - cur) / cur * 100
+                # CPE 越低越好，其余越高越好——按方向给差异着色。
+                better = diff_pct < 0 if key == "cpe" else diff_pct > 0
+                diff_fg = theme.SUCCESS if better else theme.ERROR
+                cmp_row = tk.Frame(card, bg=theme.PANEL)
+                cmp_row.pack(fill="x")
+                tk.Label(cmp_row, text=f"计算方式: {method} · 当前基准 {cur:.3f}",
+                         bg=theme.PANEL, fg=theme.MUTED,
+                         font=(theme.FONT_MONO_NAME, 8)).pack(side="left")
+                tk.Label(cmp_row, text=f"{diff_pct:+.1f}%",
+                         bg=theme.PANEL, fg=diff_fg,
+                         font=(theme.FONT_MONO_NAME, 8, "bold")).pack(side="right")
+            else:
+                tk.Label(card, text=f"计算方式: {method}", bg=theme.PANEL,
+                         fg=theme.MUTED, font=(theme.FONT_MONO_NAME, 8)).pack(anchor="w")
 
         # Note
         tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
@@ -1565,7 +1582,11 @@ class SessionTimelinePopup:
             self._tooltip.hide()
             return
         t = self._stats[idx]
-        lines = [f"回合 {idx + 1}"]
+        # Codex 等源一个回合可能拆成多个 token 步：显示真实回合号，步序号补充。
+        if t.turn != idx:
+            lines = [f"回合 {t.turn + 1}（第 {idx + 1} 步）"]
+        else:
+            lines = [f"回合 {idx + 1}"]
         if t.ts:
             lines.append(fmt.fmt_dt(t.ts, "%m-%d %H:%M:%S"))
         lines.append(f"输入 {t.input_tokens:,} · 缓存写 {t.cache_write:,}")

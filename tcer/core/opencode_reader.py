@@ -19,6 +19,7 @@ from pathlib import Path
 
 from tcer.core import pricing
 from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
+from tcer.core.parse_util import as_int as _as_int, first_str as _first_str
 from tcer.core.paths import opencode_dir
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
@@ -190,6 +191,9 @@ def read_session_meta(db_path: Path, session_id: str) -> SessionMeta:
     permission = _json_obj(row["permission"])
     title = row["title"] if isinstance(row["title"], str) and row["title"] else None
     cwd = _first_str(row["directory"], row["project_worktree"])
+    keys = set(row.keys())
+    version = (row["version"] if "version" in keys
+               and isinstance(row["version"], str) and row["version"] else None)
     return SessionMeta(
         session_id=session_id,
         cwd=cwd,
@@ -198,6 +202,7 @@ def read_session_meta(db_path: Path, session_id: str) -> SessionMeta:
         is_subagent=bool(row["parent_id"]),
         entrypoint="opencode",
         source="opencode",
+        cli_version=version,
         model_provider=provider,
         approval_policy=_permission_label(permission),
     )
@@ -237,6 +242,15 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
         if rev is not None and str(rev).strip() not in ("", "null", "{}", "[]"):
             u.revert_events += 1
 
+    # OpenCode 自报成本 → 与 TCER 价表计价交叉校验（0/缺失视为未知）。
+    if "cost" in session.keys():
+        try:
+            reported = float(session["cost"] or 0)
+        except (TypeError, ValueError):
+            reported = 0.0
+        if reported > 0:
+            u.reported_cost_usd = reported
+
     turn_by_message: dict[str, int] = {}
     assistant_seen = 0
     for msg in messages:
@@ -251,6 +265,15 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
             mkey = _message_model_key(data) or model_key
             if mkey:
                 u.models.add(mkey)
+            # 逐消息 token 快照 → peak 补齐（多回合且无 step-finish 时不再留 0）。
+            tok = data.get("tokens")
+            if isinstance(tok, dict):
+                cache = tok.get("cache")
+                cr = _as_int(cache.get("read")) if isinstance(cache, dict) else 0
+                cw = _as_int(cache.get("write")) if isinstance(cache, dict) else 0
+                step_in = _as_int(tok.get("input")) + cr + cw
+                if step_in > 0:
+                    u.peak_input_tokens = max(u.peak_input_tokens, step_in)
     if assistant_seen:
         u.assistant_msgs = max(u.assistant_msgs, assistant_seen)
 
@@ -1204,20 +1227,6 @@ def _display_name(name, cwd: str | None) -> str:
     return _NO_PROJECT_LABEL
 
 
-def _first_str(*values) -> str | None:
-    for v in values:
-        if isinstance(v, str) and v:
-            return v
-    return None
-
-
-def _as_int(v) -> int:
-    if v is None or isinstance(v, bool):
-        return 0
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _is_image_mime(value) -> bool:

@@ -106,6 +106,9 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以�
 18. **逐回合时间线**：`TokenUsage.turn_stats: list[TurnStat]`（turn/ts/4 token/duration_ms/tool_calls/errors），四源填充：Claude 逐响应、Codex 逐 token_count 差分步（task_complete 回填耗时）、Grok 逐 turn_completed、OpenCode 逐 step-finish。merge 时 rebase turn（聚合对象时间线是串接非并发）。GUI「会话时间线」弹窗与会话级 HTML 报告消费。
 19. **F1 修正（originalFile）**：Claude 工具结果行 `toolUseResult.originalFile` 携带 Write 前真实原文。`_LocAccumulator.pending_f1` 记录按 old=0 记账的首个 Write，`note_write_original` 回溯修正（覆写→按 new−orig 重算并撤销 unseen；确认新文件→只撤销 unseen）。`scan_session` 与 `session_loc_full` 两条路径都做同一修正（审计交叉验证要求逐字节一致）。`toolUseResult.userModified` → 人工修正计数（采纳信号）；OpenCode `session.revert` / Grok `hasReverted` → `revert_events`。
 20. **Codex 工具错误识别**：exit code 有两种实测格式（`Process exited with code N` / `Exit code: N`），exit code 权威；无码时只认显式失败前缀（`execution error`/`error:`/`failed:`/traceback），禁止全文 `error` 子串匹配（误报）。
+21. **SourceAdapter**：非 Claude 三源共用 `analyze._analyze_source_project` 骨架 + `_SourceAdapter` 钩子（resolve/sessions/read_meta/usage_of/loc_of/session_key），file_cache key 构造在钩子内（Grok 必须并入 signals.json/events.jsonl 旁路文件签名，否则会话结束后补写的信号不失效）。新增数据源 = 写一个 adapter。共享小工具在 `core/parse_util`（as_int/first_str）。
+22. **护栏测试**：`tests/test_models_merge.py` 反射断言 `TokenUsage.merge` 覆盖全部字段（新增字段忘改 merge 会当场失败，容器/极值字段进 `_SPECIAL` 表）；`tests/test_gui_smoke.py` 无头构建全部图表模式与弹窗（无显示环境自动 skip）；`tests/test_export.py` 断言 `report_row_dict` 每个键必须归入 `_CSV_FIELDS` 或 `_CSV_EXCLUDED`。
+23. **模型对比分摊**：`compare_models` 行为/产出/质量指标按 token 占比加权（`_weight_sum`），单模型会话权重 1.0 与旧「主模型全额归因」一致，混合会话按占比拆分不再丢弃。
 
 > 完整架构说明：[doc/architecture.md](doc/architecture.md)
 > 数据格式细节：[doc/data-format.md](doc/data-format.md)

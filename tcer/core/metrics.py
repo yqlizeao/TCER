@@ -464,17 +464,18 @@ class ModelComparison:
     churn_ratio: float | None = None
     read_before_write: float | None = None
     files_per_session: float | None = None
-    # 内部累加器
-    _primary_count: int = 0  # 主模型会话数（>50% token），作产出/行为/质量指标的分母
+    # 内部累加器（按 token 权重分摊：单模型会话权重 1.0，混合会话按占比拆分，
+    # 不再把混合会话的行为数据整段丢弃或全额记给主模型）
+    _weight_sum: float = 0.0  # Σ 会话权重，作产出/行为/质量指标的分母
     _rbw_sum: float = 0.0
-    _rbw_count: int = 0
+    _rbw_weight: float = 0.0
     _tool_calls: dict = None
-    _tool_errors: int = 0
-    _code_added: int = 0
-    _code_deleted: int = 0
-    _code_reworked: int = 0
-    _net_loc: int = 0
-    _files_touched: int = 0
+    _tool_errors: float = 0.0
+    _code_added: float = 0.0
+    _code_deleted: float = 0.0
+    _code_reworked: float = 0.0
+    _net_loc: float = 0.0
+    _files_touched: float = 0.0
 
     def __post_init__(self):
         if self._tool_calls is None:
@@ -504,26 +505,27 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
             mc.cache_creation_tokens += mu.cache_creation_input_tokens
             mc.cache_read_tokens += mu.cache_read_input_tokens
             mc.session_count += 1
-            # 主模型会话（该模型占该会话 >50% token）才统计产出/行为/质量
+            # 产出/行为/质量按该模型在会话内的 token 占比分摊。单模型会话
+            # 权重恰为 1.0（与旧的「主模型全额归因」结果一致）；混合会话按
+            # 占比拆分（旧逻辑要么整段丢弃、要么全额记给 >50% 的主模型）。
             mu_total = mu.input_tokens + mu.output_tokens + mu.cache_creation_input_tokens + mu.cache_read_input_tokens
-            is_primary = u.total > 0 and mu_total / u.total > 0.5
-            if is_primary:
-                mc._primary_count += 1
-                # 行为特征 (仅按主模型会话统计)
+            w = (mu_total / u.total) if u.total > 0 else 0.0
+            if w > 0:
+                mc._weight_sum += w
                 for tool, cnt in u.tool_calls.items():
-                    mc._tool_calls[tool] = mc._tool_calls.get(tool, 0) + cnt
-                mc._tool_errors += u.tool_errors
-                mc._code_added += r.code_added or 0
-                mc._code_deleted += r.code_deleted or 0
+                    mc._tool_calls[tool] = mc._tool_calls.get(tool, 0) + cnt * w
+                mc._tool_errors += u.tool_errors * w
+                mc._code_added += (r.code_added or 0) * w
+                mc._code_deleted += (r.code_deleted or 0) * w
                 # Mirror compute(): self-rework count, falling back to gross
                 # deletions when a session predates the code_reworked field.
                 reworked = r.code_reworked if r.code_reworked is not None else r.code_deleted
-                mc._code_reworked += reworked or 0
-                mc._net_loc += r.net_loc or 0
-                mc._files_touched += r.files_touched or 0
+                mc._code_reworked += (reworked or 0) * w
+                mc._net_loc += (r.net_loc or 0) * w
+                mc._files_touched += (r.files_touched or 0) * w
                 if r.read_before_write is not None:
-                    mc._rbw_sum += r.read_before_write
-                    mc._rbw_count += 1
+                    mc._rbw_sum += r.read_before_write * w
+                    mc._rbw_weight += w
 
     # Compute derived metrics
     grand_tokens = sum(mc.total_tokens for mc in buckets.values())
@@ -540,7 +542,7 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
         mc.code_per_dollar = mc._net_loc / mc.cost if mc.cost > 0 else None
         mc.token_share = mc.total_tokens / grand_tokens * 100 if grand_tokens else 0
         # 产出效率
-        mc.net_loc_per_session = mc._net_loc / mc._primary_count if mc._primary_count > 0 else None
+        mc.net_loc_per_session = mc._net_loc / mc._weight_sum if mc._weight_sum > 0 else None
         # 行为特征
         total_tools = sum(mc._tool_calls.values())
         if total_tools > 0:
@@ -561,8 +563,8 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
             mc.tool_error_rate = mc._tool_errors / total_tools
         # 代码质量 (self-rework, consistent with compute()/SessionReport.churn_ratio)
         mc.churn_ratio = mc._code_reworked / mc._code_added if mc._code_added > 0 else None
-        mc.read_before_write = mc._rbw_sum / mc._rbw_count if mc._rbw_count > 0 else None
-        mc.files_per_session = mc._files_touched / mc._primary_count if mc._primary_count > 0 else None
+        mc.read_before_write = mc._rbw_sum / mc._rbw_weight if mc._rbw_weight > 0 else None
+        mc.files_per_session = mc._files_touched / mc._weight_sum if mc._weight_sum > 0 else None
     for mc in buckets.values():
         mc.cost_share = mc.cost / grand_cost * 100 if grand_cost else 0
 
@@ -1058,6 +1060,12 @@ def compute(
     total_tools = sum(u.tool_calls.values())
     tool_err_rate = u.tool_errors / total_tools if total_tools else None
     ttft_sec = (u.time_to_first_token_ms / 1000) if u.time_to_first_token_ms else None
+    if u.ttft_ms_samples:
+        ordered = sorted(u.ttft_ms_samples)
+        p95_idx = min(len(ordered) - 1, int(0.95 * (len(ordered) - 1) + 0.5))
+        ttft_p95 = ordered[p95_idx] / 1000
+    else:
+        ttft_p95 = None
     task_completion = (
         u.completed_task_count / u.task_count
         if u.task_count else None
@@ -1145,6 +1153,7 @@ def compute(
         first_edit_turn=fq["first_edit_turn"],
         bash_ratio=tool_m["bash_ratio"],
         time_to_first_token_sec=ttft_sec,
+        ttft_p95_sec=ttft_p95,
         task_completion_rate=task_completion,
         patch_apply_success_rate=patch_success,
         context_window_used_ratio=context_window_ratio,

@@ -94,6 +94,11 @@ GROUPS: list[Group] = [
                "本地代理会话开始时记录的工作分支。", "basic"),
         Metric("git_commit", "Git 提交", "",
                "本地代理会话开始时记录的提交。", "basic"),
+        Metric("hook_overhead", "钩子开销", "",
+               "stop hook（lint/test 等用户配置的钩子）的累计耗时与失败次数——"
+               "「你自己装的钩子拖慢了多少」。", "basic", "down"),
+        Metric("queued_inputs", "排队输入", "",
+               "AI 运行期间用户排队发送输入的次数——打断/并行指令的行为信号。", "basic"),
         Metric("ratings", "用户评价", "",
                "会话中用户给出的显式好评/差评（👍/👎）次数，来自本地代理的信号记录。", "basic"),
         Metric("permission_wait", "审批等待", "秒",
@@ -222,6 +227,10 @@ GROUPS: list[Group] = [
                    "公式：工具出错次数 ÷ 总工具调用\n"
                    "推荐：越低越好\n"
                    "说明：反映操作可靠性，偏高常因文件不存在、命令失败、Edit 匹配不到；审查/探索类自然略高。", "basic", "down"),
+            Metric("first_pass_ratio", "一次写对率", "",
+                   "公式：只编辑 1 次的文件数 ÷ 被编辑文件总数\n"
+                   "推荐：越高越好\n"
+                   "说明：与「高返工文件」互补的正面质量信号——一次到位、无需返场修改的文件占比。", "basic", "up"),
             Metric("high_churn_files", "高返工文件", "",
                    "公式：被编辑 ≥3 次的文件数\n"
                    "推荐：越少越好\n"
@@ -234,7 +243,13 @@ GROUPS: list[Group] = [
                    "公式：task_complete ÷ task_started\n"
                    "说明：本地代理任务开始 / 完成 / 中断事件给出的任务完成情况。", "basic", "up"),
             Metric("ttft", "首字延迟", "秒",
-                   "本地代理记录的首字延迟，表示任务从开始到首个模型输出的耗时。", "basic", "down"),
+                   "本地代理记录的首字延迟，表示任务从开始到首个模型输出的耗时（会话最小值）。", "basic", "down"),
+            Metric("ttft_p95", "首字延迟P95", "秒",
+                   "逐回合首字延迟样本的 P95 尾部值——「最卡的那些回合有多慢」，"
+                   "比最小值更能反映真实等待体验。", "basic", "down"),
+            Metric("rate_limit_peak", "配额峰值", "",
+                   "限流窗口配额的峰值占用比例（primary/secondary 取最大）。\n"
+                   "接近 100% 说明会话逼近限流边缘，比「限流命中次数」更早预警。", "basic", "down"),
             Metric("patch_success", "补丁成功率", "",
                    "公式：patch_apply_end.success ÷ patch_apply_end 总数\n"
                    "说明：本地代理补丁应用事件的成功率，能解释 Edit 失败或工具错误率。", "basic", "up"),
@@ -404,15 +419,18 @@ _SESSION_FMT: dict[str, str] = {
     "edit_ratio": "pct", "exploration_ratio": "pct", "thinking_count": "int",
     "files_touched": "int", "search_edit_ratio": "pct", "read_before_write": "pct",
     "tool_error_rate": "pct", "high_churn_files": "int", "unseen_writes": "int",
+    "first_pass_ratio": "pct",
     "memory_files": "int", "reasoning_ratio": "pct", "compactions": "int",
     "web_searches": "int", "image_inputs": "int", "task_completion": "pct",
-    "ttft": "float:0.0", "patch_success": "pct", "aborted_tasks": "int",
+    "ttft": "float:0.0", "ttft_p95": "float:0.0", "rate_limit_peak": "pct",
+    "patch_success": "pct", "aborted_tasks": "int",
     "rate_limit_hits": "int",
     "cancellations": "int", "regenerations": "int", "reverted_lines": "int",
     "git_commits": "int", "user_modified": "int", "revert_events": "int",
     # G1 新增
     "ratings": "text", "permission_wait": "text",
     "itl_p50": "int", "itl_p99": "int",
+    "hook_overhead": "text", "queued_inputs": "int",
     # G5
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
     # G6
@@ -427,10 +445,12 @@ _REPORT_ATTR = {
     "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
     "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
     "high_churn_files": "high_churn_file_count", "latency": "avg_turn_latency_sec",
+    "first_pass_ratio": "first_pass_file_ratio",
     "context_window_used": "context_window_used_ratio",
     "reasoning_ratio": "reasoning_output_ratio",
     "task_completion": "task_completion_rate",
     "ttft": "time_to_first_token_sec",
+    "ttft_p95": "ttft_p95_sec",
     "patch_success": "patch_apply_success_rate",
 }
 # key → attribute name on report.usage (token counters live there).
@@ -445,6 +465,7 @@ _USAGE_ATTR = {
     "web_searches": "web_search_count",
     "aborted_tasks": "aborted_task_count",
     "rate_limit_hits": "rate_limit_reached_count",
+    "rate_limit_peak": "rate_limit_peak_used",
     "cancellations": "cancellation_count",
     "regenerations": "regeneration_count",
     "reverted_lines": "reverted_lines",
@@ -453,6 +474,7 @@ _USAGE_ATTR = {
     "revert_events": "revert_events",
     "itl_p50": "itl_p50_ms",
     "itl_p99": "itl_p99_ms",
+    "queued_inputs": "queued_input_count",
 }
 # key → callable returning the current baseline constant (read-only reference).
 _BASELINE = {
@@ -517,6 +539,12 @@ _DISPLAY_EXTRACTORS = {
     "permission_wait": lambda r: (
         f"{r.usage.permission_wait_ms_total / 1000:.1f}（{r.usage.permission_request_count} 次）"
         if r.usage.permission_request_count else "-"),
+    "hook_overhead": lambda r: (
+        f"{r.usage.hook_duration_ms_total / 1000:.1f}s"
+        f"（{r.usage.hook_run_count} 次"
+        + (f"，{r.usage.hook_error_count} 失败" if r.usage.hook_error_count else "")
+        + "）"
+        if r.usage.hook_run_count else "-"),
 }
 
 
@@ -588,6 +616,9 @@ def raw_value(report, key: str) -> float | None:
         if key == "permission_wait":
             return (u.permission_wait_ms_total / 1000
                     if u.permission_request_count else None)
+        if key == "hook_overhead":
+            return (u.hook_duration_ms_total / 1000
+                    if u.hook_run_count else None)
         if key in _USAGE_ATTR:
             v = getattr(u, _USAGE_ATTR[key])
             return float(v) if v is not None else None
@@ -654,6 +685,8 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "context_window": frozenset({"codex", "grok"}),
     "context_window_used": frozenset({"codex", "grok"}),
     "ttft": frozenset({"codex", "grok"}),
+    "ttft_p95": frozenset({"codex"}),
+    "rate_limit_peak": frozenset({"codex"}),
     "patch_success": frozenset({"codex"}),
     "aborted_tasks": frozenset({"codex"}),
     # Grok signals.json / events.jsonl 独有
@@ -662,6 +695,8 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "reverted_lines": frozenset({"grok"}),
     "user_modified": frozenset({"claude"}),
     "revert_events": frozenset({"opencode", "grok"}),
+    "hook_overhead": frozenset({"claude"}),
+    "queued_inputs": frozenset({"claude"}),
     "git_commits": frozenset({"grok"}),
     "ratings": frozenset({"grok"}),
     "permission_wait": frozenset({"grok"}),

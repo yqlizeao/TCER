@@ -138,6 +138,11 @@ def _mk_report(
         details = {fp: cnt for fp, cnt in sloc.file_edit_counts.items() if cnt >= 3}
         if details:
             rep.high_churn_details = dict(sorted(details.items(), key=lambda x: -x[1]))
+        # 一次写对率：只编辑 1 次的文件占比——比「高返工文件数」更正面的质量信号。
+        counts = sloc.file_edit_counts
+        if counts:
+            rep.first_pass_file_ratio = (
+                sum(1 for c in counts.values() if c == 1) / len(counts))
     if set_subagent_density and u.effective_turns:
         rep.subagent_density = n_sub / u.effective_turns
     return rep
@@ -271,54 +276,24 @@ def analyze_project(
         task_type = metrics.DEFAULT_TASK_TYPE  # placeholder; per-session inference wins
     cancel_check = _make_cancel_check(cancel_event)
 
-    if source == "codex" or (project_ref and project_ref.source == "codex"):
-        return _analyze_codex_project(
-            project_ref or project,
-            session=session,
-            code_dir=code_dir,
-            no_loc=no_loc,
-            scan_code_dir=scan_code_dir,
-            task_type=task_type,
-            baseline_tcer=baseline_tcer,
-            baseline_ncpi=baseline_ncpi,
-            baseline_cpe=baseline_cpe,
-            since=since,
-            until=until,
-            cancel_check=cancel_check,
-            auto_infer=auto_infer,
-        )
-    if source == "opencode" or (project_ref and project_ref.source == "opencode"):
-        return _analyze_opencode_project(
-            project_ref or project,
-            session=session,
-            code_dir=code_dir,
-            no_loc=no_loc,
-            scan_code_dir=scan_code_dir,
-            task_type=task_type,
-            baseline_tcer=baseline_tcer,
-            baseline_ncpi=baseline_ncpi,
-            baseline_cpe=baseline_cpe,
-            since=since,
-            until=until,
-            cancel_check=cancel_check,
-            auto_infer=auto_infer,
-        )
-    if source == "grok" or (project_ref and project_ref.source == "grok"):
-        return _analyze_grok_project(
-            project_ref or project,
-            session=session,
-            code_dir=code_dir,
-            no_loc=no_loc,
-            scan_code_dir=scan_code_dir,
-            task_type=task_type,
-            baseline_tcer=baseline_tcer,
-            baseline_ncpi=baseline_ncpi,
-            baseline_cpe=baseline_cpe,
-            since=since,
-            until=until,
-            cancel_check=cancel_check,
-            auto_infer=auto_infer,
-        )
+    for adapter in _ADAPTERS:
+        if source == adapter.source or (project_ref and project_ref.source == adapter.source):
+            return _analyze_source_project(
+                adapter,
+                project_ref or project,
+                session=session,
+                code_dir=code_dir,
+                no_loc=no_loc,
+                scan_code_dir=scan_code_dir,
+                task_type=task_type,
+                baseline_tcer=baseline_tcer,
+                baseline_ncpi=baseline_ncpi,
+                baseline_cpe=baseline_cpe,
+                since=since,
+                until=until,
+                cancel_check=cancel_check,
+                auto_infer=auto_infer,
+            )
 
     proj = resolve_project(project)
     if proj is None:
@@ -489,7 +464,38 @@ def analyze_project(
     )
 
 
-def _analyze_codex_project(
+# --------------------------------------------------------------------------- #
+# Non-Claude sources: one shared skeleton + per-source adapters
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class _SourceAdapter:
+    """Per-source hooks for the shared non-Claude analyze pipeline.
+
+    Claude 保持独立路径（子代理折叠 + cwd-keyed 扫描）；Codex / OpenCode / Grok
+    共享同一条「逐会话 → 聚合」流水线，源差异全部收敛到这些钩子。``handle``
+    是源自定义的会话句柄：Codex/Grok 为 updates/rollout 文件 Path，OpenCode 为
+    session id 字符串（legacy 会话为 JSON 路径字符串）。file_cache 的 key 构造
+    在各 usage_of / loc_of 钩子内部（每源的失效语义不同，如 Grok 要并入
+    signals/events 旁路文件签名）。
+    """
+
+    source: str
+    entrypoint: str
+    resolve: Callable[[str], ProjectRef | None]
+    sessions: Callable[[ProjectRef], list]
+    read_meta: Callable[[ProjectRef, object], SessionMeta]
+    usage_of: Callable[[ProjectRef, object], TokenUsage]
+    loc_of: Callable[[ProjectRef, object, SessionMeta], tuple]
+    session_key: Callable[[ProjectRef, object], str]
+    not_found: str      # .format(project=...)
+    no_sessions: str    # .format(name=ref.display_name)
+    no_match: str       # .format(session=...)
+    requires_path: bool = False  # OpenCode: ref.path (SQLite db) 必须存在
+
+
+def _analyze_source_project(
+    adapter: _SourceAdapter,
     project: str | ProjectRef,
     *,
     session: str | None = None,
@@ -505,7 +511,7 @@ def _analyze_codex_project(
     cancel_check: Callable[[], None] | None = None,
     auto_infer: bool = False,
 ) -> ProjectAnalysis:
-    """Analyze a Codex cwd-grouped project."""
+    """Shared per-session pipeline for Codex / OpenCode / Grok projects."""
     # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
     # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
     if baseline_tcer is None:
@@ -514,38 +520,30 @@ def _analyze_codex_project(
         baseline_ncpi = metrics.NCPI_BASELINE
     if baseline_cpe is None:
         baseline_cpe = metrics.CPE_BASELINE
-    ref = project if isinstance(project, ProjectRef) else codex_reader.resolve_project(project)
-    if ref is None:
-        raise FileNotFoundError(f"codex project '{project}' not found under ~/.codex/sessions")
-    files = codex_reader.sessions_for_project(ref)
-    if not files:
-        raise FileNotFoundError(f"no Codex session files for '{ref.display_name}'")
+    ref = project if isinstance(project, ProjectRef) else adapter.resolve(project)
+    if ref is None or (adapter.requires_path and ref.path is None):
+        raise FileNotFoundError(adapter.not_found.format(project=project))
+    handles = adapter.sessions(ref)
+    if not handles:
+        raise FileNotFoundError(adapter.no_sessions.format(name=ref.display_name))
 
-    from tcer.core import file_cache
+    usage_memo: dict = {}
 
-    usage_memo: dict[Path, TokenUsage] = {}
-
-    def _usage_of(f: Path) -> TokenUsage:
-        u = usage_memo.get(f)
+    def _usage_of(h) -> TokenUsage:
+        u = usage_memo.get(h)
         if u is None:
             if cancel_check:
                 cancel_check()
-            u = file_cache.get_or_compute(
-                f, ("codex_usage",),
-                lambda: codex_reader.aggregate_usage(f),
-            )
-            usage_memo[f] = u
+            u = adapter.usage_of(ref, h)
+            usage_memo[h] = u
         return u
 
-    files = _filter_by_started_at(files, _usage_of, since, until)
+    handles = _filter_by_started_at(handles, _usage_of, since, until)
 
     if session:
-        files = [
-            f for f in files
-            if session in (codex_reader.read_session_meta(f).session_id or f.stem)
-        ]
-        if not files:
-            raise FileNotFoundError(f"no Codex session matches '{session}'")
+        handles = [h for h in handles if session in adapter.session_key(ref, h)]
+        if not handles:
+            raise FileNotFoundError(adapter.no_match.format(session=session))
 
     code_path = Path(code_dir) if code_dir else (Path(ref.cwd) if ref.cwd else None)
     loc_total = (
@@ -563,23 +561,20 @@ def _analyze_codex_project(
     agg_u = TokenUsage()
     totals = _empty_loc_totals()
 
-    for f in files:
+    for h in handles:
         if cancel_check:
             cancel_check()
-        meta = codex_reader.read_session_meta(f)
-        u = _usage_of(f)
+        meta = adapter.read_meta(ref, h)
+        u = _usage_of(h)
         agg_u = agg_u.merge(u)
         if no_loc:
             reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
             continue
-        # Single scan yields both the LOC and whether any patch existed.
-        sloc, has_signal = file_cache.get_or_compute(
-            f, ("codex_loc",),
-            lambda p=f: codex_reader._loc_scan(p),
-        )
+        # Single scan yields the LOC and whether any edit signal existed.
+        sloc, has_signal = adapter.loc_of(ref, h, meta)
         if not has_signal:
-            # No parseable apply_patch → known zero LOC (not unknown). Keeps
-            # project aggregate TCER valid when sibling sessions have patches.
+            # No parseable edit signal → known zero LOC (not unknown). Keeps
+            # project aggregate TCER valid when sibling sessions have signal.
             sloc = loc.SessionLoc(added=0, deleted=0)
         _accumulate_sloc_totals(sloc, totals)
         reports.append(_mk_report(
@@ -587,10 +582,12 @@ def _analyze_codex_project(
             ctx=ctx, sloc=sloc, unseen=sloc.unseen_writes,
         ))
 
+    first = handles[0] if handles else None
     agg_meta = SessionMeta(
         session_id="(aggregate)", cwd=str(code_path) if code_path else ref.cwd,
-        title=None, path=ref.path or (files[0].parent if files else Path(".")),
-        is_subagent=False, entrypoint="codex", source="codex",
+        title=None,
+        path=ref.path or (first.parent if isinstance(first, Path) else Path(".")),
+        is_subagent=False, entrypoint=adapter.entrypoint, source=adapter.source,
     )
     agg_tt = (
         metrics.majority_task_type([r.task_type for r in reports])
@@ -618,293 +615,123 @@ def _analyze_codex_project(
         code_dir=code_path,
         n_sessions=len(reports),
         n_subagents=0,
-        source="codex",
+        source=adapter.source,
         project_ref=ref,
     )
 
 
-def _analyze_opencode_project(
-    project: str | ProjectRef,
-    *,
-    session: str | None = None,
-    code_dir: str | Path | None = None,
-    no_loc: bool = False,
-    scan_code_dir: bool = False,
-    task_type: str = metrics.DEFAULT_TASK_TYPE,
-    baseline_tcer: float | None = None,
-    baseline_ncpi: float | None = None,
-    baseline_cpe: float | None = None,
-    since: str | None = None,
-    until: str | None = None,
-    cancel_check: Callable[[], None] | None = None,
-    auto_infer: bool = False,
-) -> ProjectAnalysis:
-    """Analyze an OpenCode project from its local SQLite database."""
-    # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
-    # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
-    if baseline_tcer is None:
-        baseline_tcer = metrics.TCER_BASELINE
-    if baseline_ncpi is None:
-        baseline_ncpi = metrics.NCPI_BASELINE
-    if baseline_cpe is None:
-        baseline_cpe = metrics.CPE_BASELINE
-    ref = project if isinstance(project, ProjectRef) else opencode_reader.resolve_project(project)
-    if ref is None or ref.path is None:
-        raise FileNotFoundError(f"opencode project '{project}' not found under ~/.local/share/opencode")
-    session_ids = opencode_reader.sessions_for_project(ref)
-    if not session_ids:
-        raise FileNotFoundError(f"no OpenCode sessions for '{ref.display_name}'")
-
+# ---- Codex hooks ----------------------------------------------------------- #
+def _codex_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
     from tcer.core import file_cache
-
-    db_path = ref.path
-    usage_memo: dict[str, TokenUsage] = {}
-
-    def _cache_file_of(sid: str) -> Path:
-        # Legacy sessions live in their own JSON file; key the mtime cache on it.
-        # SQLite sessions key on the db file (coarse: any write invalidates all).
-        return Path(sid) if opencode_reader._is_legacy_session(sid) else db_path
-
-    def _usage_of(sid: str) -> TokenUsage:
-        u = usage_memo.get(sid)
-        if u is None:
-            if cancel_check:
-                cancel_check()
-            u = file_cache.get_or_compute(
-                _cache_file_of(sid), ("opencode_usage", sid),
-                lambda: opencode_reader.aggregate_usage(db_path, sid),
-            )
-            usage_memo[sid] = u
-        return u
-
-    since_ms = _parse_date_to_ms(since) if since else None
-    until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
-    if since_ms or until_ms:
-        filtered = []
-        for sid in session_ids:
-            u = _usage_of(sid)
-            if u.started_at is None:
-                continue
-            if since_ms and u.started_at < since_ms:
-                continue
-            if until_ms and u.started_at > until_ms:
-                continue
-            filtered.append(sid)
-        session_ids = filtered
-
-    if session:
-        session_ids = [sid for sid in session_ids if session in sid]
-        if not session_ids:
-            raise FileNotFoundError(f"no OpenCode session matches '{session}'")
-
-    code_path = Path(code_dir) if code_dir else (Path(ref.cwd) if ref.cwd else None)
-    loc_total = (
-        loc.tree_loc(code_path)
-        if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
-        else None
-    )
-    ctx = _MetricCtx(
-        loc_total=loc_total, task_type=task_type,
-        baseline_tcer=baseline_tcer, baseline_ncpi=baseline_ncpi,
-        baseline_cpe=baseline_cpe, auto_infer=auto_infer,
-    )
-
-    reports: list[SessionReport] = []
-    agg_u = TokenUsage()
-    totals = _empty_loc_totals()
-
-    for sid in session_ids:
-        if cancel_check:
-            cancel_check()
-        meta = opencode_reader.read_session_meta(db_path, sid)
-        u = _usage_of(sid)
-        agg_u = agg_u.merge(u)
-        if no_loc:
-            reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
-            continue
-        # One SQLite pass for signal + LOC (same pattern as Codex/Grok).
-        sess_cwd = meta.cwd or ref.cwd
-        sloc, has_signal = file_cache.get_or_compute(
-            _cache_file_of(sid), ("opencode_loc", sid, str(sess_cwd or ""), False),
-            lambda s=sid, c=sess_cwd: opencode_reader._loc_scan(
-                db_path, s, cwd=c, disk_prior=False,
-            ),
-        )
-        if not has_signal:
-            # No summary and no edit tools → known zero (not unknown).
-            sloc = loc.SessionLoc(added=0, deleted=0)
-        _accumulate_sloc_totals(sloc, totals)
-        reports.append(_mk_report(
-            meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted,
-            ctx=ctx, sloc=sloc, unseen=sloc.unseen_writes,
-        ))
-
-    agg_meta = SessionMeta(
-        session_id="(aggregate)", cwd=str(code_path) if code_path else ref.cwd,
-        title=None, path=db_path, is_subagent=False, entrypoint="opencode", source="opencode",
-    )
-    agg_tt = (
-        metrics.majority_task_type([r.task_type for r in reports])
-        if auto_infer and reports else None
-    )
-    if no_loc:
-        agg = _mk_report(
-            agg_meta, agg_u, None, None, None, ctx=ctx,
-            task_type_override=agg_tt,
-        )
-    else:
-        agg_sloc = _totals_to_sloc(totals)
-        agg = _mk_report(
-            agg_meta, agg_u, agg_sloc.added - agg_sloc.deleted,
-            agg_sloc.added, agg_sloc.deleted, ctx=ctx, sloc=agg_sloc,
-            unseen=agg_sloc.unseen_writes,
-            task_type_override=agg_tt,
-        )
-    _suppress_aggregate_session_metrics(agg)
-
-    return ProjectAnalysis(
-        project_hash=ref.key,
-        reports=reports,
-        aggregate=agg,
-        code_dir=code_path,
-        n_sessions=len(reports),
-        n_subagents=0,
-        source="opencode",
-        project_ref=ref,
-    )
+    return file_cache.get_or_compute(
+        f, ("codex_usage",), lambda: codex_reader.aggregate_usage(f))
 
 
-def _analyze_grok_project(
-    project: str | ProjectRef,
-    *,
-    session: str | None = None,
-    code_dir: str | Path | None = None,
-    no_loc: bool = False,
-    scan_code_dir: bool = False,
-    task_type: str = metrics.DEFAULT_TASK_TYPE,
-    baseline_tcer: float | None = None,
-    baseline_ncpi: float | None = None,
-    baseline_cpe: float | None = None,
-    since: str | None = None,
-    until: str | None = None,
-    cancel_check: Callable[[], None] | None = None,
-    auto_infer: bool = False,
-) -> ProjectAnalysis:
-    """Analyze a Grok cwd-grouped project."""
-    # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
-    # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
-    if baseline_tcer is None:
-        baseline_tcer = metrics.TCER_BASELINE
-    if baseline_ncpi is None:
-        baseline_ncpi = metrics.NCPI_BASELINE
-    if baseline_cpe is None:
-        baseline_cpe = metrics.CPE_BASELINE
-    ref = project if isinstance(project, ProjectRef) else grok_reader.resolve_project(project)
-    if ref is None:
-        raise FileNotFoundError(f"grok project '{project}' not found under ~/.grok/sessions")
-    files = grok_reader.sessions_for_project(ref)
-    if not files:
-        raise FileNotFoundError(f"no Grok session files for '{ref.display_name}'")
-
+def _codex_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
     from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        f, ("codex_loc",), lambda: codex_reader._loc_scan(f))
 
-    usage_memo: dict[Path, TokenUsage] = {}
 
-    def _usage_of(f: Path) -> TokenUsage:
-        u = usage_memo.get(f)
-        if u is None:
-            if cancel_check:
-                cancel_check()
-            u = file_cache.get_or_compute(
-                f, ("grok_usage",),
-                lambda: grok_reader.aggregate_usage(f),
-            )
-            usage_memo[f] = u
-        return u
+_CODEX = _SourceAdapter(
+    source="codex", entrypoint="codex",
+    resolve=codex_reader.resolve_project,
+    sessions=codex_reader.sessions_for_project,
+    read_meta=lambda ref, f: codex_reader.read_session_meta(f),
+    usage_of=_codex_usage_of,
+    loc_of=_codex_loc_of,
+    session_key=lambda ref, f: (codex_reader.read_session_meta(f).session_id or f.stem),
+    not_found="codex project '{project}' not found under ~/.codex/sessions",
+    no_sessions="no Codex session files for '{name}'",
+    no_match="no Codex session matches '{session}'",
+)
 
-    files = _filter_by_started_at(files, _usage_of, since, until)
 
-    if session:
-        files = [
-            f for f in files
-            if session in (grok_reader.read_session_meta(f).session_id or f.stem)
-        ]
-        if not files:
-            raise FileNotFoundError(f"no Grok session matches '{session}'")
+# ---- OpenCode hooks -------------------------------------------------------- #
+def _opencode_cache_file(ref: ProjectRef, sid: str) -> Path:
+    # Legacy sessions live in their own JSON file; key the mtime cache on it.
+    # SQLite sessions key on the db file (coarse: any write invalidates all).
+    return Path(sid) if opencode_reader._is_legacy_session(sid) else ref.path
 
-    code_path = Path(code_dir) if code_dir else (Path(ref.cwd) if ref.cwd else None)
-    loc_total = (
-        loc.tree_loc(code_path)
-        if scan_code_dir and not no_loc and code_path and _is_project_dir(code_path)
-        else None
-    )
-    ctx = _MetricCtx(
-        loc_total=loc_total, task_type=task_type,
-        baseline_tcer=baseline_tcer, baseline_ncpi=baseline_ncpi,
-        baseline_cpe=baseline_cpe, auto_infer=auto_infer,
-    )
 
-    reports: list[SessionReport] = []
-    agg_u = TokenUsage()
-    totals = _empty_loc_totals()
+def _opencode_usage_of(ref: ProjectRef, sid: str) -> TokenUsage:
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        _opencode_cache_file(ref, sid), ("opencode_usage", sid),
+        lambda: opencode_reader.aggregate_usage(ref.path, sid))
 
-    for f in files:
-        if cancel_check:
-            cancel_check()
-        meta = grok_reader.read_session_meta(f)
-        u = _usage_of(f)
-        agg_u = agg_u.merge(u)
-        if no_loc:
-            reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
-            continue
-        sess_cwd = meta.cwd or ref.cwd
-        sloc, has_signal = file_cache.get_or_compute(
-            f, ("grok_loc", str(sess_cwd or ""), False),
-            lambda p=f, c=sess_cwd: grok_reader._loc_scan(p, cwd=c, disk_prior=False),
-        )
-        if not has_signal:
-            # No search_replace/write → known zero LOC (not unknown).
-            sloc = loc.SessionLoc(added=0, deleted=0)
-        _accumulate_sloc_totals(sloc, totals)
-        reports.append(_mk_report(
-            meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted,
-            ctx=ctx, sloc=sloc, unseen=sloc.unseen_writes,
-        ))
 
-    agg_meta = SessionMeta(
-        session_id="(aggregate)", cwd=str(code_path) if code_path else ref.cwd,
-        title=None, path=ref.path or (files[0].parent if files else Path(".")),
-        is_subagent=False, entrypoint="grok", source="grok",
-    )
-    agg_tt = (
-        metrics.majority_task_type([r.task_type for r in reports])
-        if auto_infer and reports else None
-    )
-    if no_loc:
-        agg = _mk_report(
-            agg_meta, agg_u, None, None, None, ctx=ctx,
-            task_type_override=agg_tt,
-        )
-    else:
-        agg_sloc = _totals_to_sloc(totals)
-        agg = _mk_report(
-            agg_meta, agg_u, agg_sloc.added - agg_sloc.deleted,
-            agg_sloc.added, agg_sloc.deleted, ctx=ctx, sloc=agg_sloc,
-            unseen=agg_sloc.unseen_writes,
-            task_type_override=agg_tt,
-        )
-    _suppress_aggregate_session_metrics(agg)
+def _opencode_loc_of(ref: ProjectRef, sid: str, meta: SessionMeta):
+    from tcer.core import file_cache
+    sess_cwd = meta.cwd or ref.cwd
+    return file_cache.get_or_compute(
+        _opencode_cache_file(ref, sid),
+        ("opencode_loc", sid, str(sess_cwd or ""), False),
+        lambda: opencode_reader._loc_scan(
+            ref.path, sid, cwd=sess_cwd, disk_prior=False))
 
-    return ProjectAnalysis(
-        project_hash=ref.key,
-        reports=reports,
-        aggregate=agg,
-        code_dir=code_path,
-        n_sessions=len(reports),
-        n_subagents=0,
-        source="grok",
-        project_ref=ref,
-    )
+
+_OPENCODE = _SourceAdapter(
+    source="opencode", entrypoint="opencode",
+    resolve=opencode_reader.resolve_project,
+    sessions=opencode_reader.sessions_for_project,
+    read_meta=lambda ref, sid: opencode_reader.read_session_meta(ref.path, sid),
+    usage_of=_opencode_usage_of,
+    loc_of=_opencode_loc_of,
+    session_key=lambda ref, sid: sid,
+    not_found="opencode project '{project}' not found under ~/.local/share/opencode",
+    no_sessions="no OpenCode sessions for '{name}'",
+    no_match="no OpenCode session matches '{session}'",
+    requires_path=True,
+)
+
+
+# ---- Grok hooks ------------------------------------------------------------ #
+def _grok_side_files_key(f: Path) -> tuple:
+    """signals.json / events.jsonl 的签名并入缓存 key。
+
+    这两个文件是会话结束后补写/更新的，而 file_cache 的主签名只看
+    updates.jsonl —— 不并入会导致取消数/评价/回退行等信号停留在旧值。
+    """
+    parts = []
+    for name in ("signals.json", "events.jsonl"):
+        try:
+            st = (f.parent / name).stat()
+            parts.append((name, int(st.st_mtime_ns), int(st.st_size)))
+        except OSError:
+            parts.append((name, 0, 0))
+    return tuple(parts)
+
+
+def _grok_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        f, ("grok_usage", _grok_side_files_key(f)),
+        lambda: grok_reader.aggregate_usage(f))
+
+
+def _grok_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
+    from tcer.core import file_cache
+    sess_cwd = meta.cwd or ref.cwd
+    return file_cache.get_or_compute(
+        f, ("grok_loc", str(sess_cwd or ""), False),
+        lambda: grok_reader._loc_scan(f, cwd=sess_cwd, disk_prior=False))
+
+
+_GROK = _SourceAdapter(
+    source="grok", entrypoint="grok",
+    resolve=grok_reader.resolve_project,
+    sessions=grok_reader.sessions_for_project,
+    read_meta=lambda ref, f: grok_reader.read_session_meta(f),
+    usage_of=_grok_usage_of,
+    loc_of=_grok_loc_of,
+    session_key=lambda ref, f: (grok_reader.read_session_meta(f).session_id or f.stem),
+    not_found="grok project '{project}' not found under ~/.grok/sessions",
+    no_sessions="no Grok session files for '{name}'",
+    no_match="no Grok session matches '{session}'",
+)
+
+_ADAPTERS = (_CODEX, _OPENCODE, _GROK)
 
 
 def _synth_meta(session_id: str, sample: Path) -> SessionMeta:

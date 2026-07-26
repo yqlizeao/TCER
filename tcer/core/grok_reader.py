@@ -25,6 +25,7 @@ from urllib.parse import unquote
 
 from tcer.core import pricing
 from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
+from tcer.core.parse_util import as_int as _as_int, first_str as _first_str
 from tcer.core.paths import encode_hash, grok_sessions_dir
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
@@ -733,14 +734,6 @@ def _chunk_text(update: dict) -> str:
     return ""
 
 
-def _as_int(v) -> int:
-    if v is None or isinstance(v, bool):
-        return 0
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
-
 
 def _json_label(v) -> str | None:
     if isinstance(v, str) and v:
@@ -751,12 +744,6 @@ def _json_label(v) -> str | None:
         return str(v)
     return None
 
-
-def _first_str(*values) -> str | None:
-    for v in values:
-        if isinstance(v, str) and v:
-            return v
-    return None
 
 
 def _display_name_for_cwd(cwd: str | None) -> str:

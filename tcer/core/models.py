@@ -134,6 +134,9 @@ class TokenUsage:
     rate_limit_snapshots: int = 0
     rate_limit_reached_count: int = 0
     rate_limit_names: set[str] = field(default_factory=set)
+    rate_limit_peak_used: float | None = None  # 配额峰值占用（0..1，Codex used_percent/100）
+    ttft_ms_samples: list[int] = field(default_factory=list)  # 逐回合 TTFT（p95 用）
+    abort_reasons: dict[str, int] = field(default_factory=dict)  # 中断原因 → 次数
     # --- Grok signals.json / events.jsonl（会话级聚合信号与事件） ---
     cancellation_count: int = 0        # 用户取消回合次数
     regeneration_count: int = 0        # 重新生成次数
@@ -147,6 +150,12 @@ class TokenUsage:
     permission_wait_ms_total: int = 0  # 审批等待总毫秒（人卡住 AI 的时间）
     itl_p50_ms: int | None = None      # inter-token latency P50
     itl_p99_ms: int | None = None
+    # --- Claude 深挖第三批 ---
+    mcp_calls_by_attr: dict[str, int] = field(default_factory=dict)  # "server/tool" → 次数（精确 MCP 归因）
+    hook_run_count: int = 0            # stop hook 执行次数
+    hook_error_count: int = 0          # stop hook 失败次数
+    hook_duration_ms_total: int = 0    # stop hook 累计耗时
+    queued_input_count: int = 0        # 用户在 AI 运行时排队输入的次数（打断/并行输入）
     # --- 采纳信号 ---
     user_modified_count: int = 0       # AI 写入后被用户手动修改的工具结果数（Claude）
     revert_events: int = 0             # 会话被回退的事件数（OpenCode revert / Grok hasReverted）
@@ -154,6 +163,9 @@ class TokenUsage:
     # 与回放 LOC 相互独立的第二套估计，用于交叉校验；不参与 TCER 计算。
     patch_diff_added: int = 0
     patch_diff_deleted: int = 0
+    # 数据源自报成本（OpenCode session.cost）——与 TCER 价表计价交叉校验；
+    # 0/缺失视为未知（None）。不参与任何指标计算。
+    reported_cost_usd: float | None = None
 
     @property
     def total_input(self) -> int:
@@ -248,6 +260,10 @@ class TokenUsage:
             rate_limit_snapshots=self.rate_limit_snapshots + other.rate_limit_snapshots,
             rate_limit_reached_count=self.rate_limit_reached_count + other.rate_limit_reached_count,
             rate_limit_names=self.rate_limit_names | other.rate_limit_names,
+            rate_limit_peak_used=_max_opt(self.rate_limit_peak_used,
+                                          other.rate_limit_peak_used),
+            ttft_ms_samples=self.ttft_ms_samples + other.ttft_ms_samples,
+            abort_reasons=_merge_dicts(self.abort_reasons, other.abort_reasons),
             cancellation_count=self.cancellation_count + other.cancellation_count,
             regeneration_count=self.regeneration_count + other.regeneration_count,
             positive_ratings=self.positive_ratings + other.positive_ratings,
@@ -263,10 +279,16 @@ class TokenUsage:
             # 分位数不可加，聚合取最差值（max）
             itl_p50_ms=_max_ms(self.itl_p50_ms, other.itl_p50_ms),
             itl_p99_ms=_max_ms(self.itl_p99_ms, other.itl_p99_ms),
+            mcp_calls_by_attr=_merge_dicts(self.mcp_calls_by_attr, other.mcp_calls_by_attr),
+            hook_run_count=self.hook_run_count + other.hook_run_count,
+            hook_error_count=self.hook_error_count + other.hook_error_count,
+            hook_duration_ms_total=self.hook_duration_ms_total + other.hook_duration_ms_total,
+            queued_input_count=self.queued_input_count + other.queued_input_count,
             user_modified_count=self.user_modified_count + other.user_modified_count,
             revert_events=self.revert_events + other.revert_events,
             patch_diff_added=self.patch_diff_added + other.patch_diff_added,
             patch_diff_deleted=self.patch_diff_deleted + other.patch_diff_deleted,
+            reported_cost_usd=_sum_opt(self.reported_cost_usd, other.reported_cost_usd),
         )
 
 
@@ -293,6 +315,18 @@ def _merge_dicts(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
     for k, v in b.items():
         out[k] = out.get(k, 0) + v
     return out
+
+
+def _max_opt(a: float | None, b: float | None) -> float | None:
+    vals = [v for v in (a, b) if v is not None]
+    return max(vals) if vals else None
+
+
+def _sum_opt(a: float | None, b: float | None) -> float | None:
+    """None-aware 求和：双 None → None，否则缺失按 0。"""
+    if a is None and b is None:
+        return None
+    return (a or 0.0) + (b or 0.0)
 
 
 def _min_ms(a: int | None, b: int | None) -> int | None:
@@ -379,6 +413,7 @@ class SessionReport:
     # --- file-level quality ---
     high_churn_file_count: int = 0  # files edited ≥3 times
     high_churn_details: dict | None = None  # {path: count} for files edited ≥3 (for popup)
+    first_pass_file_ratio: float | None = None  # 只编辑 1 次的文件占比（一次写对率）
     test_net_loc: int | None = None  # net LOC in test files
     doc_net_loc: int | None = None  # net LOC in doc files
     test_loc_ratio: float | None = None  # test_net / net_loc
@@ -397,6 +432,7 @@ class SessionReport:
     memory_dir: str | None = None           # absolute path to the memory/ directory
     # --- Codex/local-agent runtime metrics ---
     time_to_first_token_sec: float | None = None
+    ttft_p95_sec: float | None = None  # TTFT 尾部延迟（逐回合样本的 P95）
     task_completion_rate: float | None = None
     patch_apply_success_rate: float | None = None
     context_window_used_ratio: float | None = None

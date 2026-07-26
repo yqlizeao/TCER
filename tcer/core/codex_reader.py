@@ -12,6 +12,7 @@ from pathlib import Path
 
 from tcer.core import pricing
 from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
+from tcer.core.parse_util import as_int as _as_int, first_str as _first_str
 from tcer.core.paths import codex_dir, codex_sessions_dir, encode_hash
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
@@ -270,9 +271,12 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 ttft = _as_int(payload.get("time_to_first_token_ms"))
                 if ttft > 0:
                     u.time_to_first_token_ms = ttft if u.time_to_first_token_ms is None else min(u.time_to_first_token_ms, ttft)
+                    u.ttft_ms_samples.append(ttft)  # 全样本保留（p95 用）
             elif ptype == "turn_aborted":
                 u.aborted_task_count += 1
                 active_duration_ms += _as_int(payload.get("duration_ms"))
+                reason = _first_str(payload.get("reason")) or "unknown"
+                u.abort_reasons[reason] = u.abort_reasons.get(reason, 0) + 1
             elif ptype == "context_compacted":
                 u.compaction_event_count += 1
             elif ptype == "web_search_end":
@@ -638,6 +642,15 @@ def _add_rate_limit(u: TokenUsage, rate_limits) -> None:
         u.rate_limit_names.add(name)
     if rate_limits.get("rate_limit_reached_type"):
         u.rate_limit_reached_count += 1
+    # 配额水位：primary/secondary.used_percent（0–100）→ 峰值占用 0..1。
+    for key in ("primary", "secondary"):
+        win = rate_limits.get(key)
+        if isinstance(win, dict):
+            pct = win.get("used_percent")
+            if isinstance(pct, (int, float)) and pct > 0:
+                frac = float(pct) / 100.0
+                if u.rate_limit_peak_used is None or frac > u.rate_limit_peak_used:
+                    u.rate_limit_peak_used = frac
 
 
 def _set_max(u: TokenUsage, attr: str, value) -> None:
@@ -805,14 +818,6 @@ def _output_is_error(output: str) -> bool:
     ))
 
 
-def _as_int(v) -> int:
-    if v is None or isinstance(v, bool):
-        return 0
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
-
 
 def _list_len(v) -> int:
     return len(v) if isinstance(v, list) else 0
@@ -836,12 +841,6 @@ def _json_label(v) -> str | None:
             return str(v)
     return str(v)
 
-
-def _first_str(*values) -> str | None:
-    for v in values:
-        if isinstance(v, str) and v:
-            return v
-    return None
 
 
 def _session_id_from_filename(path: Path) -> str | None:

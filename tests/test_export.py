@@ -118,3 +118,16 @@ def test_to_markdown_contains_key_sections():
     assert "## Sessions" in md
     assert "## CTEI Distribution" in md
     assert "abc12345"[:12] in md
+
+
+def test_csv_fields_cover_all_row_keys():
+    """漂移护栏:report_row_dict 的每个键必须进 _CSV_FIELDS 或 _CSV_EXCLUDED。"""
+    r = _report(500)
+    row = export.report_row_dict(r)
+    unaccounted = [k for k in row
+                   if k not in export._CSV_FIELDS and k not in export._CSV_EXCLUDED]
+    assert not unaccounted, (
+        f"新导出字段未归类(进 _CSV_FIELDS 或 _CSV_EXCLUDED): {unaccounted}")
+    # 反向:清单里不能有已消失的键
+    stale = [k for k in export._CSV_FIELDS if k not in row]
+    assert not stale, f"_CSV_FIELDS 含已不存在的键: {stale}"

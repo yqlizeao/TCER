@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tcer.core.models import SessionMeta, ToolOp, TokenUsage
+from tcer.core.parse_util import as_int as _as_int
 from tcer.core.paths import claude_config_dirs
 from tcer.core import pricing
 
@@ -324,10 +325,25 @@ def _scan_session_uncached(
         if cancel_check is not None:
             cancel_check()
 
+        # 用户在 AI 运行时排队输入（打断/并行输入信号）。
+        if obj.get("type") == "queue-operation":
+            u.queued_input_count += 1
+            continue
+
         # 非 message 行：system 子类型携带真实回合耗时 / 限流 / 压缩信号。
         if obj.get("type") == "system":
             sub = obj.get("subtype")
-            if sub == "turn_duration":
+            if sub == "stop_hook_summary":
+                u.hook_run_count += _as_int(obj.get("hookCount"))
+                errs = obj.get("hookErrors")
+                u.hook_error_count += (len(errs) if isinstance(errs, list)
+                                       else _as_int(errs))
+                infos = obj.get("hookInfos")
+                if isinstance(infos, list):
+                    for info in infos:
+                        if isinstance(info, dict):
+                            u.hook_duration_ms_total += _as_int(info.get("durationMs"))
+            elif sub == "turn_duration":
                 # 权威的每回合耗时（不含用户暂停），回填到最近一个回合。
                 dur = _as_int(obj.get("durationMs"))
                 if dur and u.turn_stats and u.turn_stats[-1].duration_ms is None:
@@ -346,6 +362,12 @@ def _scan_session_uncached(
         # userModified → 「AI 写完后被人改过」采纳信号。
         tur = obj.get("toolUseResult")
         if isinstance(tur, dict):
+            # MCP 精确归因：结果行携带 attributionMcpServer/Tool（每次调用一行）。
+            srv = obj.get("attributionMcpServer")
+            if isinstance(srv, str) and srv:
+                tool_attr = obj.get("attributionMcpTool")
+                key_attr = f"{srv}/{tool_attr}" if isinstance(tool_attr, str) and tool_attr else srv
+                u.mcp_calls_by_attr[key_attr] = u.mcp_calls_by_attr.get(key_attr, 0) + 1
             if loc_acc is not None and "originalFile" in tur:
                 loc_acc.note_write_original(tur.get("filePath"),
                                             tur.get("originalFile"))
@@ -821,11 +843,3 @@ def truncate_summary(text: str, max_chars: int) -> str:
         return trimmed
     return trimmed[:max_chars] + "..."
 
-
-def _as_int(v) -> int:
-    if v is None or isinstance(v, bool):
-        return 0
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
