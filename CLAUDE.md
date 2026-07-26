@@ -38,7 +38,7 @@ python -m tcer.audit --ci --summary-json audit-summary.json   # 等价 CI 预设
 TCER/
 ├── tcer/                  Python 包
 │   ├── core/              核心库（reader / loc / metrics / pricing / models / paths / analyze / export / format / audit …）
-│   ├── gui/               GUI（app / theme / metric_defs / widgets / views / popups）
+│   ├── gui/               GUI（app / theme / metric_defs / widgets / views / charts / popups / html_report）
 │   └── config/            配置（model_pricing.json / composite_baselines.json）
 ├── tests/                 测试（``python -m pytest tests/``）
 └── doc/                   详细文档
@@ -72,6 +72,8 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以�
 - **逐模型**：`MODEL_GROUPS` + `model_raw` / `model_display` / `model_tip`，同义指标转调 `format_value` 与会话级逐字节一致；**例外**：模型对比是 N 列并排，Token 数等大数量级用 K/M 紧凑显示（布局需要），比率/百分比仍与网格一致。
 - **CTEI 因子分解**：`CTEI_FACTORS`（名称/公式）。
 - **评级体系**：`core/metrics.GRADE_BANDS`（名称+阈值，best→worst）是 grade 的唯一源；`grade()`、排名分布条、趋势 CTEI 带都从它派生。
+- **源能力感知**：`metric_defs._SOURCE_SUPPORT` 标注「数据源根本不产生该字段」的指标（如 Claude 无独立推理 token、Codex 无缓存写入、上下文窗口/TTFT/限流为 Codex 独有）。`display()` 返回「不适用」、`raw_value()` 返回 None，网格/图表/HTML 报告自动继承；「不适用」与「-」一样参与空单元格折叠，但颜色置灰。部分支持（如 OpenCode 多回合 peak 留 0）**不**标注，仍显示 "-"。
+- **HTML 报告**：`gui/html_report.py`（无 Tk 依赖，可无头测试）渲染项目级/会话级自包含单文件 HTML，数值全部走 `metric_defs.display`，与网格逐字节一致；GUI 导出菜单含项目/会话两组入口。图表组件在 `gui/charts.py`（趋势/散点/仪表板/时段热力图，从 views 拆出，views re-export 保持旧 import 路径）。
 
 
 ## 工程规范
@@ -97,8 +99,13 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以�
 11. **任务类型 SSOT**：`TASK_CATEGORIES` / TTAF 只来自 `config/composite_baselines.json`（`metrics._refresh_composite_globals`）。分析入口默认 `code_creation`；`resolve_task_type` 把空值/未知/`feature` 等合法化，`coerce_task_type` 给公式层（未知→None，不静默套创作系数）。`task_type=auto`（GUI「自动」）按会话 `infer_task_type`（net_loc/探索比/Edit 比/读写比）推断，聚合取众数。个人基准默认至少 `MIN_BASELINE_SESSIONS=10` 条完整会话。
 12. **Claude 单次扫描**：`reader.scan_session` 一趟 JSONL 同时产出 TokenUsage + SessionLoc；`analyze` 进程内按 path 缓存，避免 usage 与 LOC 双读。GUI `reanalyze` 用 `cancel_event` 协作取消上一次分析。
 13. **high_churn 合并**：子代理折叠/项目聚合用 `loc.merge_session_locs`，按合并后的 `file_edit_counts` 重算 `high_churn_files`（同路径不重复计）。
-14. **mtime 缓存**：`tcer.core.file_cache` 按 `(path, mtime_ns, size, variant)` 缓存 scan/usage；可取消扫描不入缓存。测试可用 `file_cache.clear()`。
+14. **mtime 缓存**：`tcer.core.file_cache` 按 `(path, mtime_ns, size, variant)` 缓存 scan/usage（LRU，上限 512）。取消靠 `cancel_check` 在 factory 内抛异常实现，部分扫描天然不入缓存——因此 GUI 的可取消分析**同样走缓存**（勿再用 `cancel_check is None` 做缓存开关）。四源均已接入：Claude `scan_session`、Codex/Grok usage+loc、OpenCode usage+loc（SQLite 会话 key 到 db 文件，粗粒度；legacy 会话 key 到自身 JSON）。Claude 日期过滤复用 cwd-keyed 扫描，同文件不再双扫。测试可用 `file_cache.clear()`。
 15. **用户消息懒加载**：分析只计 `user_msgs` 数量；Claude 与 Codex 一样弹窗/上传时再 `read_user_messages`（含 subagent 文件）。
+16. **缓存写 TTL 分档计价**：Claude `usage.cache_creation.ephemeral_1h_input_tokens` 是 1h 缓存写子集（单价 2×input，5m 为 1.25×input）。`TokenUsage.cache_write_1h_tokens` 记录该子集，`metrics._cost_from` 按 `CACHE_1H_PREMIUM=0.6` 加溢价（价表 cache_write 视为 5m 率）。实测本机 60% 缓存写走 1h 档——漏掉会系统性低估成本。
+17. **深度信号解析**：Claude `type:"system"` 子类型：`turn_duration.durationMs`（真实回合耗时→回填 `turn_stats`，不含用户暂停）、`api_error`（429→限流命中）、`compact_boundary`（压缩）；`usage.server_tool_use`（网页搜索/抓取）；行级 `version/gitBranch/effort/permissionMode` → SessionMeta。Grok 每会话另读 `signals.json`（窗口/TTFT/ITL/取消/评价/git 落地/回退行；`contextTokensUsed` **覆盖** peak_input——turn_completed.usage 是回合内多补全总和，按回合累计的 peak 虚高 10×+）与 `events.jsonl`（`permission_resolved.wait_ms` 审批等待）。改支持范围后同步 `metric_defs._SOURCE_SUPPORT`。
+18. **逐回合时间线**：`TokenUsage.turn_stats: list[TurnStat]`（turn/ts/4 token/duration_ms/tool_calls/errors），四源填充：Claude 逐响应、Codex 逐 token_count 差分步（task_complete 回填耗时）、Grok 逐 turn_completed、OpenCode 逐 step-finish。merge 时 rebase turn（聚合对象时间线是串接非并发）。GUI「会话时间线」弹窗与会话级 HTML 报告消费。
+19. **F1 修正（originalFile）**：Claude 工具结果行 `toolUseResult.originalFile` 携带 Write 前真实原文。`_LocAccumulator.pending_f1` 记录按 old=0 记账的首个 Write，`note_write_original` 回溯修正（覆写→按 new−orig 重算并撤销 unseen；确认新文件→只撤销 unseen）。`scan_session` 与 `session_loc_full` 两条路径都做同一修正（审计交叉验证要求逐字节一致）。`toolUseResult.userModified` → 人工修正计数（采纳信号）；OpenCode `session.revert` / Grok `hasReverted` → `revert_events`。
+20. **Codex 工具错误识别**：exit code 有两种实测格式（`Process exited with code N` / `Exit code: N`），exit code 权威；无码时只认显式失败前缀（`execution error`/`error:`/`failed:`/traceback），禁止全文 `error` 子串匹配（误报）。
 
 > 完整架构说明：[doc/architecture.md](doc/architecture.md)
 > 数据格式细节：[doc/data-format.md](doc/data-format.md)

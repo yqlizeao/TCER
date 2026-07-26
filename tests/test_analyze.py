@@ -218,6 +218,56 @@ def test_file_cache_invalidates_on_mtime(tmp_path):
     file_cache.clear()
 
 
+def test_scan_session_caches_with_cancel_check(tmp_path):
+    # GUI always passes cancel_check; completed scans must still be cached.
+    from tcer.core import file_cache
+
+    file_cache.clear()
+    p = tmp_path / "s.jsonl"
+    _write_jsonl(p, [_assistant(_usage(1, 0, 0, 1), msg_id="a")])
+    noop = lambda: None
+    u1, _ = reader.scan_session(p, with_loc=False, include_user_texts=False,
+                                cancel_check=noop)
+    u2, _ = reader.scan_session(p, with_loc=False, include_user_texts=False,
+                                cancel_check=noop)
+    assert u1 is u2
+    assert file_cache.stats()["entries"] >= 1
+    file_cache.clear()
+
+
+def test_cancelled_scan_not_cached(tmp_path):
+    # A cancel raises inside the factory → the partial scan never enters the cache.
+    from tcer.core import file_cache
+
+    file_cache.clear()
+    p = tmp_path / "s.jsonl"
+    _write_jsonl(p, [_assistant(_usage(1, 0, 0, 1), msg_id="a")])
+
+    def _cancel():
+        raise analyze.AnalysisCancelled()
+
+    with pytest.raises(analyze.AnalysisCancelled):
+        reader.scan_session(p, with_loc=False, include_user_texts=False,
+                            cancel_check=_cancel)
+    assert file_cache.stats()["entries"] == 0
+    file_cache.clear()
+
+
+def test_analyze_with_cancel_event_populates_cache(tmp_path, monkeypatch):
+    # End-to-end: analyze_project with a (never-set) cancel_event — the GUI's
+    # normal mode — must populate the mtime cache so reanalyze is cheap.
+    from tcer.core import file_cache
+
+    file_cache.clear()
+    proj, h = _seed_claude_project(tmp_path, monkeypatch)
+    _write_jsonl(proj / "s1.jsonl", [
+        _assistant(_usage(), msg_id="a", ts="2026-03-06T10:00:00Z"),
+    ])
+    analyze.analyze_project(h, cancel_event=threading.Event())
+    assert file_cache.stats()["entries"] >= 1
+    file_cache.clear()
+
+
 def test_analyze_omits_user_texts_but_count_and_lazy_read(tmp_path, monkeypatch):
     proj, h = _seed_claude_project(tmp_path, monkeypatch)
     _write_jsonl(proj / "s1.jsonl", [

@@ -94,6 +94,15 @@ GROUPS: list[Group] = [
                "本地代理会话开始时记录的工作分支。", "basic"),
         Metric("git_commit", "Git 提交", "",
                "本地代理会话开始时记录的提交。", "basic"),
+        Metric("ratings", "用户评价", "",
+               "会话中用户给出的显式好评/差评（👍/👎）次数，来自本地代理的信号记录。", "basic"),
+        Metric("permission_wait", "审批等待", "秒",
+               "工具执行前等待用户审批的累计时长——「人卡住 AI」的时间。\n"
+               "推荐：越低越流畅；括号内为审批请求次数。", "basic", "down"),
+        Metric("itl_p50", "输出间隔P50", "毫秒",
+               "inter-token latency 中位数：相邻输出块的间隔毫秒数，反映生成流畅度。", "basic", "down"),
+        Metric("itl_p99", "输出间隔P99", "毫秒",
+               "inter-token latency P99：输出卡顿的尾部延迟，偏高说明生成经常停顿。", "basic", "down"),
     ]),
     Group("G2", "Token 用量", [
         Metric("total_tokens", "总 Token", "",
@@ -156,6 +165,9 @@ GROUPS: list[Group] = [
                    "测试文件（*test*.py、*/tests/ 等）的净增行，反映测试投入。", "basic"),
             Metric("doc_loc", "文档行", "",
                    "文档文件（*.md、*/docs/ 等）的净增行，反映文档投入。", "basic"),
+            Metric("git_commits", "落地提交", "",
+                   "会话期间产生的 git 提交数（由本地代理记录，TCER 不调 git）。\n"
+                   "写出来的代码有没有真正落地的直接信号；PR 创建/合并数见导出数据。", "basic", "up"),
         ]),
         Subgroup("行为", [
             Metric("read_write_ratio", "读写比", "",
@@ -170,6 +182,17 @@ GROUPS: list[Group] = [
                    "公式：（Grep + Glob）÷ 总工具调用\n"
                    "推荐：视任务而定（仅供参考）\n"
                    "说明：⚠️ 分子只含 Grep/Glob，但 Claude Code 大量探索走 Bash（rg/find/cat）与子代理,均不计入；分母含 Bash/TodoWrite 等，故实测普遍低于直觉。仅作粗略趋势参考。", "basic"),
+            Metric("bash_ratio", "Bash 占比", "",
+                   "公式：Bash/PowerShell 调用 ÷ 总工具调用\n"
+                   "说明：量化「经 Bash 完成的阅读/搜索」盲区暴露面——占比越高，"
+                   "读写比与探索占比越失真（cat/rg/find 不计入专用工具统计）。", "basic"),
+            Metric("first_edit_turn", "首次编辑回合", "",
+                   "第一次 Write/Edit 发生在第几回合——动手前的探索/热身长度。\n"
+                   "说明：调研/审查类会话可能从不动手（显示 -）；过早动手 + 高返工 = 盲写信号。", "basic"),
+            Metric("edit_verify_ratio", "改后验证率", "",
+                   "公式：Write/Edit 后 3 回合内出现 Bash（跑测试/编译/lint）的占比\n"
+                   "推荐：越高越好\n"
+                   "说明：与「搜索后编辑比」互补——搜完是否动手、改完是否验证。", "basic", "up"),
             Metric("search_edit_ratio", "搜索后编辑比", "",
                    "公式：搜索（Grep/Glob）后 3 回合内发生 Edit/Write 的占比\n"
                    "推荐：越高越好\n"
@@ -218,7 +241,18 @@ GROUPS: list[Group] = [
             Metric("aborted_tasks", "中断任务", "",
                    "本地代理任务中断次数。用户中断、取消或运行中止时会增加。", "basic", "down"),
             Metric("rate_limit_hits", "限流命中", "",
-                   "本地代理限流记录中出现限流命中的次数。", "basic", "down"),
+                   "限流命中次数：Claude 为 429 API 错误行，Codex 为限流快照记录。", "basic", "down"),
+            Metric("cancellations", "用户取消", "",
+                   "用户中途取消回合的次数——对当前输出不满意或方向跑偏的信号。", "basic", "down"),
+            Metric("regenerations", "重新生成", "",
+                   "用户要求重新生成回答的次数——直接的「这次输出不行」信号。", "basic", "down"),
+            Metric("reverted_lines", "回退行", "",
+                   "AI 写入后又被回退（rewind/revert）的代码行数——写了但没被采纳的产出。", "basic", "down"),
+            Metric("user_modified", "人工修正", "",
+                   "AI 写入文件后被用户手动修改过的工具结果数（toolUseResult.userModified）。\n"
+                   "偏高说明 AI 产出常需要人再加工——最直接的产出质量信号之一。", "basic", "down"),
+            Metric("revert_events", "回退事件", "",
+                   "用户回退（revert/rewind）AI 改动的事件数——「产出被拒绝」的显式信号。", "basic", "down"),
         ]),
     ]),
     Group("G5", "成本分析", [
@@ -365,6 +399,7 @@ _SESSION_FMT: dict[str, str] = {
     "non_cached_input_ratio": "pct",
     # G4
     "net_loc": "int", "added": "int", "deleted": "int", "churn": "pct",
+    "bash_ratio": "pct", "first_edit_turn": "int", "edit_verify_ratio": "pct",
     "test_loc": "int", "doc_loc": "int", "read_write_ratio": "float:0.0",
     "edit_ratio": "pct", "exploration_ratio": "pct", "thinking_count": "int",
     "files_touched": "int", "search_edit_ratio": "pct", "read_before_write": "pct",
@@ -373,6 +408,11 @@ _SESSION_FMT: dict[str, str] = {
     "web_searches": "int", "image_inputs": "int", "task_completion": "pct",
     "ttft": "float:0.0", "patch_success": "pct", "aborted_tasks": "int",
     "rate_limit_hits": "int",
+    "cancellations": "int", "regenerations": "int", "reverted_lines": "int",
+    "git_commits": "int", "user_modified": "int", "revert_events": "int",
+    # G1 新增
+    "ratings": "text", "permission_wait": "text",
+    "itl_p50": "int", "itl_p99": "int",
     # G5
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
     # G6
@@ -405,6 +445,14 @@ _USAGE_ATTR = {
     "web_searches": "web_search_count",
     "aborted_tasks": "aborted_task_count",
     "rate_limit_hits": "rate_limit_reached_count",
+    "cancellations": "cancellation_count",
+    "regenerations": "regeneration_count",
+    "reverted_lines": "reverted_lines",
+    "git_commits": "git_commit_count",
+    "user_modified": "user_modified_count",
+    "revert_events": "revert_events",
+    "itl_p50": "itl_p50_ms",
+    "itl_p99": "itl_p99_ms",
 }
 # key → callable returning the current baseline constant (read-only reference).
 _BASELINE = {
@@ -463,6 +511,12 @@ _DISPLAY_EXTRACTORS = {
     "task_type": lambda r: _task_category_name(r.task_type) or "-",
     "memory_files": lambda r: str(len(r.memory_files)) if r.memory_files is not None else "-",
     "image_inputs": lambda r: fmt.fmt_int(r.usage.image_count + r.usage.local_image_count),
+    "ratings": lambda r: (
+        f"👍{r.usage.positive_ratings} · 👎{r.usage.negative_ratings}"
+        if (r.usage.positive_ratings or r.usage.negative_ratings) else "-"),
+    "permission_wait": lambda r: (
+        f"{r.usage.permission_wait_ms_total / 1000:.1f}（{r.usage.permission_request_count} 次）"
+        if r.usage.permission_request_count else "-"),
 }
 
 
@@ -477,6 +531,8 @@ def _native(report: SessionReport, key: str):
 
 def display(report: SessionReport, key: str) -> str:
     """The display string for one metric of one SessionReport (session/aggregate)."""
+    if not is_supported(report, key):
+        return UNSUPPORTED_LABEL
     ext = _DISPLAY_EXTRACTORS.get(key)
     if ext is not None:
         return ext(report)
@@ -509,6 +565,8 @@ def raw_value(report, key: str) -> float | None:
         "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
         "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
     }
+    if not is_supported(report, key):
+        return None  # 该源不提供此字段，图表不画点（避免把「不支持」画成 0）
     try:
         if key == "chr":
             return report.chr * 100.0 if report.chr is not None else None
@@ -522,6 +580,14 @@ def raw_value(report, key: str) -> float | None:
             return float(sum(u.tool_calls.values())) if u.tool_calls else None
         if key == "image_inputs":
             return float(u.image_count + u.local_image_count)
+        if key == "ratings":
+            # 图表取净评价（好评 − 差评）；无评价 → None 不画点
+            if u.positive_ratings or u.negative_ratings:
+                return float(u.positive_ratings - u.negative_ratings)
+            return None
+        if key == "permission_wait":
+            return (u.permission_wait_ms_total / 1000
+                    if u.permission_request_count else None)
         if key in _USAGE_ATTR:
             v = getattr(u, _USAGE_ATTR[key])
             return float(v) if v is not None else None
@@ -561,6 +627,81 @@ METRIC_BY_KEY: dict[str, Metric] = {m.key: m for group in GROUPS for m in group.
 # format spec lives on the Metric object too (frozen dataclass → object.__setattr__).
 for _m in METRIC_BY_KEY.values():
     object.__setattr__(_m, "fmt", _SESSION_FMT.get(_m.key, "text"))
+
+
+# ============================================================
+# 源能力感知 — 区分「该数据源不提供此字段」(不适用) 与「真的没有数据」(-)。
+# 只标注数据源*根本不产生*该字段的清晰情形；字段存在但可能为空的部分支持
+# (如 OpenCode 多回合 peak_input 留 0)不在此列，仍按 "-" 处理。
+# display() / raw_value() 统一拦截，指标网格、弹窗、图表与 HTML 报告自动继承。
+# ============================================================
+
+UNSUPPORTED_LABEL = "不适用"
+
+SOURCE_LABELS = {
+    "claude": "Claude", "codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
+}
+
+# key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
+_SOURCE_SUPPORT: dict[str, frozenset[str]] = {
+    # Claude 独有
+    "subagent": frozenset({"claude"}),
+    "memory_files": frozenset({"claude"}),
+    # Claude 的推理输出并入「输出」，不单独上报
+    "reasoning_tokens": frozenset({"codex", "opencode", "grok"}),
+    "reasoning_ratio": frozenset({"codex", "opencode", "grok"}),
+    # Codex/Grok 运行时信号（Grok 来自 signals.json）
+    "context_window": frozenset({"codex", "grok"}),
+    "context_window_used": frozenset({"codex", "grok"}),
+    "ttft": frozenset({"codex", "grok"}),
+    "patch_success": frozenset({"codex"}),
+    "aborted_tasks": frozenset({"codex"}),
+    # Grok signals.json / events.jsonl 独有
+    "cancellations": frozenset({"grok"}),
+    "regenerations": frozenset({"grok"}),
+    "reverted_lines": frozenset({"grok"}),
+    "user_modified": frozenset({"claude"}),
+    "revert_events": frozenset({"opencode", "grok"}),
+    "git_commits": frozenset({"grok"}),
+    "ratings": frozenset({"grok"}),
+    "permission_wait": frozenset({"grok"}),
+    "itl_p50": frozenset({"grok"}),
+    "itl_p99": frozenset({"grok"}),
+    # 部分源组合（Claude 的限流/压缩/网页搜索来自 system 子类型与
+    # usage.server_tool_use，reader 已解析）
+    "rate_limit_hits": frozenset({"claude", "codex"}),
+    "task_completion": frozenset({"codex", "grok"}),
+    "compactions": frozenset({"claude", "codex", "opencode"}),
+    "web_searches": frozenset({"claude", "codex", "grok"}),
+    "image_inputs": frozenset({"codex", "opencode"}),
+    # Codex 不上报缓存写入 (reader 恒 0)，显示 0 会误导
+    "cache_write": frozenset({"claude", "opencode", "grok"}),
+    "cache_write_ratio": frozenset({"claude", "opencode", "grok"}),
+    "cache_efficiency": frozenset({"claude", "opencode", "grok"}),
+}
+
+
+def report_source(report) -> str:
+    return getattr(report.meta, "source", None) or "claude"
+
+
+def is_supported(report, key: str) -> bool:
+    """False 当且仅当该 report 的数据源不提供该指标字段。"""
+    allowed = _SOURCE_SUPPORT.get(key)
+    return allowed is None or report_source(report) in allowed
+
+
+def _support_note(key: str) -> str:
+    allowed = _SOURCE_SUPPORT[key]
+    names = "、".join(SOURCE_LABELS[s] for s in SOURCE_LABELS if s in allowed)
+    return f"⚠️ 仅以下数据源提供此字段：{names}；其余来源显示「{UNSUPPORTED_LABEL}」。"
+
+
+# 把支持范围附到 tip 上（静态、随 SSOT 生效，HTML 报告的 title 提示同样继承）。
+for _k, _allowed in _SOURCE_SUPPORT.items():
+    _m = METRIC_BY_KEY.get(_k)
+    if _m is not None:
+        object.__setattr__(_m, "tip", f"{_m.tip}\n{_support_note(_k)}")
 
 
 # ============================================================

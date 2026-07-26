@@ -20,7 +20,7 @@ from tcer.core import upload_client, upload_prefs
 from tcer.core.calibrate import calibrate_project
 from tcer.core.paths import list_project_refs, project_has_sessions
 from tcer.core.reader import discover_jsonl
-from . import popups, theme, views
+from . import html_report, popups, theme, views
 from .views import CteiRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
 
 
@@ -207,6 +207,11 @@ class TcerGui:
                     _, payload = item
                     self.filter.set_status("校准出错")
                     messagebox.showerror("LOC 校准出错", payload)
+                elif kind == "overview":
+                    _, rows, errors = item
+                    note = f"（{errors} 个项目分析失败）" if errors else ""
+                    self.filter.set_status(f"项目总览完成{note}")
+                    popups.ProjectOverviewPopup(self.root, rows)
                 elif kind == "upload":
                     _, dialog, ok, message = item
                     if ok:
@@ -410,21 +415,49 @@ class TcerGui:
         if not report:
             messagebox.showinfo("用户消息", "当前会话未记录到用户消息。")
             return
+        # 聚合视图要遍历项目全部会话文件（Claude 还含 subagents 目录），大项目
+        # 在主线程读会卡死界面 — 放后台线程，读完回 Tk 主循环弹窗。
+        reports = list(self._current.reports) if self._current else []
+        self.filter.set_status("读取用户消息…")
+
+        def _work() -> None:
+            try:
+                msgs, label = self._load_user_messages(report, reports)
+                err = None
+            except Exception as e:  # noqa: BLE001 — 后台线程兜底，错误回主线程展示
+                msgs, label, err = None, "", str(e)
+            self.root.after(0, lambda: self._show_user_msgs_done(msgs, label, err))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _show_user_msgs_done(self, msgs, label: str, err: str | None) -> None:
+        self.filter.set_status("就绪")
+        if err is not None:
+            messagebox.showerror("用户消息", f"读取失败：{err}")
+        elif msgs:
+            popups.UserMsgsPopup(self.root, msgs)
+        else:
+            messagebox.showinfo("用户消息", f"当前 {label} 会话未记录到用户消息。")
+
+    @staticmethod
+    def _load_user_messages(report, reports) -> tuple[list[str], str]:
+        """读取一个 report（会话或聚合）的全部用户消息文本（仅文件 IO，线程安全）。"""
         source = report.meta.source or "claude"
+        is_agg = report.meta.session_id == "(aggregate)"
         msgs: list[str] = []
 
         if source == "codex":
             from tcer.core import codex_reader
-            if report.meta.session_id == "(aggregate)" and self._current:
-                for r in self._current.reports:
+            if is_agg:
+                for r in reports:
                     msgs.extend(codex_reader.read_user_messages(r.meta.path))
             else:
                 msgs = codex_reader.read_user_messages(report.meta.path)
             label = "Codex"
         elif source == "opencode":
             from tcer.core import opencode_reader
-            if report.meta.session_id == "(aggregate)" and self._current:
-                for r in self._current.reports:
+            if is_agg:
+                for r in reports:
                     sid = r.meta.session_id
                     if sid:
                         msgs.extend(opencode_reader.read_user_messages(r.meta.path, sid))
@@ -433,28 +466,23 @@ class TcerGui:
             label = "OpenCode"
         elif source == "grok":
             from tcer.core import grok_reader
-            if report.meta.session_id == "(aggregate)" and self._current:
-                for r in self._current.reports:
+            if is_agg:
+                for r in reports:
                     msgs.extend(grok_reader.read_user_messages(r.meta.path))
             else:
                 msgs = grok_reader.read_user_messages(report.meta.path)
             label = "Grok"
         else:
             # Claude: prefer cached texts (legacy), else lazy-read main + subagent files.
-            from tcer.core import reader
             if report.usage.user_message_texts:
                 msgs = list(report.usage.user_message_texts)
-            elif report.meta.session_id == "(aggregate)" and self._current:
-                for r in self._current.reports:
-                    msgs.extend(self._claude_user_messages(r))
+            elif is_agg:
+                for r in reports:
+                    msgs.extend(TcerGui._claude_user_messages(r))
             else:
-                msgs = self._claude_user_messages(report)
+                msgs = TcerGui._claude_user_messages(report)
             label = "Claude"
-
-        if msgs:
-            popups.UserMsgsPopup(self.root, msgs)
-        else:
-            messagebox.showinfo("用户消息", f"当前 {label} 会话未记录到用户消息。")
+        return msgs, label
 
     @staticmethod
     def _claude_user_messages(report) -> list[str]:
@@ -548,6 +576,66 @@ class TcerGui:
 
         popups.BaselinesPopup(self.root, values, len(eligible), _apply)
 
+    def show_tool_sequence(self) -> None:
+        report = self._rendered_report
+        if not report or len(report.usage.tool_ops) < 2:
+            self.filter.set_status("工具调用不足，无法分析序列")
+            return
+        suffix = (" · 项目汇总" if report.meta.session_id == "(aggregate)"
+                  else f" · {(report.meta.session_id or '')[:16]}…")
+        popups.ToolSequencePopup(self.root, report.usage, suffix)
+
+    def show_project_overview(self) -> None:
+        """跨项目总览：后台分析全部项目（走 mtime 缓存），弹窗可排序对比。"""
+        if not self._projects:
+            self.filter.set_status("无项目可汇总")
+            return
+        params = self.filter.get_params()
+        projects = list(self._projects)
+        self.filter.set_status(f"项目总览计算中…（{len(projects)} 个项目）")
+
+        def _work() -> None:
+            rows = []
+            errors = 0
+            for p in projects:
+                try:
+                    a = analyze.analyze_project(
+                        p.key, source=getattr(p, "source", "claude"),
+                        project_ref=p if hasattr(p, "session_paths") else None,
+                        task_type=params["task_type"],
+                        since=params["since"], until=params["until"],
+                        no_loc=self._no_loc,
+                    )
+                except Exception:  # noqa: BLE001 — 单项目失败不拦总览
+                    errors += 1
+                    continue
+                if a.n_sessions:
+                    rows.append((p, a))
+            self._q.put(("overview", rows, errors))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def show_session_timeline(self) -> None:
+        if not self._current:
+            self.filter.set_status("无数据")
+            return
+        sid = self._selected_session_id
+        report = self._session_report(sid) if sid else None
+        if report is None:
+            self.filter.set_status("请先在会话列表选中一个会话")
+            return
+        if not report.usage.turn_stats:
+            self.filter.set_status("该会话未记录逐回合数据")
+            return
+        popups.SessionTimelinePopup(self.root, report)
+
+    def show_session_compare(self) -> None:
+        if not self._current or len(self._current.reports) < 2:
+            self.filter.set_status("至少需要 2 个会话才能对比")
+            return
+        popups.SessionComparePopup(self.root, self._current.reports,
+                                   preselect_sid=self._selected_session_id)
+
     def show_advanced(self) -> None:
         def _apply(code_dir, no_loc, scan_code_dir):
             self._code_dir = code_dir
@@ -559,27 +647,57 @@ class TcerGui:
                              self._scan_code_dir, _apply)
 
     # --------------------------------------------------------------- export
-    def export(self, fmt: str) -> None:
+    def export(self, fmt: str, scope: str = "project") -> None:
         if not self._current:
             self.filter.set_status("无数据可导出")
             return
-        ext = {"json": "json", "csv": "csv", "md": "md"}[fmt]
+        a = self._current
+        report = None
+        if scope == "session":
+            sid = self._selected_session_id
+            report = self._session_report(sid) if sid else None
+            if report is None:
+                self.filter.set_status("未选中会话，无法导出会话报告")
+                return
+        proj = self._selected_project()
+        proj_name = views.project_label(proj) if proj is not None else a.project_hash
+        source_label = (views.project_source_label(proj) if proj is not None
+                        else (a.source or "claude").capitalize())
+        if scope == "session":
+            stem = f"tcer-会话-{(self._selected_session_id or 'session')[:12]}"
+        else:
+            stem = f"tcer-报告-{proj_name}"
+        stem = "".join(ch for ch in stem if ch not in '<>:"/\\|?*').strip() or "tcer-report"
+        ext = {"json": "json", "csv": "csv", "md": "md", "html": "html"}[fmt]
         path = filedialog.asksaveasfilename(
             defaultextension=f".{ext}",
             filetypes=[(f"{ext.upper()} 文件", f"*.{ext}"), ("所有文件", "*.*")],
-            initialfile=f"tcer-report.{ext}",
+            initialfile=f"{stem}.{ext}",
         )
         if not path:
             return
-        a = self._current
         try:
-            if fmt == "json":
+            if scope == "session":
+                if fmt == "html":
+                    content = html_report.render_session_html(
+                        report, project_name=proj_name, source_label=source_label)
+                elif fmt == "json":
+                    content = export_mod.session_to_json(report)
+                else:
+                    content = export_mod.to_markdown(
+                        [report], report, 1, a.code_dir, project_name=proj_name)
+            elif fmt == "html":
+                content = html_report.render_project_html(
+                    a.reports, a.aggregate, project_name=proj_name,
+                    source_label=source_label, n_sessions=a.n_sessions,
+                    n_subagents=a.n_subagents)
+            elif fmt == "json":
                 content = export_mod.to_json(a.reports, a.aggregate, a.n_sessions)
             elif fmt == "csv":
                 content = export_mod.to_csv(a.reports)
             else:
                 content = export_mod.to_markdown(a.reports, a.aggregate, a.n_sessions,
-                                                 a.code_dir, project_name=a.project_hash)
+                                                 a.code_dir, project_name=proj_name)
             Path(path).write_text(content, encoding="utf-8")
             self.filter.set_status(f"已导出 → {Path(path).name}")
         except OSError as e:

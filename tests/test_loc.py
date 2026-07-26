@@ -203,3 +203,83 @@ def test_tree_loc_skips_build_and_dep_trees(tmp_path):
 
 def test_tree_loc_none_for_missing_dir(tmp_path):
     assert loc.tree_loc(tmp_path / "does-not-exist") is None
+
+
+def test_original_file_corrects_f1_overwrite(tmp_path):
+    """toolUseResult.originalFile:覆写既有文件时按真实原行数修正 F1 高估。"""
+    import json
+
+    from tcer.core import reader as reader_mod
+    lines = [
+        # Write 10 行到「未见过」的文件
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0},
+                     "content": [{"type": "tool_use", "id": "t1", "name": "Write",
+                                  "input": {"file_path": "a.py",
+                                            "content": "\n".join(f"l{i}" for i in range(10))}}]}},
+        # 结果行:原文件其实有 6 行(覆写)
+        {"type": "user", "toolUseResult": {
+            "filePath": "a.py",
+            "originalFile": "\n".join(f"o{i}" for i in range(6)),
+            "userModified": False},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    # scan 与 session_loc_full 两条路径一致
+    _, sl = reader_mod.scan_session(p, with_loc=True, include_user_texts=False)
+    sl2 = loc.session_loc_full(p)
+    for s in (sl, sl2):
+        assert s.added == 4          # 10 - 6,不再是 10
+        assert s.deleted == 0
+        assert s.unseen_writes == 0  # 先验已知,不再计 F1 暴露
+
+
+def test_original_file_new_file_clears_unseen_only(tmp_path):
+    """originalFile 为空串 = 确认新文件:added 保持全文,unseen 归零。"""
+    import json
+
+    from tcer.core import reader as reader_mod
+    lines = [
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0},
+                     "content": [{"type": "tool_use", "id": "t1", "name": "Write",
+                                  "input": {"file_path": "b.py", "content": "x\ny\nz"}}]}},
+        {"type": "user", "toolUseResult": {"filePath": "b.py", "originalFile": ""},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    _, sl = reader_mod.scan_session(p, with_loc=True, include_user_texts=False)
+    assert (sl.added, sl.deleted, sl.unseen_writes) == (3, 0, 0)
+
+
+def test_user_modified_counted(tmp_path):
+    import json
+
+    from tcer.core import reader as reader_mod
+    lines = [
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0},
+                     "content": [{"type": "tool_use", "id": "t1", "name": "Edit",
+                                  "input": {"file_path": "c.py", "old_string": "a",
+                                            "new_string": "b"}}]}},
+        {"type": "user", "toolUseResult": {"filePath": "c.py", "userModified": True},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader_mod.aggregate_usage(p)
+    assert u.user_modified_count == 1

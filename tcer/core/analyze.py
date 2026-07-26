@@ -113,7 +113,8 @@ def _mk_report(
     if task_type_override:
         tt = task_type_override
     elif ctx.auto_infer:
-        tt = metrics.infer_task_type_from_usage(u, net_loc=net)
+        tt = metrics.infer_task_type_from_usage(
+            u, net_loc=net, test_net_loc=test_net, doc_net_loc=doc_net)
     else:
         tt = ctx.task_type
 
@@ -356,33 +357,40 @@ def analyze_project(
             scan_memo[key] = hit
         return hit
 
-    def _usage_of(f: Path) -> TokenUsage:
-        # Date filter only needs usage; skip disk prior work when no_loc.
-        return _scan_of(f)[0]
-
-    files = _filter_by_started_at(files, _usage_of, since, until)
-
     # Group files by parent session id (subagents fold into the owning session).
     groups: dict[str, list[Path]] = {}
     for f in files:
         groups.setdefault(reader.parent_session_id(f), []).append(f)
+
+    # First pass: per-group metadata (cheap head/tail read) to discover cwds
+    # BEFORE the date filter, so the filter scans with the same cwd-keyed
+    # memo/cache key as the second pass (one scan per file, not two).
+    metas: dict[str, SessionMeta] = {}
+    for key, gfiles in groups.items():
+        if cancel_check:
+            cancel_check()
+        main = next((f for f in gfiles if not reader.is_subagent(f)), None)
+        metas[key] = reader.read_session_meta(main) if main else _synth_meta(key, gfiles[0])
+
+    def _usage_of(f: Path) -> TokenUsage:
+        return _scan_of(f, cwd=metas[reader.parent_session_id(f)].cwd)[0]
+
+    files = _filter_by_started_at(files, _usage_of, since, until)
+    if since or until:
+        groups = {}
+        for f in files:
+            groups.setdefault(reader.parent_session_id(f), []).append(f)
 
     if session:
         groups = {k: v for k, v in groups.items() if session in k}
         if not groups:
             raise FileNotFoundError(f"no session matches '{session}'")
 
-    # First pass: per-group metadata (cheap head/tail read) to discover the cwd.
-    metas: dict[str, SessionMeta] = {}
     cwd: Path | None = None
-    for key, gfiles in groups.items():
-        if cancel_check:
-            cancel_check()
-        main = next((f for f in gfiles if not reader.is_subagent(f)), None)
-        meta = reader.read_session_meta(main) if main else _synth_meta(key, gfiles[0])
-        metas[key] = meta
-        if cwd is None and meta.cwd:
-            cwd = Path(meta.cwd)
+    for key in groups:
+        if metas[key].cwd:
+            cwd = Path(metas[key].cwd)
+            break
 
     code_path = Path(code_dir) if code_dir else cwd
     # tree_loc scans the whole code dir to size the codebase (NCPI denominator).
@@ -522,14 +530,10 @@ def _analyze_codex_project(
         if u is None:
             if cancel_check:
                 cancel_check()
-            # Process-level mtime cache; skip when cancellable (partial walk risk).
-            if cancel_check is None:
-                u = file_cache.get_or_compute(
-                    f, ("codex_usage",),
-                    lambda: codex_reader.aggregate_usage(f),
-                )
-            else:
-                u = codex_reader.aggregate_usage(f)
+            u = file_cache.get_or_compute(
+                f, ("codex_usage",),
+                lambda: codex_reader.aggregate_usage(f),
+            )
             usage_memo[f] = u
         return u
 
@@ -569,13 +573,10 @@ def _analyze_codex_project(
             reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
             continue
         # Single scan yields both the LOC and whether any patch existed.
-        if cancel_check is None:
-            sloc, has_signal = file_cache.get_or_compute(
-                f, ("codex_loc",),
-                lambda p=f: codex_reader._loc_scan(p),
-            )
-        else:
-            sloc, has_signal = codex_reader._loc_scan(f)
+        sloc, has_signal = file_cache.get_or_compute(
+            f, ("codex_loc",),
+            lambda p=f: codex_reader._loc_scan(p),
+        )
         if not has_signal:
             # No parseable apply_patch → known zero LOC (not unknown). Keeps
             # project aggregate TCER valid when sibling sessions have patches.
@@ -654,15 +655,25 @@ def _analyze_opencode_project(
     if not session_ids:
         raise FileNotFoundError(f"no OpenCode sessions for '{ref.display_name}'")
 
+    from tcer.core import file_cache
+
     db_path = ref.path
     usage_memo: dict[str, TokenUsage] = {}
+
+    def _cache_file_of(sid: str) -> Path:
+        # Legacy sessions live in their own JSON file; key the mtime cache on it.
+        # SQLite sessions key on the db file (coarse: any write invalidates all).
+        return Path(sid) if opencode_reader._is_legacy_session(sid) else db_path
 
     def _usage_of(sid: str) -> TokenUsage:
         u = usage_memo.get(sid)
         if u is None:
             if cancel_check:
                 cancel_check()
-            u = opencode_reader.aggregate_usage(db_path, sid)
+            u = file_cache.get_or_compute(
+                _cache_file_of(sid), ("opencode_usage", sid),
+                lambda: opencode_reader.aggregate_usage(db_path, sid),
+            )
             usage_memo[sid] = u
         return u
 
@@ -712,7 +723,13 @@ def _analyze_opencode_project(
             reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
             continue
         # One SQLite pass for signal + LOC (same pattern as Codex/Grok).
-        sloc, has_signal = opencode_reader._loc_scan(db_path, sid)
+        sess_cwd = meta.cwd or ref.cwd
+        sloc, has_signal = file_cache.get_or_compute(
+            _cache_file_of(sid), ("opencode_loc", sid, str(sess_cwd or ""), False),
+            lambda s=sid, c=sess_cwd: opencode_reader._loc_scan(
+                db_path, s, cwd=c, disk_prior=False,
+            ),
+        )
         if not has_signal:
             # No summary and no edit tools → known zero (not unknown).
             sloc = loc.SessionLoc(added=0, deleted=0)
@@ -798,13 +815,10 @@ def _analyze_grok_project(
         if u is None:
             if cancel_check:
                 cancel_check()
-            if cancel_check is None:
-                u = file_cache.get_or_compute(
-                    f, ("grok_usage",),
-                    lambda: grok_reader.aggregate_usage(f),
-                )
-            else:
-                u = grok_reader.aggregate_usage(f)
+            u = file_cache.get_or_compute(
+                f, ("grok_usage",),
+                lambda: grok_reader.aggregate_usage(f),
+            )
             usage_memo[f] = u
         return u
 
@@ -844,13 +858,10 @@ def _analyze_grok_project(
             reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
             continue
         sess_cwd = meta.cwd or ref.cwd
-        if cancel_check is None:
-            sloc, has_signal = file_cache.get_or_compute(
-                f, ("grok_loc", str(sess_cwd or ""), False),
-                lambda p=f, c=sess_cwd: grok_reader._loc_scan(p, cwd=c, disk_prior=False),
-            )
-        else:
-            sloc, has_signal = grok_reader._loc_scan(f, cwd=sess_cwd, disk_prior=False)
+        sloc, has_signal = file_cache.get_or_compute(
+            f, ("grok_loc", str(sess_cwd or ""), False),
+            lambda p=f, c=sess_cwd: grok_reader._loc_scan(p, cwd=c, disk_prior=False),
+        )
         if not has_signal:
             # No search_replace/write → known zero LOC (not unknown).
             sloc = loc.SessionLoc(added=0, deleted=0)

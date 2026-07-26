@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from tcer.core import pricing
-from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp
+from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
 from tcer.core.paths import opencode_dir
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
@@ -231,6 +231,12 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
     if model_key:
         u.models.add(model_key)
 
+    # revert 列非空 = 用户回退过 AI 的改动（最直接的「产出被拒绝」信号）。
+    if "revert" in session.keys():
+        rev = session["revert"]
+        if rev is not None and str(rev).strip() not in ("", "null", "{}", "[]"):
+            u.revert_events += 1
+
     turn_by_message: dict[str, int] = {}
     assistant_seen = 0
     for msg in messages:
@@ -277,6 +283,7 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
         elif ptype in ("step-finish", "step_finish"):
             # Live OpenCode: per-step token snapshot for peak window pressure.
             _note_step_input_peak(u, data)
+            _note_step_turn_stat(u, data, turn, parse_timestamp_ms(part["time_created"]))
         elif ptype == "compaction":
             u.compaction_count += 1
 
@@ -1012,6 +1019,24 @@ def _note_step_input_peak(u: TokenUsage, data: dict) -> None:
     step_in = i + cr + cw
     if step_in > 0:
         u.peak_input_tokens = max(u.peak_input_tokens, step_in)
+
+
+def _note_step_turn_stat(u: TokenUsage, data: dict, turn: int, ts: int | None) -> None:
+    """step-finish 快照 → 时间线 TurnStat（仅展示用，不参与聚合 token）。"""
+    tok = data.get("tokens")
+    if not isinstance(tok, dict):
+        return
+    i = _as_int(tok.get("input"))
+    o = _as_int(tok.get("output")) + _as_int(tok.get("reasoning"))
+    cache = tok.get("cache")
+    cr = _as_int(cache.get("read")) if isinstance(cache, dict) else 0
+    cw = _as_int(cache.get("write")) if isinstance(cache, dict) else 0
+    if i + o + cr + cw <= 0:
+        return
+    u.turn_stats.append(TurnStat(
+        turn=turn, ts=ts, input_tokens=i, cache_write=cw,
+        cache_read=cr, output_tokens=o,
+    ))
 
 
 # OpenCode tool ids → TCER-canonical names (case-insensitive keys).

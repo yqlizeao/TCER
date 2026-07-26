@@ -387,3 +387,81 @@ def test_aggregate_handles_garbage_lines(tmp_path):
                  + "\n", encoding="utf-8")
     u = reader.aggregate_usage(p)
     assert u.assistant_msgs == 1
+
+
+def test_scan_parses_system_signals_and_server_tool_use(tmp_path):
+    """system/turn_duration、api_error(429)、compact_boundary 与 server_tool_use。"""
+    import json as _json
+    lines = [
+        {"type": "assistant", "timestamp": "2026-07-01T10:00:00Z",
+         "message": {"role": "assistant", "id": "m1", "model": "claude-opus-4-8",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0,
+                               "server_tool_use": {"web_search_requests": 2,
+                                                   "web_fetch_requests": 1}}}},
+        {"type": "system", "subtype": "turn_duration",
+         "durationMs": 4321, "messageCount": 3},
+        {"type": "system", "subtype": "api_error",
+         "error": {"status": 429, "message": "rate limited"},
+         "retryAttempt": 1},
+        {"type": "system", "subtype": "compact_boundary",
+         "compactMetadata": {"trigger": "auto", "preTokens": 150000}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert u.web_search_count == 3
+    assert u.rate_limit_reached_count == 1
+    assert "api-429" in u.rate_limit_names
+    assert u.compaction_count == 1
+    # 真实回合耗时回填到 turn_stats
+    assert len(u.turn_stats) == 1
+    assert u.turn_stats[0].duration_ms == 4321
+    assert u.turn_stats[0].output_tokens == 5
+
+
+def test_session_meta_line_metadata(tmp_path):
+    """行级 version/gitBranch/effort/permissionMode → SessionMeta。"""
+    import json as _json
+    line = {"type": "user", "sessionId": "sid-1", "cwd": "/tmp/x",
+            "version": "2.1.220", "gitBranch": "main", "effort": "high",
+            "permissionMode": "bypassPermissions",
+            "message": {"role": "user",
+                        "content": [{"type": "text", "text": "hello"}]}}
+    p = tmp_path / "s.jsonl"
+    p.write_text(_json.dumps(line) + "\n", encoding="utf-8")
+    meta = reader.read_session_meta(p)
+    assert meta.cli_version == "2.1.220"
+    assert meta.git_branch == "main"
+    assert meta.reasoning_effort == "high"
+    assert meta.permission_profile == "bypassPermissions"
+
+
+def test_structured_patch_diff_counters(tmp_path):
+    """structuredPatch 的 +/- 行独立累计(仅代码文件),作回放 LOC 交叉校验。"""
+    import json as _json
+    lines = [
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0}}},
+        {"type": "user",
+         "toolUseResult": {"filePath": "a.py", "structuredPatch": [
+             {"lines": ["+new1", "+new2", "-old1", " ctx"]},
+             {"lines": ["+new3"]},
+         ]},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+        # 非代码后缀不计
+        {"type": "user",
+         "toolUseResult": {"filePath": "img.png", "structuredPatch": [
+             {"lines": ["+x", "-y"]}]},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t2"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert (u.patch_diff_added, u.patch_diff_deleted) == (3, 1)

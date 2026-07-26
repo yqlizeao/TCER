@@ -255,7 +255,7 @@ class _LocAccumulator:
         "file_lines", "session_authored", "file_edits",
         "added", "deleted", "unseen", "rework",
         "test_added", "test_deleted", "doc_added", "doc_deleted",
-        "cwd", "disk_prior",
+        "cwd", "disk_prior", "pending_f1",
     )
 
     def __init__(
@@ -273,6 +273,9 @@ class _LocAccumulator:
         self.doc_added = self.doc_deleted = 0
         self.cwd = cwd
         self.disk_prior = disk_prior
+        # F1 待修正：首个 Write 按 old=0 记账的 (path → 该 Write 的新行数)。
+        # Claude 的 toolUseResult.originalFile 到达后经 note_write_original 修正。
+        self.pending_f1: dict[str, int] = {}
 
     def on_tool_use(self, name: str, inp: dict) -> None:
         if name not in _EDIT_TOOLS:
@@ -292,6 +295,7 @@ class _LocAccumulator:
                 disk_text, resolved = disk_file_text(fp, self.cwd)
                 if not resolved:
                     self.unseen += 1  # assume old=0
+                    self.pending_f1[fp] = _nlines(inp.get("content"))
                 elif disk_text is None:
                     pass  # missing file → prior 0, full add
                 elif isinstance(content, str) and _text_equiv(disk_text, content):
@@ -300,6 +304,7 @@ class _LocAccumulator:
                     self.file_lines[fp] = _nlines(disk_text)  # different content
             else:
                 self.unseen += 1
+                self.pending_f1[fp] = _nlines(inp.get("content"))
         # Self-rework only against lines this session already wrote — never the
         # disk prior seed (deleting pre-existing code is a normal edit).
         authored_before = self.session_authored.get(fp, 0)
@@ -320,6 +325,34 @@ class _LocAccumulator:
         elif _is_doc_file(fp):
             self.doc_added += a
             self.doc_deleted += d
+
+    def note_write_original(self, fp: str, original_text) -> None:
+        """用 ``toolUseResult.originalFile``（Write 前的真实文件内容）修正 F1。
+
+        首个 Write 记账时假定 old=0（added=全文、deleted=0、unseen+1）。结果行
+        给出真实原文后：确认新文件 → 只撤销 unseen 计数；确认覆写 → 按会话内
+        Write 语义重算 (new−orig / orig−new)，同步修正 test/doc 拆分。仅对仍在
+        ``pending_f1`` 的路径生效（后续 Edit 的 originalFile 不会误触发）。
+        """
+        if not isinstance(fp, str) or fp not in self.pending_f1:
+            return
+        if not isinstance(original_text, str):
+            return
+        new = self.pending_f1.pop(fp)
+        self.unseen -= 1  # 先验已知，不再是 F1 暴露
+        orig = _nlines(original_text)
+        if orig <= 0:
+            return  # 确认新文件：old=0 假定本来就对
+        ta, td = (new - orig, 0) if new >= orig else (0, orig - new)
+        d_add = ta - new  # ≤ 0：撤销多计的 added
+        self.added += d_add
+        self.deleted += td
+        if _is_test_file(fp):
+            self.test_added += d_add
+            self.test_deleted += td
+        elif _is_doc_file(fp):
+            self.doc_added += d_add
+            self.doc_deleted += td
 
     def finish(self) -> SessionLoc:
         return SessionLoc(
@@ -354,6 +387,11 @@ def session_loc_full(
     """
     acc = _LocAccumulator(cwd=cwd, disk_prior=disk_prior)
     for obj in reader.iter_messages(path):
+        # Write 结果行的 originalFile → F1 修正（与 reader.scan_session 一致，
+        # 保证审计交叉验证时两条路径逐字节相同）。
+        tur = obj.get("toolUseResult")
+        if isinstance(tur, dict) and "originalFile" in tur:
+            acc.note_write_original(tur.get("filePath"), tur.get("originalFile"))
         msg = obj.get("message")
         if not isinstance(msg, dict):
             continue

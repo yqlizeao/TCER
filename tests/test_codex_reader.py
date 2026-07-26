@@ -425,3 +425,68 @@ def test_analyze_codex_project_without_loc_keeps_token_metrics(tmp_path, monkeyp
     assert result.aggregate.net_loc == 0
     assert result.reports[0].net_loc == 0
     assert result.reports[0].tcer == 0.0
+
+
+def test_custom_tool_output_exit_code_and_prefix_errors(tmp_path):
+    """custom_tool_call_output 的 "Exit code: N" 与无码 "execution error" 均计错；
+    正常输出提到 error 一词不再误报。"""
+    events = [
+        {"timestamp": "2026-07-01T10:00:00Z", "type": "event_msg",
+         "payload": {"type": "token_count",
+                     "info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}}}},
+        {"timestamp": "2026-07-01T10:00:01Z", "type": "response_item",
+         "payload": {"type": "custom_tool_call", "name": "apply_patch",
+                     "call_id": "c1", "input": "*** Begin Patch\n*** End Patch"}},
+        # Exit code: 1 → 错误
+        {"timestamp": "2026-07-01T10:00:02Z", "type": "response_item",
+         "payload": {"type": "custom_tool_call_output", "call_id": "c1",
+                     "output": "Exit code: 1\nstderr: boom"}},
+        # Exit code: 0 且正文含 "error" 词 → 不误报
+        {"timestamp": "2026-07-01T10:00:03Z", "type": "response_item",
+         "payload": {"type": "custom_tool_call_output", "call_id": "c1",
+                     "output": "Exit code: 0\nfixed the error handling docs"}},
+        # 无码显式失败前缀 → 计错
+        {"timestamp": "2026-07-01T10:00:04Z", "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "c1",
+                     "output": "execution error: Io(NotFound)"}},
+        # 无码、正文含 failed 一词 → 不误报
+        {"timestamp": "2026-07-01T10:00:05Z", "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "c1",
+                     "output": "3 tests passed, previously failed cases now green"}},
+    ]
+    p = tmp_path / "rollout-2026-07-01T10-00-00-x.jsonl"
+    p.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    u = codex_reader.aggregate_usage(p)
+    assert u.tool_errors == 2
+    # 错误按 call_id 归因到映射的工具名
+    assert sum(u.tool_errors_by_tool.values()) == 2
+
+
+def test_task_started_drives_turn_grouping(tmp_path):
+    """有 task_started 时,同回合的工具与 token 步共享回合号;跨回合递增。"""
+    events = [
+        {"timestamp": "2026-07-01T10:00:00Z", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "t-1",
+                     "started_at": "2026-07-01T10:00:00Z"}},
+        {"timestamp": "2026-07-01T10:00:01Z", "type": "response_item",
+         "payload": {"type": "function_call", "name": "shell", "call_id": "c1",
+                     "arguments": "{\"command\": [\"ls\"]}"}},
+        {"timestamp": "2026-07-01T10:00:02Z", "type": "event_msg",
+         "payload": {"type": "token_count",
+                     "info": {"total_token_usage": {"input_tokens": 100, "output_tokens": 10}}}},
+        {"timestamp": "2026-07-01T10:00:03Z", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "t-2",
+                     "started_at": "2026-07-01T10:00:03Z"}},
+        {"timestamp": "2026-07-01T10:00:04Z", "type": "response_item",
+         "payload": {"type": "function_call", "name": "shell", "call_id": "c2",
+                     "arguments": "{\"command\": [\"pwd\"]}"}},
+        {"timestamp": "2026-07-01T10:00:05Z", "type": "event_msg",
+         "payload": {"type": "token_count",
+                     "info": {"total_token_usage": {"input_tokens": 250, "output_tokens": 30}}}},
+    ]
+    p = tmp_path / "rollout-2026-07-01T10-00-00-y.jsonl"
+    p.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    u = codex_reader.aggregate_usage(p)
+    turns = [op.turn for op in u.tool_ops]
+    assert turns == [0, 1]
+    assert [t.turn for t in u.turn_stats] == [0, 1]

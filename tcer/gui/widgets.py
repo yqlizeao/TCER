@@ -9,7 +9,7 @@ from __future__ import annotations
 import tkinter as tk
 
 from . import theme
-from .metric_defs import Metric
+from .metric_defs import Metric, UNSUPPORTED_LABEL
 
 
 class Tooltip:
@@ -158,6 +158,10 @@ class MetricCell:
     def set_value(self, text: str) -> None:
         """Update displayed value and apply sentiment-based coloring."""
         self.var.set(text)
+        if text == UNSUPPORTED_LABEL:
+            # 数据源不提供该字段 — 弱化显示，与「无数据 -」区分。
+            self.value.config(fg=theme.MUTED)
+            return
         sentiment = self.metric.sentiment
         if not sentiment or text in ("-", "0", "0.0", "0.00", "0.000"):
             fg = theme.VALUE_NEUTRAL

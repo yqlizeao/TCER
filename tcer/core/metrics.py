@@ -182,6 +182,12 @@ _INFER_DEFAULTS = {
     "edit_maint": 0.60,        # edit_ratio ≥ this → maintenance
     "rwr_maint": 2.0,
     "rwr_noncoding": 5.0,
+    # 扩展信号（均为可选输入，缺失时不参与打分）
+    "doc_share_noncoding": 0.8,   # 文档行占净增 ≥ → 文档/调研类
+    "test_share_maint": 0.6,      # 测试行占净增 ≥ → 测试补充（维护）
+    "err_rate_maint": 0.15,       # 工具错误率 ≥ → 调试特征
+    "bash_maint": 0.5,            # Bash 占比 ≥ → 运维/调试重 shell
+    "web_noncoding": 3.0,         # 网页搜索次数 ≥ → 调研
 }
 
 
@@ -205,6 +211,11 @@ def infer_task_type(
     exploration_ratio: float | None = None,
     edit_ratio: float | None = None,
     read_write_ratio: float | None = None,
+    test_net_loc: int | None = None,
+    doc_net_loc: int | None = None,
+    tool_error_rate: float | None = None,
+    bash_ratio: float | None = None,
+    web_search_count: int | None = None,
 ) -> str:
     """Heuristic task category from LOC + tool-behavior signals.
 
@@ -282,6 +293,19 @@ def infer_task_type(
         elif rwr < 1.0:
             scores["code_creation"] += 0.5
 
+    # --- 扩展信号（保守低权重，只做倾斜不做定性） ---
+    if net_loc is not None and net_loc > 0:
+        if doc_net_loc is not None and doc_net_loc / net_loc >= th["doc_share_noncoding"]:
+            scores["non_coding"] += 2.5   # 产出几乎全是文档 → 文档/调研
+        if test_net_loc is not None and test_net_loc / net_loc >= th["test_share_maint"]:
+            scores["code_maintenance"] += 1.0  # 测试补充多归维护
+    if tool_error_rate is not None and tool_error_rate >= th["err_rate_maint"]:
+        scores["code_maintenance"] += 1.0     # 高错误率 = 调试/试错特征
+    if bash_ratio is not None and bash_ratio >= th["bash_maint"]:
+        scores["code_maintenance"] += 1.0     # 重 shell = 运维/调试
+    if web_search_count is not None and web_search_count >= th["web_noncoding"]:
+        scores["non_coding"] += 1.0           # 频繁联网搜索 = 调研
+
     # Prefer keys that exist in the live config table.
     ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
     for key, _ in ranked:
@@ -296,15 +320,23 @@ def infer_task_type_from_usage(
     u: TokenUsage,
     *,
     net_loc: int | None,
+    test_net_loc: int | None = None,
+    doc_net_loc: int | None = None,
 ) -> str:
-    """Infer task type from a ``TokenUsage`` (+ optional net LOC)."""
+    """Infer task type from a ``TokenUsage`` (+ optional net LOC / test / doc split)."""
     tool_m = tool_usage_metrics(u)
+    total_tools = sum(u.tool_calls.values())
     return infer_task_type(
         net_loc=net_loc,
         total_tokens=u.total,
         exploration_ratio=tool_m.get("exploration_ratio"),
         edit_ratio=tool_m.get("edit_ratio"),
         read_write_ratio=tool_m.get("read_write_ratio"),
+        test_net_loc=test_net_loc,
+        doc_net_loc=doc_net_loc,
+        tool_error_rate=(u.tool_errors / total_tools) if total_tools else None,
+        bash_ratio=tool_m.get("bash_ratio"),
+        web_search_count=u.web_search_count,
     )
 
 
@@ -550,11 +582,18 @@ class _FakeModelUsage:
 
 
 
+# Anthropic 缓存写分档：价表 cache_write 是 5m 率（1.25×input）；1h 率为 2×input，
+# 即在 5m 率上加 (2/1.25 − 1) = 0.6 倍溢价。无分档信息的源 cache_write_1h_tokens=0。
+CACHE_1H_PREMIUM = 0.6
+
+
 def _cost_from(o, r: dict[str, float]) -> float:
     """USD cost of one token record ``o`` at rate map ``r`` (TokenUsage or ModelUsage)."""
+    cw1h = getattr(o, "cache_write_1h_tokens", 0)
     return (
         o.input_tokens * r["input"]
         + o.cache_creation_input_tokens * r["cache_write"]
+        + cw1h * r["cache_write"] * CACHE_1H_PREMIUM
         + o.cache_read_input_tokens * r["cache_read"]
         + o.output_tokens * r["output"]
     ) / 1_000_000
@@ -709,6 +748,9 @@ def tool_usage_metrics(u: TokenUsage) -> dict[str, float | None]:
         "read_write_ratio": read / (write + edit) if (write + edit) else None,
         "edit_ratio": edit / (edit + write) if (edit + write) else None,
         "exploration_ratio": explore / total_tools if total_tools else None,
+        # Bash 占比：量化「探索/阅读经 Bash 完成」的盲区暴露面（cat/rg/find 不计入
+        # read/exploration，占比越高，上面两个比率越失真）。
+        "bash_ratio": bash / total_tools if total_tools else None,
         # exposed for debugging / future metrics (not required by callers)
         "_bash_like": bash,
         "_explore_count": explore,
@@ -794,9 +836,28 @@ def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
             searches_with_edit += 1
     ste = (searches_with_edit / searches) if searches else None
 
+    # 改→验闭环率：Write/Edit 后 WINDOW 回合内出现 Bash/PowerShell（跑测试/
+    # 编译/lint 的唯一通道）。低值 = 改完不验证就继续。
+    verify_turns = sorted({op.turn for op in u.tool_ops
+                           if op.tool in ("Bash", "PowerShell")})
+    edits = edits_with_verify = 0
+    for op in u.tool_ops:
+        if op.tool not in _WRITE_EDIT:
+            continue
+        edits += 1
+        if any(op.turn < vt <= op.turn + WINDOW for vt in verify_turns):
+            edits_with_verify += 1
+    vae = (edits_with_verify / edits) if edits else None
+
+    # 首次编辑回合（1-based）：动手前的探索/热身长度。None = 纯阅读会话。
+    first_edit = min((op.turn for op in u.tool_ops if op.tool in _WRITE_EDIT),
+                     default=None)
+
     return {
         "search_edit_ratio": ste,
         "read_before_write": rbw,
+        "edit_verify_ratio": vae,
+        "first_edit_turn": (first_edit + 1) if first_edit is not None else None,
     }
 
 
@@ -1080,6 +1141,9 @@ def compute(
         thinking_count=u.thinking_count,
         search_edit_ratio=fq["search_edit_ratio"],
         read_before_write=fq["read_before_write"],
+        edit_verify_ratio=fq["edit_verify_ratio"],
+        first_edit_turn=fq["first_edit_turn"],
+        bash_ratio=tool_m["bash_ratio"],
         time_to_first_token_sec=ttft_sec,
         task_completion_rate=task_completion,
         patch_apply_success_rate=patch_success,

@@ -606,3 +606,31 @@ def test_user_msgs_passthrough():
     assert len(r.usage.user_message_texts) == 2
 
 
+
+
+def test_infer_task_type_extended_signals():
+    """扩展信号:文档主导→非编码;高错误率+重 Bash→维护;缺失时不变。"""
+    # 中等产出、几乎全是文档 → 非编码(文档/调研)
+    assert metrics.infer_task_type(
+        net_loc=50, total_tokens=1_000_000,
+        doc_net_loc=45,
+    ) == "non_coding"
+    # 同样产出但无文档信号 → 保持原判(创作/维护)
+    assert metrics.infer_task_type(
+        net_loc=50, total_tokens=1_000_000,
+    ) != "non_coding"
+    # 强创作信号(高伪 TCER)不被单一文档信号翻转
+    assert metrics.infer_task_type(
+        net_loc=200, total_tokens=1_000_000,
+        doc_net_loc=180,
+    ) == "code_creation"
+    # 中等产出 + 高工具错误率 + 重 Bash → 维护
+    assert metrics.infer_task_type(
+        net_loc=30, total_tokens=1_000_000,
+        tool_error_rate=0.2, bash_ratio=0.6,
+    ) == "code_maintenance"
+    # 中等产出、测试行主导 → 维护倾斜
+    assert metrics.infer_task_type(
+        net_loc=50, total_tokens=1_000_000,
+        test_net_loc=40,
+    ) == "code_maintenance"
