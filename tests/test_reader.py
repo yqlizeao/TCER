@@ -465,3 +465,31 @@ def test_structured_patch_diff_counters(tmp_path):
     p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
     u = reader.aggregate_usage(p)
     assert (u.patch_diff_added, u.patch_diff_deleted) == (3, 1)
+
+
+def test_claude_third_batch_signals(tmp_path):
+    """stop_hook_summary / queue-operation / MCP 归因。"""
+    import json as _json
+    lines = [
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0}}},
+        {"type": "queue-operation", "operation": "enqueue"},
+        {"type": "queue-operation", "operation": "enqueue"},
+        {"type": "system", "subtype": "stop_hook_summary",
+         "hookCount": 2, "hookErrors": ["boom"],
+         "hookInfos": [{"durationMs": 1200}, {"durationMs": 300}]},
+        {"type": "user", "attributionMcpServer": "monolith",
+         "attributionMcpTool": "editor_query",
+         "toolUseResult": {"stdout": "ok"},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert u.queued_input_count == 2
+    assert (u.hook_run_count, u.hook_error_count, u.hook_duration_ms_total) == (2, 1, 1500)
+    assert u.mcp_calls_by_attr == {"monolith/editor_query": 1}

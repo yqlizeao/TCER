@@ -42,6 +42,36 @@ cost = (input × r["input"] + cache_write × r["cache_write"] + cache_read × r[
 
 基准默认值：TCER=76.59, NCPI=0.101, CPE=8.22（来自原始框架 16 会话参考数据集）。可通过 `tcer/config/composite_baselines.json` 覆盖。
 
+## 扩展指标（数据源深挖信号）
+
+以 `metric_defs.GROUPS` 为准；「不适用」= 该数据源不产生此字段（见 `_SOURCE_SUPPORT`）。
+
+| 指标 | 公式 / 来源 | 源 |
+|------|------------|-----|
+| **Bash 占比** | Bash+PowerShell ÷ 总工具调用（比率盲区暴露面） | 全部 |
+| **首次编辑回合** | min(Write/Edit 的回合号)+1；None=未动手 | 全部 |
+| **改后验证率** | Write/Edit 后 3 回合内出现 Bash 的占比 | 全部 |
+| **一次写对率** | 只编辑 1 次的文件 ÷ 被编辑文件总数 | 全部 |
+| **人工修正** | `toolUseResult.userModified=true` 计数 | Claude |
+| **回退事件 / 回退行** | OpenCode `revert` / Grok `hasReverted`、`agentLines*Reverted` | OpenCode/Grok |
+| **落地提交** | Grok `signals.gitCommitCount`（PR 数在导出里） | Grok |
+| **用户取消 / 重新生成** | Grok `cancellationCount` / `regenerationCount` | Grok |
+| **用户评价** | Grok `positiveRatings` / `negativeRatings` | Grok |
+| **审批等待** | Σ `permission_resolved.wait_ms`（括号内为请求次数） | Grok |
+| **输出间隔 P50/P99** | Grok `itlP50Ms` / `itlP99Ms`（inter-token latency） | Grok |
+| **首字延迟 P95** | 逐回合 TTFT 样本的 P95 | Codex |
+| **配额峰值** | max(primary/secondary `used_percent`)/100 | Codex |
+| **钩子开销** | Σ `stop_hook_summary.hookInfos[].durationMs`（次数/失败数） | Claude |
+| **排队输入** | `queue-operation` 行计数 | Claude |
+| **限流命中** | Claude 429 `api_error` 行 / Codex 限流快照 | Claude/Codex |
+| **网页搜索** | Claude `server_tool_use` / Codex·Grok 事件 | Claude/Codex/Grok |
+
+导出独有（不进指标网格）：`patch_diff_added/deleted`（structuredPatch 独立差分，交叉校验回放 LOC）、`source_reported_cost_usd`（OpenCode 自报成本，交叉校验计价）、`mcp_calls_by_attr`（MCP 精确归因）、`abort_reasons`。
+
+**成本计价补充**：Claude 缓存写按 TTL 分档——1h 档单价 = 5m 档 × 1.6（`CACHE_1H_PREMIUM`），子集来自 `usage.cache_creation.ephemeral_1h_input_tokens`。
+
+**模型对比分摊**：`compare_models` 的产出/行为/质量指标按「该模型在会话内的 token 占比」加权分摊；单模型会话权重 = 1.0，混合模型会话按占比拆分（不再整段丢弃）。
+
 ## 科学计算步骤
 
 ### 第 1 步 · 采集与清洗（`reader.iter_messages`）

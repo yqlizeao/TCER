@@ -490,3 +490,30 @@ def test_task_started_drives_turn_grouping(tmp_path):
     turns = [op.turn for op in u.tool_ops]
     assert turns == [0, 1]
     assert [t.turn for t in u.turn_stats] == [0, 1]
+
+
+def test_rate_limit_peak_ttft_samples_abort_reason(tmp_path):
+    events = [
+        {"timestamp": "2026-07-01T10:00:00Z", "type": "event_msg",
+         "payload": {"type": "token_count",
+                     "rate_limits": {"limit_name": "weekly",
+                                     "primary": {"used_percent": 42.5},
+                                     "secondary": {"used_percent": 61.0}},
+                     "info": {"total_token_usage": {"input_tokens": 100, "output_tokens": 10}}}},
+        {"timestamp": "2026-07-01T10:00:01Z", "type": "event_msg",
+         "payload": {"type": "task_complete", "duration_ms": 1000,
+                     "time_to_first_token_ms": 800}},
+        {"timestamp": "2026-07-01T10:00:02Z", "type": "event_msg",
+         "payload": {"type": "task_complete", "duration_ms": 1000,
+                     "time_to_first_token_ms": 300}},
+        {"timestamp": "2026-07-01T10:00:03Z", "type": "event_msg",
+         "payload": {"type": "turn_aborted", "reason": "interrupted",
+                     "duration_ms": 50}},
+    ]
+    p = tmp_path / "rollout-2026-07-01T10-00-00-z.jsonl"
+    p.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    u = codex_reader.aggregate_usage(p)
+    assert u.rate_limit_peak_used == 0.61
+    assert u.time_to_first_token_ms == 300      # 保持 min 语义
+    assert sorted(u.ttft_ms_samples) == [300, 800]
+    assert u.abort_reasons == {"interrupted": 1}

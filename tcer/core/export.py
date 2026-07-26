@@ -176,6 +176,7 @@ def report_row_dict(r: SessionReport) -> dict:
         "non_cached_input_ratio": r.non_cached_input_ratio,
         # --- file-level quality ---
         "high_churn_file_count": r.high_churn_file_count,
+        "first_pass_file_ratio": r.first_pass_file_ratio,
         "test_net_loc": r.test_net_loc,
         "doc_net_loc": r.doc_net_loc,
         "test_loc_ratio": r.test_loc_ratio,
@@ -217,6 +218,9 @@ def report_row_dict(r: SessionReport) -> dict:
         "rate_limit_snapshots": u.rate_limit_snapshots,
         "rate_limit_reached_count": u.rate_limit_reached_count,
         "rate_limit_names": sorted(u.rate_limit_names),
+        "rate_limit_peak_used": u.rate_limit_peak_used,
+        "ttft_p95_sec": r.ttft_p95_sec,
+        "abort_reasons": dict(sorted(u.abort_reasons.items())),
         "cancellation_count": u.cancellation_count,
         "regeneration_count": u.regeneration_count,
         "positive_ratings": u.positive_ratings,
@@ -231,8 +235,14 @@ def report_row_dict(r: SessionReport) -> dict:
         "itl_p99_ms": u.itl_p99_ms,
         "user_modified_count": u.user_modified_count,
         "revert_events": u.revert_events,
+        "mcp_calls_by_attr": dict(sorted(u.mcp_calls_by_attr.items())),
+        "hook_run_count": u.hook_run_count,
+        "hook_error_count": u.hook_error_count,
+        "hook_duration_ms_total": u.hook_duration_ms_total,
+        "queued_input_count": u.queued_input_count,
         "patch_diff_added": u.patch_diff_added,
         "patch_diff_deleted": u.patch_diff_deleted,
+        "source_reported_cost_usd": u.reported_cost_usd,
         "files_touched": r.files_touched,
         "search_edit_ratio": r.search_edit_ratio,
         "read_before_write": r.read_before_write,
@@ -277,10 +287,29 @@ _CSV_FIELDS = [
     "task_count", "completed_task_count", "aborted_task_count", "task_completion_rate",
     "compaction_count", "web_search_count", "image_count", "local_image_count",
     "patch_apply_count", "patch_apply_success_count", "patch_apply_success_rate",
-    "rate_limit_snapshots", "rate_limit_reached_count",
+    "rate_limit_snapshots", "rate_limit_reached_count", "rate_limit_peak_used",
     "files_touched", "search_edit_ratio", "read_before_write",
+    "cache_write_1h_tokens", "first_pass_file_ratio", "ttft_p95_sec",
+    "cancellation_count", "regeneration_count",
+    "positive_ratings", "negative_ratings",
+    "git_commit_count", "pr_created_count", "pr_merged_count",
+    "reverted_lines", "permission_request_count", "permission_wait_ms_total",
+    "itl_p50_ms", "itl_p99_ms", "user_modified_count", "revert_events",
+    "hook_run_count", "hook_error_count", "hook_duration_ms_total",
+    "queued_input_count", "patch_diff_added", "patch_diff_deleted",
+    "source_reported_cost_usd", "edit_verify_ratio", "first_edit_turn",
+    "bash_ratio",
     "models", "models_label",
 ]
+
+# report_row_dict 中有意不进 CSV 的键：隐私/宽度（title/path/cwd）、
+# 时间戳原值（有格式化派生列）、以及 dict/list 结构化字段。
+# 新增导出字段必须进 _CSV_FIELDS 或此集合之一——test_export 有漂移护栏。
+_CSV_EXCLUDED = frozenset({
+    "title", "path", "cwd", "started_at", "ended_at",
+    "git_repository", "permission_profile",
+    "rate_limit_names", "abort_reasons", "mcp_calls_by_attr", "cost_by_model",
+})
 
 
 def to_csv(reports: list[SessionReport]) -> str:

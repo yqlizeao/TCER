@@ -379,3 +379,37 @@ def test_signals_and_events_folding(tmp_path):
     t = u.turn_stats[0]
     assert (t.input_tokens, t.cache_read, t.output_tokens) == (60, 40, 20)
     assert t.duration_ms == 900
+
+
+def test_signals_update_invalidates_analyze_cache(tmp_path, monkeypatch):
+    """signals.json 补写后,analyze 的 grok usage 缓存必须失效(旁路文件签名进 key)。"""
+    import time
+
+    from tcer.core import file_cache
+    from tcer.core.models import ProjectRef
+
+    file_cache.clear()
+    sdir = tmp_path / "C%3A%5Cwork" / "0198-uuid"
+    sdir.mkdir(parents=True)
+    updates = sdir / "updates.jsonl"
+    turn = _notif(_T0, {"sessionUpdate": "turn_completed",
+                        "usage": {"inputTokens": 100, "cachedReadTokens": 0,
+                                  "outputTokens": 20, "apiDurationMs": 100}},
+                  params_meta={"modelId": "grok-4.5"})
+    updates.write_text(json.dumps(turn) + "\n", encoding="utf-8")
+    _write_summary(sdir, {"info": {"id": "0198-uuid", "cwd": "C:\work"},
+                          "generated_title": "t"})
+    (sdir / "signals.json").write_text(json.dumps({"cancellationCount": 1}),
+                                       encoding="utf-8")
+    ref = ProjectRef(source="grok", key="g", display_name="g", cwd="C:\work",
+                     path=sdir.parent, session_paths=(updates,))
+
+    a1 = analyze.analyze_project("g", source="grok", project_ref=ref)
+    assert a1.aggregate.usage.cancellation_count == 1
+    # 补写 signals.json(更新取消数)
+    time.sleep(0.02)
+    (sdir / "signals.json").write_text(json.dumps({"cancellationCount": 5}),
+                                       encoding="utf-8")
+    a2 = analyze.analyze_project("g", source="grok", project_ref=ref)
+    assert a2.aggregate.usage.cancellation_count == 5
+    file_cache.clear()
