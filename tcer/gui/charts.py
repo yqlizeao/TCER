@@ -16,7 +16,7 @@ from tcer.core import metrics
 from tcer.core.format import fmt_dt
 from . import theme
 from .metric_defs import GROUPS, Metric, METRIC_BY_KEY, format_plot, raw_value
-from .widgets import ScrollFrame, Tooltip
+from .widgets import ScrollFrame, Tooltip, flat_button
 
 # 兼容旧名：图表代码里沿用 views 时代的别名。
 metric_raw_value = raw_value
@@ -25,13 +25,12 @@ _metric_by_key = METRIC_BY_KEY
 # Metrics that cannot be plotted (metadata / categorical / constant).
 _NON_PLOTTABLE = frozenset({
     "models", "tools", "started", "last_time", "entrypoint",
-    "task_type", "grade", "bl_tcer", "bl_ncpi", "bl_cpe",
+    "task_type", "grade", "bl_tcer", "bl_cpe",
 })
 
 # Baseline reference lines (key → metrics module constant name).
 _METRIC_BASELINE: dict[str, str] = {
     "tcer": "TCER_BASELINE",
-    "ncpi": "NCPI_BASELINE",
     "cpe": "CPE_BASELINE",
 }
 
@@ -371,11 +370,8 @@ class TrendChart:
         mode_header = self._add_mode_buttons(right)
         self._legend_frame = tk.Frame(mode_header, bg=theme.GROUP_COLORS["G_NEUTRAL"])
         self._legend_frame.pack(side="right")
-        self._zoom_reset_btn = tk.Button(
-            mode_header, text="重置缩放", command=self._reset_zoom,
-            bg=theme.PANEL, fg=theme.WARNING, relief="flat",
-            font=theme.FONT_UI_SMALL, padx=6,
-        )
+        self._zoom_reset_btn = flat_button(mode_header, "重置缩放",
+                                           self._reset_zoom, padx=theme.PAD_M)
         # Hidden by default; shown when zoom is active
 
         self.canvas = tk.Canvas(right, bg=theme.PANEL, highlightthickness=0)

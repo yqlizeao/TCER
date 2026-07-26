@@ -47,8 +47,7 @@ def _report(sid: str, net: int = 300) -> metrics.SessionReport:
         TurnStat(1, ts=1_770_000_600_000, input_tokens=1200, cache_read=6000,
                  output_tokens=900, errors=1),
     ]
-    return metrics.compute(meta, u, net_loc=net, loc_accumulated=10_000,
-                           task_type="feature")
+    return metrics.compute(meta, u, net_loc=net, task_type="feature")
 
 
 @pytest.fixture(scope="module")
@@ -143,4 +142,91 @@ def test_metric_panel_renders(root, reports):
     panel.update(reports[0])
     root.update_idletasks()
     panel.clear()
+    frame.destroy()
+
+
+def test_flat_button_and_card_hover(root):
+    from tcer.gui.widgets import Card, flat_button
+
+    frame = tk.Frame(root)
+    frame.pack()
+    btn = flat_button(frame, "测试", lambda: None)
+    btn.pack()
+    btn2 = flat_button(frame, "主操作", lambda: None, primary=True)
+    btn2.pack()
+    card = Card(frame, on_click=lambda c: None)
+    card._on_hover()
+    card.set_selected(True)
+    card._on_hover()   # 选中态 hover 不改边框
+    card._on_unhover()
+    card.set_selected(False)
+    root.update_idletasks()
+    frame.destroy()
+
+
+def test_scrollframe_autohide_scrollbar(root):
+    from tcer.gui.widgets import ScrollFrame
+
+    frame = tk.Frame(root, width=200, height=120)
+    frame.pack_propagate(False)
+    frame.pack()
+    sf = ScrollFrame(frame)
+    # 内容超出 → 滚动条出现;清空 → 隐藏
+    for i in range(40):
+        tk.Label(sf.inner, text=f"行 {i}").pack()
+    root.update_idletasks()
+    sf.update_scroll()
+    root.update()
+    frame.destroy()
+
+
+def test_project_column_empty_state_and_preferred(root):
+    from tcer.gui.views import ProjectColumn
+
+    class _Ctl:
+        def on_select_project(self, idx):
+            self.selected = idx
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    frame = tk.Frame(root)
+    frame.pack()
+    ctl = _Ctl()
+    col = ProjectColumn(frame, ctl)
+    col.update([])   # 空状态引导不崩
+    root.update_idletasks()
+
+    class _P:
+        def __init__(self, key):
+            self.key = key
+            self.source = "claude"
+            self.name = key
+    ps = [_P("a"), _P("b"), _P("c")]
+    col.update(ps, set(), preferred_key="b")
+    assert getattr(ctl, "selected", None) == 1  # 恢复到 b
+    frame.destroy()
+
+
+def test_ranking_falls_back_to_tcer(root, reports):
+    from tcer.gui.views import CteiRankingView
+
+    frame = tk.Frame(root)
+    frame.pack()
+    view = CteiRankingView(frame)
+    # 合成 reports 有净增行与成本 → 有 CTEI:正常模式
+    view.update(reports)
+    assert not view._fallback_tcer
+    # 去掉 CTEI → 回退按 TCER 排名,提示条出现
+    import copy
+    stripped = [copy.copy(r) for r in reports]
+    for r in stripped:
+        r.ctei = None
+        r.grade = None
+    view.update(stripped)
+    assert view._fallback_tcer
+    assert view._ranking and view._ranking[0][1] == max(r.tcer for r in stripped)
+    root.update_idletasks()
+    # 回到正常模式提示条隐藏
+    view.update(reports)
+    assert not view._fallback_tcer
     frame.destroy()

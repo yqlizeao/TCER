@@ -292,9 +292,9 @@ def _unseen_warning(rep: SessionReport) -> str:
     if not rep.unseen_writes:
         return ""
     return (f'<div class="warn">⚠️ <b>{rep.unseen_writes} 次盲写文件</b>（F1 暴露）——'
-            "Write 工具假设写入新文件（原大小 = 0）；若覆盖已有文件，写入行会高估、"
-            "删除行会遗漏（Edit 不受影响）。该计数是净增行潜在高估的上界，"
-            "可用 GUI「LOC 校准」对标 git 历史精确量化。</div>")
+            "Write 工具假设写入新文件（原大小 = 0）；若覆盖已有文件且会话数据未携带 "
+            "originalFile 修正，写入行会高估、删除行会遗漏（Edit 不受影响）。"
+            "该计数是净增行潜在高估的上界。</div>")
 
 
 def _meta_line(rep: SessionReport, *, source_label: str, extra: str = "") -> str:

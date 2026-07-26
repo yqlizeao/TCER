@@ -391,18 +391,14 @@ class SessionReport:
     net_loc: int | None
     tcer: float | None  # LOC/Mt
     cpe: float | None  # $ per 1000 LOC
-    # --- 综合评分 (G6), populated when loc_accumulated / task_type available ---
-    loc_accumulated: int | None = None  # current codebase size (for NCPI / PSAC)
-    ncpi: float | None = None  # net code production index = net_loc / loc_accumulated
+    # --- 综合评分 (G6) ---
     caf: float | None = None  # cache adjustment factor
     task_type: str | None = None  # one of metrics.TASK_CATEGORIES keys
     task_category: str | None = None  # one of metrics.TASK_CATEGORIES keys
     ttaf: float | None = None  # task type adjustment factor
     ntcer: float | None = None  # normalized TCER = tcer / TTAF
     ta_tcer: float | None = None  # backward compat alias for ntcer
-    psac: float | None = None  # project-stage adjustment coefficient
-    tcer_phase_adj: float | None = None  # tcer * psac
-    ctei: float | None = None  # composite token efficiency index
+    ctei: float | None = None  # composite token efficiency index（三因子，见 metrics.ctei）
     grade: str | None = None  # CTEI rating label
     # --- 代码产出与质量 (G4) ---
     code_added: int | None = None  # gross code lines added (from tool calls)

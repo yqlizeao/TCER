@@ -42,14 +42,8 @@
   },
   "ctei_baselines": {
     "tcer": 35.949296044253295,
-    "ncpi": 0.08481064527260179,
     "cpe": 5.317090240384615,
     "_note": "Medians (TCER, CPE) and mean (NCPI) from the framework's reference dataset. Override these once you have your own accumulated data."
-  },
-  "psac": {
-    "intercept": 83.64,
-    "slope": 0.000866,
-    "_note": "Project-Stage Adjustment Coefficient regression (framework §6.5): TCER ≈ -slope * LOC_accum + intercept. Neutralizes the structural TCER decline of larger codebases."
   },
   "chr_weight": 0.5,
   "_chr_note": "CHR reward factor = 1 + CHR * chr_weight (framework §6.3). A 10% CHR increase yields a 5% CTEI boost.",

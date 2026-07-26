@@ -21,7 +21,7 @@ from .metric_defs import (
     report_values, format_value,
     model_display, model_raw, model_tip,
 )
-from .widgets import Card, MetricCell, ScrollFrame, Tooltip
+from .widgets import Card, MetricCell, ScrollFrame, Tooltip, flat_button
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
 
@@ -145,8 +145,8 @@ class FilterBar:
         self._date_entry(bar, self.until_var, "结束日期").pack(side="left", padx=2)
 
         for label, preset in (("本周", "week"), ("本月", "month"), ("全部", "all")):
-            tk.Button(bar, text=label, command=lambda p=preset: self._set_preset(p),
-                      bg=theme.PANEL, fg=theme.FG, relief="flat", padx=4, pady=1).pack(side="left", padx=2)
+            flat_button(bar, label, lambda p=preset: self._set_preset(p),
+                        padx=theme.PAD_S).pack(side="left", padx=theme.PAD_XS)
 
         # -- Actions (right side) --
         for factory in [
@@ -181,11 +181,10 @@ class FilterBar:
         tmenu.add_command(label="工具序列", command=self.controller.show_tool_sequence)
         tmenu.add_command(label="会话时间线", command=self.controller.show_session_timeline)
         tmenu.add_command(label="会话对比", command=self.controller.show_session_compare)
-        tmenu.add_command(label="LOC 校准", command=self.controller.run_calibration)
         tmenu.add_command(label="计算个人基准", command=self.controller.compute_baselines)
         tmenu.add_command(label="高级选项", command=self.controller.show_advanced)
         tb.config(menu=tmenu)
-        Tooltip(tb, "会话对比 · LOC 校准 · 计算个人基准 · 高级选项")
+        Tooltip(tb, "项目总览 · 会话时间线 · 会话对比 · 工具序列 · 个人基准 · 高级选项")
         return tb
 
     def _make_export_menu(self, parent) -> tk.Menubutton:
@@ -206,9 +205,8 @@ class FilterBar:
         return mb
 
     def _make_upload_button(self, parent) -> tk.Button:
-        btn = tk.Button(parent, text="上传…", relief="flat", bg=theme.PANEL, fg=theme.FG,
-                        padx=6, activebackground=theme.BG, activeforeground=theme.FG,
-                        command=self.controller.show_upload)
+        btn = flat_button(parent, "上传…", self.controller.show_upload,
+                          padx=theme.PAD_M)
         Tooltip(btn, "上传当前项目的效率报告到 TCER Web")
         return btn
 
@@ -289,6 +287,15 @@ class FilterBar:
     def get_source(self) -> str:
         return self._source_reverse_map.get(self.source_var.get(), "all")
 
+    def restore_prefs(self, prefs: dict) -> None:
+        """恢复上次的来源/任务类型筛选（在首次 refresh_projects 之前调用）。"""
+        src = prefs.get("source")
+        if src in self._source_display_names:
+            self.source_var.set(self._source_display_names[src])
+        tt = prefs.get("task_type")
+        if tt in self._task_display_names:
+            self.task_var.set(self._task_display_names[tt])
+
     def set_status(self, text: str) -> None:
         self.status.config(text=text)
 
@@ -315,10 +322,14 @@ class ProjectColumn:
         self.scroll = sf
         self.container = sf.inner
 
-    def update(self, projects, empty_projects: set | None = None) -> None:
+    def update(self, projects, empty_projects: set | None = None,
+               preferred_key: str | None = None) -> None:
         for card in self._cards:
             card.frame.destroy()
         self._cards.clear()
+        if getattr(self, "_empty_hint", None) is not None:
+            self._empty_hint.destroy()
+            self._empty_hint = None
         self._selected = None
         self._projects = projects
         self._empty = empty_projects or set()
@@ -326,14 +337,38 @@ class ProjectColumn:
             card = self._make_card(d, idx, is_empty=(idx in self._empty))
             self._cards.append(card)
         self.count_label.config(text=f"项目（{len(projects)}）")
+        if not projects:
+            # 空状态引导：告诉用户去哪里产生数据，而不是留一片空白。
+            self._empty_hint = tk.Label(
+                self.container,
+                text="未发现任何会话数据\n\n"
+                     "请确认本机存在以下任一目录：\n"
+                     "~/.claude（Claude Code）\n"
+                     "~/.codex（Codex）\n"
+                     "~/.local/share/opencode（OpenCode）\n"
+                     "~/.grok（Grok）\n\n"
+                     "或切换顶部「来源」筛选后重试。",
+                bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
+                justify="left", pady=theme.PAD_L * 2)
+            self._empty_hint.pack(padx=theme.PAD_M)
         self.scroll.update_scroll(reset=True)
-        # 自动选中第一个有数据的项目
+        # 选中项目：优先恢复上次选中（启动时），否则第一个有数据的项目。
         if self._cards:
-            first_valid = next(
-                (i for i in range(len(self._cards)) if i not in self._empty), None
-            )
-            if first_valid is not None:
-                self._select(self._cards[first_valid], first_valid)
+            idx = None
+            if preferred_key is not None:
+                idx = next(
+                    (i for i, p in enumerate(projects)
+                     if getattr(p, "key", None) == preferred_key
+                     and i not in self._empty),
+                    None,
+                )
+            if idx is None:
+                idx = next(
+                    (i for i in range(len(self._cards)) if i not in self._empty),
+                    None,
+                )
+            if idx is not None:
+                self._select(self._cards[idx], idx)
 
     def _make_card(self, project_dir, idx, *, is_empty=False):
         card = Card(self.container,
@@ -495,6 +530,17 @@ class SessionColumn:
             self._reports = list(self._all_reports)
         for r in self._reports:
             self._cards.append(self._make_card(r))
+        if getattr(self, "_empty_hint", None) is not None:
+            self._empty_hint.destroy()
+            self._empty_hint = None
+        if not self._reports:
+            hint = ("无匹配会话，试试清空搜索框" if needle
+                    else "该项目暂无会话\n（或尚未完成分析）")
+            self._empty_hint = tk.Label(self.container, text=hint,
+                                        bg=theme.PANEL, fg=theme.MUTED,
+                                        font=theme.FONT_UI, justify="center",
+                                        pady=theme.PAD_L * 2)
+            self._empty_hint.pack(padx=theme.PAD_M)
         n_all = len(self._all_reports)
         label = (f"会话（{len(self._reports)}/{n_all}）" if needle
                  else f"会话（{n_all}）")
@@ -865,6 +911,11 @@ class CteiRankingView:
         # -- Split: table (left) + decompose (right) --
         paned = tk.PanedWindow(parent, orient="horizontal", bg=theme.BG, sashwidth=3)
         paned.pack(fill="both", expand=True, padx=2, pady=2)
+        # TCER 回退提示条挂在 paned 之前（见 update）。
+        self._note_parent = parent
+        self._paned_ref = paned
+        self._fallback_note = None
+        self._fallback_tcer = False
 
         table_frame = tk.Frame(paned, bg=theme.BG)
         paned.add(table_frame, minsize=280)
@@ -924,8 +975,34 @@ class CteiRankingView:
     def update(self, reports) -> None:
         scored = [r for r in reports if r.ctei is not None]
         scored.sort(key=lambda r: r.ctei, reverse=True)
-        self._ranking = [(r.meta.title or r.meta.session_id or r.meta.path.stem, r.ctei, r.grade or "", r)
-                         for r in scored]
+        # 无 CTEI（如 no_loc 或会话无净增行/成本）时回退按 TCER 排名。
+        self._fallback_tcer = False
+        if not scored:
+            by_tcer = [r for r in reports if r.tcer is not None]
+            if by_tcer:
+                self._fallback_tcer = True
+                by_tcer.sort(key=lambda r: r.tcer, reverse=True)
+                scored = by_tcer
+
+        def _label(r):
+            return r.meta.title or r.meta.session_id or r.meta.path.stem
+
+        if self._fallback_tcer:
+            self._ranking = [(_label(r), r.tcer, "", r) for r in scored]
+        else:
+            self._ranking = [(_label(r), r.ctei, r.grade or "", r) for r in scored]
+        self._tree.heading("ctei_val",
+                           text="TCER" if self._fallback_tcer else "CTEI")
+        if getattr(self, "_fallback_note", None) is None:
+            self._fallback_note = tk.Label(
+                self._note_parent,
+                text="ℹ 会话缺少综合效率分（无净增行或成本数据）——当前按 TCER 排名。",
+                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL,
+                anchor="w", padx=theme.PAD_M, pady=theme.PAD_XS)
+        if self._fallback_tcer:
+            self._fallback_note.pack(fill="x", before=self._paned_ref)
+        else:
+            self._fallback_note.pack_forget()
         self._avg_factors = ctei_decompose_avg(reports)
         self._current_report = None
         self._grade_filter = None

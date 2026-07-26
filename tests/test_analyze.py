@@ -70,7 +70,7 @@ def test_task_categories_ssot_matches_config():
         assert metrics.TASK_CATEGORIES[k]["ttaf"] == cfg["task_categories"][k]["ttaf"]
 
 
-def test_analyze_claude_folds_subagent_and_clears_aggregate_ctei(tmp_path, monkeypatch):
+def test_analyze_claude_folds_subagent_and_aggregate_ctei_valid(tmp_path, monkeypatch):
     proj, h = _seed_claude_project(tmp_path, monkeypatch)
     main = proj / "SID-MAIN.jsonl"
     sub = proj / "SID-MAIN" / "subagents" / "agent-1.jsonl"
@@ -107,10 +107,9 @@ def test_analyze_claude_folds_subagent_and_clears_aggregate_ctei(tmp_path, monke
     # Same path edited 3 times across main+sub → one high-churn file, not two.
     assert r.high_churn_file_count == 1
     assert r.high_churn_details and "a.py" in r.high_churn_details
-    # Aggregate suppresses NCPI/CTEI/grade (single-session concept).
-    assert result.aggregate.ncpi is None
-    assert result.aggregate.ctei is None
-    assert result.aggregate.grade is None
+    # CTEI 三因子化后聚合有效（不再抑制）。
+    assert result.aggregate.ctei is not None
+    assert result.aggregate.grade is not None
     # Default task_type yields NTCER when TCER is computable.
     assert r.task_type == "code_creation"
     assert r.ntcer is not None

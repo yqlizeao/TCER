@@ -49,7 +49,7 @@ TCER/
 
 ## 指标分类（6 组 · 以 ``metric_defs.GROUPS`` 为准）
 
-GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以代码 SSOT 为准（当前约 74 项）：
+GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以代码 SSOT 为准：
 
 | 组 | 名称 | 内容 |
 |---|------|------|
@@ -87,14 +87,14 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以�
 ## 关键注意事项
 
 1. **按 message.id 去重**：一次 API 响应被拆成多行写入 JSONL，每行重复携带 usage。必须按 id 只计一次（实测 55.9% 重复计数）。**边界**：空字符串 `""` 视为无 id，逐条计数。**ccswitch 兼容**：mimo 消息第一行是 thinking 桩（usage=0），第二行才有真实 usage；零 usage 行会释放 id 锁（`seen.discard`），允许后续行贡献真实 token。**Grok 差异**：grok build 每 turn 恰好一条 `turn_completed` 携带权威 usage，无多行重复问题，直接累加；错误回合的空 usage（字段为 null）计入 `empty_usage_skipped`，不虚增回合数。工具名映射含 `grep_search`→Grep，并兼容实机短名 `grep`（否则探索比漏计）。**Codex 差异**：`token_count` 事件会重复投递相同的 `last_token_usage`（实测虚增 1.5–2.5%），必须对单调递增的 `total_token_usage` 做差分，`last` 仅作无 total 时的回退。**Grok user chunk**：同一条用户消息可能拆成相邻多条 `user_message_chunk`（或重复投递），相邻连续的 user chunk 只计 1 条 user_msgs，任何其他更新（`turn_completed`/`retry_state` 等）终止合并。**OpenCode peak**：session 聚合计数是多步总和，仅单回合会话可作 peak_input 近似；多回合且无 `step-finish` 快照时 peak 留 0（ratio 显示 None，勿用总和虚增窗口占用）。详见 [doc/data-format.md](doc/data-format.md)。
-2. **LOC 不依赖 git**：净增代码来自会话内工具调用回放。默认 **`disk_prior=False`**（计量「模型写出了什么」）：首次 Write 假定 old=0 并 `unseen_writes++`（覆写既有文件会 F1 高估，属已知上界）。**勿**对已结束会话默认用磁盘作先验——磁盘多为 **Write 之后**状态，中间 Write + 后续 Edit 时若 `disk_prior=True` 会把磁盘当成先验、把 Write 误判成大量删除。`disk_prior=True` 仅用于磁盘仍是 Write 前基线的校准场景（且磁盘文本等于 Write 载荷时不再种子化）。**Grok `write` 同理**；`search_replace` 仍用 old/new 行差。
+2. **LOC 不依赖 git、不读真实仓库**：净增代码只来自会话内工具调用回放。首次 Write 假定 old=0 并 `unseen_writes++`（F1 暴露）；Claude 的 `toolUseResult.originalFile` 到达后按会话数据回溯修正真实原行数（`note_write_original`，scan 与 session_loc_full 两路一致）。**产品边界：磁盘先验（disk_prior）、tree_loc 全树扫描、git 校准均已按「纯离线仅析会话数据」定位移除**；会话日志里记录的 git 分支/提交等元数据属会话数据，保留。Grok `write`/`search_replace` 走同一 `_LocAccumulator`。
 3. **逐模型计价**：TokenUsage.per_model 按 message.model 分桶，混用多模型会话也精确。价表 `tcer/config/model_pricing.json`（≈175 模型）。**四级匹配**（`pricing._match_id`，按优先级）：①精确 ②归一化精确（小写、去 `-`/`_`、`5p2`→`5.2` 且 `5-6`→`5.6`，先于前缀以防 `glm-5p2` 误中 `glm-5`、`gpt-5-6-sol` 误中 `gpt-5`）③前缀（`claude-opus-4-8[1m]`→`claude-opus-4-8`）④反向前缀（短名 `claude-opus-4-6`→带日期 key）。每条先试原 id 再试末段 path（剥 `z-ai/`、`accounts/fireworks/models/` 等供应商前缀）。`pricing.normalize()` 把 per_model key 归一化到价表规范 key；`pricing.table_key()` 返回 None 即走 default 回退（GUI 价表浮窗据此标"默认配置价"）。匹配候选含 path 尾段与 **mode 后缀剥离**（`-thinking`/`-reasoner`，如 `claude-opus-4-6-thinking`→`claude-opus-4-6-20260206`；不剥 `-high`/`-reasoning` 以免误绑）。`pricing.unmatched_models` / `metrics.unmatched_pricing_models` 列出回退模型；状态栏与模型/成本弹窗提示。**Grok**：`turn_completed.usage.modelUsage` 同样按模型分桶（如 `grok-4.5`）；工具名优先 `x.ai/tool`，否则 `rawInput.variant` / `kind` / title（后端 WebSearch 无 tool 名时归 WebSearch）。
 4. **过滤 `<synthetic>`**：ccswitch 在 429 限流或系统占位时注入伪 assistant 消息，`model` 字段为 `<synthetic>`，usage 全为零。reader 层直接过滤，不计入 `models` 和 `per_model`。
 5. **子代理并入父会话**：Token 与 LOC 保留真实成本，不单独计为 session。
 6. **时序分析**：`ToolOp(turn, tool, path)` 记录每个工具调用的回合序号和文件路径。**搜索后编辑比**按回合就近匹配（搜索后 3 回合内出现 Write/Edit 即算跟进，不绑定具体文件——真实 Grep/Glob 的 `path` 多为目录）；**先读后写率**等仍用 file_path。merge 时 rebase turn 编号保证聚合后时序连续。
 7. **任务类型体系**：3 大类（代码创作/代码维护/非编码），每类有 TTAF 系数。`ntcer = tcer / ttaf` 归一化后可跨任务类型公平比较。`ta_tcer` 保留为向后兼容别名。
 8. **返工率 = 自返工率**：churn 只计「本会话先写入、随后又被自己删除/替换」的行（`loc.SessionLoc.rework_deleted`，封顶于本会话已写入该文件的行数）；删除会话之外的既有代码属正常编辑，不计入。
-9. **聚合层禁用 NCPI/CTEI/评级**：这三项是单会话概念（NCPI = 净增 ÷ 当前代码库行数）。聚合时净增是全生命周期累计、分母是当前快照，比值常 >1 致 CTEI 虚高，故 `analyze` 在聚合报告里置空它们；TCER/PSAC/NTCER 作为聚合仍有效。
+9. **CTEI 三因子（聚合有效）**：`CTEI = (TCER/基准) × (CPE基准/CPE) × (1+CHR×0.5)`。历史第四因子 NCPI（净增÷代码库行数）因需扫描真实仓库已随产品定位移除，PSAC/阶段调整同删；三因子皆可聚合，**聚合层不再禁用 CTEI/评级**（audit 改为校验聚合 CTEI 与公式重算一致）。
 10. **自定义 Claude 配置目录自动识别**：用户常以 `CLAUDE_CONFIG_DIR=%USERPROFILE%\.zclaude`（或其他自定义名）启动 Claude Code 以隔离 `.claude`。该环境变量只在 Claude 进程内、TCER 读不到；故 `paths.claude_config_dirs()` 以规范目录（`CLAUDE_CONFIG_DIR` 或 `~/.claude`）为锚，扫描其**父目录**里所有结构匹配 Claude 的兄弟目录（`projects/<hash>/*.jsonl` 指纹），全部视为 Claude 根。`list_projects()`/`discover_jsonl(hash)` 跨所有根查找，**同 hash 跨根的会话合并**（不同项目各自出现）；结果按 `(home, CLAUDE_CONFIG_DIR)` 进程级缓存——会话期间新建的自定义配置目录需重启 TCER 才会出现。**Windows**：盘符大小写导致 `C--GitHub-X` 与 `c--GitHub-X` 两文件夹时，`project_hash_key` 折叠列表为一项，`discover_jsonl` 按 casefold 并集会话。
 11. **任务类型 SSOT**：`TASK_CATEGORIES` / TTAF 只来自 `config/composite_baselines.json`（`metrics._refresh_composite_globals`）。分析入口默认 `code_creation`；`resolve_task_type` 把空值/未知/`feature` 等合法化，`coerce_task_type` 给公式层（未知→None，不静默套创作系数）。`task_type=auto`（GUI「自动」）按会话 `infer_task_type`（net_loc/探索比/Edit 比/读写比）推断，聚合取众数。个人基准默认至少 `MIN_BASELINE_SESSIONS=10` 条完整会话。
 12. **Claude 单次扫描**：`reader.scan_session` 一趟 JSONL 同时产出 TokenUsage + SessionLoc；`analyze` 进程内按 path 缓存，避免 usage 与 LOC 双读。GUI `reanalyze` 用 `cancel_event` 协作取消上一次分析。
@@ -109,6 +109,7 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以�
 21. **SourceAdapter**：非 Claude 三源共用 `analyze._analyze_source_project` 骨架 + `_SourceAdapter` 钩子（resolve/sessions/read_meta/usage_of/loc_of/session_key），file_cache key 构造在钩子内（Grok 必须并入 signals.json/events.jsonl 旁路文件签名，否则会话结束后补写的信号不失效）。新增数据源 = 写一个 adapter。共享小工具在 `core/parse_util`（as_int/first_str）。
 22. **护栏测试**：`tests/test_models_merge.py` 反射断言 `TokenUsage.merge` 覆盖全部字段（新增字段忘改 merge 会当场失败，容器/极值字段进 `_SPECIAL` 表）；`tests/test_gui_smoke.py` 无头构建全部图表模式与弹窗（无显示环境自动 skip）；`tests/test_export.py` 断言 `report_row_dict` 每个键必须归入 `_CSV_FIELDS` 或 `_CSV_EXCLUDED`。
 23. **模型对比分摊**：`compare_models` 行为/产出/质量指标按 token 占比加权（`_weight_sum`），单模型会话权重 1.0 与旧「主模型全额归因」一致，混合会话按占比拆分不再丢弃。
-
+24. **GUI 视觉一致性**：①Windows 高 DPI 感知在 `app._enable_windows_hidpi`（**必须在创建 Tk 之前**调用，否则整窗被位图拉伸发糊）+ `_apply_tk_scaling`；②按钮一律用 `widgets.flat_button`（`primary=True`=强调色主操作），禁止再手写 `tk.Button(... relief="flat" ...)`；③间距从 `theme.PAD_XS/S/M/L`（2/4/8/12）取值；④`ScrollFrame` 自带按需显示的深色滚动条；⑤Combobox 深色化 = ttk style + `root.option_add`（下拉列表不吃 style）双管齐下；⑥界面偏好（几何/分栏/筛选/上次项目）经 `core/ui_prefs` 持久化到 `~/.claude/tcer_ui.json`，关闭时保存、启动时恢复（`last_project` 一次性生效）。例外：UploadDialog 与删除确认弹窗的按钮保持原样（前者归上传负责人，后者红色警示是刻意的）。
+25. **排名页**：CTEI 三因子化后默认即可计算，排名页默认就有数据；仅当会话无 CTEI（no_loc 或无净增行/成本）时回退按 TCER 排名并显示提示条。`launch.bat` 优先 `pyw`/`pythonw`（`start` 分离，无残留控制台；文件为 GBK 编码保 cmd 中文注释）。
 > 完整架构说明：[doc/architecture.md](doc/architecture.md)
 > 数据格式细节：[doc/data-format.md](doc/data-format.md)

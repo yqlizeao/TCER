@@ -1,4 +1,4 @@
-"""Dialog windows: glossary, session detail, tool calls, calibration, baselines.
+"""Dialog windows: glossary, session detail, tool calls, baselines.
 
 Each popup is a ``Toplevel`` built on demand and owns no long-lived state. They
 render from ``metric_defs`` / the analysis result so they never duplicate the
@@ -14,7 +14,7 @@ from tcer.core import format as fmt
 from tcer.core import metrics
 from . import theme
 from .metric_defs import CONCEPT_NOTES, GROUPS, METRIC_BY_KEY
-from .widgets import ScrollFrame, Tooltip, new_window
+from .widgets import ScrollFrame, Tooltip, flat_button, new_window
 
 
 # 共享弹窗外壳在 widgets.new_window；保留旧名兼容既有调用。
@@ -442,79 +442,6 @@ class CostBreakdownPopup:
                      font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
 
 
-class CalibratePopup:
-    """校准结果 — tcer LOC vs git ground truth, unified card style."""
-
-    _TCER_COLOR = "#569cd6"   # blue for tcer
-    _GIT_COLOR = "#4ec9b0"    # teal for git
-    _DEV_COLOR = "#f48771"    # red for deviation
-
-    def __init__(self, parent, calibrations, text_report: str) -> None:
-        win = _new_window(parent, "LOC 精度校准（对照 git）", "600x580")
-        tk.Label(win, text="LOC 精度校准", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
-
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
-        inner = sf.inner
-
-        # Compute totals
-        tot_tcer = tot_git = 0
-        for cal in calibrations:
-            tot_tcer += cal.tcer_added - cal.tcer_deleted
-            tot_git += cal.git_added - cal.git_deleted
-        factor = (tot_tcer / tot_git) if tot_git else 0
-        ratio = ((tot_tcer / tot_git - 1) * 100) if tot_git else 0
-
-        # Summary header
-        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
-        head.pack(fill="x", pady=10)
-        tk.Label(head, text=f"{len(calibrations)} 个会话",
-                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
-        tk.Label(head, text=f"工具调用净增 {tot_tcer:+,}  git 净增 {tot_git:+,}  "
-                            f"偏差 {tot_tcer - tot_git:+,}（{ratio:+.1f}%）",
-                 bg="#2a2a2e", fg=self._DEV_COLOR, font=theme.FONT_UI).pack()
-        tk.Label(head, text=f"校准系数: {factor:.4f}",
-                 bg="#2a2a2e", fg=theme.MUTED, font=theme.FONT_UI).pack()
-
-        # Per-session cards
-        for cal in calibrations:
-            tcer_net = cal.tcer_added - cal.tcer_deleted
-            git_net = cal.git_added - cal.git_deleted
-            dev = cal.net_deviation
-
-            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-            card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=6)
-            card.pack(fill="x")
-
-            # Session ID + deviation
-            hdr = tk.Frame(card, bg=theme.PANEL)
-            hdr.pack(fill="x")
-            tk.Label(hdr, text=cal.session_id[:38], bg=theme.PANEL, fg=theme.FG,
-                     anchor="w", font=theme.FONT_MONO).pack(side="left")
-            dev_color = self._DEV_COLOR if abs(dev) > 100 else theme.MUTED
-            tk.Label(hdr, text=f"{dev:+d}", bg=theme.PANEL, fg=dev_color,
-                     anchor="e", font=theme.FONT_MONO).pack(side="right")
-
-            # Detail line: tcer vs git
-            det = tk.Frame(card, bg=theme.PANEL)
-            det.pack(fill="x", pady=2)
-            tk.Label(det, text=f"工具调用 +{cal.tcer_added} -{cal.tcer_deleted}",
-                     bg=theme.PANEL, fg=self._TCER_COLOR,
-                     font=(theme.FONT_MONO_NAME, 8)).pack(side="left", padx=(0, 12))
-            tk.Label(det, text=f"git +{cal.git_added} -{cal.git_deleted}",
-                     bg=theme.PANEL, fg=self._GIT_COLOR,
-                     font=(theme.FONT_MONO_NAME, 8)).pack(side="left")
-
-        # Bottom buttons
-        btn_bar = tk.Frame(win, bg=theme.BG)
-        btn_bar.pack(pady=8)
-        tk.Button(btn_bar, text="复制文本报告", command=lambda: _copy(win, text_report),
-                  bg=theme.PANEL, fg=theme.FG, relief="flat", padx=12, pady=4).pack(side="left", padx=4)
-        tk.Button(btn_bar, text="关闭", command=win.destroy, bg=theme.ACCENT, fg=theme.FG,
-                  relief="flat", padx=20, pady=4).pack(side="left", padx=4)
-
-
 class BaselinesPopup:
     """计算出的个人基准 + 应用按钮，统一卡片风格。"""
 
@@ -536,9 +463,8 @@ class BaselinesPopup:
                  bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
 
         # Baseline cards（含与当前生效基准的对比）
-        current = {"tcer": metrics.TCER_BASELINE, "ncpi": metrics.NCPI_BASELINE,
-                   "cpe": metrics.CPE_BASELINE}
-        for key, method in [("tcer", "中位数"), ("ncpi", "均值"), ("cpe", "中位数")]:
+        current = {"tcer": metrics.TCER_BASELINE, "cpe": metrics.CPE_BASELINE}
+        for key, method in [("tcer", "中位数"), ("cpe", "中位数")]:
             val = values[key]
             tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
             card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
@@ -546,7 +472,7 @@ class BaselinesPopup:
 
             hdr = tk.Frame(card, bg=theme.PANEL)
             hdr.pack(fill="x")
-            name = {"tcer": "TCER（行/百万Token）", "ncpi": "NCPI（代码库贡献度）",
+            name = {"tcer": "TCER（行/百万Token）",
                     "cpe": "CPE（千行成本·美元）"}[key]
             tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG,
                      anchor="w", font=theme.FONT_VALUE).pack(side="left")
@@ -580,75 +506,44 @@ class BaselinesPopup:
         # Buttons
         btn_bar = tk.Frame(win, bg=theme.BG)
         btn_bar.pack(pady=8)
-        tk.Button(btn_bar, text="应用为基准", command=lambda: (on_apply(values), win.destroy()),
-                  bg=theme.ACCENT, fg=theme.FG, relief="flat", padx=16, pady=4).pack(side="left", padx=4)
-        tk.Button(btn_bar, text="取消", command=win.destroy, bg=theme.PANEL, fg=theme.FG,
-                  relief="flat", padx=16, pady=4).pack(side="left", padx=4)
+        flat_button(btn_bar, "应用为基准",
+                    lambda: (on_apply(values), win.destroy()), primary=True,
+                    padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
+        flat_button(btn_bar, "取消", win.destroy,
+                    padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
 
 
 class AdvancedPopup:
-    """高级选项 — code-dir 覆盖 + 跳过 LOC + 代码库扫描开关，统一卡片风格。"""
+    """高级选项 — 跳过 LOC 开关（产品定位：只分析会话数据，无仓库扫描项）。"""
 
-    def __init__(self, parent, code_dir: str, no_loc: bool, scan_code_dir: bool,
-                 on_apply) -> None:
-        win = _new_window(parent, "高级选项", "480x300")
+    def __init__(self, parent, no_loc: bool, on_apply) -> None:
+        win = _new_window(parent, "高级选项", "460x220")
         tk.Label(win, text="高级选项", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
 
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
-        inner = sf.inner
+        inner = tk.Frame(win, bg=theme.PANEL)
+        inner.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Summary header
-        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
-        head.pack(fill="x", pady=10)
-        tk.Label(head, text="自定义分析参数",
-                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
-
-        # Code dir card
-        tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-        card1 = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
-        card1.pack(fill="x")
-        tk.Label(card1, text="工作目录", bg=theme.PANEL, fg=theme.FG,
-                 font=theme.FONT_VALUE).pack(anchor="w")
-        tk.Label(card1, text="累计 LOC 扫描目录，留空则使用会话 cwd",
-                 bg=theme.PANEL, fg=theme.MUTED,
-                 font=(theme.FONT_MONO_NAME, 8)).pack(anchor="w", pady=(0, 4))
-        code_var = tk.StringVar(value=code_dir)
-        tk.Entry(card1, textvariable=code_var, width=48, bg="#1e1e1e", fg=theme.FG,
-                 insertbackground=theme.FG, relief="flat", highlightthickness=1,
-                 highlightbackground="#3e3e42").pack(anchor="w")
-
-        # No-LOC card
-        tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-        card2 = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
-        card2.pack(fill="x")
+        card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=10)
+        card.pack(fill="x")
         no_loc_var = tk.BooleanVar(value=no_loc)
-        tk.Checkbutton(card2, text="跳过 LOC（仅 Token 指标，不算 TCER/CPE/CTEI）",
-                       variable=no_loc_var, bg=theme.PANEL, fg=theme.FG, selectcolor="#1e1e1e",
+        tk.Checkbutton(card, text="跳过 LOC（仅 Token 指标，不算 TCER/CPE/CTEI）",
+                       variable=no_loc_var, bg=theme.PANEL, fg=theme.FG,
+                       selectcolor="#1e1e1e",
                        activebackground=theme.PANEL, activeforeground=theme.FG,
                        font=theme.FONT_UI).pack(anchor="w")
+        tk.Label(card,
+                 text="全部指标均来自会话数据回放；TCER 不读取真实仓库、不依赖 git。",
+                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                 wraplength=400, justify="left").pack(anchor="w", pady=(6, 0))
 
-        # Scan-code-dir card — opt-in tree_loc (NCPI/CTEI denominator). Off by
-        # default: scanning a large repo (Rust target/, vendored deps, …) can
-        # freeze the UI for minutes.
-        tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-        card3 = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
-        card3.pack(fill="x")
-        scan_code_var = tk.BooleanVar(value=scan_code_dir)
-        tk.Checkbutton(card3, text="扫描代码库目录（计算 NCPI/CTEI，大项目可能很慢）",
-                       variable=scan_code_var, bg=theme.PANEL, fg=theme.FG, selectcolor="#1e1e1e",
-                       activebackground=theme.PANEL, activeforeground=theme.FG,
-                       font=theme.FONT_UI).pack(anchor="w")
-
-        # Buttons
         btn_bar = tk.Frame(win, bg=theme.BG)
         btn_bar.pack(pady=8)
-        tk.Button(btn_bar, text="应用并重算",
-                  command=lambda: (on_apply(code_var.get().strip() or None, no_loc_var.get(), scan_code_var.get()), win.destroy()),
-                  bg=theme.ACCENT, fg=theme.FG, relief="flat", padx=16, pady=4).pack(side="left", padx=4)
-        tk.Button(btn_bar, text="取消", command=win.destroy, bg=theme.PANEL, fg=theme.FG,
-                  relief="flat", padx=16, pady=4).pack(side="left", padx=4)
+        flat_button(btn_bar, "应用并重算",
+                    lambda: (on_apply(no_loc_var.get()), win.destroy()),
+                    primary=True, padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
+        flat_button(btn_bar, "取消", win.destroy,
+                    padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
 
 
 class UserMsgsPopup:
@@ -794,11 +689,9 @@ class MemoryFilesPopup:
         # 按钮栏：打开目录（居中）
         btn_bar = tk.Frame(win, bg=theme.BG)
         btn_bar.pack(fill="x", padx=10, pady=(4, 8))
-        tk.Button(btn_bar, text=f"📂 在{FILE_MANAGER_NAME}中打开目录",
-                  command=lambda: open_in_file_manager(memory_dir),
-                  bg=theme.PANEL_2, fg=theme.FG, relief="flat",
-                  activebackground=theme.PANEL, activeforeground=theme.FG,
-                  padx=12, pady=3, font=theme.FONT_UI, cursor="hand2").pack(anchor="center")
+        flat_button(btn_bar, f"📂 在{FILE_MANAGER_NAME}中打开目录",
+                    lambda: open_in_file_manager(memory_dir),
+                    padx=theme.PAD_L).pack(anchor="center")
 
         sf = ScrollFrame(win, bg=theme.PANEL)
         sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -945,8 +838,8 @@ class RadarPopup:
         canvas.create_text(cx, 14, text="绝对刻度，外圈 = 100%",
                            fill=theme.MUTED, font=theme.FONT_UI_SMALL)
 
-        tk.Button(win, text="关闭", command=win.destroy, bg=theme.ACCENT,
-                  fg=theme.FG, relief="flat", padx=20, pady=4).pack(pady=6)
+        flat_button(win, "关闭", win.destroy, primary=True,
+                    padx=theme.PAD_L * 2).pack(pady=theme.PAD_M)
 
     @staticmethod
     def _normalize(raw, ntype, ref):

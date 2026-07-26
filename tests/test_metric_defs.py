@@ -17,8 +17,7 @@ def _report():
     meta = SessionMeta(session_id="s", cwd="/tmp", title="t",
                        path=Path("/tmp/s.jsonl"), is_subagent=False)
     u = TokenUsage(input_tokens=500_000, output_tokens=500_000)
-    return metrics.compute(meta, u, net_loc=400, loc_accumulated=10_000,
-                           task_type="feature", code_added=420, code_deleted=20)
+    return metrics.compute(meta, u, net_loc=400, task_type="feature", code_added=420, code_deleted=20)
 
 
 def test_every_layer_key_is_formatted():
@@ -55,11 +54,10 @@ def test_format_value_tokens():
     assert metric_defs.format_value("cost", 1.2345) == "$1.2345"   # money 4dp
     assert metric_defs.format_value("cost_per_mt", 1.6) == "$1.60"  # money2 2dp
     assert metric_defs.format_value("tcer", 60.13) == "60.1"        # float:0.0
-    assert metric_defs.format_value("ncpi", 0.0305) == "0.030"      # float:0.000
 
 
 def test_format_value_none_is_dash():
-    for key in ("cost", "chr", "tcer", "ncpi", "cost_per_mt", "net_loc"):
+    for key in ("cost", "chr", "tcer", "cost_per_mt", "net_loc"):
         assert metric_defs.format_value(key, None) == "-"
 
 
@@ -80,8 +78,7 @@ def test_report_values_golden_strings():
                    assistant_msgs=50, empty_usage_skipped=3, user_msgs=12,
                    thinking_count=7)
     u.tool_calls = {"Read": 10, "Edit": 5}
-    r = metrics.compute(meta, u, net_loc=400, loc_accumulated=10_000,
-                        task_type="code_creation", code_added=420,
+    r = metrics.compute(meta, u, net_loc=400, task_type="code_creation", code_added=420,
                         code_deleted=20, code_reworked=20)
     v = metric_defs.report_values(r)
     assert v["total_tokens"] == "5,000,000"
@@ -203,8 +200,7 @@ def _report_for(source: str):
                        path=Path("/tmp/s.jsonl"), is_subagent=False, source=source)
     u = TokenUsage(input_tokens=500_000, output_tokens=500_000,
                    cache_creation_input_tokens=1000, reasoning_output_tokens=200)
-    return metrics.compute(meta, u, net_loc=400, loc_accumulated=10_000,
-                           task_type="feature")
+    return metrics.compute(meta, u, net_loc=400, task_type="feature")
 
 
 def test_unsupported_metric_shows_label():

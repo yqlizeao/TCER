@@ -186,7 +186,7 @@ def _claude_raw_token_total_no_dedup(path: Path) -> int:
 
 # --------------------------------------------------------------------------- per-source audit
 
-def _audit_claude_session(report, *, project_hash: str, code_cwd: str | None) -> SessionAudit:
+def _audit_claude_session(report, *, project_hash: str) -> SessionAudit:
     sid = report.meta.session_id or report.meta.path.stem
     sa = SessionAudit(
         session_id=sid,
@@ -212,12 +212,9 @@ def _audit_claude_session(report, *, project_hash: str, code_cwd: str | None) ->
         sum(report.usage.tool_calls.values()),
     ))
 
-    # LOC: re-scan with same disk_prior / cwd as analyze (disk_prior=False)
+    # LOC: re-scan from session data (originalFile F1 correction included)
     if report.net_loc is not None:
-        slocs = [
-            loc.session_loc_full(f, cwd=code_cwd or report.meta.cwd, disk_prior=False)
-            for f in files
-        ]
+        slocs = [loc.session_loc_full(f) for f in files]
         merged_sloc = loc.merge_session_locs(slocs)
         sa.checks.append(_eq("net_loc", merged_sloc.added - merged_sloc.deleted, report.net_loc))
         sa.checks.append(_eq("code_added", merged_sloc.added, report.code_added))
@@ -426,9 +423,7 @@ def _audit_file_session(
             if source == "codex":
                 sloc = codex_reader.session_loc_full(report.meta.path)
             else:  # grok
-                sloc = grok_reader.session_loc_full(
-                    report.meta.path, cwd=report.meta.cwd, disk_prior=False,
-                )
+                sloc = grok_reader.session_loc_full(report.meta.path)
             sa.checks.append(_eq(
                 "net_loc", sloc.added - sloc.deleted, report.net_loc,
             ))
@@ -501,8 +496,7 @@ def _audit_opencode_session(report, *, no_loc: bool = False) -> SessionAudit:
     if report.net_loc is not None and not no_loc and report.meta.session_id:
         try:
             sloc = opencode_reader.session_loc_full(
-                report.meta.path, report.meta.session_id, disk_prior=False,
-            )
+                report.meta.path, report.meta.session_id)
             sa.checks.append(_eq(
                 "net_loc", sloc.added - sloc.deleted, report.net_loc,
             ))
@@ -578,7 +572,6 @@ def audit_ref(
             project_ref=ref,
             task_type=task_type,
             no_loc=no_loc,
-            scan_code_dir=False,
         )
     except FileNotFoundError as e:
         # No sessions after filter / empty project — soft pass.
@@ -606,15 +599,15 @@ def audit_ref(
 
     # Aggregate invariants
     pa.checks.append(_eq("n_sessions", len(result.reports), result.n_sessions))
-    pa.checks.append(_truth(
-        "aggregate_ctei_suppressed",
-        result.aggregate.ctei is None,
-        detail="project aggregate must not show CTEI",
-    ))
-    pa.checks.append(_truth(
-        "aggregate_ncpi_suppressed",
-        result.aggregate.ncpi is None,
-    ))
+    # CTEI 三因子化后聚合有效:校验聚合 CTEI 与公式重算一致。
+    agg = result.aggregate
+    if agg.ctei is not None:
+        recomputed = metrics.ctei(agg.tcer, agg.cpe, agg.chr)
+        pa.checks.append(_eq(
+            "aggregate_ctei_recompute",
+            round(recomputed, 9) if recomputed is not None else None,
+            round(agg.ctei, 9),
+        ))
     sum_tok = sum(r.usage.total for r in result.reports)
     pa.checks.append(_eq("aggregate_tokens_sum", sum_tok, result.aggregate.usage.total))
 
@@ -638,7 +631,6 @@ def audit_ref(
             result.reports,
             result.aggregate,
             result.n_sessions,
-            result.code_dir,
             project_name=ref.display_name or ref.key,
         )
         pa.checks.append(_truth("export_smoke_ok", True, detail="json/csv/md"))
@@ -650,10 +642,9 @@ def audit_ref(
     if top is not None and top > 0:
         reports = reports[:top]
 
-    code_cwd = str(result.code_dir) if result.code_dir else None
     for rep in reports:
         if ref.source == "claude":
-            sa = _audit_claude_session(rep, project_hash=ref.key, code_cwd=code_cwd)
+            sa = _audit_claude_session(rep, project_hash=ref.key)
         elif ref.source == "codex":
             sa = _audit_file_session(rep, source="codex", aggregate_fn=codex_reader.aggregate_usage)
         elif ref.source == "grok":

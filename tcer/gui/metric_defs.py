@@ -6,7 +6,7 @@ explanation, semantic color level, and how to extract+format its value from a
 popup render from ``GROUPS``, so adding or renaming a metric is a one-line change
 here. No Tkinter dependency.
 
-Code keys stay abbreviated (``chr`` / ``ctei`` / ``ncpi`` …); only the ``name``
+Code keys stay abbreviated (``chr`` / ``ctei`` / ``ntcer`` …); only the ``name``
 shown to users is full Chinese (TCER is the sole English abbreviation kept).
 """
 from __future__ import annotations
@@ -304,13 +304,14 @@ GROUPS: list[Group] = [
                "怎么看：越高越省；新功能通常 >50，参考中位数约 76.6；调试/重构天然偏低，正常。\n"
                "💡 想提高：提高缓存命中率、少返工、别让 AI 反复重写整文件。", "basic", "up"),
         Metric("ctei", "综合效率分", "",
-               "把 4 件事打包成一个总分：产出效率(TCER) × 对项目的贡献(贡献度) × 每行省不省钱 × 缓存用得好不好，再跟一条参考线比。\n"
+               "把 3 件事打包成一个总分：产出效率(TCER) × 每行省不省钱(成本) × 缓存用得好不好，再跟参考线比。\n"
                "怎么看：>2 优秀 · 1–2 良好 · 0.5–1 中等 · 0.1–0.5 低效 · <0.1 极端低效。\n"
-               "⚠️ 它是 4 个比率相乘，数值可能很大(单会话偶尔上百)，别纠结绝对值——主要看排名页的相对高低和趋势。要看「这次到底干得好不好」，直接看 TCER、返工率、每千行成本更靠谱。\n"
-               "⚠️ 只看单会话；「全部会话」聚合视图显示「-」。\n⚠️ 公式含「代码库贡献度」，默认未扫描代码库时也显示「-」——需在「工具→高级选项」开启「扫描代码库目录」。", "compound", "up"),
+               "⚠️ 它是 3 个比率相乘，别纠结绝对值——主要看排名页的相对高低和趋势。"
+               "要看「这次到底干得好不好」，直接看 TCER、返工率、每千行成本更直观。\n"
+               "全部来自会话数据，单会话与项目聚合均有效。", "compound", "up"),
         Metric("grade", "评级", "",
-               "上面「综合效率分」对应的等级标签：优秀/良好/中等/低效/极端低效，颜色和排名页的条形图一致。\n"
-               "⚠️ 聚合视图显示「-」，请在排名页看每个会话的评级。\n默认未扫描代码库时也显示「-」（依赖综合效率分）。", "basic"),
+               "上面「综合效率分」对应的等级标签：优秀/良好/中等/低效/极端低效，"
+               "颜色和排名页的条形图一致。", "basic"),
         Metric("task_type", "任务类型", "",
                "你这次主要在干啥：写新代码(创作)、改老代码(维护)、还是不写代码(调研/审查)。\n"
                "💡 选对很重要——下面的「归一化效率」靠它把不同任务拉到同一起跑线公平比。点下拉看三类区别(创作100% · 维护45% · 非编码20%)。", "compound"),
@@ -322,22 +323,9 @@ GROUPS: list[Group] = [
                "把 TCER 按任务难度折扣还原后的效率，让「调试」和「写新功能」能公平比较。\n"
                "怎么看：越高越好；跨任务类型比较时，看这个比看 TCER 更公平。\n"
                "例：调试 TCER=30，但调试本就难，还原后 ≈75，其实不差。", "compound", "up"),
-        Metric("ncpi", "代码库贡献度", "",
-               "这次写的净代码，相当于整个项目现有代码的百分之几。\n"
-               "怎么看：新项目能到 10%+，成熟大项目 1–2% 就算显著；项目越大占比越低很自然。\n"
-               "⚠️ 单会话指标；聚合视图显示「-」(累计写入会超过项目现有规模)。\n默认未扫描代码库时也显示「-」——需在「工具→高级选项」开启「扫描代码库目录」(大项目会很慢)。", "basic", "up"),
-        Metric("psac", "阶段调整系数", "",
-               "项目越大，改一点点就越难产出新行(「维护税」)。这个系数给大项目的效率打个补偿，>1 表示项目还年轻。\n"
-               "💡 偏技术的修正项，日常可忽略；它只用来算下面的「阶段调整后效率」。\n默认未扫描代码库时显示「-」。", "compound"),
-        Metric("tcer_phase_adj", "阶段调整后效率", "行/百万",
-               "把项目规模的影响剔除后的 TCER，方便拿大项目和小项目公平比。\n"
-               "怎么看：越高越好。\n"
-               "💡 和「归一化效率」一样是公平化后的值，日常看 TCER 本身就够。\n默认未扫描代码库时显示「-」。", "compound", "up"),
         Metric("bl_tcer", "TCER 基准", "行/百万",
                "一条「参考线」，不是你的成绩——「综合效率分」拿你的 TCER 跟它比来打分。默认 76.59，来自框架自带的 16 个样本会话。\n"
                "💡 想改成「跟你自己的历史平均」比，可用本项目数据生成个人基准来替换。", "basic"),
-        Metric("bl_ncpi", "贡献度基准", "",
-               "「综合效率分」里给贡献度打分用的参考线(默认 0.101)，不是你的成绩。可用个人基准替换。", "basic"),
         Metric("bl_cpe", "成本基准", "美元/千行",
                "「综合效率分」里给每千行成本打分用的参考线(默认 8.22)，不是你的成绩。可用个人基准替换。", "basic"),
     ]),
@@ -353,7 +341,7 @@ CONCEPT_NOTES: list[tuple[str, str, str]] = [
     ("LOC 统计假设 ⚠️",
      "【重要】Write 工具调用假设写入的是新文件（原大小 = 0）。若 Write 覆盖已有文件，"
      "added 会高估、deleted 会遗漏。Edit 不受影响（只看增量）。「高频改动文件」计数是潜在高估的上界。"
-     "若需精确量化偏差，用「校准 LOC」功能对标 git 历史。", "basic"),
+     "basic"),
     ("如何提高效率",
      "想提升 TCER/CTEI？几个实用建议：①保持提示词稳定（提高缓存命中率）；"
      "②用 Edit 而非 Write 修改已有文件（更精确，返工率低）；"
@@ -451,9 +439,8 @@ _SESSION_FMT: dict[str, str] = {
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
     # G6
     "tcer": "float:0.0", "ctei": "float:0.000", "ttaf": "float:0.00",
-    "ntcer": "float:0.00", "ncpi": "float:0.000", "psac": "float:0.000",
-    "tcer_phase_adj": "float:0.00",
-    "bl_tcer": "float:0.00", "bl_ncpi": "float:0.000", "bl_cpe": "float:0.00",
+    "ntcer": "float:0.00",
+    "bl_tcer": "float:0.00", "bl_cpe": "float:0.00",
 }
 
 # key → attribute name on SessionReport when they differ from the metric key.
@@ -500,7 +487,6 @@ _USAGE_ATTR = {
 # key → callable returning the current baseline constant (read-only reference).
 _BASELINE = {
     "bl_tcer": lambda: _metrics.TCER_BASELINE,
-    "bl_ncpi": lambda: _metrics.NCPI_BASELINE,
     "bl_cpe": lambda: _metrics.CPE_BASELINE,
 }
 
@@ -925,7 +911,6 @@ def _chr_weight_label() -> str:
 
 CTEI_FACTORS: list[CteiFactor] = [
     CteiFactor("eff_factor", "效率因子", "TCER÷基准"),
-    CteiFactor("density_factor", "产出密度", "NCPI÷基准"),
     CteiFactor("cost_factor", "成本效率", "基准÷CPE"),
     CteiFactor("cache_factor", "缓存因子", f"1+CHR×{_chr_weight_label()}"),
 ]

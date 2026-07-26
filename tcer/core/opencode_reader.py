@@ -458,13 +458,7 @@ def read_conversation(db_path: Path, session_id: str) -> list[dict]:
 _EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 
-def _loc_scan(
-    db_path: Path,
-    session_id: str,
-    *,
-    cwd: str | Path | None = None,
-    disk_prior: bool = False,
-):
+def _loc_scan(db_path: Path, session_id: str):
     """Single pass: ``(SessionLoc, has_signal)`` for one OpenCode session.
 
     Prefer persisted ``summary_*`` counters when present; else replay edit/write
@@ -481,7 +475,7 @@ def _loc_scan(
         files = _as_int(_dig(obj, "summary", "files") or obj.get("summary_files"))
         if added or deleted or files:
             return SessionLoc(added=added, deleted=deleted), True
-        return _legacy_tool_loc(Path(session_id), obj, cwd=cwd, disk_prior=disk_prior)
+        return _legacy_tool_loc(Path(session_id), obj)
 
     with _connect(db_path) as con:
         row = con.execute(
@@ -521,12 +515,7 @@ def _loc_scan(
             file_edit_counts=edit_counts,
         ), True
 
-    session_cwd = cwd
-    if session_cwd is None and "directory" in keys:
-        d = row["directory"]
-        if isinstance(d, str) and d:
-            session_cwd = d
-    acc = _LocAccumulator(cwd=session_cwd, disk_prior=disk_prior)
+    acc = _LocAccumulator()
     saw_edit = False
     for part in parts:
         data = _json_obj(part["data"])
@@ -544,15 +533,9 @@ def _loc_scan(
     return acc.finish(), saw_edit
 
 
-def session_loc_full(
-    db_path: Path,
-    session_id: str,
-    *,
-    cwd: str | Path | None = None,
-    disk_prior: bool = False,
-):
+def session_loc_full(db_path: Path, session_id: str):
     """Return LOC for one OpenCode session (summary counters or tool replay)."""
-    return _loc_scan(db_path, session_id, cwd=cwd, disk_prior=disk_prior)[0]
+    return _loc_scan(db_path, session_id)[0]
 
 
 def has_loc_signal(db_path: Path, session_id: str) -> bool:
@@ -563,11 +546,11 @@ def has_loc_signal(db_path: Path, session_id: str) -> bool:
         return False
 
 
-def _legacy_tool_loc(session_path: Path, obj: dict, *, cwd, disk_prior: bool):
+def _legacy_tool_loc(session_path: Path, obj: dict):
     """Best-effort ``(SessionLoc, saw_edit)`` from legacy JSON tool parts."""
     from tcer.core.loc import _LocAccumulator
 
-    acc = _LocAccumulator(cwd=cwd, disk_prior=disk_prior)
+    acc = _LocAccumulator()
     saw_edit = False
     for data in _legacy_iter_tool_parts(session_path, obj):
         name = _first_str(data.get("tool"), data.get("toolName"), data.get("name"))
