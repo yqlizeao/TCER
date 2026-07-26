@@ -41,8 +41,8 @@
     }
   },
   "ctei_baselines": {
-    "tcer": 35.949296044253295,
-    "cpe": 5.317090240384615,
+    "tcer": 26.220163629311674,
+    "cpe": 13.619017038539553,
     "_note": "Medians (TCER, CPE) and mean (NCPI) from the framework's reference dataset. Override these once you have your own accumulated data."
   },
   "chr_weight": 0.5,
