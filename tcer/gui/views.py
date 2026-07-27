@@ -7,6 +7,7 @@ Chart classes draw on a ``tk.Canvas``; ``CteiRankingView`` consumes the shared
 """
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk
@@ -61,6 +62,32 @@ def project_source_label(project) -> str:
     if source == "grok":
         return "Grok"
     return "Claude"
+
+
+_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+# PhotoImage 必须被 Python 引用持有，否则 GC 后卡片图标变空白——模块级缓存。
+_ICON_CACHE: dict[str, "tk.PhotoImage | None"] = {}
+_MISSING = object()  # 区分「未查询」与「查过但无图标」，让负缓存生效
+
+
+def source_icon(master, source: str):
+    """16px 来源图标（tk.PhotoImage，模块级缓存防 GC）。
+
+    无对应资源（或 Tk 尚未就绪）返回 None，调用方回退到 ``[源名]`` 文字标注。
+    构建期已用 PIL 把 1024/640/128 原图预缩到 16×16，运行时零依赖。
+    """
+    cached = _ICON_CACHE.get(source, _MISSING)
+    if cached is not _MISSING:
+        return cached
+    path = os.path.join(_ASSETS_DIR, f"{source}.png")
+    img = None
+    if os.path.isfile(path):
+        try:
+            img = tk.PhotoImage(master=master, file=path)
+        except tk.TclError:
+            img = None
+    _ICON_CACHE[source] = img
+    return img
 
 
 def project_open_path(project) -> str:
@@ -376,14 +403,30 @@ class ProjectColumn:
                     on_right_click=lambda e, _i=idx, _d=project_dir: self._on_right_click(e, _i, _d),
                     padx=1, pady=1)
         name = project_label(project_dir)
+        source = getattr(project_dir, "source", "claude")
         label = project_source_label(project_dir)
         if is_empty:
             name += " （无会话）"
         fg = theme.MUTED if is_empty else theme.FG
-        lbl = tk.Label(card.frame, text=f"[{label}] {name}", bg=theme.PANEL_2, fg=fg,
-                       font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        lbl.pack(fill="x", padx=4, pady=3)
-        card.bind_to(lbl)
+        icon = source_icon(card.frame, source)
+        if icon is None:
+            # 无图标资源：回退到 [源名] 文字前缀
+            lbl = tk.Label(card.frame, text=f"[{label}] {name}", bg=theme.PANEL_2, fg=fg,
+                           font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+            lbl.pack(fill="x", padx=4, pady=3)
+            card.bind_to(lbl)
+            return card
+        # 图标 + 名称横排，取代 [Claude] 之类的文字标注
+        row = tk.Frame(card.frame, bg=theme.PANEL_2)
+        row.pack(fill="x", padx=4, pady=3)
+        img_lbl = tk.Label(row, image=icon, bg=theme.PANEL_2)
+        img_lbl.pack(side="left", padx=(0, 4))
+        Tooltip(img_lbl, label)  # 悬停图标显示来源名（图标取代了文字标注）
+        name_lbl = tk.Label(row, text=name, bg=theme.PANEL_2, fg=fg,
+                            font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+        name_lbl.pack(side="left", fill="x", expand=True)
+        for w in (row, img_lbl, name_lbl):
+            card.bind_to(w)
         return card
 
     def _on_card_click(self, card, idx, is_empty):
