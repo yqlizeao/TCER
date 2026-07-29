@@ -522,3 +522,46 @@ def test_prompt_behavior_signals(tmp_path):
     assert u.correction_msg_count == 1
     assert u.first_prompt_chars == len("帮我实现一个解析器,要求如下:支持 JSONL")
     assert u.user_msgs == 5
+
+
+def test_read_user_messages_filters_cc_injections(tmp_path):
+    """Claude-Code-injected user-role texts must NOT appear in the popup.
+
+    Before the fix ``_strip_tags`` ran BEFORE the ``<…>`` prefix check, which
+    erased the tags first and let ~17% of popup rows be injections
+    (task-notification, ide_opened_file, local-command-stdout, compact
+    continuation, ESC marker, system-reminder…). The check must run on the
+    RAW text. Guards read_user_messages, user_message_texts, and
+    first_prompt_chars together.
+    """
+    import json as _json
+
+    def _user(text):
+        return {"type": "user",
+                "message": {"role": "user",
+                            "content": [{"type": "text", "text": text}]}}
+
+    lines = [
+        _user("<task-notification>a095\ncall_1\nC:\\Temp\\t</task-notification>"),
+        _user("<ide_opened_file>The user opened the file Untitled-1 in the IDE.</ide_opened_file>"),
+        _user("<local-command-stdout>Set model to Fable 5</local-command-stdout>"),
+        _user("<command-name>/model</command-name>"),
+        _user("[Request interrupted by user]"),
+        _user("This session is being continued from a previous conversation that ran out of context."),
+        _user("<system-reminder>Only use artifacts when explicitly asked.</system-reminder>"),
+        _user("请帮我修复这个 bug"),   # the one real human message
+        _assistant(_usage(10, 0, 0, 5)),
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    # Popup path: only the real message survives.
+    assert reader.read_user_messages(p) == ["请帮我修复这个 bug"]
+
+    # Cached path (aggregate_usage w/ texts) agrees.
+    u = reader.aggregate_usage(p)
+    assert u.user_message_texts == ["请帮我修复这个 bug"]
+    # first_prompt_chars skips injections → the real message's length.
+    assert u.first_prompt_chars == len("请帮我修复这个 bug")
+    # user_msgs COUNT is unaffected — injections are still user-role turns.
+    assert u.user_msgs == 8

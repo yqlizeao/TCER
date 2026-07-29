@@ -403,15 +403,34 @@ def _apply_events(u: TokenUsage, session_dir: Path) -> None:
 
 
 def read_user_messages(path: Path) -> list[str]:
-    """Extract Grok user-message text on demand for the popup."""
+    """Extract Grok user-message text on demand for the popup.
+
+    One user message may arrive as several consecutive ``user_message_chunk``
+    updates (and grok build occasionally re-emits a chunk); a run of consecutive
+    chunks is ONE message — same coalescing as :func:`aggregate_usage` /
+    :func:`read_conversation`. Without it the popup showed each chunk as a
+    separate row, fragmenting one message into many.
+    """
     messages: list[str] = []
+    parts: list[str] = []
+
+    def _flush() -> None:
+        nonlocal parts
+        if parts:
+            text = "".join(parts).strip()
+            if text:
+                messages.append(truncate_summary(text, 500))
+        parts = []
+
     for obj in iter_updates(path):
         update = _update_of(obj)
         if update.get("sessionUpdate") != "user_message_chunk":
+            _flush()  # any other update ends the user-chunk run
             continue
         text = _chunk_text(update)
-        if text and text.strip():
-            messages.append(truncate_summary(text.strip(), 500))
+        if text:
+            parts.append(text)
+    _flush()
     return messages
 
 

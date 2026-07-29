@@ -251,3 +251,28 @@ def test_ref_uid_disambiguates_same_key_cross_root():
     assert views.find_ref_by_uid(refs, views.ref_uid(rb_ref)) is rb_ref
     assert views.find_ref_by_uid(refs, h) is ra_ref  # 裸 key 降级取首个
     assert views.find_ref_by_uid(refs, None) is None
+
+
+def test_user_msgs_popup_renders(root):
+    """UserMsgsPopup 正文用 SelectableLabel(disabled Text) —— 拦构建崩溃 +
+    校验文本写入/置 disabled;不断言确切 height(无头下 count 取值不稳定)。"""
+    from tcer.gui.popups import UserMsgsPopup
+    from tcer.gui.widgets import SelectableLabel
+
+    long_msg = "验证自动换行与高度撑开的多行用户消息文本。" * 15
+    UserMsgsPopup(root, ["短消息", long_msg])
+    root.update_idletasks()
+
+    def _collect(w, acc):
+        for c in w.winfo_children():
+            if isinstance(c, SelectableLabel):
+                acc.append(c)
+            _collect(c, acc)
+
+    labels: list = []
+    _collect(root, labels)
+    assert labels, "UserMsgsPopup 未渲染出 SelectableLabel"
+    first = labels[0]
+    assert first.cget("state") == "disabled"          # 只读但可选中复制
+    assert "短消息" in first.get("1.0", "end-1c")      # 文本已写入
+    assert int(first.cget("height")) >= 1
