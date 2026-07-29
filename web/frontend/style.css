@@ -115,6 +115,8 @@ button { cursor: pointer; font-family: inherit; }
 .mi-user  { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b90a0' stroke-width='2'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21c0-4 4-6 8-6s8 2 8 6'/%3E%3C/svg%3E"); }
 .mi-model { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b90a0' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3Cpath d='M12 2v4M12 18v4M2 12h4M18 12h4M5 5l3 3M16 16l3 3M19 5l-3 3M8 16l-3 3'/%3E%3C/svg%3E"); }
 .mi-list  { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b90a0' stroke-width='2'%3E%3Cpath d='M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01'/%3E%3C/svg%3E"); }
+.mi-bulb  { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b90a0' stroke-width='2'%3E%3Cpath d='M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z'/%3E%3C/svg%3E"); }
+.mi-scale { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b90a0' stroke-width='2'%3E%3Cpath d='M12 3v18M3 7h18M6 7l-3 7h6zM18 7l-3 7h6z'/%3E%3C/svg%3E"); }
 .menu-item.active .mi { filter: brightness(0) invert(1); }
 
 /* ---------- content ---------- */
@@ -312,3 +314,56 @@ table.grid tbody tr { border-bottom: 1px solid var(--border); }
 .cv-block.cv-think .cv-body { color: var(--muted); font-style: italic; }
 .detail-json details { margin-top: 6px; }
 .detail-json summary { cursor: pointer; font-size: 13px; }
+
+/* ---------- 决策实验室 ---------- */
+.view-head.sub { margin-top: 28px; }
+.view-head.sub h2 { margin: 0; font-size: 15px; font-weight: 650; color: var(--muted); }
+
+/* 口径/免责说明：常驻可见，而不是折叠起来的小字——统计结论的边界
+   和结论本身一样重要。 */
+.caveat { font-size: 12.5px; line-height: 1.6; color: var(--muted);
+  background: var(--panel); border: 1px solid var(--border);
+  border-left: 3px solid var(--warn); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 18px; }
+.caveat strong { color: var(--fg); }
+
+.findings { display: flex; flex-direction: column; gap: 14px; }
+.finding { background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px; border-left: 3px solid var(--border); }
+.finding.sev-high { border-left-color: var(--accent); }
+.finding.sev-medium { border-left-color: var(--warn); }
+.finding header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.finding header h3 { margin: 0; font-size: 15px; font-weight: 650; flex: 1; }
+.sev-tag { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px;
+  background: var(--panel2); color: var(--muted); white-space: nowrap; }
+.finding.sev-high .sev-tag { background: rgba(91,140,255,.18); color: #9dbcff; }
+.finding .action { margin: 10px 0 6px; font-size: 13.5px; line-height: 1.6; }
+.finding details { margin-top: 6px; }
+.finding summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.finding details ul { margin: 6px 0 0; padding-left: 20px; }
+.finding details li { font-size: 12.5px; line-height: 1.65; color: var(--muted); }
+.finding details.caveats li { color: var(--warn); }
+
+.grade { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px;
+  border: 1px solid var(--border); white-space: nowrap; }
+.g-strong { color: var(--good); border-color: rgba(78,199,119,.45); }
+.g-moderate { color: var(--warn); border-color: rgba(255,180,84,.45); }
+.g-weak, .g-none, .g-insufficient { color: var(--muted); }
+
+.coverage { display: flex; flex-direction: column; gap: 6px; }
+.cov-row { display: flex; gap: 12px; align-items: baseline; font-size: 12.5px;
+  padding: 7px 12px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; }
+.cov-dim { font-weight: 650; min-width: 90px; }
+.cov-reason { color: var(--muted); flex: 1; }
+
+.cmp-hint { font-size: 12.5px; line-height: 1.6; margin: 0 0 12px; }
+.cmp-table .cmp-label { font-weight: 600; }
+.cmp-table small { font-size: 11px; }
+/* 方向着色由 JS 按指标的 higher_is_better 决定，CSS 只管好/坏两种颜色。 */
+.up-good { color: var(--good); }
+.down-bad { color: var(--err); }
+.guards { display: flex; gap: 4px; justify-content: flex-end; }
+.guard { font-size: 10.5px; padding: 1px 5px; border-radius: 5px;
+  border: 1px solid var(--border); color: var(--muted); cursor: help; }
+.guard-bad { color: var(--err); border-color: rgba(255,107,107,.45); }
