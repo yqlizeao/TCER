@@ -1,5 +1,9 @@
 ![Fable 5 Verified](img/Fable-5_Verified.png)
 
+<p align="center">
+  <img src="img/tcer_logo.png" width="200" alt="TCER">
+</p>
+
 # TCER
 
 > **Token-to-Code Efficiency Ratio** — 度量 AI 编程效率的离线分析工具
