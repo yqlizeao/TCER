@@ -25,7 +25,7 @@ def test_session_loc_write_edit_multiedit(tmp_path):
         ("Edit", {"file_path": "a.py", "old_string": "a\nb",            # 2 → 4
                   "new_string": "A\nB\nC\nD"}),                          # +2
         ("Write", {"file_path": "README.md", "content": "x\ny"}),       # +2
-        ("Edit", {"file_path": "notes.txt", "old_string": "p",         # non-code → skipped
+        ("Edit", {"file_path": "notes.txt", "old_string": "p",         # text → now counts (+2)
                   "new_string": "q\nr\ns"}),
         ("MultiEdit", {"file_path": "a.py", "edits": [
             {"old_string": "A", "new_string": "A1\nA2"},               # +1
@@ -33,9 +33,9 @@ def test_session_loc_write_edit_multiedit(tmp_path):
         ]}),
     ])
     added, deleted = loc.session_loc(f)
-    assert added == 8
+    assert added == 10   # notes.txt (+2) now counts as planner-text output
     assert deleted == 2
-    assert loc.net_loc(f) == 6
+    assert loc.net_loc(f) == 8
     # First Write to each path is F1-exposed (unseen) until originalFile arrives.
     sl = loc.session_loc_full(f)
     assert sl.unseen_writes == 2  # a.py + README.md
