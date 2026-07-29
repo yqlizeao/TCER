@@ -239,6 +239,10 @@ class SelectableLabel(tk.Text):
         self.configure(state="disabled")
         # 右键「复制全文」兜底：长消息拖选不便时一键复制。
         self.bind("<Button-3>", self._copy_menu, add="+")
+        # 构造时尚未布局(pack 前 winfo_width=1 → count 把每字算成一行)，
+        # 首次 pack 获得真实宽度时由 <Configure> 重算修正。
+        self._last_width = -1
+        self.bind("<Configure>", self._on_configure, add="+")
         self._auto_height()
 
     def set_text(self, text: str) -> None:
@@ -248,6 +252,12 @@ class SelectableLabel(tk.Text):
         self.tag_add("all", "1.0", "end")
         self.configure(state="disabled")
         self._auto_height()
+
+    def _on_configure(self, event) -> None:
+        # 仅宽度变化时重算;height 自身变化触发的 Configure 被忽略,避免递归。
+        if event.width != self._last_width:
+            self._last_width = event.width
+            self._auto_height()
 
     def _auto_height(self) -> None:
         """按 wrap 后的实际视觉行数撑高，displaylines+1 余量避免末行被裁。"""
