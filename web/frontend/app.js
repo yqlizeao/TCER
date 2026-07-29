@@ -24,12 +24,14 @@ async function api(path, opts = {}) {
 }
 
 // ---- 指标定义（前端唯一展示源，与后端字段名对齐）-------------------------
+// CTEI 不在此列：它是单会话指标（NCPI 以当前代码库行数为分母），聚合后必然虚高，
+// 桌面端在聚合报告里已置空，服务端 _agg_metrics 也不再产出，前端必须一致。
 const METRICS = [
   { key: "tcer", name: "TCER 效率", unit: "行/百万Token", fmt: "float2" },
-  { key: "ctei", name: "CTEI 综合分", unit: "", fmt: "float3" },
   { key: "net_loc", name: "净增行", unit: "行", fmt: "int" },
   { key: "total_tokens", name: "总 Token", unit: "", fmt: "tok" },
   { key: "cost_usd", name: "成本", unit: "USD", fmt: "money" },
+  { key: "cpe", name: "成本/千行", unit: "USD", fmt: "money" },
   { key: "churn_ratio", name: "返工率", unit: "", fmt: "pct" },
   { key: "chr", name: "缓存命中率", unit: "", fmt: "pct" },
   { key: "read_before_write", name: "先读后写率", unit: "", fmt: "pct" },
@@ -42,10 +44,12 @@ function fmtVal(fmt, v) {
   if (v === null || v === undefined) return "—";
   switch (fmt) {
     case "int": return Math.round(v).toLocaleString();
+    case "float1": return Number(v).toFixed(1);
     case "float2": return Number(v).toFixed(2);
     case "float3": return Number(v).toFixed(3);
     case "pct": return (v * 100).toFixed(1) + "%";
-    case "money": return "$" + Number(v).toFixed(2);
+    // 差值可能为负，符号必须在 $ 之前（"-$0.33" 而不是 "$-0.33"）
+    case "money": return (v < 0 ? "-$" : "$") + Math.abs(Number(v)).toFixed(2);
     case "tok": return fmtCompact(v);
     case "M": return (v / 1e6).toFixed(2) + "M";
     default: return String(v);
@@ -68,6 +72,12 @@ const state = {
   sessStart: "", sessEnd: "",
   activeSession: null,
   filterOptions: { persons: [], projects: [], models: [] },
+  // 决策实验室：默认 30 天（比总览的 7 天长，队列对比需要样本量）
+  insDays: 30,
+  cmpDays: 30,
+  cmpDim: "model",
+  cmpMetric: "tcer",
+  labMeta: null,
 };
 
 function rangeParams(days) {
@@ -265,7 +275,7 @@ const DETAIL_COLS = [
   { key: "net_loc", name: "净增行", fmt: "int" },
   { key: "cost_usd", name: "成本", fmt: "money" },
   { key: "tcer", name: "TCER", fmt: "float2" },
-  { key: "ctei", name: "CTEI", fmt: "float3" },
+  { key: "cpe", name: "成本/千行", fmt: "money" },
   { key: "chr", name: "缓存命中", fmt: "pct" },
   { key: "churn_ratio", name: "返工率", fmt: "pct" },
   { key: "read_before_write", name: "先读后写", fmt: "pct" },
@@ -583,6 +593,165 @@ function closeAllDropdowns() {
 document.addEventListener("click", closeAllDropdowns);
 
 // =====================================================================
+//  决策实验室（行动建议 / 队列对比）
+// =====================================================================
+const GRADE_CLASS = {
+  strong: "g-strong", moderate: "g-moderate", weak: "g-weak",
+  none: "g-none", insufficient: "g-insufficient",
+};
+const SEVERITY_LABEL = { high: "重要", medium: "值得看", low: "参考", info: "信息" };
+
+// days=0 表示「全部」——不带时间参数，让后端取全量。
+function labRange(days) {
+  return days ? rangeParams(days) : {};
+}
+
+function labQuery(days, extra = {}) {
+  return new URLSearchParams({ ...labRange(days), ...extra }).toString();
+}
+
+// ---- 行动建议 -------------------------------------------------------------
+async function loadInsights() {
+  const box = $("ins-list");
+  box.innerHTML = `<div class="placeholder">分析中…</div>`;
+  let data;
+  try {
+    data = await api("/api/insights?" + labQuery(state.insDays));
+  } catch (err) {
+    box.innerHTML = `<div class="placeholder">${esc(err.message)}</div>`;
+    return;
+  }
+  $("ins-caveat").innerHTML =
+    `<strong>读之前先看这句：</strong>${esc(data.caveat)}`;
+
+  if (!data.findings.length) {
+    box.innerHTML = `<div class="placeholder">
+      当前筛选范围内（${data.sessions_analyzed} 个会话）没有达到证据门槛的结论。<br>
+      单个取值至少需要 ${data.min_sessions} 个会话，且效应的 95% 置信区间不跨 0。<br>
+      <span class="muted">空结论是正常状态，不是故障——继续上传数据即可。</span>
+    </div>`;
+  } else {
+    box.innerHTML = data.findings.map(renderFinding).join("");
+  }
+
+  const cov = data.coverage || [];
+  $("ins-coverage").innerHTML = cov.length
+    ? cov.map((c) => `<div class="cov-row">
+        <span class="cov-dim">${esc(c.dimension_label)}</span>
+        <span class="cov-reason">${esc(c.reason)}</span>
+        <span class="muted">${esc(c.detail || "")}</span>
+      </div>`).join("")
+    : `<div class="placeholder">所有维度都已给出结论。</div>`;
+}
+
+function renderFinding(f) {
+  const ev = f.evidence.map((e) => `<li>${esc(e)}</li>`).join("");
+  const cav = (f.caveats || []).map((c) => `<li>${esc(c)}</li>`).join("");
+  return `<article class="finding sev-${esc(f.severity)}">
+    <header>
+      <span class="sev-tag">${esc(SEVERITY_LABEL[f.severity] || f.severity)}</span>
+      <h3>${esc(f.title)}</h3>
+      <span class="grade ${GRADE_CLASS[f.grade] || ""}">${esc(f.grade_label)}</span>
+    </header>
+    <p class="action"><strong>建议：</strong>${esc(f.action)}</p>
+    <details open><summary>证据</summary><ul>${ev}</ul></details>
+    ${cav ? `<details class="caveats"><summary>但要注意</summary><ul>${cav}</ul></details>` : ""}
+  </article>`;
+}
+
+// ---- 队列对比 -------------------------------------------------------------
+async function loadCompareMeta() {
+  if (state.labMeta) return state.labMeta;
+  state.labMeta = await api("/api/dimensions");
+  const dimSel = $("cmp-dim");
+  dimSel.innerHTML = state.labMeta.dimensions
+    .map((d) => `<option value="${esc(d.key)}">${esc(d.label)}${d.multi ? "（用/未用）" : ""}</option>`)
+    .join("");
+  const mSel = $("cmp-metric");
+  mSel.innerHTML = state.labMeta.metrics
+    .map((m) => `<option value="${esc(m.key)}">${esc(m.label)}</option>`).join("");
+  dimSel.value = state.cmpDim;
+  mSel.value = state.cmpMetric;
+  dimSel.addEventListener("change", () => { state.cmpDim = dimSel.value; loadCompare(); });
+  mSel.addEventListener("change", () => { state.cmpMetric = mSel.value; loadCompare(); });
+  return state.labMeta;
+}
+
+async function loadCompare() {
+  const box = $("cmp-body");
+  box.innerHTML = `<div class="placeholder">计算中…</div>`;
+  await loadCompareMeta();
+  let rep;
+  try {
+    rep = await api("/api/compare?" + labQuery(state.cmpDays, {
+      dimension: state.cmpDim, metric: state.cmpMetric,
+    }));
+  } catch (err) {
+    box.innerHTML = `<div class="placeholder">${esc(err.message)}</div>`;
+    return;
+  }
+  $("cmp-caveat").innerHTML = `<strong>口径说明：</strong>${esc(rep.caveat)}`;
+  if (!rep.cohorts.length) {
+    box.innerHTML = `<div class="placeholder">该维度在当前范围内没有取值。</div>`;
+    return;
+  }
+  const contrast = rep.multi ? "未使用的会话" : "其余会话";
+  const dirHint = rep.higher_is_better ? "越高越好" : "越低越好";
+  box.innerHTML = `
+    <p class="muted cmp-hint">
+      对比对象：每个队列 vs ${contrast}；指标「${esc(rep.metric_label)}」${dirHint}。
+      「分层后效应」已控制任务类型与会话规模；与「未分层」的差距就是混杂因素的大小。
+    </p>
+    <div class="table-wrap"><table class="grid cmp-table">
+      <thead><tr>
+        <th>${esc(rep.dimension_label)}</th><th>会话数</th>
+        <th>中位数</th><th>四分位区间</th>
+        <th>分层后效应</th><th>95% 区间</th><th>未分层差异</th>
+        <th>结论</th><th>质量护栏</th>
+      </tr></thead>
+      <tbody>${rep.cohorts.map((c) => renderCohortRow(c, rep)).join("")}</tbody>
+    </table></div>`;
+}
+
+function renderCohortRow(c, rep) {
+  const f = rep.fmt;
+  const s = c.stats;
+  const iqr = (s.p25 == null) ? "—" : `${fmtVal(f, s.p25)} ~ ${fmtVal(f, s.p75)}`;
+  const ci = (c.ci_low == null) ? "—"
+    : `${fmtVal(f, c.ci_low)} ~ ${fmtVal(f, c.ci_high)}`;
+  // 「好/坏」按指标方向着色，表格本身不需要知道哪个方向是好的。
+  // 只有结论性队列才上色——给一个「无显著差异 / 样本不足」的效应值涂绿，
+  // 等于把噪声画成了结论。
+  const conclusive = c.grade === "strong" || c.grade === "moderate";
+  const dir = (!conclusive || c.diff_oriented == null) ? "muted"
+    : (c.diff_oriented > 0 ? "up-good" : "down-bad");
+  const eff = c.diff == null ? "—"
+    : `<span class="${dir}">${fmtVal(f, c.diff)}${c.rel_diff != null
+        ? ` <small>(${(c.rel_diff * 100).toFixed(0)}%)</small>` : ""}</span>`;
+  const naive = c.naive_diff == null ? "—"
+    : `${fmtVal(f, c.naive_diff)}${c.naive_rel_diff != null
+        ? ` <small>(${(c.naive_rel_diff * 100).toFixed(0)}%)</small>` : ""}`;
+  const guards = Object.values(c.guardrails || {}).map((g) => {
+    const bad = g.grade !== "insufficient" && g.grade !== "none" && (g.diff_oriented || 0) < 0;
+    return `<span class="guard ${bad ? "guard-bad" : ""}" title="${esc(g.label)}：${
+      fmtVal(g.fmt, g.median)}（其余 ${fmtVal(g.fmt, g.contrast_median)}）">${
+      esc(g.label.slice(0, 4))}</span>`;
+  }).join("");
+  const strat = c.stratified ? `${c.strata_used} 层` : "未分层";
+  return `<tr>
+    <td class="cmp-label">${esc(c.label)}</td>
+    <td>${c.sessions}</td>
+    <td>${fmtVal(f, s.median)}</td>
+    <td class="muted">${iqr}</td>
+    <td>${eff} <small class="muted">${strat}</small></td>
+    <td class="muted">${ci}</td>
+    <td class="muted">${naive}</td>
+    <td><span class="grade ${GRADE_CLASS[c.grade] || ""}">${esc(c.grade_label)}</span></td>
+    <td class="guards">${guards}</td>
+  </tr>`;
+}
+
+// =====================================================================
 //  路由 / 视图切换
 // =====================================================================
 const VIEWS = {
@@ -591,6 +760,8 @@ const VIEWS = {
   "detail-person": () => { showView("view-detail"); loadDetail("person"); },
   "detail-model": () => { showView("view-detail"); loadDetail("model"); },
   sessions: () => { showView("view-sessions"); setupSessionFilters(); loadSessions(); },
+  insights: () => { showView("view-insights"); loadInsights(); },
+  compare: () => { showView("view-compare"); loadCompare(); },
 };
 
 function showView(id) {
@@ -690,12 +861,16 @@ $("side-toggle").addEventListener("click", () => {
 });
 $$(".menu-item").forEach((m) =>
   m.addEventListener("click", () => navigate(m.dataset.view)));
-$$("#range-tabs button").forEach((b) => b.addEventListener("click", () => {
-  $$("#range-tabs button").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active");
-  state.days = Number(b.dataset.days);
-  loadDashboard();
-}));
+function bindRangeTabs(containerId, onPick) {
+  $$("#" + containerId + " button").forEach((b) => b.addEventListener("click", () => {
+    $$("#" + containerId + " button").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    onPick(Number(b.dataset.days));
+  }));
+}
+bindRangeTabs("range-tabs", (d) => { state.days = d; loadDashboard(); });
+bindRangeTabs("ins-range", (d) => { state.insDays = d; loadInsights(); });
+bindRangeTabs("cmp-range", (d) => { state.cmpDays = d; loadCompare(); });
 
 // 图表点击放大（卡片标题与图表区域都可触发）
 ["person", "project", "model"].forEach((dim) => {

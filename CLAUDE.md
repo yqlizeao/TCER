@@ -98,7 +98,9 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以�
 12. **Claude 单次扫描**：`reader.scan_session` 一趟 JSONL 同时产出 TokenUsage + SessionLoc；`analyze` 进程内按 path 缓存，避免 usage 与 LOC 双读。GUI `reanalyze` 用 `cancel_event` 协作取消上一次分析。
 13. **high_churn 合并**：子代理折叠/项目聚合用 `loc.merge_session_locs`，按合并后的 `file_edit_counts` 重算 `high_churn_files`（同路径不重复计）。
 14. **mtime 缓存**：`tcer.core.file_cache` 按 `(path, mtime_ns, size, variant)` 缓存 scan/usage；可取消扫描不入缓存。测试可用 `file_cache.clear()`。
-15. **用户消息懒加载**：分析只计 `user_msgs` 数量；Claude 与 Codex 一样弹窗/上传时再 `read_user_messages`（含 subagent 文件）。
+15. **`tool_variants` 补录技能身份**：`tool_calls` 按工具名计数，但 `Skill`/`Task`/`Agent` 三者的工具名不含被调用的技能/子代理，`reader.record_tool_variant` 从入参补录 `"Skill:dataviz"` / `"Agent:Explore"` → 次数。**仅 Claude 源**（其余 CLI 未以已解析的形状暴露该身份）；MCP 服务器不需要它——`mcp__<server>__<tool>` 键本身就带服务器名，四源通用。web 端据此构建 Skill / 子代理 / MCP 三个对比维度。
+16. **web 聚合口径与桌面端一致**：`web/backend/db._agg_metrics` 的比率一律「分子和 ÷ 分母和」重算（返工率按 `code_added` 加权、工具错误率按工具调用数加权），**不取算术平均**（否则 5k 与 2M token 的会话等权，触发 Simpson 悖论）；无分母的比率退化为中位数并由 `_stat` 标注。聚合层同样**不产出 CTEI**（见规则 9）。决策实验室（`web/backend/analysis.py`）在此之上做「任务类型 × 会话规模」分层 + bootstrap 区间 + 证据分级，区间跨 0 一律不排名。
+17. **用户消息懒加载**：分析只计 `user_msgs` 数量；Claude 与 Codex 一样弹窗/上传时再 `read_user_messages`（含 subagent 文件）。
 
 > 完整架构说明：[doc/architecture.md](doc/architecture.md)
 > 数据格式细节：[doc/data-format.md](doc/data-format.md)

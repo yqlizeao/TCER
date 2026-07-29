@@ -219,6 +219,14 @@ def report_row_dict(r: SessionReport) -> dict:
         "files_touched": r.files_touched,
         "search_edit_ratio": r.search_edit_ratio,
         "read_before_write": r.read_before_write,
+        # Raw tool-name → call count. Keys stay verbatim (``Skill``,
+        # ``mcp__server__tool``, …) so downstream consumers can derive the
+        # Skill / MCP / plugin dimensions; CSV keeps ignoring it (dict column).
+        "tool_calls": dict(sorted(u.tool_calls.items())),
+        # "<Tool>:<variant>" → count (``Skill:dataviz``, ``Agent:Explore``).
+        # Claude sessions only for now — the other CLIs don't expose the skill /
+        # subagent identity in a shape the readers already parse.
+        "tool_variants": dict(sorted(u.tool_variants.items())),
         "models": sorted(u.models),
         "models_label": fmt.models_label(u),
         "cost_by_model": {m: round(c, 6) for m, c in sorted(metrics.cost_by_model(u).items())},
