@@ -858,8 +858,10 @@ class TcerGui:
             print("error: tkinter is not available in this Python build.")
             return 1
         _enable_windows_hidpi()
+        _set_windows_app_id()
         root = tk.Tk()
         _apply_tk_scaling(root)
+        _set_window_icon(root)
         cls(root)
         root.mainloop()
         return 0
@@ -878,6 +880,23 @@ def _enable_windows_hidpi() -> None:
         pass
 
 
+def _set_windows_app_id() -> None:
+    """设置 AppUserModelID，让 Windows 任务栏显示本程序图标。
+
+    Tk 程序默认无 AppID，任务栏按 ``python.exe`` 分组、显示默认 Python 图标——
+    即使 ``iconbitmap`` 已设好窗口图标。显式设 AppID 后任务栏才认本程序自己的
+    图标（与标题栏一致）。必须在创建 Tk 之前调用。
+    """
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("leo.TCER.app")
+    except (OSError, AttributeError):
+        pass
+
+
 def _apply_tk_scaling(root) -> None:
     """按实际 DPI 设置 Tk 缩放，点单位字体随之放大到物理正确尺寸。"""
     try:
@@ -886,3 +905,30 @@ def _apply_tk_scaling(root) -> None:
             root.tk.call("tk", "scaling", dpi / 72.0)
     except tk.TclError:
         pass
+
+
+def _set_window_icon(root) -> None:
+    """设置窗口图标（标题栏 + 任务栏）。
+
+    Windows 用多尺寸 ``.ico``（``iconbitmap``）——任务栏才会正确显示；
+    ``iconphoto`` 在 Windows 任务栏常失效、仍显默认 Tk 羽毛图标。其他平台
+    fallback 到 PNG ``iconphoto``。PhotoImage 存 ``root._tcer_icon`` 持引用防 GC。
+    """
+    import os
+    import sys
+    assets = os.path.join(os.path.dirname(__file__), "assets")
+    if sys.platform == "win32":
+        ico = os.path.join(assets, "tcer_logo.ico")
+        if os.path.isfile(ico):
+            try:
+                root.iconbitmap(default=ico)
+                return
+            except tk.TclError:
+                pass
+    png = os.path.join(assets, "tcer_logo.png")
+    if os.path.isfile(png):
+        try:
+            root._tcer_icon = tk.PhotoImage(file=png)
+            root.iconphoto(True, root._tcer_icon)
+        except tk.TclError:
+            pass
