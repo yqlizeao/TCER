@@ -1046,8 +1046,8 @@ class CteiRankingView:
 
         sb = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")  # 常驻细条：先占右侧
         self._tree.pack(fill="both", expand=True)
-        sb.pack_forget()  # hidden; mousewheel handles scrolling
 
         # Mousewheel on enter/leave (same pattern as project/session columns)
         self._unbind_wheel = None

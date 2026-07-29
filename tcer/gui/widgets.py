@@ -55,29 +55,20 @@ class ScrollFrame:
         self.inner = tk.Frame(self.canvas, bg=bg)
         self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self._reset_pending = False
-        # 按需显示的深色滚动条：内容装得下就隐藏（可视位置提示 + 拖拽滚动）。
+        # 常驻极简滚动条：始终显示（内容未占满时滑块满槽=到底了），不再时隐时现。
         self.vbar = _ttk.Scrollbar(parent, orient="vertical",
                                    command=self.canvas.yview)
-        self._vbar_visible = False
         self.canvas.configure(yscrollcommand=self._on_scroll_set)
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_resize)
         self._unbind_wheel = None
         self.canvas.bind("<Enter>", self._on_enter)
         self.canvas.bind("<Leave>", self._on_leave)
+        self.vbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
 
     def _on_scroll_set(self, first, last) -> None:
-        try:
-            need = not (float(first) <= 0.0 and float(last) >= 1.0)
-        except (TypeError, ValueError):
-            need = False
-        if need and not self._vbar_visible:
-            self.vbar.pack(side="right", fill="y", before=self.canvas)
-            self._vbar_visible = True
-        elif not need and self._vbar_visible:
-            self.vbar.pack_forget()
-            self._vbar_visible = False
+        # 常驻：只更新滑块位置/长度，不再按需显隐。
         self.vbar.set(first, last)
 
     def _on_resize(self, event) -> None:
@@ -90,8 +81,14 @@ class ScrollFrame:
 
     def _on_enter(self, _event=None) -> None:
         from .platform import bind_mousewheel
-        self._unbind_wheel = bind_mousewheel(
-            self.canvas, lambda units: self.canvas.yview_scroll(units, "units"))
+        self._unbind_wheel = bind_mousewheel(self.canvas, self._wheel_scroll)
+
+    def _wheel_scroll(self, units) -> None:
+        # 内容未溢出时不滚，避免「没占满还能滑出空白」。
+        first, last = self.canvas.yview()
+        if last - first >= 1.0:
+            return
+        self.canvas.yview_scroll(units, "units")
 
     def _on_leave(self, _event=None) -> None:
         if self._unbind_wheel:
@@ -212,6 +209,63 @@ class MetricCell:
             except (ValueError, TypeError):
                 fg = theme.VALUE_NEUTRAL
         self.value.config(fg=fg)
+
+
+class SelectableLabel(tk.Text):
+    """Label 外观的可选中文本：``state="disabled"`` 的 tk.Text 仍可拖选 + Ctrl+C 复制。
+
+    tk.Label 无法选中复制；用户消息这类长文本需要可拷出，故用 Text 伪装成
+    Label（flat / 无边框 / 同 bg-fg-font / 按 ``width`` 字符列自动换行）。仅用于
+    静态展示文本 —— 插入后置 disabled，不可编辑但可选中复制。
+
+    换行由 ``width``（字符列）决定，与像素宽度无关 —— **不要从像素反推字符列**
+    （未布局时 ``winfo_width()=1`` 会把行数算爆）。定宽容器里给一个显式 width，
+    再用 ``count(displaylines)`` 一次性算出高度即可，无需 ``<Configure>`` 动态重算。
+    """
+
+    def __init__(self, parent, *, text="", bg=theme.PANEL, fg=theme.FG,
+                 font=None, justify="left", width=60, padx=0, pady=0, **kw):
+        super().__init__(parent, wrap="word", bg=bg, fg=fg,
+                         font=font or theme.FONT_UI, relief="flat", bd=0,
+                         highlightthickness=0, padx=padx, pady=pady,
+                         width=width, height=1, cursor="arrow",
+                         selectbackground=theme.HOVER_ACCENT,
+                         selectforeground="#ffffff",
+                         inactiveselectbackground=theme.HOVER_ACCENT,
+                         exportselection=True, **kw)
+        self.tag_configure("all", justify=justify)
+        self.insert("1.0", text)
+        self.tag_add("all", "1.0", "end")
+        self.configure(state="disabled")
+        # 右键「复制全文」兜底：长消息拖选不便时一键复制。
+        self.bind("<Button-3>", self._copy_menu, add="+")
+        self._auto_height()
+
+    def set_text(self, text: str) -> None:
+        self.configure(state="normal")
+        self.delete("1.0", "end")
+        self.insert("1.0", text)
+        self.tag_add("all", "1.0", "end")
+        self.configure(state="disabled")
+        self._auto_height()
+
+    def _auto_height(self) -> None:
+        """按 wrap 后的实际视觉行数撑高，displaylines+1 余量避免末行被裁。"""
+        self.update_idletasks()
+        n = self.count("1.0", "end-1c", "displaylines")
+        lines = n[0] if n and n[0] else 1
+        self.configure(height=max(1, lines + 1))
+
+    def _copy_menu(self, event=None) -> None:
+        menu = tk.Menu(self, tearoff=0, bg=theme.PANEL, fg=theme.FG,
+                       activebackground=theme.HOVER_BG, activeforeground=theme.FG,
+                       borderwidth=0)
+        menu.add_command(label="复制", command=self._copy_all)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _copy_all(self) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(self.get("1.0", "end-1c"))
 
 
 def flat_button(parent, text, command=None, *, primary=False, padx=None, **kw):

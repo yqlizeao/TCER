@@ -14,7 +14,7 @@ from tcer.core import format as fmt
 from tcer.core import metrics
 from . import theme
 from .metric_defs import CONCEPT_NOTES, GROUPS, METRIC_BY_KEY
-from .widgets import ScrollFrame, Tooltip, flat_button, new_window
+from .widgets import ScrollFrame, SelectableLabel, Tooltip, flat_button, new_window
 
 
 # 共享弹窗外壳在 widgets.new_window；保留旧名兼容既有调用。
@@ -586,9 +586,9 @@ class UserMsgsPopup:
                          font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
 
                 # Message text
-                tk.Label(card, text=txt, bg="#2a2a2e", fg=theme.FG,
-                         font=theme.FONT_UI, wraplength=540, justify="left",
-                         anchor="w").pack(fill="x", pady=(4, 0))
+                SelectableLabel(card, text=txt, bg="#2a2a2e", fg=theme.FG,
+                                font=theme.FONT_UI, justify="left",
+                                width=60).pack(fill="x", pady=(4, 0))
 
 
 class FilesTouchedPopup:
@@ -1026,7 +1026,7 @@ class UploadDialog:
             bg="#1e1e1e", fg=theme.FG, relief="flat", highlightthickness=1,
             highlightbackground="#3e3e42", selectbackground=theme.ACCENT,
             selectforeground="#ffffff", font=theme.FONT_UI, activestyle="none")
-        lb_sb = tk.Scrollbar(lb_frame, orient="vertical", command=self._proj_lb.yview)
+        lb_sb = ttk.Scrollbar(lb_frame, orient="vertical", command=self._proj_lb.yview)
         self._proj_lb.configure(yscrollcommand=lb_sb.set)
         self._proj_lb.pack(side="left", fill="both", expand=True)
         lb_sb.pack(side="right", fill="y")

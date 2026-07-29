@@ -16,11 +16,26 @@ from tcer.core.parse_util import as_int as _as_int
 from tcer.core.paths import claude_config_dirs
 from tcer.core import pricing
 
-# Title-extraction noise to skip, matching cc-switch's filters.
-_TITLE_NOISE_PREFIXES = ("<local-command-caveat", "<command-name>", "<ide_opened_file>",
-                         "<command-message>", "/clear")
-# After tag removal, skip these system-generated phrases
-_TITLE_NOISE_AFTER_CLEAN = ("The user opened the file", "You are an expert")
+# User-role texts that Claude Code injects (not real human input). These
+# ``<…>`` tags / markers are matched on the RAW text BEFORE :func:`_strip_tags`
+# removes the tags — matching after stripping erases the tags and lets them
+# through (observed ~17% of popup rows were injections before this fix).
+_TITLE_NOISE_PREFIXES = (
+    "<local-command-caveat", "<local-command-stdout", "<local-command-stderr",
+    "<command-name>", "<command-message>",
+    "<ide_opened_file>", "<ide_selection>",
+    "<task-notification>", "<system-reminder>",
+    "/clear",
+    "[Request interrupted",
+)
+# After tag removal, skip these system-generated phrases (covers bodies whose
+# opening tag was consumed elsewhere, plus plain-text injections such as the
+# compact-continuation preamble).
+_TITLE_NOISE_AFTER_CLEAN = (
+    "The user opened the file", "The user selected the lines",
+    "This session is being continued from a previous conversation",
+    "You are an expert",
+)
 TITLE_MAX_CHARS = 80
 
 _TAG_RE = re.compile(r'<[^>]+>')
@@ -37,6 +52,20 @@ _CORRECTION_RE = re.compile(
 def _strip_tags(txt: str) -> str:
     """Remove XML/HTML-like tags (e.g. ``<ide_opened_file>…</ide_opened_file>``)."""
     return _TAG_RE.sub('', txt).strip()
+
+
+def _is_user_noise(txt: str) -> bool:
+    """Whether a user-role text is Claude-Code-injected, not real human input.
+
+    Two-stage check mirroring title extraction: ``<…>`` noise prefixes are
+    matched on the RAW text *before* tag stripping — the prefixes ARE tags, so
+    stripping first would delete them and always miss (the pre-fix bug).
+    Then the cleaned text is checked against post-strip phrases.
+    """
+    if txt.startswith(_TITLE_NOISE_PREFIXES):
+        return True
+    cleaned = _strip_tags(txt)
+    return cleaned.startswith(_TITLE_NOISE_AFTER_CLEAN)
 
 
 def discover_jsonl(project_hash: str | None = None, *,
@@ -231,9 +260,10 @@ def read_user_messages(path: Path) -> list[str]:
         if not is_real_user:
             continue
         txt = extract_text(content).strip()
+        if not txt or _is_user_noise(txt):
+            continue
+        txt = _strip_tags(txt)
         if txt:
-            txt = _strip_tags(txt)
-        if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
             messages.append(txt[:500])
     return messages
 
@@ -423,14 +453,12 @@ def _scan_session_uncached(
                     u.slash_command_count += 1
                 elif _CORRECTION_RE.search(txt[:200]):
                     u.correction_msg_count += 1
-                if (u.first_prompt_chars == 0 and txt
-                        and not txt.startswith(_TITLE_NOISE_PREFIXES)):
+                if u.first_prompt_chars == 0 and txt and not _is_user_noise(txt):
                     u.first_prompt_chars = len(txt)
-                if include_user_texts:
-                    if txt:
-                        txt = _strip_tags(txt)
-                    if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
-                        u.user_message_texts.append(txt[:500])
+                if include_user_texts and txt and not _is_user_noise(txt):
+                    cleaned = _strip_tags(txt)
+                    if cleaned:
+                        u.user_message_texts.append(cleaned[:500])
             # Count tool_result errors (from ALL user-role messages)
             if isinstance(content, list):
                 for item in content:
@@ -722,11 +750,10 @@ def read_session_meta(path: Path) -> SessionMeta:
             msg = obj.get("message")
             if isinstance(msg, dict) and msg.get("role") == "user":
                 txt = extract_text(msg.get("content")).strip()
-                if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
+                if txt and not _is_user_noise(txt):
                     # Remove all XML-like tags (e.g. <ide_opened_file>...</ide_opened_file>)
                     txt = _strip_tags(txt)
-                    # Skip system-generated phrases after cleaning
-                    if txt and not txt.startswith(_TITLE_NOISE_AFTER_CLEAN):
+                    if txt:
                         fallback_title = txt
 
     # Priority: newest tail ai-title > head ai-title > first user message.

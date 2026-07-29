@@ -67,6 +67,26 @@ def test_read_conversation_coalesces_grok_chunks(tmp_path):
     assert convo[4]["text"] == "内容"
 
 
+def test_read_user_messages_coalesces_consecutive_chunks(tmp_path):
+    """A user message split across consecutive user_message_chunk updates is
+    ONE popup row, not many — matches aggregate_usage's user_msgs coalescing.
+    Any non-user update ends the run; a later chunk starts a new message.
+    """
+    p = _write_jsonl(tmp_path / "updates.jsonl", [
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "实现 "}}),
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "Grok"}}),
+        # any non-user update ends the user-chunk run
+        _notif(_T0 + 1, {"sessionUpdate": "turn_completed", "prompt_id": "p1",
+                         "usage": {"inputTokens": 10, "outputTokens": 5}}),
+        # a second message after the boundary
+        _notif(_T0 + 2, {"sessionUpdate": "user_message_chunk",
+                         "content": {"type": "text", "text": "再来一条"}}),
+    ])
+    assert grok_reader.read_user_messages(p) == ["实现 Grok", "再来一条"]
+
+
 def _grok_lines() -> list[dict]:
     """A realistic single-turn Grok session: msg → thought → read → edit → error → turn_completed."""
     return [
