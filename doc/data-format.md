@@ -19,7 +19,7 @@ Claude Code 将所有会话数据存储在 `~/.claude/` 目录下（Windows: `%U
 
 ### 自定义配置目录（`.zclaude` 等）
 
-启动 Claude Code 时传 `CLAUDE_CONFIG_DIR=%USERPROFILE%\.zclaude` 会让它改用 `.zclaude`（结构同 `.claude`）存数据，常用于不污染 `.claude`。该环境变量只在 Claude 进程内，TCER 读不到，因此 TCER 用**结构指纹**自动发现：以规范目录（`CLAUDE_CONFIG_DIR` 或 `~/.claude`）为锚，扫描其父目录下所有含 `projects/<hash>/*.jsonl` 的兄弟目录，全部当作 Claude 根。`discover_jsonl(hash)` 与 `list_projects()` 跨所有根查找，**同一项目 hash 在多个配置目录里的会话合并**；只存在于自定义目录的项目也会出现。无需任何手动配置。
+启动 Claude Code 时传 `CLAUDE_CONFIG_DIR=%USERPROFILE%\.zclaude` 会让它改用 `.zclaude`（结构同 `.claude`）存数据，常用于不污染 `.claude`。该环境变量只在 Claude 进程内，TCER 读不到，因此 TCER 用**结构指纹**自动发现：以规范目录（`CLAUDE_CONFIG_DIR` 或 `~/.claude`）为锚，扫描其父目录下所有含 `projects/<hash>/*.jsonl` 的兄弟目录，全部当作 Claude 根。`list_projects()` 跨所有根查找，**同一项目 hash 在多个配置目录里各成一条**（`discover_jsonl(hash, roots=[根])` 按根分会话，不再跨根归并；`roots=None` 默认跨根 union 兼容 CLI）；只存在于自定义目录的项目也会出现。无需任何手动配置。
 
 ## Session 元数据（`sessions/<pid>.json`）
 
@@ -191,3 +191,63 @@ x.ai 的 grok build CLI 把会话持久化在 `~/.grok/sessions/`（`GROK_HOME` 
 
 `search_replace` / `write` 经与 Claude 相同的 `_LocAccumulator` 回放：`search_replace`→Edit（净增行差 + 自返工）、`write`→Write（`unseen_writes` / F1 同 Claude）。无编辑工具的会话 `net_loc=0`（已知零）。
 
+
+## omp 数据格式（Oh My Pi / omp）
+
+omp（[oh-my-pi](https://omp.sh)）把会话持久化在 `~/.omp/agent/sessions/`（`PI_CODING_AGENT_DIR` 重定位 agent 基目录、`PI_CONFIG_DIR` 重定位 `~/.omp` 根），按**目录编码的工作目录**分目录：
+
+```
+~/.omp/agent/sessions/<dir-encoded>/<ts>_<sessionId>.jsonl   # ★权威会话日志
+~/.omp/agent/sessions/<dir-encoded>/<ts>_<sessionId>/        # 子代理会话（同 stem 子目录）
+  *.jsonl
+~/.omp/agent/blobs/<sha256>      # 大字符串/图片外部化（未解析）
+```
+
+`<dir-encoded>`：cwd 在 home 内 → `-<相对>`；在 temp 内 → `-tmp-<相对>`；其他 → `--<绝对>--`（`/ \ :` 替换为 `-`）。
+
+### 会话 JSONL
+
+每行一个 `SessionEntry`（首行是定宽 `type:"title"` 标题槽，解析时跳过）：
+
+| type | 说明 | 关键字段 |
+|---|---|---|
+| `session` | 头（每文件一个） | `id` / `cwd` / `title` / `timestamp`(ISO-8601 字符串) / `version` |
+| `model_change` | 活动模型 | `model`（`"provider/modelId"`，计价剥前缀） |
+| `message` | 回合流 | `message.role` ∈ `user`/`assistant`/`toolResult` |
+| `custom` / `custom_message` / `compaction` / `mode_change` 等 | 忽略 | — |
+
+### Token 用量（`message.usage`，仅 assistant）
+
+每条 assistant 消息携带**一个** `usage`（一次 API 响应一个，无 Claude 多行重复），直接累加：
+
+```json
+"usage": { "input": 100, "output": 20, "cacheRead": 40, "cacheWrite": 10,
+           "totalTokens": 170, "cost": { "total": 0.01 } }
+"contextSnapshot": { "promptTokens": 1500 }   // 单回合全量输入 → peak_input
+"duration": 900, "ttft": 200                   // 回填 turn_stats.duration_ms / time_to_first_token_ms(+ttft_ms_samples)
+```
+
+- 语义同 Anthropic：`input` 不含缓存，`cacheRead`/`cacheWrite` 分列上报；无独立 reasoning token（并入输出）。
+- 全零 usage 的 assistant 计入 `empty_usage_skipped`，不虚增回合数。
+- `cost.total` 累加为 `reported_cost_usd`。
+
+### 内容块与工具结果
+
+assistant `content`：`thinking`（`thinking`/`thinkingSignature`）/ `text`（`text`）/ `toolCall`（`{id,name,arguments}`）。
+`toolResult` 消息：`{toolCallId,toolName,content,details,isError,timestamp}`；`isError=true` → `tool_errors` + `tool_errors_by_tool`。
+
+### 工具映射
+
+| omp 工具 | TCER 分类 |
+|---|---|
+| `read` / `write` / `edit`·`ast_edit` | Read / Write / Edit |
+| `grep`·`search` / `glob`·`find` / `bash`·`eval`·`ssh` | Grep / Glob / Bash |
+| `todo` / `task` / `web_search` / `ask` | TodoWrite / Task / WebSearch / AskUserQuestion |
+
+### LOC
+
+`write` 取 `arguments.content` + `details.resolvedPath`（unseen_writes 同 Grok）；`edit`/`ast_edit` 取 `details.{oldText,newText,path}` 经同一 `_LocAccumulator`（净增行差 + 自返工）。`details.snapshotsPruned`（无 oldText/newText）的 edit 跳过。无编辑工具的会话 `net_loc=0`。
+
+### 子代理折叠
+
+omp 子代理会话存于主文件同名的 `<stem>/` 子目录，`_is_subagent_file` 识别后由 `aggregate_usage`/`_loc_scan`/`read_user_messages` 合并入父（真实成本保留，不单独计 session）。

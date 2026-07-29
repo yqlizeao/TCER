@@ -196,6 +196,27 @@ def test_analyze_cancel_raises(tmp_path, monkeypatch):
         analyze.analyze_project(h, cancel_event=ev)
 
 
+def test_analyze_project_scopes_to_ref_root(tmp_path, monkeypatch):
+    """ref.config_root 限定 analyze 只见该根会话（跨根同 hash 不串）。"""
+    from tcer.core.models import ProjectRef
+    h = "c--GitHub-Demo"
+    root_a = tmp_path / ".claude"
+    root_b = tmp_path / ".zclaude"
+    _write_jsonl(root_a / "projects" / h / "SID-A.jsonl",
+                 [_assistant(_usage(100, 0, 0, 50), msg_id="ma",
+                             content=[{"type": "text", "text": "a"}])])
+    _write_jsonl(root_b / "projects" / h / "SID-B.jsonl",
+                 [_assistant(_usage(200, 0, 0, 50), msg_id="mb",
+                             content=[{"type": "text", "text": "b"}])])
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root_a))
+    paths.reset_claude_roots_cache()
+    ref_a = ProjectRef(source="claude", key=h, display_name=h, cwd=None,
+                       path=root_a / "projects" / h, config_root=root_a)
+    result = analyze.analyze_project(h, project_ref=ref_a, no_loc=True)
+    assert len(result.reports) == 1
+    assert result.reports[0].meta.path.stem == "SID-A"  # 只 root_a；root_b 的 SID-B 不串入
+
+
 def test_file_cache_invalidates_on_mtime(tmp_path):
     from tcer.core import file_cache
 

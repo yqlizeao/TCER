@@ -8,12 +8,13 @@
 | `tcer/core/codex_reader.py` | Codex JSONL 发现/解析、cwd 项目分组、token_count 聚合、工具调用/运行环境/上下文/限流/补丁事件统计、apply_patch LOC |
 | `tcer/core/opencode_reader.py` | OpenCode SQLite/旧 storage JSON 发现、project/session/message/part 读取、Token/工具/summary diff 聚合 |
 | `tcer/core/grok_reader.py` | Grok（grok build CLI）`updates.jsonl` ACP 流发现/解析、URL 编码 cwd 分组、`turn_completed` token 聚合、工具映射、search_replace LOC |
-| `tcer/core/paths.py` | 定位 `~/.claude`（含 `.zclaude` 等自定义 `CLAUDE_CONFIG_DIR` 兄弟目录自动识别）/ `~/.codex` / `~/.local/share/opencode` / `~/.grok`、项目哈希编解码、统一项目引用 |
+| `tcer/core/omp_reader.py` | omp（Oh My Pi）`~/.omp/agent/sessions` JSONL 发现/解析、header cwd 分组、`message.usage` 单响应聚合、子代理 `<stem>/` 折叠、edit/write LOC |
+| `tcer/core/paths.py` | 定位 `~/.claude`（含 `.zclaude` 等自定义 `CLAUDE_CONFIG_DIR` 兄弟目录自动识别）/ `~/.codex` / `~/.local/share/opencode` / `~/.grok` / `~/.omp`、项目哈希编解码、统一项目引用 |
 | `tcer/core/loc.py` | git-free 代码量统计：session_loc（会话内工具调用回放，含 originalFile F1 修正；不读磁盘） |
 | `tcer/core/metrics.py` | 全部公式：TCER/CHR/CPE/CAF/TTAF/TA-TCER/churn/CTEI(三因子) + 评级 + 逐模型成本 |
 | `tcer/core/pricing.py` | 逐模型计价：从 `tcer/config/model_pricing.json`（≈162 模型）解析 $/MTok |
 | `tcer/core/models.py` | 数据类：TokenUsage / ModelUsage / TurnStat / ToolOp / SessionMeta / SessionReport |
-| `tcer/core/analyze.py` | 编排层：Claude 独立路径（子代理折叠）+ 非 Claude 三源共享骨架 `_analyze_source_project` + `_SourceAdapter` 钩子（见下） |
+| `tcer/core/analyze.py` | 编排层：Claude 独立路径（子代理折叠）+ 非 Claude 四源共享骨架 `_analyze_source_project` + `_SourceAdapter` 钩子（见下） |
 | `tcer/core/parse_util.py` | 跨 reader 共享解析小工具（as_int / first_str） |
 | `tcer/core/file_cache.py` | 进程级 mtime/size LRU 缓存（scan/usage/loc） |
 | `tcer/core/format.py` | 纯值格式化器（千分位/百分比/时间戳/模型名） |
@@ -24,8 +25,18 @@
 
 ### 非 Claude 源的 SourceAdapter
 
-Codex / OpenCode / Grok 共享 `analyze._analyze_source_project` 一条「逐会话 → 聚合」流水线；源差异收敛为 `_SourceAdapter` 的六个钩子：`resolve`（项目解析）、`sessions`（会话句柄枚举——Codex/Grok 为文件 Path，OpenCode 为 session id）、`read_meta`、`usage_of`、`loc_of`、`session_key`。file_cache 的失效 key 在钩子内构造（如 Grok 必须并入 signals.json / events.jsonl 旁路文件签名）。**新增数据源 = 实现一个 adapter**。Claude 因子代理折叠与 cwd-keyed 扫描保持独立路径，但复用 `_mk_report` / `_MetricCtx` / LOC 聚合等共享件。
+Codex / OpenCode / Grok / omp 共享 `analyze._analyze_source_project` 一条「逐会话 → 聚合」流水线；源差异收敛为 `_SourceAdapter` 的六个钩子：`resolve`（项目解析）、`sessions`（会话句柄枚举——Codex/Grok 为文件 Path，OpenCode 为 session id）、`read_meta`、`usage_of`、`loc_of`、`session_key`（可选 `subagents_of` 统计折叠子代理数，omp 用之）。file_cache 的失效 key 在钩子内构造（如 Grok 必须并入 signals.json / events.jsonl 旁路文件签名）。**新增数据源 = 实现一个 adapter**。Claude 因子代理折叠与 cwd-keyed 扫描保持独立路径，但复用 `_mk_report` / `_MetricCtx` / LOC 聚合等共享件。
 
+
+## omp 支持
+
+omp（[oh-my-pi](https://omp.sh)）会话按 `~/.omp/agent/sessions/<dir-encoded>/<ts>_<sessionId>.jsonl` 发现（`PI_CODING_AGENT_DIR` 重定位 agent 基目录、`PI_CONFIG_DIR` 重定位 `~/.omp` 根），按 header `cwd` 聚合为项目。GUI 默认统一展示 Claude/Codex/OpenCode/Grok/omp 五源混合。
+
+omp 的权威日志是该 JSONL：一个有序 `SessionEntry` 事件流。Token 用量来自每条 assistant 消息的 `usage`（`{input,output,cacheRead,cacheWrite,totalTokens,cost:{total}}`，语义同 Anthropic）——一次 API 响应一个，无 Claude 多行重复，直接累加；`contextSnapshot.promptTokens` 作 peak_input；`duration`/`ttft` 回填逐回合时间线与 TTFT（含 p95 样本）。`model_change.model` 为 `"provider/modelId"`，`pricing.normalize` 经 `rsplit("/")` 剥前缀后按模型分桶。
+
+LOC 只从可解析的 `write`/`edit`/`ast_edit` 计算，经与 Claude 相同的 `_LocAccumulator` 回放：`write` 取 `arguments.content`+`details.resolvedPath`（unseen_writes）；`edit` 取 `details.{oldText,newText,path}`（净增行差 + 自返工）；`snapshotsPruned` 的 edit 跳过。无编辑工具的会话 `net_loc=0`。
+
+子代理折叠：omp 子代理会话存于主文件同名的 `<stem>/` 子目录，`_is_subagent_file` 识别后由 `aggregate_usage`/`_loc_scan`/`read_user_messages` 合并入父（真实成本保留，不单独计 session）；`_SourceAdapter.subagents_of` 钩子统计折叠数，file_cache key 并入子代理文件签名。
 ## GUI MVC 架构
 
 ```
@@ -106,7 +117,7 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 
 ### 自定义 Claude 配置目录的多根发现
 
-`CLAUDE_CONFIG_DIR` 是 Claude Code 的启动期参数（如 `.zclaude`），不在 TCER 进程环境里，故 TCER 无法直接读它。改为**结构指纹发现**：`paths.claude_config_dirs()` 以规范目录为锚，扫描其父目录下所有含 `projects/<hash>/*.jsonl` 的兄弟目录，全部视为 Claude 根。`list_projects()` 跨根按 hash 去重（同 hash 取字母序首根代表），`discover_jsonl(hash)` 跨根**合并**会话文件——同项目跨多个配置目录的会话自动归并，自定义目录独有的项目也会出现。按 `(home, CLAUDE_CONFIG_DIR)` 进程级缓存避免重复扫描。测试把 `CLAUDE_CONFIG_DIR` 指到 tmp 时父目录即 tmp，天然不污染真实 home。
+`CLAUDE_CONFIG_DIR` 是 Claude Code 的启动期参数（如 `.zclaude`），不在 TCER 进程环境里，故 TCER 无法直接读它。改为**结构指纹发现**：`paths.claude_config_dirs()` 以规范目录为锚，扫描其父目录下所有含 `projects/<hash>/*.jsonl` 的兄弟目录，全部视为 Claude 根。`list_projects()` 跨根**独立成条**（同 hash 每根各一条，`ProjectRef.config_root` 标所属根），`discover_jsonl(hash, roots=[根])` 按根分会话——同项目跨多个配置目录各自独立、不再归并，自定义目录独有的项目也会出现（`roots=None` 默认跨根 union，兼容 CLI 裸 hash）。按 `(home, CLAUDE_CONFIG_DIR)` 进程级缓存避免重复扫描。测试把 `CLAUDE_CONFIG_DIR` 指到 tmp 时父目录即 tmp，天然不污染真实 home。
 
 ## 测试覆盖
 

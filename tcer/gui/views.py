@@ -46,8 +46,8 @@ def _short_name(project_hash: str) -> str:
 def project_label(project) -> str:
     """Display label for a source-aware project ref or legacy Path."""
     source = getattr(project, "source", "claude")
-    if source in ("codex", "opencode", "grok"):
-        default = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok"}.get(source, source)
+    if source in ("codex", "opencode", "grok", "omp"):
+        default = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi"}.get(source, source)
         return getattr(project, "display_name", None) or getattr(project, "key", default)
     name = getattr(project, "name", None) or getattr(project, "key", str(project))
     return _short_name(name)
@@ -61,6 +61,8 @@ def project_source_label(project) -> str:
         return "OpenCode"
     if source == "grok":
         return "Grok"
+    if source == "omp":
+        return "Oh My Pi"
     return "Claude"
 
 
@@ -70,24 +72,74 @@ _ICON_CACHE: dict[str, "tk.PhotoImage | None"] = {}
 _MISSING = object()  # 区分「未查询」与「查过但无图标」，让负缓存生效
 
 
-def source_icon(master, source: str):
-    """16px 来源图标（tk.PhotoImage，模块级缓存防 GC）。
+def source_icon(master, icon_key: str):
+    """16px 图标（tk.PhotoImage，模块级缓存防 GC）。
 
-    无对应资源（或 Tk 尚未就绪）返回 None，调用方回退到 ``[源名]`` 文字标注。
-    构建期已用 PIL 把 1024/640/128 原图预缩到 16×16，运行时零依赖。
+    *icon_key* 对应 ``assets/<icon_key>.png``（claude / ccswitch / codex /
+    opencode / grok / …）。无对应资源（或 Tk 尚未就绪）返回 None，调用方
+    回退到 ``[源名]`` 文字标注。构建期已用 PIL 把原图预缩到 16×16，运行时零依赖。
     """
-    cached = _ICON_CACHE.get(source, _MISSING)
+    cached = _ICON_CACHE.get(icon_key, _MISSING)
     if cached is not _MISSING:
         return cached
-    path = os.path.join(_ASSETS_DIR, f"{source}.png")
+    path = os.path.join(_ASSETS_DIR, f"{icon_key}.png")
     img = None
     if os.path.isfile(path):
         try:
             img = tk.PhotoImage(master=master, file=path)
         except tk.TclError:
             img = None
-    _ICON_CACHE[source] = img
+    _ICON_CACHE[icon_key] = img
     return img
+
+
+def project_icon_key(project) -> str:
+    """项目卡片的图标 key（对应 ``assets/<key>.png``）。
+
+    Claude 项目区分标准 ``~/.claude``（claude 图标）与自定义配置根如
+    ``~/.claude-proxy``（ccswitch 图标）；其余来源各自同名图标，无资源时
+    由调用方回退到 ``[源名]`` 文字。
+    """
+    source = getattr(project, "source", "claude")
+    if source != "claude":
+        return source  # codex / opencode / grok / omp
+    from tcer.core.paths import is_custom_claude_root
+    if is_custom_claude_root(getattr(project, "path", None)):
+        return "ccswitch"
+    return "claude"
+
+
+def ref_uid(ref) -> str:
+    """项目 ref 的稳定唯一标识（跨根同 key 也能区分）。
+
+    Claude 项目含所属 config root 名：``claude:.claude:<hash>`` 与
+    ``claude:.claude-proxy:<hash>`` 不同；其他源 ``{source}:{key}``。
+    """
+    source = getattr(ref, "source", "claude")
+    key = getattr(ref, "key", "")
+    if source != "claude":
+        return f"{source}:{key}"
+    from tcer.core.paths import ref_root
+    root = ref_root(ref)
+    return f"claude:{root.name if root is not None else ''}:{key}"
+
+
+def find_ref_by_uid(refs, uid):
+    """按 uid 精确找项目 ref；失败则裸 key 降级取首个（规范根排前，旧 prefs 恢复路径）。"""
+    if uid is None:
+        return None
+    for r in refs:
+        if ref_uid(r) == uid:
+            return r
+    # 旧 prefs 存的是裸 key（或老格式 source:key）——按 key 取首个
+    for r in refs:
+        if getattr(r, "key", None) == uid:
+            return r
+    for r in refs:
+        key = getattr(r, "key", "")
+        if key and (uid == f"{getattr(r, 'source', '')}:{key}" or uid.endswith(":" + key)):
+            return r
+    return None
 
 
 def project_open_path(project) -> str:
@@ -98,6 +150,9 @@ def project_open_path(project) -> str:
     if source == "grok":
         from tcer.core.paths import grok_sessions_dir
         return str(grok_sessions_dir())
+    if source == "omp":
+        from tcer.core.paths import omp_sessions_dir
+        return str(omp_sessions_dir())
     path = getattr(project, "path", None)
     cwd = getattr(project, "cwd", None)
     return str(path or cwd or project)
@@ -156,13 +211,14 @@ class FilterBar:
             "codex": "Codex",
             "opencode": "OpenCode",
             "grok": "Grok",
+            "omp": "Oh My Pi",
         }
         self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
         source_cb = ttk.Combobox(bar, textvariable=self.source_var, width=8,
                                  values=list(self._source_display_names.values()), state="readonly")
         source_cb.pack(side="left", padx=(4, 12))
         source_cb.bind("<<ComboboxSelected>>", self._on_source_change)
-        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex / OpenCode / Grok")
+        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex / OpenCode / Grok / Oh My Pi")
 
         tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left")
         self.since_var = tk.StringVar(value="")
@@ -350,7 +406,7 @@ class ProjectColumn:
         self.container = sf.inner
 
     def update(self, projects, empty_projects: set | None = None,
-               preferred_key: str | None = None) -> None:
+               preferred_uid: str | None = None) -> None:
         for card in self._cards:
             card.frame.destroy()
         self._cards.clear()
@@ -382,10 +438,11 @@ class ProjectColumn:
         # 选中项目：优先恢复上次选中（启动时），否则第一个有数据的项目。
         if self._cards:
             idx = None
-            if preferred_key is not None:
+            if preferred_uid is not None:
                 idx = next(
                     (i for i, p in enumerate(projects)
-                     if getattr(p, "key", None) == preferred_key
+                     if (ref_uid(p) == preferred_uid
+                         or getattr(p, "key", None) == preferred_uid)
                      and i not in self._empty),
                     None,
                 )
@@ -403,12 +460,11 @@ class ProjectColumn:
                     on_right_click=lambda e, _i=idx, _d=project_dir: self._on_right_click(e, _i, _d),
                     padx=1, pady=1)
         name = project_label(project_dir)
-        source = getattr(project_dir, "source", "claude")
         label = project_source_label(project_dir)
         if is_empty:
             name += " （无会话）"
         fg = theme.MUTED if is_empty else theme.FG
-        icon = source_icon(card.frame, source)
+        icon = source_icon(card.frame, project_icon_key(project_dir))
         if icon is None:
             # 无图标资源：回退到 [源名] 文字前缀
             lbl = tk.Label(card.frame, text=f"[{label}] {name}", bg=theme.PANEL_2, fg=fg,
@@ -703,7 +759,7 @@ class SessionColumn:
         menu.add_separator()
 
         # Destructive action — last item, gated behind a二次确认对话框.
-        readonly = report.meta.source in ("codex", "opencode", "grok")
+        readonly = report.meta.source in ("codex", "opencode", "grok", "omp")
         delete_state = "disabled" if readonly else "normal"
         delete_label = "🗑 删除会话…" if not readonly else f"🗑 删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(

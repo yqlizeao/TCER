@@ -135,7 +135,7 @@ GROUPS: list[Group] = [
                "本地代理上报的 model_context_window，表示当前模型上下文窗口大小。", "basic"),
         Metric("peak_input", "峰值输入", "",
                "单轮输入 Token 峰值 = max(每轮 input + cache_write + cache_read)。\n"
-               "窗口使用率的分子。Claude/Codex/Grok 按 API 回合统计；OpenCode 来自 step-finish 快照"
+               "窗口使用率的分子。Claude/Codex/Grok/omp 按 API 回合统计；OpenCode 来自 step-finish 快照"
                "（禁止用会话累计总输入当峰值，否则多轮会虚高几十倍）。", "basic"),
         Metric("context_window_used", "窗口使用率", "",
                "公式：峰值输入 ÷ 上下文窗口\n"
@@ -683,7 +683,8 @@ for _m in METRIC_BY_KEY.values():
 UNSUPPORTED_LABEL = "不适用"
 
 SOURCE_LABELS = {
-    "claude": "Claude", "codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
+    "claude": "Claude", "codex": "Codex", "opencode": "OpenCode",
+    "grok": "Grok", "omp": "Oh My Pi",
 }
 
 # key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
@@ -697,8 +698,8 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Codex/Grok 运行时信号（Grok 来自 signals.json）
     "context_window": frozenset({"codex", "grok"}),
     "context_window_used": frozenset({"codex", "grok"}),
-    "ttft": frozenset({"codex", "grok"}),
-    "ttft_p95": frozenset({"codex"}),
+    "ttft": frozenset({"codex", "grok", "omp"}),
+    "ttft_p95": frozenset({"codex", "omp"}),
     "rate_limit_peak": frozenset({"codex"}),
     "patch_success": frozenset({"codex"}),
     "aborted_tasks": frozenset({"codex"}),
@@ -726,12 +727,12 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "rate_limit_hits": frozenset({"claude", "codex"}),
     "task_completion": frozenset({"codex", "grok"}),
     "compactions": frozenset({"claude", "codex", "opencode"}),
-    "web_searches": frozenset({"claude", "codex", "grok"}),
+    "web_searches": frozenset({"claude", "codex", "grok", "omp"}),
     "image_inputs": frozenset({"codex", "opencode"}),
     # Codex 不上报缓存写入 (reader 恒 0)，显示 0 会误导
-    "cache_write": frozenset({"claude", "opencode", "grok"}),
-    "cache_write_ratio": frozenset({"claude", "opencode", "grok"}),
-    "cache_efficiency": frozenset({"claude", "opencode", "grok"}),
+    "cache_write": frozenset({"claude", "opencode", "grok", "omp"}),
+    "cache_write_ratio": frozenset({"claude", "opencode", "grok", "omp"}),
+    "cache_efficiency": frozenset({"claude", "opencode", "grok", "omp"}),
 }
 
 

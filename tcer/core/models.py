@@ -13,12 +13,13 @@ class ProjectRef:
     are virtual groups of session JSONL files sharing the same cwd.
     """
 
-    source: str  # "claude" / "codex" / "opencode" / "grok"
+    source: str  # "claude" / "codex" / "opencode" / "grok" / "omp"
     key: str
     display_name: str
     cwd: str | None
     path: Path | None = None
     session_paths: tuple[Path, ...] = ()
+    config_root: Path | None = None
 
     @property
     def name(self) -> str:
@@ -364,7 +365,7 @@ class SessionMeta:
     path: Path
     is_subagent: bool
     entrypoint: str | None = None  # "claude-vscode" / "claude-cli" / etc.
-    source: str = "claude"  # "claude" / "codex" / "opencode" / "grok"
+    source: str = "claude"  # "claude" / "codex" / "opencode" / "grok" / "omp"
     cli_version: str | None = None
     model_provider: str | None = None
     thread_source: str | None = None

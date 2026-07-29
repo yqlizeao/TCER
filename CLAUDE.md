@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-基于真实 AI 编程助手会话数据，构建多维 AI 编程效率计量体系（TCER/CTEI）。支持四个数据来源：Claude Code（`~/.claude`）、Codex（`~/.codex`）、OpenCode（`~/.local/share/opencode`）、Grok / grok build CLI（`~/.grok`）。
+基于真实 AI 编程助手会话数据，构建多维 AI 编程效率计量体系（TCER/CTEI）。支持五个数据来源：Claude Code（`~/.claude`）、Codex（`~/.codex`）、OpenCode（`~/.local/share/opencode`）、Grok / grok build CLI（`~/.grok`）、Oh My Pi / omp（`~/.omp`）。
 
 - **GUI-only**：`python -m tcer` 启动桌面界面
 - **纯离线**：不依赖 git、不做联网操作，数据来自本地 JSONL / SQLite 文件
@@ -10,17 +10,17 @@
 
 ## 快速开始
 
-```bash
+``bash
 python -m tcer            # 启动 GUI
 python -m pytest tests/   # 运行测试
 python -m tcer.audit      # 闭环审计：真实本地会话 vs 原始 JSONL 重算
-```
+``
 
 ### 闭环审计（开发必用）
 
 改 `reader` / `analyze` / `loc` / 计价后，用真实 `~/.claude` 等数据验证，避免脑测：
 
-```bash
+``bash
 python -m tcer.audit --list
 python -m tcer.audit --source claude --project TCER --top 5 -v
 python -m tcer.audit --source all --project TCER --json audit-out.json
@@ -28,26 +28,26 @@ python -m tcer.audit --all-projects --top 2 --no-loc   # 批跑全部项目（�
 python -m tcer.audit --all-projects --skip-empty --top 1 -q --summary-json -
 python -m tcer.audit --ci --summary-json audit-summary.json   # 等价 CI 预设
 # 退出码 0/1；cost_sum_per_model 校验逐模型成本加总
-```
+``
 
 库入口：`tcer.core.audit.audit_project` / `audit_ref` / `summarize`（pytest 也可调）。检查项含：会话 Token 与文件重算一致、子代理折叠、LOC/unseen_writes、聚合 Token 求和、聚合禁用 CTEI、Grok 无裸 `grep` 工具名、`cost_usd` 不崩。`paths.project_has_sessions` 统一判断空项目（GUI 置灰 + audit `--skip-empty`）。
 
 ## 仓库结构
 
-```
+``
 TCER/
 ├── tcer/                  Python 包
 │   ├── core/              核心库（reader / loc / metrics / pricing / models / paths / analyze / export / format / audit …）
 │   ├── gui/               GUI（app / theme / metric_defs / widgets / views / charts / popups / popups_analysis / html_report）
 │   └── config/            配置（model_pricing.json / composite_baselines.json）
-├── tests/                 测试（``python -m pytest tests/``）
+├── tests/                 测试（`python -m pytest tests/`）
 └── doc/                   详细文档
     ├── metrics.md         指标公式与计算步骤
     ├── data-format.md     JSONL 数据格式与 LOC 原理
     └── architecture.md    MVC 架构与工程规范
-```
+``
 
-## 指标分类（6 组 · 以 ``metric_defs.GROUPS`` 为准）
+## 指标分类（6 组 · 以 `metric_defs.GROUPS` 为准）
 
 GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以代码 SSOT 为准：
 
@@ -95,7 +95,7 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以�
 7. **任务类型体系**：3 大类（代码创作/代码维护/非编码），每类有 TTAF 系数。`ntcer = tcer / ttaf` 归一化后可跨任务类型公平比较。`ta_tcer` 保留为向后兼容别名。
 8. **返工率 = 自返工率**：churn 只计「本会话先写入、随后又被自己删除/替换」的行（`loc.SessionLoc.rework_deleted`，封顶于本会话已写入该文件的行数）；删除会话之外的既有代码属正常编辑，不计入。
 9. **CTEI 三因子（聚合有效）**：`CTEI = (TCER/基准) × (CPE基准/CPE) × (1+CHR×0.5)`。历史第四因子 NCPI（净增÷代码库行数）因需扫描真实仓库已随产品定位移除，PSAC/阶段调整同删；三因子皆可聚合，**聚合层不再禁用 CTEI/评级**（audit 改为校验聚合 CTEI 与公式重算一致）。
-10. **自定义 Claude 配置目录自动识别**：用户常以 `CLAUDE_CONFIG_DIR=%USERPROFILE%\.zclaude`（或其他自定义名）启动 Claude Code 以隔离 `.claude`。该环境变量只在 Claude 进程内、TCER 读不到；故 `paths.claude_config_dirs()` 以规范目录（`CLAUDE_CONFIG_DIR` 或 `~/.claude`）为锚，扫描其**父目录**里所有结构匹配 Claude 的兄弟目录（`projects/<hash>/*.jsonl` 指纹），全部视为 Claude 根。`list_projects()`/`discover_jsonl(hash)` 跨所有根查找，**同 hash 跨根的会话合并**（不同项目各自出现）；结果按 `(home, CLAUDE_CONFIG_DIR)` 进程级缓存——会话期间新建的自定义配置目录需重启 TCER 才会出现。**Windows**：盘符大小写导致 `C--GitHub-X` 与 `c--GitHub-X` 两文件夹时，`project_hash_key` 折叠列表为一项，`discover_jsonl` 按 casefold 并集会话。
+10. **自定义 Claude 配置目录自动识别**：用户常以 `CLAUDE_CONFIG_DIR=%USERPROFILE%\.zclaude`（或其他自定义名）启动 Claude Code 以隔离 `.claude`。该环境变量只在 Claude 进程内、TCER 读不到；故 `paths.claude_config_dirs()` 以规范目录（`CLAUDE_CONFIG_DIR` 或 `~/.claude`）为锚，扫描其**父目录**里所有结构匹配 Claude 的兄弟目录（`projects/<hash>/*.jsonl` 指纹），全部视为 Claude 根。`list_projects()` 跨所有根查找，**同 hash 跨根各成一条**（每根独立成卡，`ProjectRef.config_root` 标所属根；`discover_jsonl(hash, roots=[根])` 按根分会话，`roots=None` 默认仍跨根 union 兼容 CLI）；结果按 `(home, CLAUDE_CONFIG_DIR)` 进程级缓存——会话期间新建的自定义配置目录需重启 TCER 才会出现。**Windows**：盘符大小写导致同一根内 `C--GitHub-X` 与 `c--GitHub-X` 两文件夹时，`project_hash_key` 折叠为一项（根内 casefold 并集保留），但跨根不再合并。自定义根（如 `.claude-proxy`）的项目用 ccswitch 图标（`views.project_icon_key` 按 `paths.is_custom_claude_root` 判定）。
 11. **任务类型 SSOT**：`TASK_CATEGORIES` / TTAF 只来自 `config/composite_baselines.json`（`metrics._refresh_composite_globals`）。分析入口默认 `code_creation`；`resolve_task_type` 把空值/未知/`feature` 等合法化，`coerce_task_type` 给公式层（未知→None，不静默套创作系数）。`task_type=auto`（GUI「自动」）按会话 `infer_task_type`（net_loc/探索比/Edit 比/读写比）推断，聚合取众数。个人基准默认至少 `MIN_BASELINE_SESSIONS=10` 条完整会话。
 12. **Claude 单次扫描**：`reader.scan_session` 一趟 JSONL 同时产出 TokenUsage + SessionLoc；`analyze` 进程内按 path 缓存，避免 usage 与 LOC 双读。GUI `reanalyze` 用 `cancel_event` 协作取消上一次分析。
 13. **high_churn 合并**：子代理折叠/项目聚合用 `loc.merge_session_locs`，按合并后的 `file_edit_counts` 重算 `high_churn_files`（同路径不重复计）。
@@ -106,10 +106,11 @@ GUI 指标按关注维度分为 6 组（扁平，无层级关系）。数量以�
 18. **逐回合时间线**：`TokenUsage.turn_stats: list[TurnStat]`（turn/ts/4 token/duration_ms/tool_calls/errors），四源填充：Claude 逐响应、Codex 逐 token_count 差分步（task_complete 回填耗时）、Grok 逐 turn_completed、OpenCode 逐 step-finish。merge 时 rebase turn（聚合对象时间线是串接非并发）。GUI「会话时间线」弹窗与会话级 HTML 报告消费。
 19. **F1 修正（originalFile）**：Claude 工具结果行 `toolUseResult.originalFile` 携带 Write 前真实原文。`_LocAccumulator.pending_f1` 记录按 old=0 记账的首个 Write，`note_write_original` 回溯修正（覆写→按 new−orig 重算并撤销 unseen；确认新文件→只撤销 unseen）。`scan_session` 与 `session_loc_full` 两条路径都做同一修正（审计交叉验证要求逐字节一致）。`toolUseResult.userModified` → 人工修正计数（采纳信号）；OpenCode `session.revert` / Grok `hasReverted` → `revert_events`。
 20. **Codex 工具错误识别**：exit code 有两种实测格式（`Process exited with code N` / `Exit code: N`），exit code 权威；无码时只认显式失败前缀（`execution error`/`error:`/`failed:`/traceback），禁止全文 `error` 子串匹配（误报）。
-21. **SourceAdapter**：非 Claude 三源共用 `analyze._analyze_source_project` 骨架 + `_SourceAdapter` 钩子（resolve/sessions/read_meta/usage_of/loc_of/session_key），file_cache key 构造在钩子内（Grok 必须并入 signals.json/events.jsonl 旁路文件签名，否则会话结束后补写的信号不失效）。新增数据源 = 写一个 adapter。共享小工具在 `core/parse_util`（as_int/first_str）。
+21. **SourceAdapter**：非 Claude 四源（Codex/OpenCode/Grok/omp）共用 `analyze._analyze_source_project` 骨架 + `_SourceAdapter` 钩子（resolve/sessions/read_meta/usage_of/loc_of/session_key），file_cache key 构造在钩子内（Grok 必须并入 signals.json/events.jsonl 旁路文件签名，否则会话结束后补写的信号不失效）。新增数据源 = 写一个 adapter。共享小工具在 `core/parse_util`（as_int/first_str）。
 22. **护栏测试**：`tests/test_models_merge.py` 反射断言 `TokenUsage.merge` 覆盖全部字段（新增字段忘改 merge 会当场失败，容器/极值字段进 `_SPECIAL` 表）；`tests/test_gui_smoke.py` 无头构建全部图表模式与弹窗（无显示环境自动 skip）；`tests/test_export.py` 断言 `report_row_dict` 每个键必须归入 `_CSV_FIELDS` 或 `_CSV_EXCLUDED`。
 23. **模型对比分摊**：`compare_models` 行为/产出/质量指标按 token 占比加权（`_weight_sum`），单模型会话权重 1.0 与旧「主模型全额归因」一致，混合会话按占比拆分不再丢弃。
 24. **GUI 视觉一致性**：①Windows 高 DPI 感知在 `app._enable_windows_hidpi`（**必须在创建 Tk 之前**调用，否则整窗被位图拉伸发糊）+ `_apply_tk_scaling`；②按钮一律用 `widgets.flat_button`（`primary=True`=强调色主操作），禁止再手写 `tk.Button(... relief="flat" ...)`；③间距从 `theme.PAD_XS/S/M/L`（2/4/8/12）取值；④`ScrollFrame` 自带按需显示的深色滚动条；⑤Combobox 深色化 = ttk style + `root.option_add`（下拉列表不吃 style）双管齐下；⑥界面偏好（几何/分栏/筛选/上次项目）经 `core/ui_prefs` 持久化到 `~/.claude/tcer_ui.json`，关闭时保存、启动时恢复（`last_project` 一次性生效）。例外：UploadDialog 与删除确认弹窗的按钮保持原样（前者归上传负责人，后者红色警示是刻意的）。
 25. **排名页**：CTEI 三因子化后默认即可计算，排名页默认就有数据；仅当会话无 CTEI（no_loc 或无净增行/成本）时回退按 TCER 排名并显示提示条。`launch.bat` 优先 `pyw`/`pythonw`（`start` 分离，无残留控制台；文件为 GBK 编码保 cmd 中文注释）。
+26. **omp（Oh My Pi）数据格式**：会话存于 `~/.omp/agent/sessions/<dir-encoded>/<ts>_<sessionId>.jsonl`（`PI_CODING_AGENT_DIR` 重定位 agent 基目录、`PI_CONFIG_DIR` 重定位 `~/.omp` 根；`omp_sessions_dir` 解析同 omp `dirs.ts`，未复刻 Linux XDG 重定向）。JSONL 每行一个 `SessionEntry`：首行 `type:"title"`（定宽标题槽，跳过）、`type:"session"` 头（`id`/`cwd`/`title`/`timestamp` 为 **ISO-8601 字符串**，`parse_timestamp_ms` 兼容）、`type:"model_change"`（`model` 为 `"provider/modelId"`，`pricing.normalize` 经 `rsplit("/")` 剥供应商前缀）、`type:"message"`（`message.role` ∈ `user`/`assistant`/`toolResult`）。assistant 携带**每响应一个** `usage={input,output,cacheRead,cacheWrite,totalTokens,cost:{total}}`（无 Claude 多行重复，直接累加）+ `contextSnapshot.promptTokens`（peak_input）+ `duration`/`ttft`（回填 turn_stats / time_to_first_token_ms + `ttft_ms_samples`）；content 块 `thinking`/`text`/`toolCall={id,name,arguments}`；`toolResult={toolCallId,toolName,content,details,isError}`。LOC：`write` 取 `arguments.content`+`details.resolvedPath`（unseen_writes 同 Grok）；`edit`/`ast_edit` 取 `details.{oldText,newText,path}` 经同一 `_LocAccumulator`（净增行差 + 自返工）；`snapshotsPruned`（无 oldText/newText）的 edit 跳过。`custom`/`custom_message` 等非 message 行忽略。**子代理折叠**：omp 子代理会话存于主文件同名的 `<stem>/` 子目录（`..._<uuid>.jsonl` → `..._<uuid>/SubAgent.jsonl`），`_is_subagent_file` 按「父目录名 == 某 main 文件 stem」识别，`sessions_for_project`/`session_paths` 只返回 main，`aggregate_usage`/`_loc_scan`/`read_user_messages` 把子代理合并入父（真实成本保留，不单独计 session），`_SourceAdapter.subagents_of` 钩子统计折叠数（`n_subagents`），file_cache key 并入子代理文件签名。env 优先级：`PI_CODING_AGENT_DIR` > `PI_CONFIG_DIR` > `OMP_HOME`（legacy）> 默认 `~/.omp`。能力映射见 `metric_defs._SOURCE_SUPPORT`（omp 与 Claude 同为 Anthropic 语义：cache 读写分列、无独立 reasoning；另支持 ttft/ttft_p95/web_searches，不支持 context_window/compactions/rate_limit）。
 > 完整架构说明：[doc/architecture.md](doc/architecture.md)
 > 数据格式细节：[doc/data-format.md](doc/data-format.md)

@@ -48,6 +48,40 @@ def projects_dir() -> Path:
     return _claude_dir() / "projects"
 
 
+def is_custom_claude_root(project_path: Path) -> bool:
+    """True if *project_path* lives under a non-canonical Claude config root.
+
+    Used by the GUI to flag Claude projects that come from a sibling config dir
+    (e.g. ccswitch's ``~/.claude-proxy``) rather than the canonical ``~/.claude``
+    (or ``$CLAUDE_CONFIG_DIR``). *project_path* is a project-hash directory of
+    the form ``<root>/projects/<hash>``; its grandparent is the config root.
+    Compared by directory *name* so a ``$CLAUDE_CONFIG_DIR`` override is
+    respected and Windows path casing can't cause false positives.
+    """
+    try:
+        return project_path.parent.parent.name != _claude_dir().name
+    except (AttributeError, OSError):
+        return False
+
+
+def ref_root(ref) -> Path | None:
+    """Claude 项目 ref 所属的 config root（仅对 ``source=='claude'`` 有意义）。
+
+    优先 ``ref.config_root``；未填（旧 ref / 测试构造）时回退从 ``ref.path``
+    推（``<root>/projects/<hash>`` 的祖父目录）。返回 None 表示无法定位根。
+    """
+    root = getattr(ref, "config_root", None)
+    if root is not None:
+        return root
+    path = getattr(ref, "path", None)
+    if path is None:
+        return None
+    try:
+        return path.parent.parent
+    except (AttributeError, OSError):
+        return None
+
+
 def _looks_like_claude_config(d: Path) -> bool:
     """Heuristic: a directory with ``projects/<hash>/*.jsonl`` looks like a Claude config root."""
     projs = d / "projects"
@@ -164,6 +198,46 @@ def grok_sessions_dir() -> Path:
     return grok_dir() / "sessions"
 
 
+def omp_dir() -> Path:
+    """Return the Oh My Pi (omp) config root (``~/.omp`` by default).
+
+    omp's ``dirs.ts`` resolves the config root from ``PI_CONFIG_DIR`` (default
+    ``.omp``) joined to the home directory. ``OMP_HOME`` is honored only as a
+    legacy fallback (it is not a real omp variable).
+    """
+    cfg = os.environ.get("PI_CONFIG_DIR")
+    if cfg:
+        return Path.home() / cfg
+    override = os.environ.get("OMP_HOME")
+    if override:
+        return Path(override)
+    return Path.home() / ".omp"
+
+
+def omp_agent_dir() -> Path:
+    """Return the omp *agent* base directory (``~/.omp/agent`` by default).
+
+    ``PI_CODING_AGENT_DIR`` relocates the whole agent base (sessions, blobs,
+    ``agent.db``); otherwise it is ``<config-root>/agent``. Mirrors omp's
+    ``getAgentDir``.
+    """
+    override = os.environ.get("PI_CODING_AGENT_DIR")
+    if override:
+        return Path(override)
+    return omp_dir() / "agent"
+
+
+def omp_sessions_dir() -> Path:
+    """Return the root directory containing omp session JSONL files.
+
+    omp stores sessions under ``<agent-dir>/sessions/<encoded-cwd>/*.jsonl``
+    (``~/.omp/agent/sessions`` by default; honors ``PI_CODING_AGENT_DIR`` and
+    ``PI_CONFIG_DIR``). Note: Linux XDG redirection (``$XDG_DATA_HOME/omp``) is
+    not replicated - run ``omp config migrate`` first or keep the default root.
+    """
+    return omp_agent_dir() / "sessions"
+
+
 def encode_hash(cwd: str | Path) -> str:
     """Encode a working-directory path into its project-hash folder name.
 
@@ -176,17 +250,21 @@ def encode_hash(cwd: str | Path) -> str:
 
 
 def list_projects() -> list[Path]:
-    """Return all project-hash directories across every Claude config root, sorted.
+    """Return every project-hash directory across all Claude config roots, sorted.
 
-    When multiple config roots (e.g. ``~/.claude`` and ``~/.zclaude``) hold the
-    same project hash, the directory with more ``*.jsonl`` sessions represents
-    it (tie → lexicographically first name). On Windows, hash names that differ
-    only by case (``C--GitHub-X`` vs ``c--GitHub-X``) collapse to one entry;
-    :func:`tcer.core.reader.discover_jsonl` still unions session files from every
-    matching folder so no sessions are lost.
+    Each config root is enumerated independently (no cross-root dedup) so a
+    project hash present in both ``~/.claude`` and ``~/.claude-proxy`` yields two
+    entries — one per root — each scoped to its own sessions via
+    :func:`tcer.core.reader.discover_jsonl` (with ``roots=``). Within a single
+    root, Windows hash names that differ only by case (``C--GitHub-X`` vs
+    ``c--GitHub-X``) still collapse to one entry (the folder with more
+    ``*.jsonl`` sessions, tie → lexicographically first name).
+
+    Sorted by ``(config-root name, hash name)`` so the canonical ``.claude`` root
+    lists first — this gives :func:`resolve_project` a stable default when a bare
+    hash matches across roots.
     """
-    best: dict[str, Path] = {}
-    best_n: dict[str, int] = {}
+    out: list[Path] = []
     for root in claude_config_dirs():
         base = root / "projects"
         if not base.is_dir():
@@ -195,6 +273,10 @@ def list_projects() -> list[Path]:
             children = sorted(base.iterdir(), key=lambda p: p.name.lower())
         except OSError:
             continue
+        # 根内 casefold 折叠（本根的 C--X / c--X 合并为一）；字典声明在根循环内，
+        # 使兄弟根不再互相合并——跨根同 hash 现在各成一条。
+        best: dict[str, Path] = {}
+        best_n: dict[str, int] = {}
         for d in children:
             if not d.is_dir():
                 continue
@@ -209,7 +291,8 @@ def list_projects() -> list[Path]:
             ):
                 best[key] = d
                 best_n[key] = n
-    return sorted(best.values(), key=lambda p: p.name.lower())
+        out.extend(best.values())
+    return sorted(out, key=lambda p: (p.parent.parent.name.lower(), p.name.lower()))
 
 
 def project_has_sessions(ref: ProjectRef) -> bool:
@@ -221,8 +304,9 @@ def project_has_sessions(ref: ProjectRef) -> bool:
     """
     if ref.source == "claude":
         from tcer.core import reader
-        return bool(reader.discover_jsonl(ref.key))
-    if ref.source in ("codex", "grok"):
+        root = ref_root(ref)
+        return bool(reader.discover_jsonl(ref.key, roots=[root] if root is not None else None))
+    if ref.source in ("codex", "grok", "omp"):
         return bool(ref.session_paths)
     if ref.source == "opencode":
         from tcer.core import opencode_reader
@@ -235,10 +319,9 @@ def project_has_sessions(ref: ProjectRef) -> bool:
 
 def list_project_refs(source: str = "all") -> list[ProjectRef]:
     """Return source-aware project refs for the GUI.
-
     ``source`` is one of ``"all"``, ``"claude"``, ``"codex"``, ``"opencode"``,
-    or ``"grok"``. Claude refs wrap real project directories; Codex/OpenCode/
-    Grok refs are grouped by session cwd/project directory.
+    ``"grok"``, or ``"omp"``. Claude refs wrap real project directories;
+    Codex/OpenCode/Grok/omp refs are grouped by session cwd/project directory.
     """
     refs: list[ProjectRef] = []
     if source in ("all", "claude"):
@@ -249,6 +332,7 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
                 display_name=d.name,
                 cwd=None,
                 path=d,
+                config_root=d.parent.parent,
             )
             for d in list_projects()
         )
@@ -264,6 +348,10 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
         from tcer.core import grok_reader
 
         refs.extend(grok_reader.list_project_refs())
+    if source in ("all", "omp"):
+        from tcer.core import omp_reader
+
+        refs.extend(omp_reader.list_project_refs())
     return sorted(refs, key=lambda r: (r.source, r.display_name.lower()))
 
 
