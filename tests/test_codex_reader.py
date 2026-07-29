@@ -227,6 +227,45 @@ def test_codex_task_complete_duration_is_used(tmp_path):
     assert u.completed_task_count == 1
 
 
+def _rollout_with_session_id(dir_: Path, name: str, sid: str, cwd: str, mtime_ns: int) -> Path:
+    """Minimal Codex rollout file carrying only a session_meta header."""
+    import os
+    p = _write_jsonl(dir_ / name, [
+        {"timestamp": "2026-07-29T10:00:00Z", "type": "session_meta",
+         "payload": {"session_id": sid, "cwd": cwd}},
+    ])
+    os.utime(p, ns=(mtime_ns, mtime_ns))
+    return p
+
+
+def test_codex_resume_same_session_id_collapses_to_latest(tmp_path, monkeypatch):
+    """Codex resume writes a new rollout file per resume reusing the same
+    session_id; only the most recent (most-complete) snapshot should be
+    listed — never one row per file."""
+    import time
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    sess_dir = tmp_path / "sessions" / "2026" / "07" / "29"
+    sess_dir.mkdir(parents=True)
+    cwd = str(tmp_path / "repo")
+    base = (int(time.time()) - 10_000) * 1_000_000_000
+
+    # Three rollout files for the SAME session (resume) at increasing mtimes,
+    # plus one unrelated session sharing the same cwd.
+    p_old = _rollout_with_session_id(sess_dir, "rollout-a-SAME.jsonl", "SAME", cwd, base)
+    p_mid = _rollout_with_session_id(sess_dir, "rollout-b-SAME.jsonl", "SAME", cwd, base + 1_000_000_000)
+    p_new = _rollout_with_session_id(sess_dir, "rollout-c-SAME.jsonl", "SAME", cwd, base + 2_000_000_000)
+    p_other = _rollout_with_session_id(sess_dir, "rollout-d-OTHER.jsonl", "OTHER", cwd, base + 3_000_000_000)
+
+    refs = codex_reader.list_project_refs()
+    assert len(refs) == 1                       # one project (shared cwd)
+    paths = set(refs[0].session_paths)
+    assert paths == {p_new, p_other}            # SAME→latest only; OTHER distinct
+    assert p_old not in paths and p_mid not in paths
+
+    result = analyze.analyze_project(refs[0].key, source="codex", project_ref=refs[0])
+    assert result.n_sessions == 2               # not 4
+
+
 def test_project_refs_group_by_cwd_and_index_title(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     _write_jsonl(tmp_path / "session_index.jsonl", [
@@ -282,6 +321,36 @@ def test_apply_patch_loc_counts_only_patch_hunks(tmp_path):
     assert sloc.file_edit_counts == {"app.py": 1, "README.md": 1}
     # First touch of app.py deletes pre-session "old" — not self-rework.
     assert sloc.rework_deleted == 0
+
+
+def test_planner_text_files_count_as_output(tmp_path):
+    """Planner text files (.txt/.rst/.csv) count toward net output and doc LOC;
+    binary Office (.docx/.xlsx) does not — the edit model can't line-count them."""
+    from tcer.core.loc import _is_code, _is_doc_file
+    # Gate: planner text now counts as productive output (was excluded before).
+    for fp in ("spec.txt", "plan.rst", "notes.org", "data.csv", "doc.adoc"):
+        assert _is_code(fp), f"{fp} should count as output"
+    # Prose text is categorized as 文档; .csv is output but data (not doc).
+    assert _is_doc_file("spec.txt") and _is_doc_file("plan.rst")
+    assert not _is_doc_file("data.csv")
+    # Binary Office never counts (no text lines to count).
+    assert not _is_code("report.docx") and not _is_code("sheet.xlsx")
+
+    patch = """*** Begin Patch
+*** Add File: 设计说明.txt
++需求一
++需求二
+*** End Patch
+"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "apply_patch",
+            "arguments": json.dumps({"patch": patch}),
+        }}
+    ])
+    sloc = codex_reader.session_loc_full(p)
+    assert sloc.added == 2                 # .txt now counts toward net output
+    assert sloc.doc_added == 2             # and is recognized as 文档行
 
 
 def test_apply_patch_self_rework_across_patches(tmp_path):
@@ -406,6 +475,38 @@ def test_apply_patch_tool_op_path_from_patch_body(tmp_path):
     edit_ops = [op for op in u.tool_ops if op.tool == "Edit"]
     assert len(edit_ops) == 2
     assert all(op.path == "src/main.py" for op in edit_ops)
+
+
+def test_shell_workdir_not_recorded_as_file_path(tmp_path):
+    """A shell command's ``workdir`` is a directory, not a touched file — it
+    must not leak into ``ToolOp.path`` (it polluted 涉及文件 with the project
+    root, no extension, once per call)."""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command", "call_id": "c1",
+            "arguments": json.dumps({"cmd": "npm test", "workdir": r"C:\repo\app"}),
+        }},
+    ])
+    u = codex_reader.aggregate_usage(p)
+    bash_ops = [op for op in u.tool_ops if op.tool == "Bash"]
+    assert len(bash_ops) == 1
+    assert bash_ops[0].path == ""               # workdir must NOT surface here
+    assert all("repo" not in (op.path or "") for op in u.tool_ops)
+
+
+def test_shell_mentioning_apply_patch_not_misclassified_as_edit(tmp_path):
+    """A shell command that merely *mentions* apply_patch (e.g. Select-String
+    grepping logs for the tool name) must NOT classify as Edit — only a real
+    apply_patch invocation (starts with it, or carries *** Begin Patch) does."""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command", "call_id": "c1",
+            "arguments": json.dumps({"cmd": "Select-String -Pattern 'apply_patch|exec_command' *.jsonl"}),
+        }},
+    ])
+    u = codex_reader.aggregate_usage(p)
+    assert u.tool_calls.get("Edit", 0) == 0       # not an edit
+    assert "Grep" in u.tool_calls                 # Select-String → search, not edit
 
 
 def test_analyze_codex_project_without_loc_keeps_token_metrics(tmp_path, monkeypatch):

@@ -171,14 +171,16 @@ GROUPS: list[Group] = [
                    "公式：写入行 − 删除行\n"
                    "推荐：视任务而定（正值=增长，负值=重构/精简）\n"
                    "说明：来自会话内 Write/Edit/MultiEdit 逐条统计，不依赖 git。", "basic"),
-            Metric("added", "写入行", "", "工具调用写入的总代码行数（含重写/覆盖）。", "basic"),
-            Metric("deleted", "删除行", "", "工具调用删除的总代码行数。", "basic"),
+            Metric("added", "写入行", "", "工具调用写入的总行数（代码/文档/配置，含重写/覆盖）。", "basic"),
+            Metric("deleted", "删除行", "", "工具调用删除的总行数（代码/文档/配置）。", "basic"),
             Metric("files_touched", "涉及文件", "",
                    "会话中读取、写入或编辑过的独立文件数，点击查看列表。", "basic"),
             Metric("test_loc", "测试行", "",
                    "测试文件（*test*.py、*/tests/ 等）的净增行，反映测试投入。", "basic"),
             Metric("doc_loc", "文档行", "",
-                   "文档文件（*.md、*/docs/ 等）的净增行，反映文档投入。", "basic"),
+                   "文档/策划文本（*.md、*.txt、*.rst、*/docs/ 等）的净增行，反映文档投入。\n"
+                   "注：Word/Excel 等二进制文件不计——AI 的编辑是文本行模型，无法对其产出行数；"
+                   "策划通常在 .md/.txt 起草后再转成 Office。", "basic"),
             Metric("git_commits", "落地提交", "",
                    "会话期间产生的 git 提交数（由本地代理记录，TCER 不调 git）。\n"
                    "写出来的代码有没有真正落地的直接信号；PR 创建/合并数见导出数据。", "basic", "up"),

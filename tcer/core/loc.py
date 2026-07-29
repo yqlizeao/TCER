@@ -29,14 +29,27 @@ from pathlib import Path
 
 from tcer.core import reader
 
-# File suffixes counted as "code". Deliberately includes docs (.md) and config
-# (.json/.yaml/.toml) since notes and project files are real output for this repo.
+# --- 产出文件分类：程序员代码 / 策划文本 / 开发配置 ---------------------------
+# 闸门 _is_code 取三类并集（都算有效产出，计入 net_loc / TCER）；_is_doc_file 再把
+# 「策划文本」单独挑出来记入「文档行」。Office 二进制（.docx/.xlsx/.pptx）刻意
+# 不在内：AI 的 Write/Edit/apply_patch 是文本行模型，无法对二进制产生行增量——
+# 策划通常在 .md/.txt 起草，再自行转成 Word/Excel，那份文本产出已被计入。
+
+# 程序员：纯代码源文件
 CODE_SUFFIXES = {
     ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".go", ".java",
     ".c", ".cpp", ".cc", ".h", ".hpp", ".cs", ".rb", ".php", ".swift", ".kt",
-    ".scala", ".sh", ".bash", ".sql", ".vue", ".svelte", ".md", ".json", ".yaml",
-    ".yml", ".toml", ".html", ".css",
+    ".scala", ".sh", ".bash", ".sql", ".vue", ".svelte", ".html", ".css",
 }
+# 策划/文档：可文本编辑的文档与表格数据（产生行增量，计入产出）
+TEXT_SUFFIXES = {
+    ".md", ".txt", ".rtf", ".rst", ".org", ".adoc", ".tex", ".csv",
+}
+# 开发配置（已计入产出）
+CONFIG_SUFFIXES = {".json", ".yaml", ".yml", ".toml"}
+
+# 产出总集（_is_code 闸门）：代码 ∪ 文本 ∪ 配置
+_PRODUCTIVE_SUFFIXES = CODE_SUFFIXES | TEXT_SUFFIXES | CONFIG_SUFFIXES
 
 # Tool names that mutate files (so their token cost should produce LOC).
 _EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
@@ -49,9 +62,10 @@ _TEST_PATTERNS = [
     r'/spec/',             # RSpec style
 ]
 
-# Path patterns for documentation files
+# Path patterns for documentation / planner-text files (feeds 「文档行」).
+# 散文类文档——.csv 计入产出（在闸门里）但属数据、不算文档。
 _DOC_PATTERNS = [
-    r'\.md$',
+    r'\.(md|txt|rtf|rst|org|adoc|tex)$',
     r'/docs?/',
     r'README',
 ]
@@ -64,7 +78,7 @@ def _is_test_file(file_path: str) -> bool:
 
 
 def _is_doc_file(file_path: str) -> bool:
-    """Check if file path matches documentation file patterns."""
+    """Check if file path is a documentation / planner-text file."""
     normalized = file_path.replace('\\', '/')
     return any(re.search(pat, normalized, re.IGNORECASE) for pat in _DOC_PATTERNS)
 
@@ -75,7 +89,14 @@ def _nlines(s) -> int:
 
 
 def _is_code(file_path: str) -> bool:
-    return Path(file_path).suffix.lower() in CODE_SUFFIXES
+    """True for any countable text output — code, planner text, or config.
+
+    Name kept for back-compat; the gate now covers planner text files
+    (.txt/.rst/.org/…) too, not just programmer code. Binary Office formats
+    (.docx/.xlsx) are never text-line-editable, so they stay out — no line
+    deltas exist to count.
+    """
+    return Path(file_path).suffix.lower() in _PRODUCTIVE_SUFFIXES
 
 
 @dataclass
