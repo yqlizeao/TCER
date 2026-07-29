@@ -14,9 +14,9 @@ from functools import reduce
 from pathlib import Path
 from typing import Callable
 
-from tcer.core import codex_reader, grok_reader, loc, metrics, opencode_reader, reader
+from tcer.core import codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, reader
 from tcer.core.models import ProjectRef, SessionMeta, SessionReport, TokenUsage
-from tcer.core.paths import resolve_project
+from tcer.core.paths import ref_root, resolve_project
 
 
 class AnalysisCancelled(Exception):
@@ -275,11 +275,19 @@ def analyze_project(
                 auto_infer=auto_infer,
             )
 
-    proj = resolve_project(project)
-    if proj is None:
-        raise FileNotFoundError(f"project '{project}' not found under ~/.claude/projects")
-
-    files = reader.discover_jsonl(proj.name)
+    if project_ref is not None and project_ref.source == "claude":
+        # 跨根独立成条：按 ref 所属根限分会话（跳过 resolve_project，避免选错根）。
+        proj = project_ref.path
+        root = ref_root(project_ref)
+        files = reader.discover_jsonl(
+            project_ref.key, roots=[root] if root is not None else None)
+        if proj is None:
+            proj = resolve_project(project)
+    else:
+        proj = resolve_project(project)
+        if proj is None:
+            raise FileNotFoundError(f"project '{project}' not found under ~/.claude/projects")
+        files = reader.discover_jsonl(proj.name)  # CLI 裸 hash：跨根 union（兼容）
     if not files:
         raise FileNotFoundError(f"no session files in {proj}")
     if no_subagents:
@@ -449,6 +457,7 @@ class _SourceAdapter:
     no_sessions: str    # .format(name=ref.display_name)
     no_match: str       # .format(session=...)
     requires_path: bool = False  # OpenCode: ref.path (SQLite db) 必须存在
+    subagents_of: Callable[[ProjectRef, object], int] | None = None  # omp: folded subagent count
 
 
 def _analyze_source_project(
@@ -465,7 +474,7 @@ def _analyze_source_project(
     cancel_check: Callable[[], None] | None = None,
     auto_infer: bool = False,
 ) -> ProjectAnalysis:
-    """Shared per-session pipeline for Codex / OpenCode / Grok projects."""
+    """Shared per-session pipeline for Codex / OpenCode / Grok / omp projects."""
     # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
     # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
     if baseline_tcer is None:
@@ -554,13 +563,17 @@ def _analyze_source_project(
             task_type_override=agg_tt,
         )
 
+    n_sub_total = (
+        sum(adapter.subagents_of(ref, h) for h in handles)
+        if adapter.subagents_of else 0
+    )
     return ProjectAnalysis(
         project_hash=ref.key,
         reports=reports,
         aggregate=agg,
         code_dir=code_path,
         n_sessions=len(reports),
-        n_subagents=0,
+        n_subagents=n_sub_total,
         source=adapter.source,
         project_ref=ref,
     )
@@ -672,7 +685,54 @@ _GROK = _SourceAdapter(
     no_match="no Grok session matches '{session}'",
 )
 
-_ADAPTERS = (_CODEX, _OPENCODE, _GROK)
+
+# ---- omp hooks ------------------------------------------------------------- #
+def _omp_subagent_key(f: Path) -> tuple:
+    """Fold subagent JSONL signatures into the omp cache key.
+
+    omp subagent transcripts live under ``<stem>/`` and are merged into the
+    parent by ``aggregate_usage`` / ``_loc_scan``. The main file's mtime alone
+    does not change when a subagent file is appended/updated, so without these
+    signatures a later subagent write would surface stale merged usage/LOC
+    (same reason Grok folds signals.json/events.jsonl into its key).
+    """
+    parts = []
+    for sub in omp_reader._subagent_files(f):
+        try:
+            st = sub.stat()
+            parts.append((sub.name, int(st.st_mtime_ns), int(st.st_size)))
+        except OSError:
+            parts.append((sub.name, 0, 0))
+    return tuple(parts)
+
+
+def _omp_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        f, ("omp_usage", _omp_subagent_key(f)), lambda: omp_reader.aggregate_usage(f))
+
+
+def _omp_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        f, ("omp_loc", _omp_subagent_key(f)), lambda: omp_reader._loc_scan(f))
+
+
+_OMP = _SourceAdapter(
+    source="omp", entrypoint="omp",
+    resolve=omp_reader.resolve_project,
+    sessions=omp_reader.sessions_for_project,
+    read_meta=lambda ref, f: omp_reader.read_session_meta(f),
+    usage_of=_omp_usage_of,
+    loc_of=_omp_loc_of,
+    session_key=lambda ref, f: (omp_reader.read_session_meta(f).session_id or f.stem),
+    not_found="omp project '{project}' not found under ~/.omp/agent/sessions",
+    no_sessions="no omp session files for '{name}'",
+    no_match="no omp session matches '{session}'",
+    subagents_of=lambda ref, f: len(omp_reader._subagent_files(f)),
+)
+
+_ADAPTERS = (_CODEX, _OPENCODE, _GROK, _OMP)
 
 
 def _synth_meta(session_id: str, sample: Path) -> SessionMeta:

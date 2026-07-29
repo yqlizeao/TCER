@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from tcer.core import analyze, export as export_mod, metrics
 from tcer.core import ui_prefs, upload_client, upload_prefs
-from tcer.core.paths import list_project_refs, project_has_sessions
+from tcer.core.paths import list_project_refs, project_has_sessions, ref_root
 from tcer.core.reader import discover_jsonl
 from . import html_report, popups, theme, views
 from .views import CteiRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
@@ -51,7 +51,7 @@ class TcerGui:
 
         # 界面偏好：恢复上次窗口几何，否则居中（略上移避开任务栏）。
         self._ui_prefs = ui_prefs.load()
-        self._restore_project_key = self._ui_prefs.get("last_project")
+        self._restore_project_uid = self._ui_prefs.get("last_project")
         if ui_prefs.valid_geometry(self._ui_prefs.get("geometry")):
             root.geometry(self._ui_prefs["geometry"])
         else:
@@ -78,7 +78,7 @@ class TcerGui:
                 "sashes": [self._paned.sash_coord(i)[0] for i in (0, 1)],
                 "source": self.filter.get_source(),
                 "task_type": self.filter.get_params().get("task_type"),
-                "last_project": getattr(proj, "key", None),
+                "last_project": views.ref_uid(proj) if proj else None,
             })
         except tk.TclError:
             pass
@@ -139,16 +139,16 @@ class TcerGui:
         self._selected_project_idx = None
         self._clear_analysis_view()
         self._projects = list_project_refs(source)
-        # 标记无会话项目（Claude / Codex / OpenCode / Grok 统一判定）
+        # 标记无会话项目（Claude / Codex / OpenCode / Grok / Oh My Pi 统一判定）
         self._empty_projects = {
             i for i, p in enumerate(self._projects)
             if not project_has_sessions(p)
         }
         # 启动时恢复上次选中的项目（一次性；之后的刷新回到默认选首个）。
-        preferred = self._restore_project_key
-        self._restore_project_key = None
+        preferred = self._restore_project_uid
+        self._restore_project_uid = None
         self.project_col.update(self._projects, self._empty_projects,
-                                preferred_key=preferred)
+                                preferred_uid=preferred)
         n_empty = len(self._empty_projects)
         n_live = len(self._projects) - n_empty
         status = f"发现 {len(self._projects)} 个项目"
@@ -257,9 +257,7 @@ class TcerGui:
         proj = self._selected_project()
         if proj is None:
             return
-        if a.project_ref and (
-            a.project_ref.source != proj.source or a.project_ref.key != proj.key
-        ):
+        if a.project_ref and views.ref_uid(a.project_ref) != views.ref_uid(proj):
             return
         self._current = a
         prev_sid = self._selected_session_id
@@ -315,8 +313,8 @@ class TcerGui:
         from tcer.core import reader
 
         sid = report.meta.session_id or report.meta.path.stem
-        if report.meta.source in ("codex", "opencode", "grok"):
-            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok"}.get(report.meta.source, report.meta.source)
+        if report.meta.source in ("codex", "opencode", "grok", "omp"):
+            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi"}.get(report.meta.source, report.meta.source)
             messagebox.showinfo("删除会话", f"{label} 会话当前仅支持只读分析，暂不删除本地会话数据。")
             return
         try:
@@ -330,7 +328,11 @@ class TcerGui:
         self.session_col.clear_selection()
 
         proj = self._selected_project()
-        if proj is not None and proj.source == "claude" and discover_jsonl(proj.key):
+        _has = False
+        if proj is not None and proj.source == "claude":
+            _r = ref_root(proj)
+            _has = bool(discover_jsonl(proj.key, roots=[_r] if _r is not None else None))
+        if _has:
             self.reanalyze()
         else:
             # 最后一个会话被删 — 项目变空，回到项目列表状态。
@@ -498,6 +500,14 @@ class TcerGui:
             else:
                 msgs = grok_reader.read_user_messages(report.meta.path)
             label = "Grok"
+        elif source == "omp":
+            from tcer.core import omp_reader
+            if is_agg:
+                for r in reports:
+                    msgs.extend(omp_reader.read_user_messages(r.meta.path))
+            else:
+                msgs = omp_reader.read_user_messages(report.meta.path)
+            label = "Oh My Pi"
         else:
             # Claude: prefer cached texts (legacy), else lazy-read main + subagent files.
             if report.usage.user_message_texts:
@@ -699,12 +709,12 @@ class TcerGui:
 
     # --------------------------------------------------------------- upload
     def show_upload(self) -> None:
-        projects = [(p.key, f"[{views.project_source_label(p)}] {views.project_label(p)}")
+        projects = [(views.ref_uid(p), f"[{views.project_source_label(p)}] {views.project_label(p)}")
                     for p in self._projects]
         default_proj = None
         proj = self._selected_project()
         if proj is not None:
-            default_proj = proj.key
+            default_proj = views.ref_uid(proj)
         popups.UploadDialog(
             self.root,
             prefs=self._upload_prefs,
@@ -723,11 +733,8 @@ class TcerGui:
         # (Re)arm or cancel the auto-upload timer to match the new setting.
         self._schedule_auto_upload()
 
-    def _project_ref_by_key(self, key: str):
-        for p in self._projects:
-            if p.key == key:
-                return p
-        return None
+    def _project_ref_by_uid(self, uid: str):
+        return views.find_ref_by_uid(self._projects, uid)
 
     def _start_upload(self, prefs: dict, dialog=None) -> None:
         """Analyze each selected project fresh, then upload its own report.
@@ -743,7 +750,7 @@ class TcerGui:
             if dialog is not None:
                 dialog.set_status("请至少选择一个项目", error=True)
             return
-        refs = [(k, self._project_ref_by_key(k)) for k in keys]
+        refs = [(k, self._project_ref_by_uid(k)) for k in keys]
         missing = [k for k, r in refs if r is None]
         refs = [(k, r) for k, r in refs if r is not None]
         if not refs:

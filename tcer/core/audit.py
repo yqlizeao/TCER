@@ -39,9 +39,9 @@ from functools import reduce
 from pathlib import Path
 from typing import Any, Iterable
 
-from tcer.core import analyze, codex_reader, grok_reader, loc, metrics, opencode_reader, reader
+from tcer.core import analyze, codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, reader
 from tcer.core.models import ProjectRef, TokenUsage
-from tcer.core.paths import list_project_refs, resolve_project
+from tcer.core.paths import list_project_refs, ref_root, resolve_project
 
 
 # --------------------------------------------------------------------------- checks
@@ -345,7 +345,7 @@ def _append_metric_bound_checks(sa: SessionAudit, report) -> None:
     if u.turn_stats:
         ts_total = sum(t.input_tokens + t.cache_write + t.cache_read
                        + t.output_tokens for t in u.turn_stats)
-        strict = sa.source in ("claude", "codex", "grok")
+        strict = sa.source in ("claude", "codex", "grok", "omp")
         sa.checks.append(_truth(
             "turn_stats_match_total",
             (ts_total == u.total) if strict else True,
@@ -417,13 +417,24 @@ def _audit_file_session(
                 with_path == len(edit_ops),
                 detail=f"{with_path}/{len(edit_ops)} Edit ToolOps with path from patch",
             ))
+    if source == "omp":
+        # omp tool names are canonicalised via _OMP_TOOL_MAP; a raw omp name
+        # (read/edit/grep/...) leaking into tool_calls means mapping regressed.
+        bad = [k for k in report.usage.tool_calls if k in omp_reader._OMP_TOOL_MAP]
+        sa.checks.append(_truth(
+            "omp_tools_canonical",
+            not bad,
+            detail=f"raw omp tool names leaked: {bad} -- map via _OMP_TOOL_MAP",
+        ))
     # LOC + self-rework rescan (guards rework_deleted / net_loc regressions).
     if report.net_loc is not None:
         try:
-            if source == "codex":
-                sloc = codex_reader.session_loc_full(report.meta.path)
-            else:  # grok
-                sloc = grok_reader.session_loc_full(report.meta.path)
+            _loc_fn = {
+                "codex": codex_reader.session_loc_full,
+                "grok": grok_reader.session_loc_full,
+                "omp": omp_reader.session_loc_full,
+            }[source]
+            sloc = _loc_fn(report.meta.path)
             sa.checks.append(_eq(
                 "net_loc", sloc.added - sloc.deleted, report.net_loc,
             ))
@@ -556,7 +567,13 @@ def audit_ref(
     )
     t0 = time.perf_counter()
     # Empty Claude project folders are common (listed but no jsonl) — not a failure.
-    if ref.source == "claude" and not reader.discover_jsonl(ref.key):
+    if ref.source == "claude":
+        _r = ref_root(ref)
+        _empty = not reader.discover_jsonl(
+            ref.key, roots=[_r] if _r is not None else None)
+    else:
+        _empty = False
+    if _empty:
         pa.elapsed_ms = (time.perf_counter() - t0) * 1000
         pa.checks.append(_truth(
             "empty_project_ok",
@@ -651,6 +668,8 @@ def audit_ref(
             sa = _audit_file_session(rep, source="grok", aggregate_fn=grok_reader.aggregate_usage)
         elif ref.source == "opencode":
             sa = _audit_opencode_session(rep, no_loc=no_loc)
+        elif ref.source == "omp":
+            sa = _audit_file_session(rep, source="omp", aggregate_fn=omp_reader.aggregate_usage)
         else:
             sa = SessionAudit(
                 session_id="?",
@@ -720,7 +739,7 @@ def audit_many(
         # Prefer exact source when user said all + project name
         if source == "all":
             results = []
-            for s in ("claude", "codex", "grok", "opencode"):
+            for s in ("claude", "codex", "grok", "opencode", "omp"):
                 pa = audit_project(project, source=s, top=top, task_type=task_type, no_loc=no_loc)
                 if pa.error and "not found" in (pa.error or ""):
                     continue
@@ -734,7 +753,9 @@ def audit_many(
     # Prefer projects that likely have data; Claude with sessions first
     def _rank(r: ProjectRef) -> tuple:
         if r.source == "claude":
-            n = len(reader.discover_jsonl(r.key))
+            _r = ref_root(r)
+            n = len(reader.discover_jsonl(
+                r.key, roots=[_r] if _r is not None else None))
             return (0, -n, r.display_name.lower())
         n = len(r.session_paths) if r.session_paths else 0
         return (1, -n, r.display_name.lower())
@@ -867,7 +888,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Closed-loop audit: analyze real local sessions and re-verify against raw files.",
     )
     p.add_argument("--source", default="all",
-                   choices=["all", "claude", "codex", "grok", "opencode"],
+                   choices=["all", "claude", "codex", "grok", "opencode", "omp"],
                    help="Data source (default: all when --project set, else all)")
     p.add_argument("--project", default=None,
                    help="Project key or substring (e.g. TCER, c--GitHub-TCER)")
@@ -925,15 +946,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list:
         refs = list_project_refs(args.source)
+        from tcer.core.paths import claude_config_dirs
+        multi_root = len(claude_config_dirs()) > 1
         for r in refs:
             from tcer.core.paths import project_has_sessions
             empty = "" if project_has_sessions(r) else " [empty]"
             n = ""
+            key_disp = r.key
             if r.source == "claude":
-                n = f" sessions≈{len(reader.discover_jsonl(r.key))}"
+                _r = ref_root(r)
+                n = f" sessions≈{len(reader.discover_jsonl(r.key, roots=[_r] if _r is not None else None))}"
+                if multi_root and _r is not None:
+                    key_disp = f"{r.key}@{_r.name}"
             elif r.session_paths:
                 n = f" sessions={len(r.session_paths)}"
-            print(f"{r.source:8} {r.key:40} {r.display_name}{n}{empty}")
+            print(f"{r.source:8} {key_disp:40} {r.display_name}{n}{empty}")
         return 0
 
     # Fresh process-level scan cache so re-audits after code changes re-read files.

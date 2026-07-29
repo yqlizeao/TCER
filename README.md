@@ -4,7 +4,7 @@
 
 > **Token-to-Code Efficiency Ratio** — 度量 AI 编程效率的离线分析工具
 
-基于 Claude Code、Codex、OpenCode与 Grok本地会话数据，多维度量化「每消耗多少 Token、产出多少有效代码」。
+基于 Claude Code、Codex、OpenCode、Grok 与 Oh My Pi（omp）本地会话数据，多维度量化「每消耗多少 Token、产出多少有效代码」。
 
 Tkinter 桌面界面，纯离线运行。需要 Python ≥3.11 标准库，零依赖，免安装。
 

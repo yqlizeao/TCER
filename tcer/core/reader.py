@@ -39,12 +39,17 @@ def _strip_tags(txt: str) -> str:
     return _TAG_RE.sub('', txt).strip()
 
 
-def discover_jsonl(project_hash: str | None = None) -> list[Path]:
+def discover_jsonl(project_hash: str | None = None, *,
+                   roots: list[Path] | None = None) -> list[Path]:
     """Recursively collect every ``*.jsonl`` under a project (or all projects).
 
-    Searches every Claude config root (see :func:`paths.claude_config_dirs`) so a
-    project hash present in multiple custom profiles (e.g. ``.claude`` and
-    ``.zclaude``) yields the union of its session files across roots.
+    By default searches every Claude config root (see
+    :func:`paths.claude_config_dirs`) so a project hash present in multiple custom
+    profiles (e.g. ``.claude`` and ``.zclaude``) yields the union of its session
+    files across roots. Pass *roots* to restrict the search to specific config
+    roots only — used by per-root analysis now that cross-root dedup is dropped
+    (a project that lives under both ``.claude`` and ``.claude-proxy`` is listed
+    once per root, each scoped to its own sessions).
 
     On Windows, also unions folders whose names match *project_hash* case-
     insensitively (``C--GitHub-X`` vs ``c--GitHub-X`` drive-letter variants).
@@ -53,8 +58,9 @@ def discover_jsonl(project_hash: str | None = None) -> list[Path]:
 
     from tcer.core.paths import project_hash_key
 
+    scan_roots = roots if roots is not None else claude_config_dirs()
     files: list[Path] = []
-    for root in claude_config_dirs():
+    for root in scan_roots:
         projs = root / "projects"
         if not projs.is_dir():
             continue

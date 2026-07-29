@@ -202,7 +202,7 @@ def test_project_column_empty_state_and_preferred(root):
             self.source = "claude"
             self.name = key
     ps = [_P("a"), _P("b"), _P("c")]
-    col.update(ps, set(), preferred_key="b")
+    col.update(ps, set(), preferred_uid="b")
     assert getattr(ctl, "selected", None) == 1  # 恢复到 b
     frame.destroy()
 
@@ -230,3 +230,24 @@ def test_ranking_falls_back_to_tcer(root, reports):
     view.update(reports)
     assert not view._fallback_tcer
     frame.destroy()
+
+
+def test_ref_uid_disambiguates_same_key_cross_root():
+    from pathlib import Path
+    from tcer.core.models import ProjectRef
+    from tcer.gui import views
+    h = "c--GitHub-Demo"
+    ra, rb = Path("/home/u/.claude"), Path("/home/u/.claude-proxy")
+    ra_ref = ProjectRef(source="claude", key=h, display_name=h, cwd=None,
+                        path=ra / "projects" / h, config_root=ra)
+    rb_ref = ProjectRef(source="claude", key=h, display_name=h, cwd=None,
+                        path=rb / "projects" / h, config_root=rb)
+    other = ProjectRef(source="codex", key="cx", display_name="cx", cwd="/x", path=None)
+    refs = [ra_ref, rb_ref, other]
+    assert views.ref_uid(ra_ref) == "claude:.claude:" + h
+    assert views.ref_uid(rb_ref) == "claude:.claude-proxy:" + h
+    assert views.ref_uid(ra_ref) != views.ref_uid(rb_ref)
+    assert views.ref_uid(other) == "codex:cx"
+    assert views.find_ref_by_uid(refs, views.ref_uid(rb_ref)) is rb_ref
+    assert views.find_ref_by_uid(refs, h) is ra_ref  # 裸 key 降级取首个
+    assert views.find_ref_by_uid(refs, None) is None
