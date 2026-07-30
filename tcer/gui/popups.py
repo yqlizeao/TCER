@@ -32,14 +32,17 @@ class UpdatePopup:
 
     _NOTES_LIMIT = 1200  # 发布说明超长截断,避免弹窗无限增高
 
-    def __init__(self, parent, current_version, release) -> None:
+    def __init__(self, parent, current_version, release, controller=None) -> None:
+        import sys
         import webbrowser
 
         from tcer.core import update_check
 
+        self._controller = controller
         self._current = current_version
         self._release = release
         win = _new_window(parent, "检查更新", "440x360")
+        self._win = win
         win.grab_release()  # 非模态:不阻塞主界面(检查更新是辅助动作)
 
         tk.Label(win, text="检查更新", bg=theme.BG, fg=theme.FG,
@@ -74,8 +77,8 @@ class UpdatePopup:
                      font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(4, 2))
             tk.Label(body, text=f"当前版本 v{current_version}(已是最新)",
                      bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(anchor="w")
-        # 发布说明:新版显示新版本内容,已是最新则显示当前版本内容
-        notes = (release.get("notes") or "").strip()
+        # 发布说明(已清理 markdown):新版显示新版本内容,已是最新则显示当前版本内容
+        notes = update_check.render_notes(release.get("notes") or "")
         if notes:
             sf = ScrollFrame(body, bg=theme.PANEL)
             sf.canvas.pack(fill="both", expand=True, pady=(8, 0))
@@ -85,10 +88,32 @@ class UpdatePopup:
                      font=theme.FONT_UI_SMALL, wraplength=400, justify="left",
                      anchor="nw").pack(fill="x")
         if newer:
-            flat_button(body, "前往下载", primary=True,
-                        command=lambda: webbrowser.open(release.get("url") or "")
-                        ).pack(anchor="w", pady=(12, 0))
+            # 发布版且有当前平台安装包 → 应用内直接更新;否则跳浏览器手动下载
+            from tcer.core import updater
+            can_self = (controller is not None and getattr(sys, "frozen", False)
+                        and updater.asset_for_current_platform(release) is not None)
+            if can_self:
+                self._update_btn = flat_button(
+                    body, "立即更新", primary=True,
+                    command=lambda: controller.start_self_update(release, self))
+                self._update_btn.pack(anchor="w", pady=(12, 0))
+            else:
+                flat_button(body, "前往下载", primary=True,
+                            command=lambda: webbrowser.open(release.get("url") or "")
+                            ).pack(anchor="w", pady=(12, 0))
+        # 下载进度文字(由 controller 经 set_progress 在主线程更新)
+        self._progress = tk.Label(body, text="", bg=theme.BG, fg=theme.MUTED,
+                                  font=theme.FONT_UI_SMALL, wraplength=400, justify="left")
         # 无底部「关闭」按钮:标题栏 × 即可关闭
+
+    def set_progress(self, text):
+        """供 controller 在主线程更新下载进度文字。"""
+        try:
+            if not self._progress.winfo_ismapped():
+                self._progress.pack(anchor="w", pady=(8, 0))
+            self._progress.config(text=text)
+        except tk.TclError:
+            pass
 
 
 class SessionDetailPopup:
