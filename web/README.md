@@ -40,8 +40,8 @@ web/
     复用 `tcer.core.pricing`），也可手动归并。以表格呈现 TCER 等指标。
 - **会话详情**：顶部筛选（项目 / 人员 / 模型多选 + 时间范围），次级 sidebar 列出会话，
   右侧展示会话概要 + 逐回合会话明细（用户 / 助手 / 思考 / 工具调用 / 工具结果气泡）+
-  可折叠的原始上传数据。逐回合明细来自「含明细」上传时附带的 `conversation` 字段，四个
-  数据源（Claude / Codex / Grok / OpenCode）的不同磁盘结构在客户端各自的
+  可折叠的原始上传数据。逐回合明细来自「含明细」上传时附带的 `conversation` 字段，五个
+  数据源（Claude / Codex / Grok / OpenCode / omp）的不同磁盘结构在客户端各自的
   `read_conversation` 里归一到同一 block 形状再上传。仅上传聚合信息、或未附带明细的记录
   在列表打「仅聚合」tag / 显示补传提示。
 - **决策实验室**（调研与选型见 [RESEARCH-insights.md](RESEARCH-insights.md)）：
@@ -113,12 +113,11 @@ Body 直接复用客户端 `export.report_row_dict` 的字段；服务端只提�
 `approval_policy` / `permission_profile` / `collaboration_mode` / `cli_version` / `entrypoint`。
 另有两个字典字段：
 
-- `tool_calls`：原始工具名 → 次数。MCP 服务器从 `mcp__<server>__<tool>` 键派生，**四源通用**。
+- `tool_calls`：原始工具名 → 次数。MCP 服务器从 `mcp__<server>__<tool>` 键派生，**五源通用**。
 - `tool_variants`：`"Skill:dataviz"` / `"Agent:Explore"` → 次数。`Skill`/`Task`/`Agent` 在
   `tool_calls` 里只有一个键，看不出到底调了哪个技能，所以由 reader 从调用入参补录。
-  **目前仅 Claude 源可解析**——其余三个 CLI 没有以 reader 已解析的形状暴露技能/子代理身份。
+  **目前仅 Claude 源可解析**——其余四个 CLI 没有以 reader 已解析的形状暴露技能/子代理身份。
 
-> ⚠️ 客户端当前 `report_row_dict` 尚未导出 `started_at`/`ended_at`，落地上传前需补上，否则明细点会全部落到同一上传时间。详见 `PLAN-client-upload.md`。
 
 ### 公共查询参数
 
@@ -127,7 +126,7 @@ Body 直接复用客户端 `export.report_row_dict` 的字段；服务端只提�
 - `persons` / `projects` / `models`：逗号分隔多选过滤（**项目/模型按归一后的标准名匹配**）
 - `start` / `end`：epoch 秒时间范围
 - `/api/overview` 另有 `metric`（曲线指标）；`/api/detail` 另有 `dimension`（`project|person|model`）
-- 可选指标 `metric`：`tcer`（默认）| `ctei` | `cost_usd` | `net_loc` | `total_tokens` |
+- 可选指标 `metric`：`tcer`（默认）| `ctei` | `cost_usd` | `cpe` | `net_loc` | `total_tokens` |
   `churn_ratio` | `chr` | `read_before_write` | `search_edit_ratio` | `tool_error_rate`
 
 ### 聚合与去重规则
@@ -139,18 +138,12 @@ Body 直接复用客户端 `export.report_row_dict` 的字段；服务端只提�
   对 per-session 比率取算术平均会让 5k token 的会话与 2M token 的会话等权，触发 Simpson 悖论。
   `read_before_write` / `search_edit_ratio` 的分母不在库里（来自工具时序），退化为**中位数**，
   由返回体的 `_stat` 字段标明每个比率实际用了哪种统计量。
-- **聚合层不出 CTEI**：遵守 `CLAUDE.md` 规则 9（CTEI/NCPI 是单会话概念），
-  桌面端在聚合报告里置空，web 端同样不产出，曲线指标里也已移除。
+- **聚合 CTEI 重算不取平均**：CTEI 三因子化后可聚合（`CLAUDE.md` 规则 9），
+  服务端按 `tcer.core.metrics.ctei(聚合TCER, 聚合CPE, 聚合CHR)` 重算并附 `grade`，
+  与桌面端 audit 的 `aggregate_ctei_recompute` 同一口径；**不**对各会话 CTEI 取算术平均。
 - **项目归一**：`project_aliases` 手动 `raw→canonical`；未命中则原样。
 - **模型归一**：先查 `model_aliases`；否则复用 `tcer.core.pricing`（含 `.`↔`-` 变体尝试，
   故 `claude-opus-4-8` 与 `claude-opus-4.8` 自动合并），落到价表规范 key。
-
-## 时间轴
-
-每条记录横轴取 session 的 `started_at`（epoch ms，自动折算为秒），缺失时回退到 `generated_at`。
-
-> ⚠️ 客户端 `report_row_dict` 若未导出 `started_at`/`ended_at`，明细点会落到同一上传时间。
-> 详见 `PLAN-client-upload.md`。
 
 ## 造数
 

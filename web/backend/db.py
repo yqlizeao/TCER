@@ -32,14 +32,17 @@ import sys
 import time
 from pathlib import Path
 
-# Reuse the desktop app's model-id resolver for canonical model grouping.
+# Reuse the desktop app's model-id resolver for canonical model grouping, and
+# its CTEI formula so an aggregate score means the same thing in both places.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 try:
+    from tcer.core import metrics as tcer_metrics  # noqa: E402
     from tcer.core import pricing  # noqa: E402
 except Exception:  # pragma: no cover - web can still run without the package
     pricing = None  # type: ignore
+    tcer_metrics = None  # type: ignore
 
 _DB_PATH = Path(os.environ.get("TCER_WEB_DB") or (Path(__file__).parent / "tcer_web.db"))
 
@@ -474,11 +477,11 @@ def model_display(canonical: str) -> str:
 # --------------------------------------------------------------------------- #
 # Querying
 # --------------------------------------------------------------------------- #
-# Metrics that survive aggregation. ``ctei`` is intentionally not here: it is a
-# single-session index (see ``_agg_metrics``), so it has no meaning on a curve
-# point that rolls up several sessions.
+# Metrics that survive aggregation. ``ctei`` qualifies since it went
+# three-factor (see ``_agg_metrics``) — each factor aggregates, so a curve point
+# rolling up several sessions is meaningful.
 _METRICS = (
-    "tcer", "cost_usd", "cpe", "net_loc", "total_tokens", "churn_ratio",
+    "tcer", "ctei", "cost_usd", "cpe", "net_loc", "total_tokens", "churn_ratio",
     "chr", "read_before_write", "search_edit_ratio", "tool_error_rate",
 )
 
@@ -561,10 +564,11 @@ def _agg_metrics(rows: list[dict]) -> dict:
     sees), so those fall back to the **median** across sessions — robust to the
     heavy tail, and flagged as such via ``*_stat``.
 
-    ``ctei`` is deliberately **absent from the result**: per ``CLAUDE.md`` rule 9
-    CTEI/NCPI are single-session concepts (NCPI divides by the current codebase
-    size), so aggregating them inflates the score. The desktop app blanks them in
-    aggregate reports and the web must agree.
+    ``ctei`` is **recomputed from the aggregate's own TCER / CPE / CHR** via
+    ``tcer.core.metrics.ctei`` — the same three-factor formula and the same
+    treatment the desktop audit's ``aggregate_ctei_recompute`` check enforces.
+    Averaging per-session CTEI would be wrong for the same reason averaging any
+    other ratio is: the sessions carry wildly different weight.
     """
     n = len(rows)
     tok = sum(_get(r, "total_tokens") or 0 for r in rows)
@@ -605,13 +609,22 @@ def _agg_metrics(rows: list[dict]) -> dict:
         err_rate = round(tool_errs / tool_calls, 4)
     else:
         err_rate = med("tool_error_rate")
+    cpe = round(cost / (net / 1000), 4) if net > 0 else None
+    chr_out = chr_ if chr_ is not None else med("chr")
+    ctei = grade = None
+    if tcer_metrics is not None:
+        ctei = tcer_metrics.ctei(tcer, cpe, chr_out)
+        if ctei is not None:
+            ctei = round(ctei, 4)
+            grade = tcer_metrics.grade(ctei)
     return {
         "sessions": n,
         "total_tokens": tok, "input_tokens": inp, "output_tokens": out,
         "cache_write_tokens": cw, "cache_read_tokens": cr,
         "net_loc": net, "code_added": added, "cost_usd": round(cost, 4),
-        "cpe": round(cost / (net / 1000), 4) if net > 0 else None,
-        "tcer": tcer, "chr": chr_ if chr_ is not None else med("chr"),
+        "cpe": cpe,
+        "tcer": tcer, "chr": chr_out,
+        "ctei": ctei, "grade": grade,
         "churn_ratio": churn,
         "read_before_write": med("read_before_write"),
         "search_edit_ratio": med("search_edit_ratio"),
@@ -619,6 +632,7 @@ def _agg_metrics(rows: list[dict]) -> dict:
         # Which statistic each ratio used, so the UI never implies "mean".
         "_stat": {
             "chr": "ratio_of_sums", "tcer": "ratio_of_sums",
+            "ctei": "recomputed",
             "churn_ratio": "weighted" if added else "median",
             "tool_error_rate": "ratio_of_sums" if tool_calls else "median",
             "read_before_write": "median", "search_edit_ratio": "median",

@@ -11,13 +11,19 @@ import re
 from pathlib import Path
 
 from tcer.core import pricing
-from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp
+from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
+from tcer.core.parse_util import as_int as _as_int, first_str as _first_str
 from tcer.core.paths import codex_dir, codex_sessions_dir, encode_hash
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
 _NO_CWD_KEY = "__codex_no_cwd__"
 _NO_CWD_LABEL = "Codex 无工作目录"
-_EXIT_RE = re.compile(r"Process exited with code\s+(-?\d+)")
+# 两种实测格式：function_call_output 用 "Process exited with code N"，
+# custom_tool_call_output 用 "Exit code: N"。
+_EXIT_RES = (
+    re.compile(r"Process exited with code\s+(-?\d+)"),
+    re.compile(r"\bExit code:\s*(-?\d+)"),
+)
 
 
 def iter_events(path: Path):
@@ -41,11 +47,26 @@ def discover_sessions() -> list[Path]:
     return sorted(base.rglob("*.jsonl"))
 
 
+# Process cache for session_index.jsonl, keyed by (path, mtime, size) so a
+# new CODEX_HOME (tests) or an index rewritten by Codex invalidates it. Avoids
+# re-reading the index once per session during analyze (once per file).
+_INDEX_TITLES_CACHE: tuple[str, int, int, dict[str, str]] | None = None
+
+
 def _index_titles() -> dict[str, str]:
-    """Read ``session_index.jsonl`` as session id -> thread title."""
+    """Read ``session_index.jsonl`` as session id -> thread title (cached)."""
+    global _INDEX_TITLES_CACHE
     p = codex_dir() / "session_index.jsonl"
-    if not p.is_file():
+    pstr = str(p)
+    try:
+        st = p.stat()
+        sig = (int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        _INDEX_TITLES_CACHE = None
         return {}
+    cached = _INDEX_TITLES_CACHE
+    if cached is not None and cached[0] == pstr and cached[1] == sig[0] and cached[2] == sig[1]:
+        return cached[3]
     titles: dict[str, str] = {}
     with p.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -57,6 +78,7 @@ def _index_titles() -> dict[str, str]:
             title = obj.get("thread_name")
             if isinstance(sid, str) and isinstance(title, str) and title.strip():
                 titles[sid] = title.strip()
+    _INDEX_TITLES_CACHE = (pstr, sig[0], sig[1], titles)
     return titles
 
 
@@ -74,19 +96,104 @@ def _normalize_cwd(cwd: str | None) -> str | None:
         return cwd
 
 
+def _session_head_meta(
+    path: Path, max_lines: int = 16,
+) -> tuple[str | None, str | None] | None:
+    """Read ``(session_id, cwd)`` from the first ``session_meta`` event only.
+
+    Codex always writes ``session_meta`` as a rollout's first line, so grouping
+    / dedup only needs line 1 — walking a whole (multi-MB) rollout end-to-end
+    just to read it made startup ``O(total rollout bytes)`` for heavy Codex
+    users. Returns None when no ``session_meta`` shows up in the first
+    ``max_lines`` lines (caller falls back to the full scan). cwd is normalized.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") == "session_meta":
+                    pl = obj.get("payload")
+                    if isinstance(pl, dict):
+                        sid = _first_str(pl.get("session_id"), pl.get("id"))
+                        cwd = pl.get("cwd") if isinstance(pl.get("cwd"), str) else None
+                        return sid, _normalize_cwd(cwd)
+    except OSError:
+        return None
+    return None
+
+
+def _dedupe_by_session_id(
+    paths: list[Path], sid_by_path: dict[Path, str | None],
+) -> list[Path]:
+    """Collapse Codex rollout files that share one ``session_id`` to the latest.
+
+    Codex ``resume`` writes a *new* rollout file that reuses the same
+    ``session_id`` and replays the full conversation history — every later file
+    is a superset of the earlier ones. Listing each rollout file as its own
+    session therefore shows the same session once per resume (and summing their
+    tokens at the aggregate would double-count). We keep only the most recently
+    written file per ``session_id``: the authoritative, most-complete snapshot.
+
+    Files without a ``session_id`` are never grouped (each stays distinct).
+    """
+    best: dict[str, Path] = {}
+    best_rank: dict[str, tuple[int, int]] = {}
+    for p in paths:
+        sid = (sid_by_path.get(p) or f"__noid__{p}")
+        try:
+            st = p.stat()
+            rank = (int(st.st_mtime_ns), int(st.st_size))
+        except OSError:
+            rank = (0, 0)
+        prev = best_rank.get(sid)
+        if prev is None or rank > prev:
+            best[sid] = p
+            best_rank[sid] = rank
+    return list(best.values())
+
+
 def list_project_refs() -> list[ProjectRef]:
-    """Group Codex sessions by cwd for the unified project list."""
+    """Group Codex sessions by cwd for the unified project list.
+
+    Project grouping only needs each file's ``session_id`` + ``cwd`` — both live
+    in the ``session_meta`` header (line 1), so we read the head cheaply instead
+    of scanning every (potentially multi-MB) rollout. Rollout files sharing a
+    ``session_id`` (Codex ``resume``) are collapsed to their latest snapshot
+    (see :func:`_dedupe_by_session_id`); survivors are bucketed by cwd so one
+    project = one card with one entry per real session.
+    """
+    paths = discover_sessions()
+    sid_by_path: dict[Path, str | None] = {}
+    cwd_by_path: dict[Path, str | None] = {}
+    for p in paths:
+        head = _session_head_meta(p)
+        if head is None:  # rare: no session_meta in head → full scan
+            meta = read_session_meta(p)
+            sid_by_path[p] = meta.session_id
+            cwd_by_path[p] = _normalize_cwd(meta.cwd)
+        else:
+            sid_by_path[p], cwd_by_path[p] = head
+
+    deduped = _dedupe_by_session_id(paths, sid_by_path)
+
     groups: dict[str, list[Path]] = {}
     cwd_by_key: dict[str, str | None] = {}
-    for p in discover_sessions():
-        meta = read_session_meta(p)
-        cwd = _normalize_cwd(meta.cwd)
+    for p in deduped:
+        cwd = cwd_by_path.get(p)
         key = encode_hash(cwd) if cwd else _NO_CWD_KEY
         groups.setdefault(key, []).append(p)
         cwd_by_key.setdefault(key, cwd)
 
     refs: list[ProjectRef] = []
-    for key, paths in groups.items():
+    for key, group_paths in groups.items():
         cwd = cwd_by_key.get(key)
         refs.append(ProjectRef(
             source="codex",
@@ -94,7 +201,7 @@ def list_project_refs() -> list[ProjectRef]:
             display_name=_display_name_for_cwd(cwd),
             cwd=cwd,
             path=Path(cwd) if cwd else None,
-            session_paths=tuple(sorted(paths)),
+            session_paths=tuple(sorted(group_paths)),
         ))
     return refs
 
@@ -141,12 +248,13 @@ def read_session_meta(path: Path) -> SessionMeta:
     collaboration_mode: str | None = None
     reasoning_effort: str | None = None
     fallback_title: str | None = None
-    started_at: int | None = None
+    got_meta = got_turn_ctx = got_title = False
 
-    for obj in iter_events(path):
-        ts = parse_timestamp_ms(obj.get("timestamp"))
-        if ts is not None and started_at is None:
-            started_at = ts
+    # Codex 把所有会话级元数据写在前几行（session_meta 在第 1 行、turn_context ~5、
+    # 首条 user_message ~7）。取齐即停——否则每次重新分析都要为读前 7 行而扫遍
+    # 整个多 MB 的 rollout（实测 3383 行 / 8 MB 文件，约 480× 过度读取）。上限兜底
+    # 从未发出其中某类事件的会话（如用户输入前就中断）。
+    for n, obj in enumerate(iter_events(path), 1):
         typ = obj.get("type")
         payload = obj.get("payload")
         if typ == "session_meta" and isinstance(payload, dict):
@@ -162,17 +270,22 @@ def read_session_meta(path: Path) -> SessionMeta:
                 git_branch = git.get("branch") if isinstance(git.get("branch"), str) else git_branch
                 git_commit = git.get("commit_hash") if isinstance(git.get("commit_hash"), str) else git_commit
                 git_repository = git.get("repository_url") if isinstance(git.get("repository_url"), str) else git_repository
+            got_meta = True
         elif typ == "turn_context" and isinstance(payload, dict):
             approval_policy = _json_label(payload.get("approval_policy")) or approval_policy
             sandbox_policy = _json_label(payload.get("sandbox_policy")) or sandbox_policy
             permission_profile = _json_label(payload.get("permission_profile")) or permission_profile
             collaboration_mode = _json_label(payload.get("collaboration_mode")) or collaboration_mode
             reasoning_effort = _json_label(payload.get("effort")) or reasoning_effort
+            got_turn_ctx = True
         elif typ == "event_msg" and isinstance(payload, dict):
             if payload.get("type") == "user_message" and fallback_title is None:
                 msg = payload.get("message")
                 if isinstance(msg, str) and msg.strip():
                     fallback_title = truncate_summary(msg.strip(), 80)
+                    got_title = True
+        if (got_meta and got_turn_ctx and got_title) or n >= 512:
+            break
 
     if session_id is None:
         session_id = _session_id_from_filename(path)
@@ -208,6 +321,10 @@ def aggregate_usage(path: Path) -> TokenUsage:
     call_id_to_name: dict[str, str] = {}
     active_duration_ms = 0
     prev_total: dict[str, int] = {}  # running total_token_usage baseline for deltas
+    # 权威回合分组：task_started = 一个 agent 回合开始。出现过 task_started 时，
+    # turn_idx 由回合边界驱动（该回合内的工具调用与 token 差分步共享同一回合号）；
+    # 旧格式（无 task_started）回退为每个 token 差分步 +1 的人造计数。
+    saw_task_started = False
 
     for obj in iter_events(path):
         ts = parse_timestamp_ms(obj.get("timestamp"))
@@ -241,6 +358,9 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 # tool_calls["Task"] entry (that inflated tool totals and
                 # zero-token sessions looked like they had tools).
                 u.task_count += 1
+                if saw_task_started:
+                    turn_idx += 1
+                saw_task_started = True
                 _set_max(u, "model_context_window", payload.get("model_context_window"))
                 started = parse_timestamp_ms(payload.get("started_at"))
                 if started is not None:
@@ -250,13 +370,20 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 completed = parse_timestamp_ms(payload.get("completed_at"))
                 if completed is not None:
                     u.ended_at = completed if u.ended_at is None else max(u.ended_at, completed)
-                active_duration_ms += _as_int(payload.get("duration_ms"))
+                dur = _as_int(payload.get("duration_ms"))
+                active_duration_ms += dur
+                # 回合权威耗时回填到该 task 的最后一个 token 步。
+                if dur and u.turn_stats and u.turn_stats[-1].duration_ms is None:
+                    u.turn_stats[-1].duration_ms = dur
                 ttft = _as_int(payload.get("time_to_first_token_ms"))
                 if ttft > 0:
                     u.time_to_first_token_ms = ttft if u.time_to_first_token_ms is None else min(u.time_to_first_token_ms, ttft)
+                    u.ttft_ms_samples.append(ttft)  # 全样本保留（p95 用）
             elif ptype == "turn_aborted":
                 u.aborted_task_count += 1
                 active_duration_ms += _as_int(payload.get("duration_ms"))
+                reason = _first_str(payload.get("reason")) or "unknown"
+                u.abort_reasons[reason] = u.abort_reasons.get(reason, 0) + 1
             elif ptype == "context_compacted":
                 u.compaction_event_count += 1
             elif ptype == "web_search_end":
@@ -284,13 +411,17 @@ def aggregate_usage(path: Path) -> TokenUsage:
                     if all(v >= 0 for v in delta.values()):
                         prev_total = {k: _as_int(total.get(k)) for k in _TOKEN_FIELDS}
                         if any(delta.values()):
-                            _add_token_usage(u, delta, current_model)
-                            turn_idx += 1
+                            _add_token_usage_with_stat(u, delta, current_model,
+                                                       turn_idx, ts)
+                            if not saw_task_started:
+                                turn_idx += 1
                         continue
                     prev_total = {k: _as_int(total.get(k)) for k in _TOKEN_FIELDS}
                 if isinstance(usage, dict):
-                    _add_token_usage(u, usage, current_model)
-                    turn_idx += 1
+                    _add_token_usage_with_stat(u, usage, current_model,
+                                               turn_idx, ts)
+                    if not saw_task_started:
+                        turn_idx += 1
             continue
 
         if typ != "response_item" or not isinstance(payload, dict):
@@ -307,12 +438,15 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 if isinstance(cid, str):
                     call_id_to_name[cid] = tool_name
                 u.tool_ops.append(ToolOp(turn_idx, tool_name, path_hint))
-        elif ptype == "function_call_output":
+        elif ptype in ("function_call_output", "custom_tool_call_output"):
             output = payload.get("output")
-            code = _exit_code(output if isinstance(output, str) else "")
-            if code is not None and code != 0:
+            out_s = output if isinstance(output, str) else ""
+            code = _exit_code(out_s)
+            # exit code 权威；无码时按显式失败前缀兜底（见 _output_is_error）。
+            is_err = (code != 0) if code is not None else _output_is_error(out_s)
+            if is_err:
                 u.tool_errors += 1
-                cid = payload.get("call_id")
+                cid = payload.get("call_id") or payload.get("id")
                 tname = call_id_to_name.get(cid) if isinstance(cid, str) else None
                 if tname:
                     u.tool_errors_by_tool[tname] = u.tool_errors_by_tool.get(tname, 0) + 1
@@ -332,10 +466,6 @@ def aggregate_usage(path: Path) -> TokenUsage:
             if isinstance(cid, str):
                 call_id_to_name[cid] = tool_name
             u.tool_ops.append(ToolOp(turn_idx, tool_name, path_hint))
-        elif ptype == "custom_tool_call_output":
-            output = payload.get("output")
-            if isinstance(output, str) and ("error" in output.lower() or "failed" in output.lower()):
-                u.tool_errors += 1
 
     if u.web_search_count == 0 and u.web_search_end_count:
         u.web_search_count = u.web_search_end_count
@@ -498,7 +628,7 @@ def _loc_scan(path: Path):
     to a file, later removed by a subsequent patch on the same path, count as
     ``rework_deleted`` (not deletions of pre-session code).
     """
-    from tcer.core.loc import SessionLoc, _is_code
+    from tcer.core.loc import SessionLoc, _is_code, _is_test_file, _is_doc_file
 
     added = deleted = rework = 0
     has_signal = False
@@ -535,11 +665,10 @@ def _loc_scan(path: Path):
             rework += rework_part
             session_authored[fp] = max(0, auth_before - rework_part + a)
             file_edit_counts[fp] = file_edit_counts.get(fp, 0) + 1
-            norm = fp.replace("\\", "/").lower()
-            if "/test/" in norm or "/tests/" in norm or norm.endswith("_test.py") or ".test." in norm:
+            if _is_test_file(fp):
                 test_added += a
                 test_deleted += d
-            elif norm.endswith(".md") or "/doc/" in norm or "/docs/" in norm or "readme" in norm:
+            elif _is_doc_file(fp):
                 doc_added += a
                 doc_deleted += d
     sloc = SessionLoc(
@@ -594,6 +723,23 @@ def _add_token_usage(u: TokenUsage, usage: dict, model: str) -> None:
     u.bucket(key).add(i, cw, cr, o)
 
 
+def _add_token_usage_with_stat(
+    u: TokenUsage, usage: dict, model: str, turn: int, ts: int | None,
+) -> None:
+    """``_add_token_usage`` + 逐步 TurnStat（时间线用；耗时由 task_complete 回填）。"""
+    before = (u.input_tokens, u.cache_read_input_tokens, u.output_tokens)
+    _add_token_usage(u, usage, model)
+    after = (u.input_tokens, u.cache_read_input_tokens, u.output_tokens)
+    if after != before:
+        u.turn_stats.append(TurnStat(
+            turn=turn, ts=ts,
+            input_tokens=after[0] - before[0],
+            cache_read=after[1] - before[1],
+            output_tokens=after[2] - before[2],
+            model=model or "",
+        ))
+
+
 def _add_rate_limit(u: TokenUsage, rate_limits) -> None:
     if not isinstance(rate_limits, dict):
         return
@@ -603,6 +749,15 @@ def _add_rate_limit(u: TokenUsage, rate_limits) -> None:
         u.rate_limit_names.add(name)
     if rate_limits.get("rate_limit_reached_type"):
         u.rate_limit_reached_count += 1
+    # 配额水位：primary/secondary.used_percent（0–100）→ 峰值占用 0..1。
+    for key in ("primary", "secondary"):
+        win = rate_limits.get(key)
+        if isinstance(win, dict):
+            pct = win.get("used_percent")
+            if isinstance(pct, (int, float)) and pct > 0:
+                frac = float(pct) / 100.0
+                if u.rate_limit_peak_used is None or frac > u.rate_limit_peak_used:
+                    u.rate_limit_peak_used = frac
 
 
 def _set_max(u: TokenUsage, attr: str, value) -> None:
@@ -643,7 +798,12 @@ def _classify_tool(name: str, arguments) -> tuple[str, str]:
         pass
     lowered = cmd.strip().lower()
     first = lowered.split(maxsplit=1)[0] if lowered else ""
-    if "apply_patch" in lowered or "applypatch" in lowered or "*** begin patch" in lowered:
+    # Only a *real* apply_patch invocation classifies as Edit — the command
+    # must start with apply_patch or carry the ``*** Begin Patch`` marker.
+    # A bare ``"apply_patch" in cmd`` substring misclassified shell commands
+    # that merely *mention* apply_patch (e.g. ``Select-String -Pattern
+    # 'apply_patch|...'`` grepping session logs) as edits.
+    if lowered.startswith("apply_patch") or lowered.startswith("applypatch") or "*** begin patch" in lowered:
         return "Edit", _path_from_apply_patch(arguments)
     if first in {"rg", "grep", "select-string"}:
         return "Grep", ""
@@ -655,13 +815,21 @@ def _classify_tool(name: str, arguments) -> tuple[str, str]:
 
 
 def _path_hint(arguments) -> str:
+    """First file-path argument (``file_path`` / ``path``).
+
+    ``workdir`` is deliberately excluded: it is the command's working
+    *directory*, never a touched file. Recording it as ``ToolOp.path``
+    polluted the 涉及文件 popup with the project root (no extension) once
+    per shell call — e.g. a TCER session showed ``C:\\GitHub\\TCER`` with
+    105 ops dominating the real files.
+    """
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
     except json.JSONDecodeError:
         return ""
     if not isinstance(args, dict):
         return ""
-    for key in ("file_path", "path", "workdir"):
+    for key in ("file_path", "path"):
         val = args.get(key)
         if isinstance(val, str):
             return val
@@ -749,17 +917,26 @@ def _patch_file_deltas(patch: str) -> list[tuple[str, int, int]]:
 
 
 def _exit_code(output: str) -> int | None:
-    m = _EXIT_RE.search(output)
-    return int(m.group(1)) if m else None
+    for rx in _EXIT_RES:
+        m = rx.search(output)
+        if m:
+            return int(m.group(1))
+    return None
 
 
-def _as_int(v) -> int:
-    if v is None or isinstance(v, bool):
-        return 0
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
+def _output_is_error(output: str) -> bool:
+    """无 exit code 时的兜底：只认显式失败前缀。
+
+    旧逻辑对 output 全文做 "error"/"failed" 子串匹配，正常输出提到这两个词
+    也会被记为工具错误（误报），而 "execution error: Io(...)" 这类无退出码的
+    真失败又因发生在 function_call_output 分支而漏报。前缀匹配两头都修。
+    """
+    head = output.lstrip().lower()
+    return head.startswith((
+        "execution error", "error:", "failed:",
+        "traceback (most recent call last)",
+    ))
+
 
 
 def _list_len(v) -> int:
@@ -784,12 +961,6 @@ def _json_label(v) -> str | None:
             return str(v)
     return str(v)
 
-
-def _first_str(*values) -> str | None:
-    for v in values:
-        if isinstance(v, str) and v:
-            return v
-    return None
 
 
 def _session_id_from_filename(path: Path) -> str | None:

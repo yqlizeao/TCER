@@ -9,6 +9,21 @@ from __future__ import annotations
 
 from .platform import FONT_CJK, FONT_MONO_NAME
 
+# 间距节奏（px）：容器/组件 padding 统一从这四档取值，保持视觉一致。
+PAD_XS = 2
+PAD_S = 4
+PAD_M = 8
+PAD_L = 12
+
+# 交互反馈色（hover 态），与 flat_button / Card 共用。
+HOVER_BG = "#33333a"
+HOVER_ACCENT = "#1a8ce0"
+BORDER = "#3e3e42"
+
+# 滚动条极简细条：深灰滑块（只比凹槽亮一点）、hover 稍亮（灰、非蓝）、凹槽近背景隐形（见 setup_style）。
+SCROLL_THUMB = "#3a3a3a"
+SCROLL_THUMB_HOVER = "#555555"
+
 # Base palette (dark, VS Code-ish).
 BG = "#1e1e1e"
 FG = "#e0e0e0"
@@ -87,6 +102,49 @@ def setup_style(ttk) -> None:
               background=[("active", "#3d3d3d"), ("pressed", "#2b2b2b")],
               foreground=[("active", FG)],
               relief=[("active", "flat"), ("pressed", "flat")])
+
+    # 下拉框深色化 — 默认白底在深色主题里非常突兀（下拉列表颜色需另经
+    # root.option_add 设置，见 app.__init__）。
+    style.configure("TCombobox", fieldbackground=PANEL, background=PANEL_2,
+                    foreground=FG, arrowcolor=MUTED, bordercolor=BORDER,
+                    lightcolor=PANEL, darkcolor=PANEL, insertcolor=FG)
+    style.map("TCombobox",
+              fieldbackground=[("readonly", PANEL)],
+              foreground=[("readonly", FG)],
+              selectbackground=[("readonly", PANEL)],
+              selectforeground=[("readonly", FG)])
+
+    # 滚动条极简细条（常驻）：clam 原生 trough/thumb + 自定义 layout 去箭头，只留滑块。
+    # 配色走 style.configure（对 clam 原生元素有效），所有未显式指定 style 的
+    # ttk.Scrollbar（ScrollFrame/Treeview/Listbox）统一继承。
+    # 注：曾尝试用 image 元素重绘以把厚度控到 8px，但 image thumb 不响应 scrollbar 的
+    # 几何控制、滑块不渲染（实机像素验证为 0），故回退原生 thumb —— 可靠可见，厚度 ~14px。
+    style.layout("Vertical.TScrollbar", [
+        ("Vertical.Scrollbar.trough", {
+            "sticky": "ns",
+            "children": [("Vertical.Scrollbar.thumb", {"expand": 1, "sticky": "ns"})],
+        }),
+    ])
+    style.configure("Vertical.TScrollbar", gripcount=0,
+                    background=SCROLL_THUMB, troughcolor=BG,
+                    bordercolor=SCROLL_THUMB, lightcolor=SCROLL_THUMB,
+                    darkcolor=SCROLL_THUMB, arrowcolor=BG, relief="flat")
+    style.map("Vertical.TScrollbar",
+              background=[("active", SCROLL_THUMB_HOVER),
+                          ("pressed", SCROLL_THUMB_HOVER)])
+    style.layout("Horizontal.TScrollbar", [
+        ("Horizontal.Scrollbar.trough", {
+            "sticky": "ew",
+            "children": [("Horizontal.Scrollbar.thumb", {"expand": 1, "sticky": "ew"})],
+        }),
+    ])
+    style.configure("Horizontal.TScrollbar", gripcount=0,
+                    background=SCROLL_THUMB, troughcolor=BG,
+                    bordercolor=SCROLL_THUMB, lightcolor=SCROLL_THUMB,
+                    darkcolor=SCROLL_THUMB, arrowcolor=BG, relief="flat")
+    style.map("Horizontal.TScrollbar",
+              background=[("active", SCROLL_THUMB_HOVER),
+                          ("pressed", SCROLL_THUMB_HOVER)])
 
     # Notebook (tab) styling — dark theme matching left panel
     style.configure("TNotebook", background=BG, borderwidth=0)

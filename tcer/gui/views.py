@@ -7,10 +7,9 @@ Chart classes draw on a ``tk.Canvas``; ``CteiRankingView`` consumes the shared
 """
 from __future__ import annotations
 
-import math
-import statistics
+import os
 import tkinter as tk
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from tkinter import ttk
 
 from tcer.core import metrics
@@ -18,12 +17,12 @@ from tcer.core.export import ctei_decompose, ctei_decompose_avg
 from tcer.core.format import fmt_dt
 from . import theme
 from .metric_defs import (
-    GROUPS, MODEL_GROUPS, Metric, METRIC_BY_KEY,
+    GROUPS, MODEL_GROUPS, UNSUPPORTED_LABEL,
     CTEI_FACTORS, CTEI_FACTOR_GOOD_THRESHOLD, format_factor,
-    report_values, raw_value, format_value, format_plot,
+    report_values, format_value,
     model_display, model_raw, model_tip,
 )
-from .widgets import Card, MetricCell, ScrollFrame, Tooltip
+from .widgets import Card, MetricCell, ScrollFrame, Tooltip, flat_button
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
 
@@ -47,8 +46,8 @@ def _short_name(project_hash: str) -> str:
 def project_label(project) -> str:
     """Display label for a source-aware project ref or legacy Path."""
     source = getattr(project, "source", "claude")
-    if source in ("codex", "opencode", "grok"):
-        default = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok"}.get(source, source)
+    if source in ("codex", "opencode", "grok", "omp"):
+        default = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi"}.get(source, source)
         return getattr(project, "display_name", None) or getattr(project, "key", default)
     name = getattr(project, "name", None) or getattr(project, "key", str(project))
     return _short_name(name)
@@ -62,7 +61,85 @@ def project_source_label(project) -> str:
         return "OpenCode"
     if source == "grok":
         return "Grok"
+    if source == "omp":
+        return "Oh My Pi"
     return "Claude"
+
+
+_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+# PhotoImage 必须被 Python 引用持有，否则 GC 后卡片图标变空白——模块级缓存。
+_ICON_CACHE: dict[str, "tk.PhotoImage | None"] = {}
+_MISSING = object()  # 区分「未查询」与「查过但无图标」，让负缓存生效
+
+
+def source_icon(master, icon_key: str):
+    """16px 图标（tk.PhotoImage，模块级缓存防 GC）。
+
+    *icon_key* 对应 ``assets/<icon_key>.png``（claude / ccswitch / codex /
+    opencode / grok / …）。无对应资源（或 Tk 尚未就绪）返回 None，调用方
+    回退到 ``[源名]`` 文字标注。构建期已用 PIL 把原图预缩到 16×16，运行时零依赖。
+    """
+    cached = _ICON_CACHE.get(icon_key, _MISSING)
+    if cached is not _MISSING:
+        return cached
+    path = os.path.join(_ASSETS_DIR, f"{icon_key}.png")
+    img = None
+    if os.path.isfile(path):
+        try:
+            img = tk.PhotoImage(master=master, file=path)
+        except tk.TclError:
+            img = None
+    _ICON_CACHE[icon_key] = img
+    return img
+
+
+def project_icon_key(project) -> str:
+    """项目卡片的图标 key（对应 ``assets/<key>.png``）。
+
+    Claude 项目区分标准 ``~/.claude``（claude 图标）与自定义配置根如
+    ``~/.claude-proxy``（ccswitch 图标）；其余来源各自同名图标，无资源时
+    由调用方回退到 ``[源名]`` 文字。
+    """
+    source = getattr(project, "source", "claude")
+    if source != "claude":
+        return source  # codex / opencode / grok / omp
+    from tcer.core.paths import is_custom_claude_root
+    if is_custom_claude_root(getattr(project, "path", None)):
+        return "ccswitch"
+    return "claude"
+
+
+def ref_uid(ref) -> str:
+    """项目 ref 的稳定唯一标识（跨根同 key 也能区分）。
+
+    Claude 项目含所属 config root 名：``claude:.claude:<hash>`` 与
+    ``claude:.claude-proxy:<hash>`` 不同；其他源 ``{source}:{key}``。
+    """
+    source = getattr(ref, "source", "claude")
+    key = getattr(ref, "key", "")
+    if source != "claude":
+        return f"{source}:{key}"
+    from tcer.core.paths import ref_root
+    root = ref_root(ref)
+    return f"claude:{root.name if root is not None else ''}:{key}"
+
+
+def find_ref_by_uid(refs, uid):
+    """按 uid 精确找项目 ref；失败则裸 key 降级取首个（规范根排前，旧 prefs 恢复路径）。"""
+    if uid is None:
+        return None
+    for r in refs:
+        if ref_uid(r) == uid:
+            return r
+    # 旧 prefs 存的是裸 key（或老格式 source:key）——按 key 取首个
+    for r in refs:
+        if getattr(r, "key", None) == uid:
+            return r
+    for r in refs:
+        key = getattr(r, "key", "")
+        if key and (uid == f"{getattr(r, 'source', '')}:{key}" or uid.endswith(":" + key)):
+            return r
+    return None
 
 
 def project_open_path(project) -> str:
@@ -73,6 +150,9 @@ def project_open_path(project) -> str:
     if source == "grok":
         from tcer.core.paths import grok_sessions_dir
         return str(grok_sessions_dir())
+    if source == "omp":
+        from tcer.core.paths import omp_sessions_dir
+        return str(omp_sessions_dir())
     path = getattr(project, "path", None)
     cwd = getattr(project, "cwd", None)
     return str(path or cwd or project)
@@ -131,13 +211,14 @@ class FilterBar:
             "codex": "Codex",
             "opencode": "OpenCode",
             "grok": "Grok",
+            "omp": "Oh My Pi",
         }
         self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
         source_cb = ttk.Combobox(bar, textvariable=self.source_var, width=8,
                                  values=list(self._source_display_names.values()), state="readonly")
         source_cb.pack(side="left", padx=(4, 12))
         source_cb.bind("<<ComboboxSelected>>", self._on_source_change)
-        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex / OpenCode / Grok")
+        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex / OpenCode / Grok / Oh My Pi")
 
         tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left")
         self.since_var = tk.StringVar(value="")
@@ -147,8 +228,8 @@ class FilterBar:
         self._date_entry(bar, self.until_var, "结束日期").pack(side="left", padx=2)
 
         for label, preset in (("本周", "week"), ("本月", "month"), ("全部", "all")):
-            tk.Button(bar, text=label, command=lambda p=preset: self._set_preset(p),
-                      bg=theme.PANEL, fg=theme.FG, relief="flat", padx=4, pady=1).pack(side="left", padx=2)
+            flat_button(bar, label, lambda p=preset: self._set_preset(p),
+                        padx=theme.PAD_S).pack(side="left", padx=theme.PAD_XS)
 
         # -- Actions (right side) --
         for factory in [
@@ -179,11 +260,14 @@ class FilterBar:
                            padx=6, activebackground=theme.BG, activeforeground=theme.FG)
         tmenu = tk.Menu(tb, tearoff=False, bg=theme.PANEL, fg=theme.FG,
                         activebackground=theme.ACCENT, activeforeground=theme.FG)
-        tmenu.add_command(label="LOC 校准", command=self.controller.run_calibration)
+        tmenu.add_command(label="项目总览", command=self.controller.show_project_overview)
+        tmenu.add_command(label="工具序列", command=self.controller.show_tool_sequence)
+        tmenu.add_command(label="会话时间线", command=self.controller.show_session_timeline)
+        tmenu.add_command(label="会话对比", command=self.controller.show_session_compare)
         tmenu.add_command(label="计算个人基准", command=self.controller.compute_baselines)
         tmenu.add_command(label="高级选项", command=self.controller.show_advanced)
         tb.config(menu=tmenu)
-        Tooltip(tb, "LOC 校准 · 计算个人基准 · 高级选项")
+        Tooltip(tb, "项目总览 · 会话时间线 · 会话对比 · 工具序列 · 个人基准 · 高级选项")
         return tb
 
     def _make_export_menu(self, parent) -> tk.Menubutton:
@@ -191,16 +275,21 @@ class FilterBar:
                            padx=6, activebackground=theme.BG, activeforeground=theme.FG)
         menu = tk.Menu(mb, tearoff=False, bg=theme.PANEL, fg=theme.FG,
                        activebackground=theme.ACCENT, activeforeground=theme.FG)
-        for label, fmt in (("JSON", "json"), ("CSV", "csv"), ("Markdown", "md")):
+        for label, fmt in (("项目报告 (HTML)", "html"), ("项目报告 (Markdown)", "md"),
+                           ("项目数据 (JSON)", "json"), ("项目数据 (CSV)", "csv")):
             menu.add_command(label=label, command=lambda f=fmt: self.controller.export(f))
+        menu.add_separator()
+        for label, fmt in (("当前会话报告 (HTML)", "html"), ("当前会话报告 (Markdown)", "md"),
+                           ("当前会话数据 (JSON)", "json")):
+            menu.add_command(label=label,
+                             command=lambda f=fmt: self.controller.export(f, scope="session"))
         mb.config(menu=menu)
-        Tooltip(mb, "导出为 JSON / CSV / Markdown")
+        Tooltip(mb, "项目级 / 会话级报告导出：HTML（自包含可分享）· Markdown · JSON · CSV")
         return mb
 
     def _make_upload_button(self, parent) -> tk.Button:
-        btn = tk.Button(parent, text="上传…", relief="flat", bg=theme.PANEL, fg=theme.FG,
-                        padx=6, activebackground=theme.BG, activeforeground=theme.FG,
-                        command=self.controller.show_upload)
+        btn = flat_button(parent, "上传…", self.controller.show_upload,
+                          padx=theme.PAD_M)
         Tooltip(btn, "上传当前项目的效率报告到 TCER Web")
         return btn
 
@@ -281,6 +370,15 @@ class FilterBar:
     def get_source(self) -> str:
         return self._source_reverse_map.get(self.source_var.get(), "all")
 
+    def restore_prefs(self, prefs: dict) -> None:
+        """恢复上次的来源/任务类型筛选（在首次 refresh_projects 之前调用）。"""
+        src = prefs.get("source")
+        if src in self._source_display_names:
+            self.source_var.set(self._source_display_names[src])
+        tt = prefs.get("task_type")
+        if tt in self._task_display_names:
+            self.task_var.set(self._task_display_names[tt])
+
     def set_status(self, text: str) -> None:
         self.status.config(text=text)
 
@@ -307,10 +405,14 @@ class ProjectColumn:
         self.scroll = sf
         self.container = sf.inner
 
-    def update(self, projects, empty_projects: set | None = None) -> None:
+    def update(self, projects, empty_projects: set | None = None,
+               preferred_uid: str | None = None) -> None:
         for card in self._cards:
             card.frame.destroy()
         self._cards.clear()
+        if getattr(self, "_empty_hint", None) is not None:
+            self._empty_hint.destroy()
+            self._empty_hint = None
         self._selected = None
         self._projects = projects
         self._empty = empty_projects or set()
@@ -318,14 +420,39 @@ class ProjectColumn:
             card = self._make_card(d, idx, is_empty=(idx in self._empty))
             self._cards.append(card)
         self.count_label.config(text=f"项目（{len(projects)}）")
+        if not projects:
+            # 空状态引导：告诉用户去哪里产生数据，而不是留一片空白。
+            self._empty_hint = tk.Label(
+                self.container,
+                text="未发现任何会话数据\n\n"
+                     "请确认本机存在以下任一目录：\n"
+                     "~/.claude（Claude Code）\n"
+                     "~/.codex（Codex）\n"
+                     "~/.local/share/opencode（OpenCode）\n"
+                     "~/.grok（Grok）\n\n"
+                     "或切换顶部「来源」筛选后重试。",
+                bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
+                justify="left", pady=theme.PAD_L * 2)
+            self._empty_hint.pack(padx=theme.PAD_M)
         self.scroll.update_scroll(reset=True)
-        # 自动选中第一个有数据的项目
+        # 选中项目：优先恢复上次选中（启动时），否则第一个有数据的项目。
         if self._cards:
-            first_valid = next(
-                (i for i in range(len(self._cards)) if i not in self._empty), None
-            )
-            if first_valid is not None:
-                self._select(self._cards[first_valid], first_valid)
+            idx = None
+            if preferred_uid is not None:
+                idx = next(
+                    (i for i, p in enumerate(projects)
+                     if (ref_uid(p) == preferred_uid
+                         or getattr(p, "key", None) == preferred_uid)
+                     and i not in self._empty),
+                    None,
+                )
+            if idx is None:
+                idx = next(
+                    (i for i in range(len(self._cards)) if i not in self._empty),
+                    None,
+                )
+            if idx is not None:
+                self._select(self._cards[idx], idx)
 
     def _make_card(self, project_dir, idx, *, is_empty=False):
         card = Card(self.container,
@@ -337,10 +464,25 @@ class ProjectColumn:
         if is_empty:
             name += " （无会话）"
         fg = theme.MUTED if is_empty else theme.FG
-        lbl = tk.Label(card.frame, text=f"[{label}] {name}", bg=theme.PANEL_2, fg=fg,
-                       font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        lbl.pack(fill="x", padx=4, pady=3)
-        card.bind_to(lbl)
+        icon = source_icon(card.frame, project_icon_key(project_dir))
+        if icon is None:
+            # 无图标资源：回退到 [源名] 文字前缀
+            lbl = tk.Label(card.frame, text=f"[{label}] {name}", bg=theme.PANEL_2, fg=fg,
+                           font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+            lbl.pack(fill="x", padx=4, pady=3)
+            card.bind_to(lbl)
+            return card
+        # 图标 + 名称横排，取代 [Claude] 之类的文字标注
+        row = tk.Frame(card.frame, bg=theme.PANEL_2)
+        row.pack(fill="x", padx=4, pady=3)
+        img_lbl = tk.Label(row, image=icon, bg=theme.PANEL_2)
+        img_lbl.pack(side="left", padx=(0, 4))
+        Tooltip(img_lbl, label)  # 悬停图标显示来源名（图标取代了文字标注）
+        name_lbl = tk.Label(row, text=name, bg=theme.PANEL_2, fg=fg,
+                            font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+        name_lbl.pack(side="left", fill="x", expand=True)
+        for w in (row, img_lbl, name_lbl):
+            card.bind_to(w)
         return card
 
     def _on_card_click(self, card, idx, is_empty):
@@ -447,6 +589,18 @@ class SessionColumn:
         self.count_label = tk.Label(header, text="会话", bg=theme.PANEL, fg=theme.FG,
                                     font=theme.FONT_HEADING, anchor="w")
         self.count_label.pack(side="left")
+        # 搜索框：按标题 / 会话 ID 过滤卡片
+        self._filter_var = tk.StringVar(value="")
+        search = tk.Entry(header, textvariable=self._filter_var, width=12,
+                          bg=theme.PANEL_2, fg=theme.FG, insertbackground=theme.FG,
+                          relief="flat", highlightthickness=1,
+                          highlightbackground="#3e3e42", font=theme.FONT_UI_SMALL)
+        search.pack(side="right", padx=(4, 0))
+        tk.Label(header, text="🔍", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL).pack(side="right")
+        Tooltip(search, "按标题 / 会话 ID 过滤（实时）")
+        self._filter_var.trace_add("write", lambda *_a: self._render())
+        self._all_reports: list = []
 
         sf = ScrollFrame(col, bg=theme.PANEL)
         sf.canvas.pack(fill="both", expand=True, padx=6, pady=4)
@@ -454,17 +608,43 @@ class SessionColumn:
         self.container = sf.inner
 
     def update(self, reports) -> None:
+        self._all_reports = sorted(reports,
+                                   key=lambda r: r.usage.ended_at or r.usage.started_at or 0,
+                                   reverse=True)
+        self._render(reset=True)
+
+    def _render(self, reset: bool = False) -> None:
+        needle = self._filter_var.get().strip().casefold()
         for card in self._cards:
             card.frame.destroy()
         self._cards.clear()
         self._selected = None
-        self._reports = sorted(reports,
-                               key=lambda r: r.usage.ended_at or r.usage.started_at or 0,
-                               reverse=True)
+        if needle:
+            self._reports = [
+                r for r in self._all_reports
+                if needle in (r.meta.title or "").casefold()
+                or needle in (r.meta.session_id or r.meta.path.stem).casefold()
+            ]
+        else:
+            self._reports = list(self._all_reports)
         for r in self._reports:
             self._cards.append(self._make_card(r))
-        self.count_label.config(text=f"会话（{len(self._reports)}）")
-        self.scroll.update_scroll(reset=True)
+        if getattr(self, "_empty_hint", None) is not None:
+            self._empty_hint.destroy()
+            self._empty_hint = None
+        if not self._reports:
+            hint = ("无匹配会话，试试清空搜索框" if needle
+                    else "该项目暂无会话\n（或尚未完成分析）")
+            self._empty_hint = tk.Label(self.container, text=hint,
+                                        bg=theme.PANEL, fg=theme.MUTED,
+                                        font=theme.FONT_UI, justify="center",
+                                        pady=theme.PAD_L * 2)
+            self._empty_hint.pack(padx=theme.PAD_M)
+        n_all = len(self._all_reports)
+        label = (f"会话（{len(self._reports)}/{n_all}）" if needle
+                 else f"会话（{n_all}）")
+        self.count_label.config(text=label)
+        self.scroll.update_scroll(reset=reset)
 
     def _make_card(self, r):
         sid = r.meta.session_id or r.meta.path.stem
@@ -579,7 +759,7 @@ class SessionColumn:
         menu.add_separator()
 
         # Destructive action — last item, gated behind a二次确认对话框.
-        readonly = report.meta.source in ("codex", "opencode", "grok")
+        readonly = report.meta.source in ("codex", "opencode", "grok", "omp")
         delete_state = "disabled" if readonly else "normal"
         delete_label = "🗑 删除会话…" if not readonly else f"🗑 删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(
@@ -765,7 +945,8 @@ class MetricPanel:
         every call so a session change that fills a previously-empty metric
         brings its cell back automatically; the user's expand/collapse choice
         persists on ``state.expanded`` across updates."""
-        empty = [c for c in state.cells if c.var.get() == "-"]
+        empty = [c for c in state.cells
+                 if c.var.get() in ("-", UNSUPPORTED_LABEL)]
         n_empty = len(empty)
         if state.expanded or n_empty == 0:
             shown = state.cells
@@ -783,7 +964,7 @@ class MetricPanel:
         else:
             arrow = "▼" if state.expanded else "▶"
             action = "收起" if state.expanded else "展开"
-            state.expander.config(text=f"{arrow} {n_empty} 项无数据（点击{action}）")
+            state.expander.config(text=f"{arrow} {n_empty} 项无数据或不适用（点击{action}）")
             state.expander.grid()
 
 
@@ -829,6 +1010,11 @@ class CteiRankingView:
         # -- Split: table (left) + decompose (right) --
         paned = tk.PanedWindow(parent, orient="horizontal", bg=theme.BG, sashwidth=3)
         paned.pack(fill="both", expand=True, padx=2, pady=2)
+        # TCER 回退提示条挂在 paned 之前（见 update）。
+        self._note_parent = parent
+        self._paned_ref = paned
+        self._fallback_note = None
+        self._fallback_tcer = False
 
         table_frame = tk.Frame(paned, bg=theme.BG)
         paned.add(table_frame, minsize=280)
@@ -860,8 +1046,8 @@ class CteiRankingView:
 
         sb = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")  # 常驻细条：先占右侧
         self._tree.pack(fill="both", expand=True)
-        sb.pack_forget()  # hidden; mousewheel handles scrolling
 
         # Mousewheel on enter/leave (same pattern as project/session columns)
         self._unbind_wheel = None
@@ -888,8 +1074,34 @@ class CteiRankingView:
     def update(self, reports) -> None:
         scored = [r for r in reports if r.ctei is not None]
         scored.sort(key=lambda r: r.ctei, reverse=True)
-        self._ranking = [(r.meta.title or r.meta.session_id or r.meta.path.stem, r.ctei, r.grade or "", r)
-                         for r in scored]
+        # 无 CTEI（如 no_loc 或会话无净增行/成本）时回退按 TCER 排名。
+        self._fallback_tcer = False
+        if not scored:
+            by_tcer = [r for r in reports if r.tcer is not None]
+            if by_tcer:
+                self._fallback_tcer = True
+                by_tcer.sort(key=lambda r: r.tcer, reverse=True)
+                scored = by_tcer
+
+        def _label(r):
+            return r.meta.title or r.meta.session_id or r.meta.path.stem
+
+        if self._fallback_tcer:
+            self._ranking = [(_label(r), r.tcer, "", r) for r in scored]
+        else:
+            self._ranking = [(_label(r), r.ctei, r.grade or "", r) for r in scored]
+        self._tree.heading("ctei_val",
+                           text="TCER" if self._fallback_tcer else "CTEI")
+        if getattr(self, "_fallback_note", None) is None:
+            self._fallback_note = tk.Label(
+                self._note_parent,
+                text="ℹ 会话缺少综合效率分（无净增行或成本数据）——当前按 TCER 排名。",
+                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL,
+                anchor="w", padx=theme.PAD_M, pady=theme.PAD_XS)
+        if self._fallback_tcer:
+            self._fallback_note.pack(fill="x", before=self._paned_ref)
+        else:
+            self._fallback_note.pack_forget()
         self._avg_factors = ctei_decompose_avg(reports)
         self._current_report = None
         self._grade_filter = None
@@ -1158,1525 +1370,10 @@ class CteiRankingView:
                      font=theme.FONT_UI_SMALL).pack(side="left", padx=4)
 
 
-# --------------------------------------------------------------------------- #
-# Trend analysis (Tab 3)
-# --------------------------------------------------------------------------- #
-# Metrics that cannot be plotted (metadata / categorical / constant).
-_NON_PLOTTABLE = frozenset({
-    "models", "tools", "started", "last_time", "entrypoint",
-    "task_type", "grade", "bl_tcer", "bl_ncpi", "bl_cpe",
-})
-
-# Baseline reference lines (key → metrics module constant name).
-_METRIC_BASELINE: dict[str, str] = {
-    "tcer": "TCER_BASELINE",
-    "ncpi": "NCPI_BASELINE",
-    "cpe": "CPE_BASELINE",
-}
-
-# Fixed palette for multi-metric overlay (up to 4 lines).
-_OVERLAY_COLORS = ["#007acc", "#4ec9b0", "#ce9178", "#c586c0"]
-
-# CTEI grade background bands (lo, hi, fill_color, label) — names + thresholds
-# derived from the metric SSOT (metrics.GRADE_BANDS); only the dark trend-fill
-# colours are presentation-local here.
-_BAND_FILL = {
-    "优秀": "#142814", "良好": "#14202e", "中等": "#2e2a14",
-    "低效": "#2e1e14", "极端低效": "#2e1414",
-}
-
-
-def _build_ctei_bands() -> list[tuple[float, float, str, str]]:
-    gb = metrics.GRADE_BANDS  # [(label, lower_bound)] best→worst
-    bands = []
-    for i, (label, lo) in enumerate(gb):
-        hi = gb[i - 1][1] if i > 0 else 999
-        if i == 0:
-            rng = f">{lo:g}"
-        elif i == len(gb) - 1:
-            rng = f"<{gb[i - 1][1]:g}"
-        else:
-            rng = f"{lo:g}–{hi:g}"
-        bands.append((lo, hi, _BAND_FILL[label], f"{label} {rng}"))
-    return bands
-
-
-_CTEI_BANDS: list[tuple[float, float, str, str]] = _build_ctei_bands()
-
-
-def _units_compatible(overlays: list[_OverlayLine]) -> bool:
-    """True if all overlays share the same non-empty unit (same-scale OK)."""
-    units = {ol.unit for ol in overlays if ol.unit}
-    return len(units) <= 1
-
-
-# Raw numeric extraction for charts now lives in the metric SSOT (metric_defs).
-# Kept as a module-level alias so existing call sites (and popups importing it
-# from here) keep working.
-metric_raw_value = raw_value
-
-
-def _nice_ticks(v_min: float, v_max: float, n: int = 5) -> list[float]:
-    """Compute *n* 'nice' (round-number) tick values between *v_min* and *v_max*."""
-    span = v_max - v_min
-    if span <= 0:
-        return [v_min]
-    raw_step = span / max(n, 1)
-    mag = 10 ** math.floor(math.log10(raw_step))
-    residual = raw_step / mag
-    if residual <= 1.5:
-        nice_step = 1 * mag
-    elif residual <= 3.5:
-        nice_step = 2 * mag
-    elif residual <= 7.5:
-        nice_step = 5 * mag
-    else:
-        nice_step = 10 * mag
-    start = math.ceil(v_min / nice_step) * nice_step
-    ticks = []
-    v = start
-    while v <= v_max + nice_step * 0.01:
-        ticks.append(round(v, 10))
-        v += nice_step
-    # Always include v_min if no tick is close
-    if ticks and ticks[0] > v_min + nice_step * 0.5:
-        ticks.insert(0, round(v_min, 10))
-    elif not ticks:
-        ticks = [round(v_min, 10)]
-    return ticks
-
-
-class MetricTrendSelector:
-    """Grouped metric picker with single/multi-select modes for the trend chart.
-
-    Built from ``GROUPS`` (metric_defs), filtering out non-plottable keys.
-    Each group gets a colored header; metrics are Checkbuttons.
-    An "叠加模式" toggle switches between single-select (default) and
-    multi-select (up to 4 metrics). Calls *on_change()* on every toggle.
-    """
-
-    MAX_OVERLAY = 4
-
-    def __init__(self, parent, on_change) -> None:
-        self._on_change = on_change
-        self._overlay_mode = False
-        self._vars: dict[str, tk.BooleanVar] = {}
-        self._buttons: dict[str, tk.Checkbutton] = {}
-
-        # Top controls
-        ctrl = tk.Frame(parent, bg=theme.PANEL)
-        ctrl.pack(fill="x", padx=2, pady=2)
-        self._overlay_var = tk.BooleanVar(value=False)
-        cb = tk.Checkbutton(
-            ctrl, text="叠加模式", variable=self._overlay_var,
-            bg=theme.PANEL, fg=theme.FG, selectcolor=theme.BG,
-            activebackground=theme.PANEL, activeforeground=theme.ACCENT,
-            font=theme.FONT_UI_SMALL, command=self._toggle_overlay,
-        )
-        cb.pack(side="left", padx=2)
-        Tooltip(cb, "开启后可同时勾选最多 4 个指标叠加对比")
-
-        sf = ScrollFrame(parent, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True)
-        self._scroll = sf
-        inner = sf.inner
-
-        for group in GROUPS:
-            hdr = tk.Frame(inner, bg=theme.GROUP_COLORS.get(group.id, theme.PANEL),
-                           padx=4, pady=2)
-            hdr.pack(fill="x", pady=(2, 0))
-            tk.Label(hdr, text=f"▼ {group.id} {group.name}",
-                     bg=hdr["bg"], fg=theme.FG,
-                     font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(fill="x")
-
-            for m in group.metrics:
-                if m.key in _NON_PLOTTABLE:
-                    continue
-                var = tk.BooleanVar(value=(m.key == "tcer"))
-                self._vars[m.key] = var
-                label = m.name
-                if m.unit:
-                    label += f"（{m.unit}）"
-                rb = tk.Checkbutton(
-                    inner, text=label, variable=var,
-                    bg=theme.PANEL, fg=theme.FG, selectcolor=theme.BG,
-                    activebackground=theme.PANEL, activeforeground=theme.ACCENT,
-                    font=theme.FONT_UI, anchor="w", padx=4,
-                    command=lambda k=m.key: self._on_toggle(k),
-                )
-                rb.pack(fill="x", padx=2)
-                Tooltip(rb, m.tip)
-                self._buttons[m.key] = rb
-
-        self._scroll.update_scroll(reset=True)
-
-    def _toggle_overlay(self) -> None:
-        self._overlay_mode = self._overlay_var.get()
-        if not self._overlay_mode:
-            # Keep only the first selected metric
-            selected = [k for k, v in self._vars.items() if v.get()]
-            if len(selected) > 1:
-                for k in selected[1:]:
-                    self._vars[k].set(False)
-        self._on_change()
-
-    def _on_toggle(self, key: str) -> None:
-        if not self._overlay_mode:
-            # Single-select: uncheck all others
-            for k, v in self._vars.items():
-                if k != key:
-                    v.set(False)
-        else:
-            # Multi-select: enforce MAX_OVERLAY limit
-            selected = [k for k, v in self._vars.items() if v.get()]
-            if len(selected) > self.MAX_OVERLAY:
-                self._vars[key].set(False)
-        # Ensure at least one is selected
-        if not any(v.get() for v in self._vars.values()):
-            self._vars["tcer"].set(True)
-        self._on_change()
-
-    def selected_keys(self) -> list[str]:
-        return [k for k, v in self._vars.items() if v.get()]
-
-    def select(self, key: str) -> None:
-        for k, v in self._vars.items():
-            v.set(k == key)
-
-    @property
-    def overlay_mode(self) -> bool:
-        return self._overlay_mode
-
-
-class _ChartTooltip:
-    """Lightweight Toplevel tooltip that follows the mouse on a Canvas."""
-
-    def __init__(self, canvas: tk.Canvas) -> None:
-        self._canvas = canvas
-        self._win: tk.Toplevel | None = None
-        self._sig: tuple | None = None  # content signature last rendered
-
-    def _place(self, x: int, y: int) -> None:
-        """Compute a screen position with edge detection and move the window."""
-        cx = self._canvas.winfo_rootx() + x + 16
-        cy = self._canvas.winfo_rooty() + y - 10
-        # Edge detection: flip if near screen edge
-        sw = self._canvas.winfo_screenwidth()
-        sh = self._canvas.winfo_screenheight()
-        if cx + 260 > sw:
-            cx = self._canvas.winfo_rootx() + x - 270
-        if cy + 80 > sh:
-            cy = self._canvas.winfo_rooty() + y - 80
-        if cx < 0:
-            cx = 4
-        if cy < 0:
-            cy = 4
-        self._win.wm_geometry(f"+{cx}+{cy}")
-
-    def show(self, x: int, y: int, lines: list[str],
-             colors: list[str] | None = None) -> None:
-        # The tooltip tracks the cursor every pixel, but its CONTENT only changes
-        # when the hovered data point changes. Rebuilding a Toplevel + N Labels
-        # per mouse-motion event is expensive, so when the content is unchanged
-        # we reuse the existing window and just reposition it.
-        sig = (tuple(lines), tuple(colors or ()))
-        if self._win is not None and self._sig == sig:
-            self._place(x, y)
-            return
-        self.hide()
-        self._win = tk.Toplevel(self._canvas)
-        self._win.wm_overrideredirect(True)
-        self._place(x, y)
-        fr = tk.Frame(self._win, bg=theme.PANEL_2, relief="solid",
-                      borderwidth=1, padx=8, pady=5)
-        fr.pack()
-        for i, line in enumerate(lines):
-            color = (colors[i] if colors and i < len(colors) else theme.FG)
-            tk.Label(fr, text=line, bg=theme.PANEL_2, fg=color,
-                     font=theme.FONT_UI, anchor="w").pack(anchor="w")
-        self._sig = sig
-
-    def hide(self) -> None:
-        if self._win:
-            self._win.destroy()
-            self._win = None
-        self._sig = None
-
-
-@dataclass
-class _OverlayLine:
-    """Cached geometry for one metric's trend line."""
-    key: str
-    name: str
-    unit: str
-    color: str
-    values: list[float | None] = field(default_factory=list)
-    timestamps: list[int | None] = field(default_factory=list)
-    screen_pts: list[tuple[float, float]] = field(default_factory=list)
-    report_indices: list[int] = field(default_factory=list)
-    y_min: float = 0.0
-    y_max: float = 0.0
-
-
-class TrendChart:
-    """Tab 3: multi-metric interactive time-series chart with statistics.
-
-    Sub-components:
-    - ``MetricTrendSelector`` (left, 180px) for metric selection
-    - ``tk.Canvas`` for the chart
-    - ``_ChartTooltip`` for hover details
-    - Statistics summary at the bottom
-
-    Controller callbacks:
-    - ``on_select_session(sid)``: fired when user clicks a data point
-    """
-
-    _PAD_L = 62
-    _PAD_R = 20
-    _PAD_T = 30
-    _PAD_B = 36
-    _HIT_RADIUS = 8
-
-    def __init__(self, parent, controller=None) -> None:
-        self._controller = controller
-        self._reports: list = []
-        self._all_reports: list = []
-        self._overlay: list[_OverlayLine] = []
-        self._selected_idx: int | None = None
-        self._tooltip = None
-        self._resize_after: str | None = None
-        self._mode = tk.StringVar(value="trend")
-        # Zoom state
-        self._zoom_active = False
-        self._zoom_sel_start: int | None = None
-        self._zoom_offset = 0  # index offset into _all_reports when zoomed
-        self._drag_start_x = 0
-        self._drag_start_y = 0
-        self._drag_moved = False
-
-        self._build(parent)
-
-    # -- layout -----------------------------------------------------------
-    def _build(self, parent) -> None:
-        self._body = tk.Frame(parent, bg=theme.BG)
-        self._body.pack(fill="both", expand=True)
-
-        # Dynamic content area (rebuilt on mode switch)
-        self._content = tk.Frame(self._body, bg=theme.BG)
-        self._content.pack(fill="both", expand=True)
-        self._build_trend_content()
-
-    def _clear_content(self) -> None:
-        for w in self._content.winfo_children():
-            w.destroy()
-
-    def _add_mode_buttons(self, parent) -> tk.Frame:
-        """Build the shared '趋势分析' group header with the 3 mode radio buttons.
-
-        The three sub-modes (趋势图 / 散点图 / 仪表板) rebuild ``_content`` from
-        scratch, so each needs its own header. Callers pack their own extras
-        (legend / 重置缩放 / hint label) into the returned frame.
-        """
-        gc = theme.GROUP_COLORS["G_NEUTRAL"]
-        header = tk.Frame(parent, bg=gc, padx=6, pady=3)
-        header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text="▼ 趋势分析", bg=gc, fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-        for label, val in (("趋势图", "trend"), ("散点图", "scatter"), ("仪表板", "dashboard")):
-            tk.Radiobutton(header, text=label, variable=self._mode, value=val,
-                           bg=gc, fg=theme.FG, selectcolor=gc,
-                           activebackground=gc, activeforeground=theme.ACCENT,
-                           font=theme.FONT_UI, command=self._switch_mode).pack(side="left", padx=4)
-        return header
-
-    def _build_trend_content(self) -> None:
-        self._clear_content()
-        # Left: metric selector
-        left = tk.Frame(self._content, bg=theme.PANEL, width=180)
-        left.pack(side="left", fill="y")
-        left.pack_propagate(False)
-        self._selector = MetricTrendSelector(left, on_change=self._on_selection_change)
-
-        # Separator
-        sep = tk.Frame(self._content, bg="#3e3e42", width=2)
-        sep.pack(side="left", fill="y")
-
-        # Right: header + canvas + stats
-        right = tk.Frame(self._content, bg=theme.BG)
-        right.pack(side="left", fill="both", expand=True)
-
-        # Mode buttons in group header
-        mode_header = self._add_mode_buttons(right)
-        self._legend_frame = tk.Frame(mode_header, bg=theme.GROUP_COLORS["G_NEUTRAL"])
-        self._legend_frame.pack(side="right")
-        self._zoom_reset_btn = tk.Button(
-            mode_header, text="重置缩放", command=self._reset_zoom,
-            bg=theme.PANEL, fg=theme.WARNING, relief="flat",
-            font=theme.FONT_UI_SMALL, padx=6,
-        )
-        # Hidden by default; shown when zoom is active
-
-        self.canvas = tk.Canvas(right, bg=theme.PANEL, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
-        self._tooltip = _ChartTooltip(self.canvas)
-        self.canvas.bind("<Configure>", self._on_configure)
-        self.canvas.bind("<Motion>", self._on_motion)
-        self.canvas.bind("<Leave>", lambda e: self._tooltip.hide())
-        self.canvas.bind("<Button-1>", self._on_press)
-        self.canvas.bind("<B1-Motion>", self._on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.canvas.bind("<Double-Button-1>", self._on_double_click)
-        self.canvas.bind("<Button-3>", self._on_right_click)
-        self.canvas.bind("<Destroy>", lambda e: self._tooltip.hide())
-        self.canvas.bind("<Left>", self._on_key_prev)
-        self.canvas.bind("<Right>", self._on_key_next)
-        self.canvas.focus_set()
-
-        # Stats in group header
-        stats_header = tk.Frame(right, bg=theme.GROUP_COLORS["G6"], padx=6, pady=3)
-        stats_header.pack(fill="x", pady=(1, 0))
-        tk.Label(stats_header, text="▼ 统计", bg=theme.GROUP_COLORS["G6"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-        self._stats_frame = tk.Frame(right, bg=theme.PANEL, padx=6, pady=3)
-        self._stats_frame.pack(fill="x")
-        self._stats_labels = []
-
-    def _build_dashboard_content(self) -> None:
-        self._clear_content()
-        right = tk.Frame(self._content, bg=theme.BG)
-        right.pack(fill="both", expand=True)
-
-        # Mode buttons in group header (same as trend)
-        mode_header = self._add_mode_buttons(right)
-        tk.Label(mode_header, text="6 组代表指标总览", bg=theme.GROUP_COLORS["G_NEUTRAL"],
-                 fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left", padx=8)
-
-        self._dashboard = DashboardChart(right)
-        self._dashboard.update(self._reports)
-
-    def _build_scatter_content(self) -> None:
-        self._clear_content()
-        right = tk.Frame(self._content, bg=theme.BG)
-        right.pack(fill="both", expand=True)
-
-        # Mode buttons in group header (same as trend)
-        self._add_mode_buttons(right)
-
-        self._scatter_chart = ScatterChart(right)
-        self._scatter_chart.update(self._reports)
-
-    def _switch_mode(self) -> None:
-        # Cancel any pending resize redraw
-        if self._resize_after is not None:
-            self.canvas.after_cancel(self._resize_after)
-            self._resize_after = None
-        # Save selector state before teardown
-        saved_keys = self._selector.selected_keys() if hasattr(self, '_selector') else ["tcer"]
-        self._tooltip.hide()
-        mode = self._mode.get()
-        if mode == "scatter":
-            self._build_scatter_content()
-        elif mode == "dashboard":
-            self._build_dashboard_content()
-        else:
-            self._build_trend_content()
-            # Restore selector state
-            if saved_keys and hasattr(self, '_selector'):
-                for k in saved_keys:
-                    if k in self._selector._vars:
-                        self._selector._vars[k].set(True)
-            self._draw()
-
-    # -- public API -------------------------------------------------------
-    def update(self, reports) -> None:
-        """Update the chart with new reports, restoring the selected session by sid.
-
-        Zoom is intentionally NOT preserved: the zoom window is a pair of
-        indices into the previous report list, which is meaningless once the
-        data changes. Only the selected data point is carried over.
-        """
-        # Save current state
-        old_selected_sid = None
-        if self._selected_idx is not None and self._selected_idx < len(self._reports):
-            r = self._reports[self._selected_idx]
-            old_selected_sid = r.meta.session_id or r.meta.path.stem
-
-        # Update data
-        self._all_reports = sorted(reports,
-                                   key=lambda r: r.usage.started_at or r.usage.ended_at or 0)
-        self._reports = list(self._all_reports)
-        self._zoom_active = False
-        self._zoom_offset = 0
-        self._selected_idx = None
-        self._tooltip.hide()
-
-        # Restore selection if the session still exists
-        if old_selected_sid:
-            for i, r in enumerate(self._reports):
-                if (r.meta.session_id or r.meta.path.stem) == old_selected_sid:
-                    self._selected_idx = i
-                    break
-
-        self._draw()
-
-    # -- event handlers ---------------------------------------------------
-    def _on_configure(self, _event=None) -> None:
-        if self._resize_after is not None:
-            self.canvas.after_cancel(self._resize_after)
-        self._resize_after = self.canvas.after(120, self._draw)
-
-    def _on_selection_change(self) -> None:
-        self._selected_idx = None
-        self._draw()
-
-    def _on_motion(self, event) -> None:
-        idx = self._hit_test(event.x, event.y)
-        if idx is None:
-            self._tooltip.hide()
-            return
-        if idx < len(self._reports):
-            self._show_tooltip(idx, event.x, event.y)
-
-    def _on_press(self, event) -> None:
-        self._drag_start_x = event.x
-        self._drag_start_y = event.y
-        self._drag_moved = False
-
-    def _on_drag(self, event) -> None:
-        if abs(event.x - self._drag_start_x) > 8:
-            self._drag_moved = True
-            # Only redraw the selection rectangle (tag-based, no full redraw)
-            self.canvas.delete("sel_rect")
-            c = self.canvas
-            c.create_rectangle(self._drag_start_x, self._PAD_T,
-                               event.x, c.winfo_height() - self._PAD_B,
-                               outline=theme.ACCENT, dash=(3, 3), width=1,
-                               tags="sel_rect")
-
-    def _on_release(self, event) -> None:
-        self.canvas.delete("sel_rect")
-        if self._drag_moved:
-            # Zoom: find report indices at start and end X positions
-            self._apply_zoom(self._drag_start_x, event.x)
-        else:
-            # Click: select data point
-            idx = self._hit_test(event.x, event.y)
-            if idx is not None and self._controller:
-                self._selected_idx = idx
-                self._draw()
-                r = self._reports[idx]
-                sid = r.meta.session_id or r.meta.path.stem
-                self._controller.on_select_session(sid)
-        self._drag_moved = False
-
-    def _apply_zoom(self, x_start: int, x_end: int) -> None:
-        """Zoom to the report index range between x_start and x_end."""
-        x_lo, x_hi = min(x_start, x_end), max(x_start, x_end)
-        # Find report indices closest to the X positions
-        if not self._overlay:
-            return
-        ol = self._overlay[0]
-        if not ol.screen_pts:
-            return
-        idx_lo, idx_hi = None, None
-        for j, (px, _py) in enumerate(ol.screen_pts):
-            ri = ol.report_indices[j]
-            if px >= x_lo and idx_lo is None:
-                idx_lo = ri
-            if px <= x_hi:
-                idx_hi = ri
-        if idx_lo is None or idx_hi is None or idx_lo >= idx_hi:
-            return
-        # Map back to _all_reports using the current zoom offset
-        abs_lo = self._zoom_offset + idx_lo
-        abs_hi = self._zoom_offset + idx_hi
-        self._reports = self._all_reports[abs_lo:abs_hi + 1]
-        self._zoom_offset = abs_lo
-        self._zoom_active = True
-        self._selected_idx = None
-        self._draw()
-
-    def _reset_zoom(self) -> None:
-        self._reports = list(self._all_reports)
-        self._zoom_active = False
-        self._zoom_offset = 0
-        self._selected_idx = None
-        self._draw()
-
-    def _on_double_click(self, event) -> None:
-        """Double-click: show radar popup for the nearest data point."""
-        idx = self._hit_test(event.x, event.y)
-        if idx is not None and idx < len(self._reports):
-            from . import popups
-            popups.RadarPopup(self.canvas, self._reports[idx], self._reports)
-
-    def _on_right_click(self, event) -> None:
-        """Right-click: context menu for the nearest data point."""
-        if not self._controller:
-            return
-        idx = self._hit_test(event.x, event.y)
-        if idx is None or idx >= len(self._reports):
-            return
-        r = self._reports[idx]
-        sid = r.meta.session_id or r.meta.path.stem
-        menu = tk.Menu(self.canvas, tearoff=False, bg=theme.PANEL, fg=theme.FG,
-                       activebackground=theme.ACCENT, activeforeground=theme.FG)
-        menu.add_command(
-            label=f"查看会话详情 · {sid[:16]}…",
-            command=lambda: self._controller.show_session_detail(sid)
-                            if self._controller else None,
-        )
-        menu.add_command(
-            label="查看雷达图",
-            command=lambda: self._show_radar_for(idx),
-        )
-        menu.add_separator()
-        menu.add_command(
-            label=f"选中此会话（第 {idx + 1} 个）",
-            command=lambda: self._select_point(idx),
-        )
-        menu.tk_popup(event.x_root, event.y_root)
-
-    def _show_radar_for(self, idx: int) -> None:
-        if idx < len(self._reports):
-            from . import popups
-            popups.RadarPopup(self.canvas, self._reports[idx], self._reports)
-
-    def _select_point(self, idx: int) -> None:
-        self._selected_idx = idx
-        self._draw()
-        if self._controller and idx < len(self._reports):
-            r = self._reports[idx]
-            sid = r.meta.session_id or r.meta.path.stem
-            self._controller.on_select_session(sid)
-
-    def select_session_by_sid(self, sid: str) -> None:
-        """Public API: find and highlight a session by its ID without rebuilding
-        the chart (preserves zoom); only the selection overlay is refreshed."""
-        for i, r in enumerate(self._reports):
-            if (r.meta.session_id or r.meta.path.stem) == sid:
-                if self._selected_idx == i:
-                    return  # already highlighted
-                self._selected_idx = i
-                self._refresh_selection()
-                return
-
-    def _on_key_prev(self, _event=None) -> None:
-        """Left arrow: select previous data point."""
-        if not self._overlay:
-            return
-        ol = self._overlay[0]
-        if not ol.report_indices:
-            return
-        if self._selected_idx is None:
-            new_idx = ol.report_indices[-1]
-        else:
-            prev = [i for i in ol.report_indices if i < self._selected_idx]
-            new_idx = prev[-1] if prev else ol.report_indices[0]
-        self._select_point(new_idx)
-
-    def _on_key_next(self, _event=None) -> None:
-        """Right arrow: select next data point."""
-        if not self._overlay:
-            return
-        ol = self._overlay[0]
-        if not ol.report_indices:
-            return
-        if self._selected_idx is None:
-            new_idx = ol.report_indices[0]
-        else:
-            nxt = [i for i in ol.report_indices if i > self._selected_idx]
-            new_idx = nxt[0] if nxt else ol.report_indices[-1]
-        self._select_point(new_idx)
-
-    # -- hit testing ------------------------------------------------------
-    def _hit_test(self, mx: int, my: int) -> int | None:
-        """Return report index of the nearest data point within _HIT_RADIUS."""
-        best_idx = None
-        best_dist = self._HIT_RADIUS + 1.0
-        for ol in self._overlay:
-            for pt_i, (px, py) in enumerate(ol.screen_pts):
-                d = math.hypot(mx - px, my - py)
-                if d < best_dist:
-                    best_dist = d
-                    best_idx = ol.report_indices[pt_i]
-        return best_idx
-
-    # -- tooltip ----------------------------------------------------------
-    @staticmethod
-    def _fmt_metric(key: str, raw: float, m: 'Metric | None') -> str:
-        """Format a single metric value for tooltip display (SSOT: format_plot)."""
-        return format_plot(key, raw, m)
-
-    def _show_tooltip(self, idx: int, mx: int, my: int) -> None:
-        r = self._reports[idx]
-        sid = r.meta.session_id or r.meta.path.stem
-        title = (r.meta.title or "(无标题)")[:30]
-        ts = fmt_dt(r.usage.started_at, "%m-%d %H:%M")
-        lines = [f"会话: {sid[:16]}… · {title}", f"时间: {ts}"]
-        colors = [theme.ACCENT, theme.MUTED]
-        for ol in self._overlay:
-            raw = metric_raw_value(r, ol.key)
-            if raw is not None:
-                m = _metric_by_key.get(ol.key)
-                disp = self._fmt_metric(ol.key, raw, m)
-                lines.append(f"{ol.name}: {disp}")
-                colors.append(ol.color)
-        self._tooltip.show(mx, my, lines, colors)
-
-    # -- drawing ----------------------------------------------------------
-    def _draw(self) -> None:
-        c = self.canvas
-        c.delete("all")
-        w, h = c.winfo_width(), c.winfo_height()
-        if w < 10 or h < 10:
-            return
-
-        # Show/hide zoom reset button
-        if hasattr(self, '_zoom_reset_btn'):
-            if self._zoom_active:
-                self._zoom_reset_btn.pack(side="right", padx=4)
-            else:
-                self._zoom_reset_btn.pack_forget()
-
-        keys = self._selector.selected_keys()
-        self._build_overlay(keys)
-        self._update_legend()
-
-        if not self._overlay:
-            c.create_text(w / 2, h / 2, text="无有效数据",
-                          fill=theme.MUTED, font=theme.FONT_UI, justify="center")
-            self._update_stats([])
-            return
-
-        pad_l, pad_r, pad_t, pad_b = self._PAD_L, self._PAD_R, self._PAD_T, self._PAD_B
-        plot_w = w - pad_l - pad_r
-        plot_h = h - pad_t - pad_b
-
-        n_overlays = len(self._overlay)
-        use_multi = (n_overlays >= 2)
-
-        if use_multi:
-            # Multi-metric rendering
-            if n_overlays == 2 and not _units_compatible(self._overlay):
-                self._draw_multi_dual_axis(c, w, h, pad_l, pad_r, pad_t, pad_b,
-                                           plot_w, plot_h)
-            else:
-                self._draw_multi_normalized(c, w, h, pad_l, pad_r, pad_t, pad_b,
-                                            plot_w, plot_h)
-        else:
-            # Single-metric rendering (existing logic)
-            ol = self._overlay[0]
-            valid = [(i, v) for i, v in enumerate(ol.values) if v is not None]
-            if len(valid) < 1:
-                c.create_text(w / 2, h / 2, text="该指标在当前时间范围内无有效数据",
-                              fill=theme.MUTED, font=theme.FONT_UI, justify="center")
-                self._update_stats([])
-                return
-
-            lo, hi = ol.y_min, ol.y_max
-            bl_val = self._baseline_value(ol.key)
-            if bl_val is not None:
-                lo, hi = min(lo, bl_val), max(hi, bl_val)
-            if hi - lo < 1e-12:
-                lo -= 1
-                hi += 1
-
-            def xv(i):
-                n = len(ol.values)
-                return pad_l + (plot_w * i / (n - 1)) if n > 1 else pad_l + plot_w / 2
-
-            def yv(v):
-                return pad_t + plot_h * (1 - (v - lo) / (hi - lo))
-
-            if ol.key == "ctei":
-                self._draw_ctei_bands(c, yv, pad_l, plot_w, lo, hi)
-
-            ticks = _nice_ticks(lo, hi, 5)
-            for tv in ticks:
-                ty = yv(tv)
-                c.create_line(pad_l, ty, pad_l + plot_w, ty,
-                              fill="#333333", dash=(2, 4))
-                c.create_text(pad_l - 6, ty, text=f"{tv:g}", anchor="e",
-                              fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-
-            if bl_val is not None and lo <= bl_val <= hi:
-                by = yv(bl_val)
-                c.create_line(pad_l, by, pad_l + plot_w, by,
-                              fill=theme.WARNING, dash=(4, 3))
-                c.create_text(pad_l + plot_w - 2, by, text="基准", anchor="e",
-                              fill=theme.WARNING, font=theme.FONT_UI_SMALL)
-
-            c.create_line(pad_l, pad_t, pad_l, pad_t + plot_h, fill="#3e3e42")
-            c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h,
-                          fill="#3e3e42")
-
-            self._draw_x_axis(c, ol.timestamps, pad_l, plot_w, pad_t, plot_h,
-                              len(ol.values))
-
-            self._draw_overlay_line(c, ol, xv, yv,
-                                    draw_extrema=True, draw_selection=True)
-
-            # Prediction line (linear extrapolation)
-            if len(ol.screen_pts) >= 3:
-                self._draw_prediction(c, ol, xv, yv, pad_l, plot_w)
-
-            label = f"{ol.name}"
-            if ol.unit:
-                label += f"（{ol.unit}）"
-            c.create_text(pad_l + plot_w / 2, 6, text=f"{label} · 趋势",
-                          fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="n")
-
-            valid_vals = [v for _, v in valid]
-            ts_list = [ol.timestamps[i] for i, _ in valid]
-            self._update_stats([(ol.key, ol.name, ol.unit, ol.color,
-                                 valid_vals, ts_list)])
-
-    def _build_overlay(self, keys: list[str]) -> None:
-        """Build _OverlayLine objects for the given metric keys."""
-        self._overlay = []
-        for ki, key in enumerate(keys):
-            metric = _metric_by_key.get(key)
-            if metric is None:
-                continue
-            values = [metric_raw_value(r, key) for r in self._reports]
-            timestamps = [r.usage.started_at or r.usage.ended_at
-                          for r in self._reports]
-            valid_vals = [v for v in values if v is not None]
-            if not valid_vals:
-                continue
-            self._overlay.append(_OverlayLine(
-                key=key, name=metric.name,
-                unit=metric.unit, color=_OVERLAY_COLORS[ki % len(_OVERLAY_COLORS)],
-                values=values, timestamps=timestamps,
-                y_min=min(valid_vals), y_max=max(valid_vals),
-            ))
-
-    def _baseline_value(self, key: str) -> float | None:
-        bl_name = _METRIC_BASELINE.get(key)
-        if bl_name:
-            return getattr(metrics, bl_name, None)
-        return None
-
-    def _draw_x_axis(self, c, timestamps, pad_l, plot_w, pad_t, plot_h,
-                     n_pts) -> None:
-        """Draw X-axis date labels with smart density."""
-        valid_ts = [t for t in timestamps if t is not None]
-        if not valid_ts:
-            return
-        min_ts, max_ts = min(valid_ts), max(valid_ts)
-        span_ms = max_ts - min_ts
-        # Choose format based on span
-        if span_ms <= 24 * 3600_000:
-            dt_fmt = "%H:%M"
-        else:
-            dt_fmt = "%m-%d"
-
-        max_labels = max(2, int(plot_w / 55))
-        step = max(1, len(timestamps) // max_labels)
-
-        for i in range(n_pts):
-            ts = timestamps[i]
-            if ts is None:
-                continue
-            if i % step != 0 and i != n_pts - 1:
-                continue
-            px = pad_l + (plot_w * i / (n_pts - 1)) if n_pts > 1 else pad_l + plot_w / 2
-            # Tick mark
-            c.create_line(px, pad_t + plot_h, px, pad_t + plot_h + 4,
-                          fill="#3e3e42")
-            label = fmt_dt(ts, dt_fmt)
-            if label == "-":
-                continue
-            # Stagger alternating labels to reduce overlap
-            y_off = 10 if (i // step) % 2 == 0 else 20
-            c.create_text(px, pad_t + plot_h + y_off, text=label,
-                          fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="n")
-
-    def _draw_ctei_bands(self, c, yv, pad_l, plot_w, lo, hi) -> None:
-        """Draw grade background bands when CTEI is selected."""
-        for lo_b, hi_b, color_b, _label in _CTEI_BANDS:
-            if hi_b < lo or lo_b > hi:
-                continue
-            y_top = yv(min(hi_b, hi))
-            y_bot = yv(max(lo_b, lo))
-            c.create_rectangle(pad_l, y_top, pad_l + plot_w, y_bot,
-                               fill=color_b, outline="")
-            # Right-edge label
-            c.create_text(pad_l + plot_w - 4, (y_top + y_bot) / 2,
-                          text=_label, anchor="e",
-                          fill="#555555", font=theme.FONT_UI_SMALL)
-
-    @staticmethod
-    def _find_extrema(values: list[float]) -> tuple[list[int], list[int]]:
-        """Return (peak_indices, valley_indices) for a numeric series."""
-        peaks, valleys = [], []
-        for i in range(1, len(values) - 1):
-            if values[i] > values[i - 1] and values[i] > values[i + 1]:
-                peaks.append(i)
-            elif values[i] < values[i - 1] and values[i] < values[i + 1]:
-                valleys.append(i)
-        # Limit to top 3 each by value prominence
-        if len(peaks) > 3:
-            peaks = sorted(peaks, key=lambda i: values[i], reverse=True)[:3]
-            peaks.sort()
-        if len(valleys) > 3:
-            valleys = sorted(valleys, key=lambda i: values[i])[:3]
-            valleys.sort()
-        return peaks, valleys
-
-    @staticmethod
-    def _draw_marker(c, px: float, py: float, is_peak: bool, color: str) -> None:
-        """Draw a small triangle marker at an extremum."""
-        s = 5
-        if is_peak:  # upward triangle
-            pts = [px, py - s - 2, px - s, py - 2, px + s, py - 2]
-        else:  # downward triangle
-            pts = [px, py + s + 2, px - s, py + 2, px + s, py + 2]
-        c.create_polygon(pts, fill=color, outline=theme.FG)
-
-    # -- multi-metric rendering -------------------------------------------
-    def _draw_overlay_line(self, c, ol, xv_fn, yv_fn,
-                           draw_extrema: bool = False,
-                           draw_selection: bool = False) -> None:
-        """Shared: build screen coords, draw polyline + dots, optionally extrema/selection."""
-        ol.screen_pts = []
-        ol.report_indices = []
-        for i, v in enumerate(ol.values):
-            if v is None:
-                continue
-            ol.screen_pts.append((xv_fn(i), yv_fn(v)))
-            ol.report_indices.append(i)
-
-        color = ol.color
-        if len(ol.screen_pts) >= 2:
-            c.create_line(ol.screen_pts, fill=color, width=2, smooth=True)
-        for px, py in ol.screen_pts:
-            c.create_oval(px - 3, py - 3, px + 3, py + 3,
-                          fill=color, outline=theme.FG)
-
-        if draw_extrema and len(ol.screen_pts) >= 5:
-            raw_vals = [ol.values[ol.report_indices[i]]
-                        for i in range(len(ol.report_indices))]
-            peaks, valleys = self._find_extrema(raw_vals)
-            for pi in peaks:
-                if pi < len(ol.screen_pts):
-                    px, py = ol.screen_pts[pi]
-                    self._draw_marker(c, px, py, True, color)
-            for vi in valleys:
-                if vi < len(ol.screen_pts):
-                    px, py = ol.screen_pts[vi]
-                    self._draw_marker(c, px, py, False, color)
-
-        if draw_selection and self._selected_idx is not None:
-            self._draw_selection(c, ol)
-
-    def _draw_selection(self, c, ol) -> None:
-        """Draw the crosshair + ring + label for the selected point on one
-        overlay. Items carry the ``sel_overlay`` tag so they can be wiped and
-        redrawn incrementally (see ``_refresh_selection``) without a full chart
-        redraw."""
-        if self._selected_idx is None:
-            return
-        for j, ri in enumerate(ol.report_indices):
-            if ri == self._selected_idx:
-                px, py = ol.screen_pts[j]
-                # Vertical crosshair line (solid, visible)
-                c.create_line(px, self._PAD_T, px,
-                              c.winfo_height() - self._PAD_B,
-                              fill=theme.ACCENT, dash=(4, 3), width=1,
-                              tags="sel_overlay")
-                # Selection ring (large, bright)
-                c.create_oval(px - 10, py - 10, px + 10, py + 10,
-                              outline=theme.ACCENT, width=2, tags="sel_overlay")
-                # Label showing which session is selected
-                sel_r = self._reports[ri] if ri < len(self._reports) else None
-                if sel_r:
-                    sel_sid = (sel_r.meta.session_id or sel_r.meta.path.stem)[:12]
-                    c.create_text(px, py - 16, text=f"▸ {sel_sid}…",
-                                  fill=theme.ACCENT, font=theme.FONT_UI_SMALL_BOLD,
-                                  anchor="s", tags="sel_overlay")
-                break
-
-    def _refresh_selection(self) -> None:
-        """Incrementally redraw just the selection overlay (crosshair + ring +
-        label) without rebuilding the whole chart, so picking a session from the
-        list doesn't re-walk every data point. Mirrors the tag-based drag
-        rectangle; only drawn in single-metric mode (matching full ``_draw``)."""
-        c = self.canvas
-        c.delete("sel_overlay")
-        if self._selected_idx is None or len(self._overlay) != 1:
-            return
-        self._draw_selection(c, self._overlay[0])
-
-    def _draw_prediction(self, c, ol, xv, yv, pad_l, plot_w) -> None:
-        """Draw a 3-point linear extrapolation as a dashed line."""
-        pts = [(i, v) for i, v in enumerate(ol.values) if v is not None]
-        if len(pts) < 3:
-            return
-        n = len(pts)
-        # Use last N points for regression (at most 10)
-        window = pts[-min(10, n):]
-        xs_w = [p[0] for p in window]
-        ys_w = [p[1] for p in window]
-        mx_ = sum(xs_w) / len(xs_w)
-        my_ = sum(ys_w) / len(ys_w)
-        ss = sum((x - mx_) ** 2 for x in xs_w)
-        if ss == 0:
-            return
-        slope = sum((xs_w[i] - mx_) * (ys_w[i] - my_) for i in range(len(xs_w))) / ss
-        intercept = my_ - slope * mx_
-        # Clamp range: use data min/max as soft bounds
-        all_vals = [v for _, v in pts]
-        v_min, v_max = min(all_vals), max(all_vals)
-        v_margin = (v_max - v_min) * 0.3 if v_max > v_min else abs(v_max) * 0.3 or 1.0
-        clamp_lo, clamp_hi = v_min - v_margin, v_max + v_margin
-        # Extrapolate 3 points beyond the last data point
-        last_i = pts[-1][0]
-        pred_pts = []
-        for step in range(1, 4):
-            pi = last_i + step
-            pv = max(clamp_lo, min(clamp_hi, slope * pi + intercept))
-            pred_pts.append((xv(pi), yv(pv)))
-        # Connect last actual point to first prediction
-        last_actual = (xv(last_i), yv(pts[-1][1]))
-        all_pred = [last_actual] + pred_pts
-        c.create_line(all_pred, fill=theme.WARNING, width=1, dash=(4, 4))
-        # Mark prediction points with hollow circles
-        for px, py in pred_pts:
-            c.create_oval(px - 2, py - 2, px + 2, py + 2,
-                          outline=theme.WARNING, fill="")
-        # Label
-        mid = pred_pts[1]
-        c.create_text(mid[0], mid[1] - 10, text="预测", fill=theme.WARNING,
-                      font=theme.FONT_UI_SMALL)
-
-    def _draw_multi_normalized(self, c, w, h, pad_l, pad_r, pad_t, pad_b,
-                               plot_w, plot_h) -> None:
-        """Draw 2+ metrics on a normalized 0–1 Y scale."""
-        n = len(self._overlay[0].values)
-
-        def xv(i):
-            return pad_l + (plot_w * i / (n - 1)) if n > 1 else pad_l + plot_w / 2
-
-        # Draw each line (normalized per-overlay)
-        for ol in self._overlay:
-            span = ol.y_max - ol.y_min if ol.y_max != ol.y_min else 1.0
-            lo_ = ol.y_min
-            def yv(v, _s=span, _lo=lo_):
-                return pad_t + plot_h * (1 - (v - _lo) / _s)
-            self._draw_overlay_line(c, ol, xv, yv)
-
-        # Axes
-        c.create_line(pad_l, pad_t, pad_l, pad_t + plot_h, fill="#3e3e42")
-        c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h,
-                      fill="#3e3e42")
-        c.create_text(pad_l - 6, pad_t, text="1.0", anchor="e",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-        c.create_text(pad_l - 6, pad_t + plot_h, text="0.0", anchor="e",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-        c.create_text(pad_l - 6, pad_t + plot_h / 2, text="0.5", anchor="e",
-                      fill="#444444", font=theme.FONT_UI_SMALL)
-        c.create_line(pad_l, pad_t + plot_h / 2, pad_l + plot_w,
-                      pad_t + plot_h / 2, fill="#2a2a2a", dash=(2, 4))
-
-        # X-axis
-        self._draw_x_axis(c, self._overlay[0].timestamps,
-                          pad_l, plot_w, pad_t, plot_h, n)
-
-        # Title
-        c.create_text(pad_l + plot_w / 2, 6, text="多指标归一化对比（0–1）",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="n")
-
-        # Stats for all metrics
-        stats_items = []
-        for ol in self._overlay:
-            valid = [v for v in ol.values if v is not None]
-            if valid:
-                stats_items.append((ol.key, ol.name, ol.unit, ol.color,
-                                    valid, ol.timestamps))
-        self._update_stats(stats_items)
-
-    def _draw_multi_dual_axis(self, c, w, h, pad_l, pad_r, pad_t, pad_b,
-                              plot_w, plot_h) -> None:
-        """Draw 2 metrics with independent left/right Y axes."""
-        ol_l, ol_r = self._overlay[0], self._overlay[1]
-        n = len(ol_l.values)
-
-        lo_l, hi_l = ol_l.y_min, ol_l.y_max
-        lo_r, hi_r = ol_r.y_min, ol_r.y_max
-        if hi_l - lo_l < 1e-12:
-            lo_l -= 1; hi_l += 1
-        if hi_r - lo_r < 1e-12:
-            lo_r -= 1; hi_r += 1
-
-        def xv(i):
-            return pad_l + (plot_w * i / (n - 1)) if n > 1 else pad_l + plot_w / 2
-
-        def y_l(v):
-            return pad_t + plot_h * (1 - (v - lo_l) / (hi_l - lo_l))
-
-        def y_r(v):
-            return pad_t + plot_h * (1 - (v - lo_r) / (hi_r - lo_r))
-
-        # Left grid lines
-        for tv in _nice_ticks(lo_l, hi_l, 4):
-            ty = y_l(tv)
-            c.create_line(pad_l, ty, pad_l + plot_w, ty, fill="#2a2a2a", dash=(2, 4))
-            c.create_text(pad_l - 6, ty, text=f"{tv:g}", anchor="e",
-                          fill=ol_l.color, font=theme.FONT_UI_SMALL)
-
-        # Right grid lines
-        for tv in _nice_ticks(lo_r, hi_r, 4):
-            ty = y_r(tv)
-            c.create_text(pad_l + plot_w + 6, ty, text=f"{tv:g}", anchor="w",
-                          fill=ol_r.color, font=theme.FONT_UI_SMALL)
-
-        # Axes
-        c.create_line(pad_l, pad_t, pad_l, pad_t + plot_h, fill="#3e3e42")
-        c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h,
-                      fill="#3e3e42")
-        c.create_line(pad_l + plot_w, pad_t, pad_l + plot_w, pad_t + plot_h,
-                      fill=ol_r.color, dash=(3, 3))
-
-        # Left line
-        self._draw_overlay_line(c, ol_l, xv, y_l)
-
-        # Right line
-        self._draw_overlay_line(c, ol_r, xv, y_r)
-
-        # X-axis
-        self._draw_x_axis(c, ol_l.timestamps, pad_l, plot_w, pad_t, plot_h, n)
-
-        # Axis labels
-        c.create_text(pad_l, pad_t - 10,
-                      text=f"← {ol_l.name}" + (f"（{ol_l.unit}）" if ol_l.unit else ""),
-                      fill=ol_l.color, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_text(pad_l + plot_w, pad_t - 10,
-                      text=f"{ol_r.name}" + (f"（{ol_r.unit}）" if ol_r.unit else "") + " →",
-                      fill=ol_r.color, font=theme.FONT_UI_SMALL, anchor="e")
-
-        # Stats for both
-        stats = []
-        for ol in (ol_l, ol_r):
-            valid = [v for v in ol.values if v is not None]
-            if valid:
-                stats.append((ol.key, ol.name, ol.unit, ol.color,
-                              valid, ol.timestamps))
-        self._update_stats(stats)
-
-    # -- legend & stats ---------------------------------------------------
-    def _update_legend(self) -> None:
-        for w in self._legend_frame.winfo_children():
-            w.destroy()
-        for ol in self._overlay:
-            dot = tk.Label(self._legend_frame, text="●", fg=ol.color,
-                           bg=theme.BG, font=theme.FONT_UI)
-            dot.pack(side="left", padx=(6, 1))
-            lbl = tk.Label(self._legend_frame, text=ol.name, fg=theme.FG,
-                           bg=theme.BG, font=theme.FONT_UI_SMALL)
-            lbl.pack(side="left")
-
-    def _update_stats(self, items: list[tuple]) -> None:
-        """Update the statistics bar. Each item: (key, name, unit, color, values, timestamps)."""
-        for w in self._stats_frame.winfo_children():
-            w.destroy()
-        if not items:
-            tk.Label(self._stats_frame, text="暂无统计信息",
-                     bg=theme.PANEL_2, fg=theme.MUTED,
-                     font=theme.FONT_UI_SMALL).pack(anchor="w")
-            return
-        for key, name, unit, color, vals, _ts in items:
-            if len(vals) < 1:
-                continue
-            mean_v = statistics.mean(vals)
-            median_v = statistics.median(vals)
-            lo_v, hi_v = min(vals), max(vals)
-            # Trend direction: compare first-half mean to second-half mean
-            mid = len(vals) // 2
-            if mid > 0:
-                first_half = statistics.mean(vals[:mid])
-                second_half = statistics.mean(vals[mid:])
-                ratio = (second_half - first_half) / (abs(first_half) or 1)
-                if ratio > 0.1:
-                    trend = "↑ 上升"
-                elif ratio < -0.1:
-                    trend = "↓ 下降"
-                else:
-                    trend = "→ 平稳"
-            else:
-                trend = "—"
-            # Moving average (last 3)
-            ma3 = statistics.mean(vals[-3:]) if len(vals) >= 3 else mean_v
-
-            suffix = f" {unit}" if unit else ""
-            text = (f"●{name}: "
-                    f"均值{mean_v:g}{suffix} · 中位{median_v:g} · "
-                    f"{trend} · 近3期{ma3:g} · "
-                    f"极值 {lo_v:g}~{hi_v:g}")
-            lbl = tk.Label(self._stats_frame, text=text, bg=theme.PANEL_2,
-                           fg=color, font=theme.FONT_UI_SMALL, anchor="w")
-            lbl.pack(fill="x", anchor="w")
-
-
-
-def _pearson_r(xs: list[float], ys: list[float]) -> float:
-    """Pearson correlation coefficient between two equal-length series."""
-    n = len(xs)
-    if n < 3:
-        return 0.0
-    mx, my = sum(xs) / n, sum(ys) / n
-    sx = math.sqrt(sum((x - mx) ** 2 for x in xs) / (n - 1))
-    sy = math.sqrt(sum((y - my) ** 2 for y in ys) / (n - 1))
-    if sx == 0 or sy == 0:
-        return 0.0
-    cov = sum((xs[i] - mx) * (ys[i] - my) for i in range(n)) / (n - 1)
-    try:
-        return cov / (sx * sy)
-    except (ZeroDivisionError, ValueError):
-        return 0.0
-
-
-class ScatterChart:
-    """Dual-metric scatter plot for correlation analysis.
-
-    X-axis = metric A, Y-axis = metric B. Each dot = one session.
-    Displays Pearson r value and optional regression line.
-    """
-
-    _PAD = 60
-
-    def __init__(self, parent) -> None:
-        self._reports: list = []
-        self._frame = tk.Frame(parent, bg=theme.BG)
-        self._frame.pack(fill="both", expand=True)
-        self._tooltip = None
-        self._point_coords: list[tuple[int, int, int]] = []  # (px, py, report_idx)
-        self._resize_after: str | None = None
-        self._build(self._frame)
-
-    def _build(self, parent) -> None:
-        ctrl = tk.Frame(parent, bg=theme.BG)
-        ctrl.pack(fill="x", padx=6, pady=4)
-        # X metric
-        tk.Label(ctrl, text="X轴:", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_UI_SMALL).pack(side="left")
-        self._x_var = tk.StringVar(value="cost")
-        plottable = [m.key for _g in GROUPS for m in _g.metrics
-                     if m.key not in _NON_PLOTTABLE]
-        ttk.Combobox(ctrl, textvariable=self._x_var, width=14, state="readonly",
-                     values=plottable).pack(side="left", padx=4)
-        self._x_var.trace_add("write", lambda *_: self._on_change())
-        # Y metric
-        tk.Label(ctrl, text="Y轴:", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_UI_SMALL).pack(side="left", padx=(12, 0))
-        self._y_var = tk.StringVar(value="tcer")
-        ttk.Combobox(ctrl, textvariable=self._y_var, width=14, state="readonly",
-                     values=plottable).pack(side="left", padx=4)
-        self._y_var.trace_add("write", lambda *_: self._on_change())
-        # Info
-        self._info = tk.Label(ctrl, text="", bg=theme.BG, fg=theme.FG,
-                              font=theme.FONT_UI)
-        self._info.pack(side="right", padx=6)
-
-        self.canvas = tk.Canvas(parent, bg=theme.PANEL, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
-        self._tooltip = _ChartTooltip(self.canvas)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self.canvas.bind("<Motion>", self._on_motion)
-        self.canvas.bind("<Leave>", lambda e: self._tooltip.hide())
-
-    def _on_canvas_configure(self, _event=None) -> None:
-        if self._resize_after is not None:
-            self.canvas.after_cancel(self._resize_after)
-        self._resize_after = self.canvas.after(120, self._draw)
-
-    def update(self, reports) -> None:
-        self._reports = list(reports)
-        self._draw()
-
-    def _on_change(self) -> None:
-        self._draw()
-
-    def _on_motion(self, event) -> None:
-        for px, py, ri in self._point_coords:
-            if math.hypot(event.x - px, event.y - py) <= 8 and ri < len(self._reports):
-                r = self._reports[ri]
-                sid = r.meta.session_id or r.meta.path.stem
-                xk, yk = self._x_var.get(), self._y_var.get()
-                xm = _metric_by_key.get(xk)
-                ym = _metric_by_key.get(yk)
-                xn = xm.name if xm else xk
-                yn = ym.name if ym else yk
-                xv = metric_raw_value(r, xk)
-                yv = metric_raw_value(r, yk)
-                x_disp = TrendChart._fmt_metric(xk, xv, xm) if xv is not None else "?"
-                y_disp = TrendChart._fmt_metric(yk, yv, ym) if yv is not None else "?"
-                lines = [
-                    f"会话: {sid[:20]}…",
-                    f"{xn}: {x_disp}",
-                    f"{yn}: {y_disp}",
-                ]
-                self._tooltip.show(event.x, event.y, lines,
-                                   [theme.ACCENT, theme.FG, theme.FG])
-                return
-        self._tooltip.hide()
-
-    def _draw(self) -> None:
-        c = self.canvas
-        c.delete("all")
-        self._point_coords = []
-        w, h = c.winfo_width(), c.winfo_height()
-        if w < 10 or h < 10:
-            return
-
-        xk, yk = self._x_var.get(), self._y_var.get()
-        xs, ys, ris = [], [], []
-        for i, r in enumerate(self._reports):
-            xv = metric_raw_value(r, xk)
-            yv = metric_raw_value(r, yk)
-            if xv is not None and yv is not None:
-                xs.append(xv)
-                ys.append(yv)
-                ris.append(i)
-
-        if len(xs) < 2:
-            c.create_text(w / 2, h / 2, text="需要 ≥2 个有效数据点",
-                          fill=theme.MUTED, font=theme.FONT_UI, justify="center")
-            self._info.config(text="")
-            return
-
-        pad = self._PAD
-        plot_w = w - pad * 2
-        plot_h = h - pad * 2
-        lo_x, hi_x = min(xs), max(xs)
-        lo_y, hi_y = min(ys), max(ys)
-        if hi_x - lo_x < 1e-12:
-            lo_x -= 1; hi_x += 1
-        if hi_y - lo_y < 1e-12:
-            lo_y -= 1; hi_y += 1
-
-        def xv(v):
-            return pad + plot_w * (v - lo_x) / (hi_x - lo_x)
-
-        def yv(v):
-            return pad + plot_h * (1 - (v - lo_y) / (hi_y - lo_y))
-
-        # Grid lines (Y)
-        for tv in _nice_ticks(lo_y, hi_y, 4):
-            ty = yv(tv)
-            c.create_line(pad, ty, pad + plot_w, ty, fill="#2a2a2a", dash=(2, 4))
-            c.create_text(pad - 6, ty, text=f"{tv:g}", anchor="e",
-                          fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-
-        # Grid lines (X)
-        for tv in _nice_ticks(lo_x, hi_x, 4):
-            tx = xv(tv)
-            c.create_line(tx, pad, tx, pad + plot_h, fill="#2a2a2a", dash=(2, 4))
-            c.create_text(tx, pad + plot_h + 6, text=f"{tv:g}", anchor="n",
-                          fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-
-        # Axes
-        c.create_line(pad, pad, pad, pad + plot_h, fill="#3e3e42")
-        c.create_line(pad, pad + plot_h, pad + plot_w, pad + plot_h, fill="#3e3e42")
-
-        # Dots
-        for xi, yi, ri in zip(xs, ys, ris):
-            px, py = xv(xi), yv(yi)
-            color = theme.ACCENT
-            grade = self._reports[ri].grade
-            if grade:
-                color = theme.GRADE_HEX.get(grade, theme.ACCENT)
-            c.create_oval(px - 4, py - 4, px + 4, py + 4,
-                          fill=color, outline=theme.FG)
-            self._point_coords.append((int(px), int(py), ri))
-
-        # Regression line
-        r_val = _pearson_r(xs, ys)
-        n = len(xs)
-        mx, my = sum(xs) / n, sum(ys) / n
-        ss_xx = sum((x - mx) ** 2 for x in xs)
-        if ss_xx > 0:
-            slope = sum((xs[i] - mx) * (ys[i] - my) for i in range(n)) / ss_xx
-            intercept = my - slope * mx
-            x0, x1 = lo_x, hi_x
-            y0, y1 = slope * x0 + intercept, slope * x1 + intercept
-            c.create_line(xv(x0), yv(y0), xv(x1), yv(y1),
-                          fill=theme.WARNING, width=1, dash=(4, 3))
-
-        # Info
-        if abs(r_val) >= 0.7:
-            strength = "强"
-        elif abs(r_val) >= 0.4:
-            strength = "中等"
-        elif abs(r_val) >= 0.2:
-            strength = "弱"
-        else:
-            strength = "极弱/无"
-        xn = _metric_by_key.get(xk, Metric(xk, xk, "", "", "basic")).name
-        yn = _metric_by_key.get(yk, Metric(yk, yk, "", "", "basic")).name
-        self._info.config(text=f"Pearson r = {r_val:.3f}（{strength}相关） · n={n}")
-
-        # Axis labels
-        c.create_text(pad + plot_w / 2, pad + plot_h + 24, text=xn,
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="n")
-        c.create_text(8, pad + plot_h / 2, text=yn,
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w",
-                      angle=90)
-
-        # Title
-        c.create_text(pad + plot_w / 2, 6,
-                      text=f"{xn} vs {yn} 散点图 · r={r_val:.3f}",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="n")
-
-
-class DashboardChart:
-    """6-group sparkline dashboard — one representative metric per G-group.
-
-    Each sparkline shows the trend of one metric across sessions, with
-    min/max/mean annotations and trend direction arrows.
-    """
-
-    # One representative metric per G-group.
-    _GROUP_METRICS = [
-        ("G1", "turns"),
-        ("G2", "total_tokens"),
-        ("G3", "chr"),
-        ("G4", "net_loc"),
-        ("G5", "cost"),
-        ("G6", "ctei"),
-    ]
-
-    def __init__(self, parent) -> None:
-        self._reports: list = []
-        self._resize_after: str | None = None
-        self.canvas = tk.Canvas(parent, bg=theme.PANEL, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
-        self.canvas.bind("<Configure>", self._on_configure)
-
-    def _on_configure(self, _event=None) -> None:
-        if self._resize_after is not None:
-            self.canvas.after_cancel(self._resize_after)
-        self._resize_after = self.canvas.after(120, self._draw)
-
-    def update(self, reports) -> None:
-        self._reports = sorted(reports,
-                               key=lambda r: r.usage.started_at or r.usage.ended_at or 0)
-        self._draw()
-
-    def _draw(self) -> None:
-        c = self.canvas
-        c.delete("all")
-        w, h = c.winfo_width(), c.winfo_height()
-        if w < 10 or h < 10:
-            return
-        n_groups = len(self._GROUP_METRICS)
-        cols = 3
-        rows = (n_groups + cols - 1) // cols
-        cell_w = w // cols
-        cell_h = h // rows
-
-        for gi, (gid, key) in enumerate(self._GROUP_METRICS):
-            col = gi % cols
-            row = gi // cols
-            x0 = col * cell_w
-            y0 = row * cell_h
-
-            metric = _metric_by_key.get(key)
-            name = metric.name if metric else key
-            unit = metric.unit if metric else ""
-            group_color = theme.GROUP_COLORS.get(gid, theme.PANEL)
-
-            # Cell background
-            c.create_rectangle(x0, y0, x0 + cell_w, y0 + cell_h,
-                               fill=theme.PANEL_2, outline="#333333")
-
-            # Header bar
-            c.create_rectangle(x0, y0, x0 + cell_w, y0 + 20,
-                               fill=group_color, outline="")
-            label = f"{gid} {name}"
-            if unit:
-                label += f"（{unit}）"
-            c.create_text(x0 + 6, y0 + 10, text=label, fill=theme.FG,
-                          font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-
-            # Extract values
-            vals = [metric_raw_value(r, key) for r in self._reports]
-            valid = [(i, v) for i, v in enumerate(vals) if v is not None]
-            if len(valid) < 1:
-                c.create_text(x0 + cell_w / 2, y0 + cell_h / 2,
-                              text="无数据", fill=theme.MUTED,
-                              font=theme.FONT_UI_SMALL)
-                continue
-
-            indices = [i for i, _ in valid]
-            values = [v for _, v in valid]
-            lo_v, hi_v = min(values), max(values)
-            mean_v = statistics.mean(values)
-            pad = 10
-            plot_x = x0 + pad
-            plot_w = cell_w - pad * 2
-            plot_y = y0 + 24
-            plot_h = cell_h - 44
-
-            if hi_v - lo_v < 1e-12:
-                hi_v = lo_v + 1
-
-            def xv(i, _indices=indices, _plot_x=plot_x, _plot_w=plot_w, _n=len(vals)):
-                return _plot_x + _plot_w * i / max(_n - 1, 1)
-
-            def yv(v, _lo=lo_v, _hi=hi_v, _plot_y=plot_y, _plot_h=plot_h):
-                return _plot_y + _plot_h * (1 - (v - _lo) / (_hi - _lo))
-
-            # Mean line
-            ym = yv(mean_v)
-            c.create_line(plot_x, ym, plot_x + plot_w, ym,
-                          fill="#444444", dash=(2, 3))
-
-            # Sparkline
-            pts = [(xv(i), yv(v)) for i, v in valid]
-            color = _OVERLAY_COLORS[0]
-            if len(pts) >= 2:
-                c.create_line(pts, fill=color, width=2, smooth=True)
-            for px, py in pts:
-                c.create_oval(px - 2, py - 2, px + 2, py + 2,
-                              fill=color, outline="")
-
-            # Min/Max markers
-            max_idx = indices[values.index(hi_v)]
-            min_idx = indices[values.index(lo_v)]
-            mx_px, mx_py = xv(max_idx), yv(hi_v)
-            mn_px, mn_py = xv(min_idx), yv(lo_v)
-            c.create_text(mx_px, mx_py - 6, text="▲", fill=theme.SUCCESS,
-                          font=theme.FONT_UI_SMALL)
-            c.create_text(mn_px, mn_py + 8, text="▼", fill=theme.ERROR,
-                          font=theme.FONT_UI_SMALL)
-
-            # Current value + trend arrow
-            current = values[-1]
-            if len(values) >= 2:
-                prev_mean = statistics.mean(values[:len(values) // 2]) if len(values) > 2 else values[0]
-                if current > prev_mean * 1.1:
-                    trend = "↑"
-                    trend_color = theme.SUCCESS
-                elif current < prev_mean * 0.9:
-                    trend = "↓"
-                    trend_color = theme.ERROR
-                else:
-                    trend = "→"
-                    trend_color = theme.MUTED
-            else:
-                trend = "—"
-                trend_color = theme.MUTED
-
-            footer_y = y0 + cell_h - 14
-            c.create_text(x0 + 6, footer_y,
-                          text=f"当前:{current:g} {trend}",
-                          fill=trend_color, font=theme.FONT_UI_SMALL, anchor="w")
-            c.create_text(x0 + cell_w - 6, footer_y,
-                          text=f"均值:{mean_v:g}",
-                          fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
-
+# 图表组件已拆分至 charts.py；从这里 re-export 保持既有 import 路径可用。
+from .charts import (  # noqa: F401
+    DashboardChart, HeatmapChart, MetricTrendSelector, ScatterChart, TrendChart,
+)
 
 # ============================================================
 # 模型对比 (Apple-style, matching MetricPanel layout)
@@ -2863,6 +1560,3 @@ def _model_price_tip(mc) -> str:
     )
 
 
-# Reverse lookup metric key → Metric object (overlay / tooltip / axis labels),
-# sourced from the metric SSOT so there is a single registry of metric metadata.
-_metric_by_key = METRIC_BY_KEY

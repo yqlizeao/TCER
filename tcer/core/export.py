@@ -33,7 +33,7 @@ def ctei_ranking(reports: list[SessionReport]) -> list[tuple[str, float, str]]:
 
 
 def ctei_decompose(report: SessionReport) -> dict[str, float] | None:
-    """Return CTEI's 4 multiplicative factors for one session.
+    """Return CTEI's 3 multiplicative factors for one session.
 
     Each factor is normalized so 1.0 = the neutral/baseline point.
     Returns None when the session has no CTEI score.
@@ -41,19 +41,15 @@ def ctei_decompose(report: SessionReport) -> dict[str, float] | None:
     if report.ctei is None:
         return None
     tcer = report.tcer
-    ncpi_ = report.ncpi
     cpe = report.cpe
     chr_ = report.chr
     bl_t = metrics.TCER_BASELINE
-    bl_n = metrics.NCPI_BASELINE
     bl_c = metrics.CPE_BASELINE
     eff = (tcer / bl_t) if (tcer is not None and bl_t) else 0.0
-    dens = (ncpi_ / bl_n) if (ncpi_ is not None and bl_n) else 0.0
     cost = (bl_c / cpe) if cpe else 0.0
     cache = metrics.chr_factor(chr_)
     return {
         "eff_factor": eff,
-        "density_factor": dens,
         "cost_factor": cost,
         "cache_factor": cache,
     }
@@ -68,7 +64,7 @@ def ctei_decompose_avg(reports: list[SessionReport]) -> dict[str, float] | None:
             all_factors.append(f)
     if not all_factors:
         return None
-    keys = ("eff_factor", "density_factor", "cost_factor", "cache_factor")
+    keys = ("eff_factor", "cost_factor", "cache_factor")
     n = len(all_factors)
     return {k: sum(d[k] for d in all_factors) / n for k in keys}
 
@@ -137,6 +133,7 @@ def report_row_dict(r: SessionReport) -> dict:
         "assistant_turns": u.assistant_msgs,
         "input_tokens": u.input_tokens,
         "cache_write_tokens": u.cache_creation_input_tokens,
+        "cache_write_1h_tokens": u.cache_write_1h_tokens,
         "cache_read_tokens": u.cache_read_input_tokens,
         "output_tokens": u.output_tokens,
         "total_tokens": u.total,
@@ -147,13 +144,9 @@ def report_row_dict(r: SessionReport) -> dict:
         "tcer": r.tcer,
         "cpe": r.cpe,
         "net_loc": r.net_loc,
-        "loc_accumulated": r.loc_accumulated,
-        "ncpi": r.ncpi,
         "caf": r.caf,
         "task_type": r.task_type,
         "ta_tcer": r.ta_tcer,
-        "psac": r.psac,
-        "tcer_phase_adj": r.tcer_phase_adj,
         "ctei": r.ctei,
         "grade": r.grade,
         "code_added": r.code_added,
@@ -175,6 +168,7 @@ def report_row_dict(r: SessionReport) -> dict:
         "non_cached_input_ratio": r.non_cached_input_ratio,
         # --- file-level quality ---
         "high_churn_file_count": r.high_churn_file_count,
+        "first_pass_file_ratio": r.first_pass_file_ratio,
         "test_net_loc": r.test_net_loc,
         "doc_net_loc": r.doc_net_loc,
         "test_loc_ratio": r.test_loc_ratio,
@@ -216,9 +210,43 @@ def report_row_dict(r: SessionReport) -> dict:
         "rate_limit_snapshots": u.rate_limit_snapshots,
         "rate_limit_reached_count": u.rate_limit_reached_count,
         "rate_limit_names": sorted(u.rate_limit_names),
+        "rate_limit_peak_used": u.rate_limit_peak_used,
+        "ttft_p95_sec": r.ttft_p95_sec,
+        "abort_reasons": dict(sorted(u.abort_reasons.items())),
+        "cancellation_count": u.cancellation_count,
+        "regeneration_count": u.regeneration_count,
+        "positive_ratings": u.positive_ratings,
+        "negative_ratings": u.negative_ratings,
+        "git_commit_count": u.git_commit_count,
+        "pr_created_count": u.pr_created_count,
+        "pr_merged_count": u.pr_merged_count,
+        "reverted_lines": u.reverted_lines,
+        "permission_request_count": u.permission_request_count,
+        "permission_wait_ms_total": u.permission_wait_ms_total,
+        "itl_p50_ms": u.itl_p50_ms,
+        "itl_p99_ms": u.itl_p99_ms,
+        "user_modified_count": u.user_modified_count,
+        "revert_events": u.revert_events,
+        "mcp_calls_by_attr": dict(sorted(u.mcp_calls_by_attr.items())),
+        "hook_run_count": u.hook_run_count,
+        "hook_error_count": u.hook_error_count,
+        "hook_duration_ms_total": u.hook_duration_ms_total,
+        "queued_input_count": u.queued_input_count,
+        "slash_command_count": u.slash_command_count,
+        "correction_msg_count": u.correction_msg_count,
+        "first_prompt_chars": u.first_prompt_chars,
+        "plan_mode_count": u.plan_mode_count,
+        "read_truncation_count": u.read_truncation_count,
+        "reasoning_ms_total": u.reasoning_ms_total,
+        "patch_diff_added": u.patch_diff_added,
+        "patch_diff_deleted": u.patch_diff_deleted,
+        "source_reported_cost_usd": u.reported_cost_usd,
         "files_touched": r.files_touched,
         "search_edit_ratio": r.search_edit_ratio,
         "read_before_write": r.read_before_write,
+        "edit_verify_ratio": r.edit_verify_ratio,
+        "first_edit_turn": r.first_edit_turn,
+        "bash_ratio": r.bash_ratio,
         # Raw tool-name → call count. Keys stay verbatim (``Skill``,
         # ``mcp__server__tool``, …) so downstream consumers can derive the
         # Skill / MCP / plugin dimensions; CSV keeps ignoring it (dict column).
@@ -233,6 +261,11 @@ def report_row_dict(r: SessionReport) -> dict:
     }
 
 
+def session_to_json(r: SessionReport) -> str:
+    """单会话 JSON 导出：一份完整的 report_row_dict（不含冗余聚合包装）。"""
+    return json.dumps(report_row_dict(r), indent=2, ensure_ascii=False, default=str)
+
+
 def to_json(reports: list[SessionReport], agg: SessionReport, n_sessions: int) -> str:
     payload = {
         "aggregate": report_row_dict(agg) | {"sessions_counted": n_sessions},
@@ -245,8 +278,8 @@ _CSV_FIELDS = [
     "session_id", "source", "is_subagent", "subagent_count", "assistant_turns", "input_tokens",
     "cache_write_tokens", "cache_read_tokens", "output_tokens",
     "total_tokens", "chr", "io_ratio", "cost_usd", "cost_per_mt",
-    "tcer", "cpe", "net_loc", "loc_accumulated", "ncpi", "caf",
-    "task_type", "ta_tcer", "psac", "tcer_phase_adj", "ctei", "grade",
+    "tcer", "cpe", "net_loc", "caf",
+    "task_type", "ta_tcer", "ctei", "grade",
     "code_added", "code_deleted", "churn_ratio", "unseen_writes",
     "avg_turn_latency_sec", "session_duration_minutes",
     "read_write_ratio", "edit_ratio", "exploration_ratio",
@@ -260,10 +293,34 @@ _CSV_FIELDS = [
     "task_count", "completed_task_count", "aborted_task_count", "task_completion_rate",
     "compaction_count", "web_search_count", "image_count", "local_image_count",
     "patch_apply_count", "patch_apply_success_count", "patch_apply_success_rate",
-    "rate_limit_snapshots", "rate_limit_reached_count",
+    "rate_limit_snapshots", "rate_limit_reached_count", "rate_limit_peak_used",
     "files_touched", "search_edit_ratio", "read_before_write",
+    "cache_write_1h_tokens", "first_pass_file_ratio", "ttft_p95_sec",
+    "cancellation_count", "regeneration_count",
+    "positive_ratings", "negative_ratings",
+    "git_commit_count", "pr_created_count", "pr_merged_count",
+    "reverted_lines", "permission_request_count", "permission_wait_ms_total",
+    "itl_p50_ms", "itl_p99_ms", "user_modified_count", "revert_events",
+    "hook_run_count", "hook_error_count", "hook_duration_ms_total",
+    "queued_input_count", "slash_command_count", "correction_msg_count",
+    "first_prompt_chars", "plan_mode_count", "read_truncation_count",
+    "reasoning_ms_total", "patch_diff_added", "patch_diff_deleted",
+    "source_reported_cost_usd", "edit_verify_ratio", "first_edit_turn",
+    "bash_ratio",
     "models", "models_label",
 ]
+
+# report_row_dict 中有意不进 CSV 的键：隐私/宽度（title/path/cwd）、
+# 时间戳原值（有格式化派生列）、以及 dict/list 结构化字段。
+# 新增导出字段必须进 _CSV_FIELDS 或此集合之一——test_export 有漂移护栏。
+_CSV_EXCLUDED = frozenset({
+    "title", "path", "cwd", "started_at", "ended_at",
+    "git_repository", "permission_profile",
+    "rate_limit_names", "abort_reasons", "mcp_calls_by_attr", "cost_by_model",
+    # Dict-valued: one CSV column per tool name would be unbounded and unstable
+    # across sessions. Uploaded as JSON to the web layer instead.
+    "tool_calls", "tool_variants",
+})
 
 
 def to_csv(reports: list[SessionReport]) -> str:
@@ -280,7 +337,7 @@ def to_csv(reports: list[SessionReport]) -> str:
 
 
 def to_markdown(reports: list[SessionReport], agg: SessionReport, n_sessions: int,
-                code_dir: Path | None, project_name: str = "Project") -> str:
+                project_name: str = "Project") -> str:
     """Lightweight Markdown report (summary + per-session table + ASCII CTEI chart).
 
     Designed for embedding in PRs, docs, or wiki pages.
@@ -312,7 +369,7 @@ def to_markdown(reports: list[SessionReport], agg: SessionReport, n_sessions: in
             "",
             "**LOC 统计假设**：Write 工具调用假设写入的是新文件（原大小 = 0）。",
             "若 Write 覆盖已有文件，added 会高估、deleted 会遗漏。Edit 不受影响。",
-            "上述计数是潜在高估的上界。若需精确量化偏差，使用 GUI 的「校准 LOC」对标 git 历史。",
+            "上述计数是残留高估的上界（会话数据带 originalFile 时已自动修正）。",
             "",
         ]
 

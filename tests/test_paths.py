@@ -43,6 +43,7 @@ def test_list_project_refs_filters_by_source(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-claude"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex"))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path / "no-opencode"))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "no-omp"))
 
     sdir = tmp_path / "sessions" / "C%3A%5Crepo%5Capp" / "uuid-1"
     sdir.mkdir(parents=True)
@@ -145,3 +146,51 @@ def test_custom_profile_only_project_is_listed(tmp_path, monkeypatch):
     keys = {r.key for r in paths.list_project_refs("claude")}
     assert "main" in keys
     assert "only-in-z" in keys  # would be invisible without multi-root discovery
+
+
+def test_list_projects_independent_per_root(tmp_path, monkeypatch):
+    """同 hash 跨根不再合并：每根各成一条（根内大小写折叠仍保留）。"""
+    from tcer.core import paths
+    h = "c--GitHub-Demo"
+    _seed_claude_project(tmp_path / ".claude", h, sid="aaa")
+    _seed_claude_project(tmp_path / ".zclaude", h, sid="bbb")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    paths.reset_claude_roots_cache()
+    same = [d for d in paths.list_projects() if d.name == h]
+    assert len(same) == 2
+    assert {d.parent.parent.name for d in same} == {".claude", ".zclaude"}
+    refs = [r for r in paths.list_project_refs("claude") if r.key == h]
+    assert len(refs) == 2
+    assert {r.config_root.name for r in refs} == {".claude", ".zclaude"}
+
+
+def test_discover_jsonl_roots_param(tmp_path, monkeypatch):
+    """roots= 限定单根；默认（None）跨根 union（向后兼容）。"""
+    from tcer.core import paths, reader
+    h = "c--GitHub-Demo"
+    root_a = tmp_path / ".claude"
+    root_b = tmp_path / ".zclaude"
+    _seed_claude_project(root_a, h, sid="aaa")
+    _seed_claude_project(root_b, h, sid="bbb")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root_a))
+    paths.reset_claude_roots_cache()
+    assert {f.stem for f in reader.discover_jsonl(h)} == {"aaa", "bbb"}            # 默认跨根
+    assert {f.stem for f in reader.discover_jsonl(h, roots=[root_a])} == {"aaa"}   # 限定 a
+    assert {f.stem for f in reader.discover_jsonl(h, roots=[root_b])} == {"bbb"}   # 限定 b
+
+
+def test_project_has_sessions_scoped_per_root(tmp_path, monkeypatch):
+    """某根空、兄弟根非空：该根 ref 判空（按根，不跨根 union）。回归护栏。"""
+    from tcer.core.models import ProjectRef
+    from tcer.core import paths
+    h = "c--GitHub-Demo"
+    root_a = tmp_path / ".claude"
+    root_b = tmp_path / ".zclaude"
+    (root_a / "projects" / h).mkdir(parents=True)   # root_a 的 h 空目录
+    _seed_claude_project(root_a, "seed")            # 让 root_a 满足 fingerprint
+    _seed_claude_project(root_b, h, sid="bbb")      # root_b 的 h 有会话
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root_a))
+    paths.reset_claude_roots_cache()
+    empty_ref = ProjectRef(source="claude", key=h, display_name=h, cwd=None,
+                           path=root_a / "projects" / h, config_root=root_a)
+    assert paths.project_has_sessions(empty_ref) is False

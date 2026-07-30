@@ -67,6 +67,26 @@ def test_read_conversation_coalesces_grok_chunks(tmp_path):
     assert convo[4]["text"] == "内容"
 
 
+def test_read_user_messages_coalesces_consecutive_chunks(tmp_path):
+    """A user message split across consecutive user_message_chunk updates is
+    ONE popup row, not many — matches aggregate_usage's user_msgs coalescing.
+    Any non-user update ends the run; a later chunk starts a new message.
+    """
+    p = _write_jsonl(tmp_path / "updates.jsonl", [
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "实现 "}}),
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "Grok"}}),
+        # any non-user update ends the user-chunk run
+        _notif(_T0 + 1, {"sessionUpdate": "turn_completed", "prompt_id": "p1",
+                         "usage": {"inputTokens": 10, "outputTokens": 5}}),
+        # a second message after the boundary
+        _notif(_T0 + 2, {"sessionUpdate": "user_message_chunk",
+                         "content": {"type": "text", "text": "再来一条"}}),
+    ])
+    assert grok_reader.read_user_messages(p) == ["实现 Grok", "再来一条"]
+
+
 def _grok_lines() -> list[dict]:
     """A realistic single-turn Grok session: msg → thought → read → edit → error → turn_completed."""
     return [
@@ -330,3 +350,86 @@ def test_analyze_grok_project_without_loc_keeps_token_metrics(tmp_path, monkeypa
     assert result.aggregate.net_loc == 0
     assert result.reports[0].net_loc == 0
     assert result.reports[0].tcer == 0.0
+
+
+def test_signals_and_events_folding(tmp_path):
+    """signals.json 与 events.jsonl 的会话级信号并入 TokenUsage。"""
+    sdir = tmp_path / "sess"
+    sdir.mkdir()
+    updates = sdir / "updates.jsonl"
+    turn = _notif(_T0, {"sessionUpdate": "turn_completed",
+                        "usage": {"inputTokens": 100, "cachedReadTokens": 40,
+                                  "outputTokens": 20, "apiDurationMs": 900}},
+                  params_meta={"modelId": "grok-4.5"})
+    updates.write_text(json.dumps(turn) + "\n", encoding="utf-8")
+    (sdir / "signals.json").write_text(json.dumps({
+        "contextWindowTokens": 256000,
+        "minTimeToFirstTokenMs": 800,
+        "cancellationCount": 2,
+        "regenerationCount": 1,
+        "positiveRatings": 3,
+        "negativeRatings": 1,
+        "gitCommitCount": 4,
+        "prMergedCount": 1,
+        "agentLinesAddedReverted": 30,
+        "agentLinesRemovedReverted": 5,
+        "itlP50Ms": 45,
+        "itlP99Ms": 320,
+    }), encoding="utf-8")
+    (sdir / "events.jsonl").write_text(
+        json.dumps({"type": "permission_resolved", "decision": "allow", "wait_ms": 1500}) + "\n"
+        + json.dumps({"type": "phase_changed", "phase": "x"}) + "\n"
+        + json.dumps({"type": "permission_resolved", "decision": "deny", "wait_ms": 500}) + "\n",
+        encoding="utf-8")
+
+    u = grok_reader.aggregate_usage(updates)
+    assert u.model_context_window == 256000
+    assert u.time_to_first_token_ms == 800
+    assert u.cancellation_count == 2
+    assert u.regeneration_count == 1
+    assert (u.positive_ratings, u.negative_ratings) == (3, 1)
+    assert u.git_commit_count == 4
+    assert u.pr_merged_count == 1
+    assert u.reverted_lines == 35
+    assert (u.itl_p50_ms, u.itl_p99_ms) == (45, 320)
+    assert u.permission_request_count == 2
+    assert u.permission_wait_ms_total == 2000
+    # 逐回合 TurnStat
+    assert len(u.turn_stats) == 1
+    t = u.turn_stats[0]
+    assert (t.input_tokens, t.cache_read, t.output_tokens) == (60, 40, 20)
+    assert t.duration_ms == 900
+
+
+def test_signals_update_invalidates_analyze_cache(tmp_path, monkeypatch):
+    """signals.json 补写后,analyze 的 grok usage 缓存必须失效(旁路文件签名进 key)。"""
+    import time
+
+    from tcer.core import file_cache
+    from tcer.core.models import ProjectRef
+
+    file_cache.clear()
+    sdir = tmp_path / "C%3A%5Cwork" / "0198-uuid"
+    sdir.mkdir(parents=True)
+    updates = sdir / "updates.jsonl"
+    turn = _notif(_T0, {"sessionUpdate": "turn_completed",
+                        "usage": {"inputTokens": 100, "cachedReadTokens": 0,
+                                  "outputTokens": 20, "apiDurationMs": 100}},
+                  params_meta={"modelId": "grok-4.5"})
+    updates.write_text(json.dumps(turn) + "\n", encoding="utf-8")
+    _write_summary(sdir, {"info": {"id": "0198-uuid", "cwd": "C:\work"},
+                          "generated_title": "t"})
+    (sdir / "signals.json").write_text(json.dumps({"cancellationCount": 1}),
+                                       encoding="utf-8")
+    ref = ProjectRef(source="grok", key="g", display_name="g", cwd="C:\work",
+                     path=sdir.parent, session_paths=(updates,))
+
+    a1 = analyze.analyze_project("g", source="grok", project_ref=ref)
+    assert a1.aggregate.usage.cancellation_count == 1
+    # 补写 signals.json(更新取消数)
+    time.sleep(0.02)
+    (sdir / "signals.json").write_text(json.dumps({"cancellationCount": 5}),
+                                       encoding="utf-8")
+    a2 = analyze.analyze_project("g", source="grok", project_ref=ref)
+    assert a2.aggregate.usage.cancellation_count == 5
+    file_cache.clear()

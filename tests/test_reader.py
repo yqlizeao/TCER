@@ -387,3 +387,181 @@ def test_aggregate_handles_garbage_lines(tmp_path):
                  + "\n", encoding="utf-8")
     u = reader.aggregate_usage(p)
     assert u.assistant_msgs == 1
+
+
+def test_scan_parses_system_signals_and_server_tool_use(tmp_path):
+    """system/turn_duration、api_error(429)、compact_boundary 与 server_tool_use。"""
+    import json as _json
+    lines = [
+        {"type": "assistant", "timestamp": "2026-07-01T10:00:00Z",
+         "message": {"role": "assistant", "id": "m1", "model": "claude-opus-4-8",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0,
+                               "server_tool_use": {"web_search_requests": 2,
+                                                   "web_fetch_requests": 1}}}},
+        {"type": "system", "subtype": "turn_duration",
+         "durationMs": 4321, "messageCount": 3},
+        {"type": "system", "subtype": "api_error",
+         "error": {"status": 429, "message": "rate limited"},
+         "retryAttempt": 1},
+        {"type": "system", "subtype": "compact_boundary",
+         "compactMetadata": {"trigger": "auto", "preTokens": 150000}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert u.web_search_count == 3
+    assert u.rate_limit_reached_count == 1
+    assert "api-429" in u.rate_limit_names
+    assert u.compaction_count == 1
+    # 真实回合耗时回填到 turn_stats
+    assert len(u.turn_stats) == 1
+    assert u.turn_stats[0].duration_ms == 4321
+    assert u.turn_stats[0].output_tokens == 5
+
+
+def test_session_meta_line_metadata(tmp_path):
+    """行级 version/gitBranch/effort/permissionMode → SessionMeta。"""
+    import json as _json
+    line = {"type": "user", "sessionId": "sid-1", "cwd": "/tmp/x",
+            "version": "2.1.220", "gitBranch": "main", "effort": "high",
+            "permissionMode": "bypassPermissions",
+            "message": {"role": "user",
+                        "content": [{"type": "text", "text": "hello"}]}}
+    p = tmp_path / "s.jsonl"
+    p.write_text(_json.dumps(line) + "\n", encoding="utf-8")
+    meta = reader.read_session_meta(p)
+    assert meta.cli_version == "2.1.220"
+    assert meta.git_branch == "main"
+    assert meta.reasoning_effort == "high"
+    assert meta.permission_profile == "bypassPermissions"
+
+
+def test_structured_patch_diff_counters(tmp_path):
+    """structuredPatch 的 +/- 行独立累计(仅代码文件),作回放 LOC 交叉校验。"""
+    import json as _json
+    lines = [
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0}}},
+        {"type": "user",
+         "toolUseResult": {"filePath": "a.py", "structuredPatch": [
+             {"lines": ["+new1", "+new2", "-old1", " ctx"]},
+             {"lines": ["+new3"]},
+         ]},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+        # 非代码后缀不计
+        {"type": "user",
+         "toolUseResult": {"filePath": "img.png", "structuredPatch": [
+             {"lines": ["+x", "-y"]}]},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t2"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert (u.patch_diff_added, u.patch_diff_deleted) == (3, 1)
+
+
+def test_claude_third_batch_signals(tmp_path):
+    """stop_hook_summary / queue-operation / MCP 归因。"""
+    import json as _json
+    lines = [
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0}}},
+        {"type": "queue-operation", "operation": "enqueue"},
+        {"type": "queue-operation", "operation": "enqueue"},
+        {"type": "system", "subtype": "stop_hook_summary",
+         "hookCount": 2, "hookErrors": ["boom"],
+         "hookInfos": [{"durationMs": 1200}, {"durationMs": 300}]},
+        {"type": "user", "attributionMcpServer": "monolith",
+         "attributionMcpTool": "editor_query",
+         "toolUseResult": {"stdout": "ok"},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert u.queued_input_count == 2
+    assert (u.hook_run_count, u.hook_error_count, u.hook_duration_ms_total) == (2, 1, 1500)
+    assert u.mcp_calls_by_attr == {"monolith/editor_query": 1}
+
+
+def test_prompt_behavior_signals(tmp_path):
+    """slash 命令 / 纠正措辞 / 首条消息长度(只计数,不存正文)。"""
+    import json as _json
+
+    def _user(text):
+        return {"type": "user",
+                "message": {"role": "user",
+                            "content": [{"type": "text", "text": text}]}}
+    lines = [
+        _user("帮我实现一个解析器,要求如下:支持 JSONL"),   # 首条(19 字)
+        _user("/compact"),                                  # slash
+        _user("<command-name>/model</command-name>"),        # 命令面板
+        _user("不对,重来,应该用差分"),                       # 纠正
+        _user("好的继续"),                                   # 普通
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0}}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert u.slash_command_count == 2
+    assert u.correction_msg_count == 1
+    assert u.first_prompt_chars == len("帮我实现一个解析器,要求如下:支持 JSONL")
+    assert u.user_msgs == 5
+
+
+def test_read_user_messages_filters_cc_injections(tmp_path):
+    """Claude-Code-injected user-role texts must NOT appear in the popup.
+
+    Before the fix ``_strip_tags`` ran BEFORE the ``<…>`` prefix check, which
+    erased the tags first and let ~17% of popup rows be injections
+    (task-notification, ide_opened_file, local-command-stdout, compact
+    continuation, ESC marker, system-reminder…). The check must run on the
+    RAW text. Guards read_user_messages, user_message_texts, and
+    first_prompt_chars together.
+    """
+    import json as _json
+
+    def _user(text):
+        return {"type": "user",
+                "message": {"role": "user",
+                            "content": [{"type": "text", "text": text}]}}
+
+    lines = [
+        _user("<task-notification>a095\ncall_1\nC:\\Temp\\t</task-notification>"),
+        _user("<ide_opened_file>The user opened the file Untitled-1 in the IDE.</ide_opened_file>"),
+        _user("<local-command-stdout>Set model to Fable 5</local-command-stdout>"),
+        _user("<command-name>/model</command-name>"),
+        _user("[Request interrupted by user]"),
+        _user("This session is being continued from a previous conversation that ran out of context."),
+        _user("<system-reminder>Only use artifacts when explicitly asked.</system-reminder>"),
+        _user("请帮我修复这个 bug"),   # the one real human message
+        _assistant(_usage(10, 0, 0, 5)),
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    # Popup path: only the real message survives.
+    assert reader.read_user_messages(p) == ["请帮我修复这个 bug"]
+
+    # Cached path (aggregate_usage w/ texts) agrees.
+    u = reader.aggregate_usage(p)
+    assert u.user_message_texts == ["请帮我修复这个 bug"]
+    # first_prompt_chars skips injections → the real message's length.
+    assert u.first_prompt_chars == len("请帮我修复这个 bug")
+    # user_msgs COUNT is unaffected — injections are still user-role turns.
+    assert u.user_msgs == 8

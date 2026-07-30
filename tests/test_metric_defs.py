@@ -17,8 +17,7 @@ def _report():
     meta = SessionMeta(session_id="s", cwd="/tmp", title="t",
                        path=Path("/tmp/s.jsonl"), is_subagent=False)
     u = TokenUsage(input_tokens=500_000, output_tokens=500_000)
-    return metrics.compute(meta, u, net_loc=400, loc_accumulated=10_000,
-                           task_type="feature", code_added=420, code_deleted=20)
+    return metrics.compute(meta, u, net_loc=400, task_type="feature", code_added=420, code_deleted=20)
 
 
 def test_every_layer_key_is_formatted():
@@ -55,11 +54,10 @@ def test_format_value_tokens():
     assert metric_defs.format_value("cost", 1.2345) == "$1.2345"   # money 4dp
     assert metric_defs.format_value("cost_per_mt", 1.6) == "$1.60"  # money2 2dp
     assert metric_defs.format_value("tcer", 60.13) == "60.1"        # float:0.0
-    assert metric_defs.format_value("ncpi", 0.0305) == "0.030"      # float:0.000
 
 
 def test_format_value_none_is_dash():
-    for key in ("cost", "chr", "tcer", "ncpi", "cost_per_mt", "net_loc"):
+    for key in ("cost", "chr", "tcer", "cost_per_mt", "net_loc"):
         assert metric_defs.format_value(key, None) == "-"
 
 
@@ -80,8 +78,7 @@ def test_report_values_golden_strings():
                    assistant_msgs=50, empty_usage_skipped=3, user_msgs=12,
                    thinking_count=7)
     u.tool_calls = {"Read": 10, "Edit": 5}
-    r = metrics.compute(meta, u, net_loc=400, loc_accumulated=10_000,
-                        task_type="code_creation", code_added=420,
+    r = metrics.compute(meta, u, net_loc=400, task_type="code_creation", code_added=420,
                         code_deleted=20, code_reworked=20)
     v = metric_defs.report_values(r)
     assert v["total_tokens"] == "5,000,000"
@@ -193,3 +190,52 @@ def test_model_tip_borrowed_from_session():
     assert metric_defs.model_tip("m_cost_share") is None  # no session counterpart
 
 
+
+
+# --------------------------------------------------------------------------- #
+# 源能力感知：不适用 vs 无数据
+# --------------------------------------------------------------------------- #
+def _report_for(source: str):
+    meta = SessionMeta(session_id="s", cwd="/tmp", title="t",
+                       path=Path("/tmp/s.jsonl"), is_subagent=False, source=source)
+    u = TokenUsage(input_tokens=500_000, output_tokens=500_000,
+                   cache_creation_input_tokens=1000, reasoning_output_tokens=200)
+    return metrics.compute(meta, u, net_loc=400, task_type="feature")
+
+
+def test_unsupported_metric_shows_label():
+    claude = _report_for("claude")
+    codex = _report_for("codex")
+    # Claude 不单独上报推理输出 → 不适用；Codex 支持 → 正常数值
+    assert metric_defs.display(claude, "reasoning_tokens") == metric_defs.UNSUPPORTED_LABEL
+    assert metric_defs.display(codex, "reasoning_tokens") == "200"
+    # Codex 不上报缓存写入 → 不适用；Claude 支持
+    assert metric_defs.display(codex, "cache_write") == metric_defs.UNSUPPORTED_LABEL
+    assert metric_defs.display(claude, "cache_write") == "1,000"
+    # Codex/Grok 运行时信号在 Claude 不适用；patch_success 仍为 Codex 独有
+    for key in ("context_window", "ttft", "patch_success"):
+        assert metric_defs.display(claude, key) == metric_defs.UNSUPPORTED_LABEL
+    assert metric_defs.display(_report_for("grok"), "patch_success") == metric_defs.UNSUPPORTED_LABEL
+    assert metric_defs.display(_report_for("grok"), "context_window") != metric_defs.UNSUPPORTED_LABEL
+    # Claude 深度解析后翻转支持：限流/压缩/网页搜索
+    for key in ("rate_limit_hits", "compactions", "web_searches"):
+        assert metric_defs.display(claude, key) != metric_defs.UNSUPPORTED_LABEL
+
+
+def test_unsupported_metric_raw_value_is_none():
+    claude = _report_for("claude")
+    assert metric_defs.raw_value(claude, "reasoning_tokens") is None
+    codex = _report_for("codex")
+    assert metric_defs.raw_value(codex, "reasoning_tokens") == 200.0
+    assert metric_defs.raw_value(codex, "cache_write") is None
+
+
+def test_supported_keys_all_exist():
+    """_SOURCE_SUPPORT 只引用真实存在的 metric key，防止拼写漂移。"""
+    unknown = set(metric_defs._SOURCE_SUPPORT) - metric_defs.ALL_KEYS
+    assert not unknown, f"_SOURCE_SUPPORT 引用了不存在的 key: {unknown}"
+
+
+def test_support_note_appended_to_tip():
+    m = metric_defs.METRIC_BY_KEY["context_window"]
+    assert "仅以下数据源提供" in m.tip and "Codex" in m.tip

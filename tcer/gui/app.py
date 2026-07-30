@@ -16,11 +16,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from tcer.core import analyze, export as export_mod, metrics
-from tcer.core import upload_client, upload_prefs
-from tcer.core.calibrate import calibrate_project
-from tcer.core.paths import list_project_refs, project_has_sessions
+from tcer.core import ui_prefs, upload_client, upload_prefs
+from tcer.core.paths import list_project_refs, project_has_sessions, ref_root
 from tcer.core.reader import discover_jsonl
-from . import popups, theme, views
+from . import html_report, popups, theme, views
 from .views import CteiRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
 
 
@@ -34,9 +33,7 @@ class TcerGui:
         self._selected_session_id: str | None = None
         self.view_mode = tk.StringVar(value="project")
         self._rendered_report = None  # last report rendered in MetricPanel (for popups)
-        self._code_dir: str | None = None
         self._no_loc: bool = False
-        self._scan_code_dir: bool = False
         self._analysis_generation = 0
         self._analysis_cancel = threading.Event()
         self._upload_prefs: dict = upload_prefs.load()
@@ -45,19 +42,47 @@ class TcerGui:
         root.title("TCER — Token 转码效率计量")
         root.configure(bg=theme.BG)
         theme.setup_style(ttk)
+        # Combobox 下拉列表是独立 Listbox，不吃 ttk style，只能经 option db 深色化。
+        for opt, val in (("*TCombobox*Listbox*background", theme.PANEL),
+                         ("*TCombobox*Listbox*foreground", theme.FG),
+                         ("*TCombobox*Listbox*selectBackground", theme.ACCENT),
+                         ("*TCombobox*Listbox*selectForeground", "#ffffff")):
+            root.option_add(opt, val)
 
-        # Center window on screen (shifted up slightly to account for taskbar)
-        w, h = 1600, 900
-        sx = root.winfo_screenwidth()
-        sy = root.winfo_screenheight()
-        root.geometry(f"{w}x{h}+{(sx - w) // 2}+{(sy - h) // 2 - 40}")
+        # 界面偏好：恢复上次窗口几何，否则居中（略上移避开任务栏）。
+        self._ui_prefs = ui_prefs.load()
+        self._restore_project_uid = self._ui_prefs.get("last_project")
+        if ui_prefs.valid_geometry(self._ui_prefs.get("geometry")):
+            root.geometry(self._ui_prefs["geometry"])
+        else:
+            w, h = 1600, 900
+            sx = root.winfo_screenwidth()
+            sy = root.winfo_screenheight()
+            root.geometry(f"{w}x{h}+{(sx - w) // 2}+{(sy - h) // 2 - 40}")
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.filter = FilterBar(root, self)
+        self.filter.restore_prefs(self._ui_prefs)
         self._build_body(root)
         self.refresh_projects()
         root.after(100, self._poll)
         if self._upload_prefs.get("auto_upload"):
             self._schedule_auto_upload()
+
+    def _on_close(self) -> None:
+        """关闭时保存界面偏好（几何/分栏/筛选/项目），失败不拦退出。"""
+        try:
+            proj = self._selected_project()
+            ui_prefs.save({
+                "geometry": self.root.geometry(),
+                "sashes": [self._paned.sash_coord(i)[0] for i in (0, 1)],
+                "source": self.filter.get_source(),
+                "task_type": self.filter.get_params().get("task_type"),
+                "last_project": views.ref_uid(proj) if proj else None,
+            })
+        except tk.TclError:
+            pass
+        self.root.destroy()
 
     # --------------------------------------------------------------- layout
     def _build_body(self, root) -> None:
@@ -92,9 +117,18 @@ class TcerGui:
         self.trend_chart = TrendChart(tab_t, controller=self)
         self.model_compare = ModelCompareView(tab_c, controller=self)
 
+        self._paned = paned
         root.update_idletasks()
         paned.sash_place(0, 190, 0)
         paned.sash_place(1, 420, 0)
+        # 恢复上次的分栏位置（覆盖默认值；数据异常则保持默认）。
+        saved = self._ui_prefs.get("sashes")
+        if isinstance(saved, list) and len(saved) == 2:
+            try:
+                paned.sash_place(0, int(saved[0]), 0)
+                paned.sash_place(1, int(saved[1]), 0)
+            except (TypeError, ValueError, tk.TclError):
+                pass
 
     # --------------------------------------------------------------- projects
     def refresh_projects(self) -> None:
@@ -105,12 +139,16 @@ class TcerGui:
         self._selected_project_idx = None
         self._clear_analysis_view()
         self._projects = list_project_refs(source)
-        # 标记无会话项目（Claude / Codex / OpenCode / Grok 统一判定）
+        # 标记无会话项目（Claude / Codex / OpenCode / Grok / Oh My Pi 统一判定）
         self._empty_projects = {
             i for i, p in enumerate(self._projects)
             if not project_has_sessions(p)
         }
-        self.project_col.update(self._projects, self._empty_projects)
+        # 启动时恢复上次选中的项目（一次性；之后的刷新回到默认选首个）。
+        preferred = self._restore_project_uid
+        self._restore_project_uid = None
+        self.project_col.update(self._projects, self._empty_projects,
+                                preferred_uid=preferred)
         n_empty = len(self._empty_projects)
         n_live = len(self._projects) - n_empty
         status = f"发现 {len(self._projects)} 个项目"
@@ -158,9 +196,7 @@ class TcerGui:
             task_type=params["task_type"],
             since=params["since"],
             until=params["until"],
-            code_dir=self._code_dir,
             no_loc=self._no_loc,
-            scan_code_dir=self._scan_code_dir,
             cancel_event=cancel_event,
         )
         threading.Thread(target=self._worker, args=(generation, args, cancel_event), daemon=True).start()
@@ -197,16 +233,11 @@ class TcerGui:
                     if generation == self._analysis_generation:
                         self.filter.set_status("出错")
                         messagebox.showerror("TCER 分析出错", payload)
-                elif kind == "calibration":
-                    _, payload = item
-                    cals, text_report = payload
-                    self.filter.set_status("校准完成")
-                    popups.CalibratePopup(self.root, cals, text_report)
-                elif kind == "calibration_err":
-                    # calibration is user-initiated — no generation gate
-                    _, payload = item
-                    self.filter.set_status("校准出错")
-                    messagebox.showerror("LOC 校准出错", payload)
+                elif kind == "overview":
+                    _, rows, errors = item
+                    note = f"（{errors} 个项目分析失败）" if errors else ""
+                    self.filter.set_status(f"项目总览完成{note}")
+                    popups.ProjectOverviewPopup(self.root, rows)
                 elif kind == "upload":
                     _, dialog, ok, message = item
                     if ok:
@@ -226,9 +257,7 @@ class TcerGui:
         proj = self._selected_project()
         if proj is None:
             return
-        if a.project_ref and (
-            a.project_ref.source != proj.source or a.project_ref.key != proj.key
-        ):
+        if a.project_ref and views.ref_uid(a.project_ref) != views.ref_uid(proj):
             return
         self._current = a
         prev_sid = self._selected_session_id
@@ -284,8 +313,8 @@ class TcerGui:
         from tcer.core import reader
 
         sid = report.meta.session_id or report.meta.path.stem
-        if report.meta.source in ("codex", "opencode", "grok"):
-            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok"}.get(report.meta.source, report.meta.source)
+        if report.meta.source in ("codex", "opencode", "grok", "omp"):
+            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi"}.get(report.meta.source, report.meta.source)
             messagebox.showinfo("删除会话", f"{label} 会话当前仅支持只读分析，暂不删除本地会话数据。")
             return
         try:
@@ -299,7 +328,11 @@ class TcerGui:
         self.session_col.clear_selection()
 
         proj = self._selected_project()
-        if proj is not None and proj.source == "claude" and discover_jsonl(proj.key):
+        _has = False
+        if proj is not None and proj.source == "claude":
+            _r = ref_root(proj)
+            _has = bool(discover_jsonl(proj.key, roots=[_r] if _r is not None else None))
+        if _has:
             self.reanalyze()
         else:
             # 最后一个会话被删 — 项目变空，回到项目列表状态。
@@ -410,21 +443,49 @@ class TcerGui:
         if not report:
             messagebox.showinfo("用户消息", "当前会话未记录到用户消息。")
             return
+        # 聚合视图要遍历项目全部会话文件（Claude 还含 subagents 目录），大项目
+        # 在主线程读会卡死界面 — 放后台线程，读完回 Tk 主循环弹窗。
+        reports = list(self._current.reports) if self._current else []
+        self.filter.set_status("读取用户消息…")
+
+        def _work() -> None:
+            try:
+                msgs, label = self._load_user_messages(report, reports)
+                err = None
+            except Exception as e:  # noqa: BLE001 — 后台线程兜底，错误回主线程展示
+                msgs, label, err = None, "", str(e)
+            self.root.after(0, lambda: self._show_user_msgs_done(msgs, label, err))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _show_user_msgs_done(self, msgs, label: str, err: str | None) -> None:
+        self.filter.set_status("就绪")
+        if err is not None:
+            messagebox.showerror("用户消息", f"读取失败：{err}")
+        elif msgs:
+            popups.UserMsgsPopup(self.root, msgs)
+        else:
+            messagebox.showinfo("用户消息", f"当前 {label} 会话未记录到用户消息。")
+
+    @staticmethod
+    def _load_user_messages(report, reports) -> tuple[list[str], str]:
+        """读取一个 report（会话或聚合）的全部用户消息文本（仅文件 IO，线程安全）。"""
         source = report.meta.source or "claude"
+        is_agg = report.meta.session_id == "(aggregate)"
         msgs: list[str] = []
 
         if source == "codex":
             from tcer.core import codex_reader
-            if report.meta.session_id == "(aggregate)" and self._current:
-                for r in self._current.reports:
+            if is_agg:
+                for r in reports:
                     msgs.extend(codex_reader.read_user_messages(r.meta.path))
             else:
                 msgs = codex_reader.read_user_messages(report.meta.path)
             label = "Codex"
         elif source == "opencode":
             from tcer.core import opencode_reader
-            if report.meta.session_id == "(aggregate)" and self._current:
-                for r in self._current.reports:
+            if is_agg:
+                for r in reports:
                     sid = r.meta.session_id
                     if sid:
                         msgs.extend(opencode_reader.read_user_messages(r.meta.path, sid))
@@ -433,28 +494,31 @@ class TcerGui:
             label = "OpenCode"
         elif source == "grok":
             from tcer.core import grok_reader
-            if report.meta.session_id == "(aggregate)" and self._current:
-                for r in self._current.reports:
+            if is_agg:
+                for r in reports:
                     msgs.extend(grok_reader.read_user_messages(r.meta.path))
             else:
                 msgs = grok_reader.read_user_messages(report.meta.path)
             label = "Grok"
+        elif source == "omp":
+            from tcer.core import omp_reader
+            if is_agg:
+                for r in reports:
+                    msgs.extend(omp_reader.read_user_messages(r.meta.path))
+            else:
+                msgs = omp_reader.read_user_messages(report.meta.path)
+            label = "Oh My Pi"
         else:
             # Claude: prefer cached texts (legacy), else lazy-read main + subagent files.
-            from tcer.core import reader
             if report.usage.user_message_texts:
                 msgs = list(report.usage.user_message_texts)
-            elif report.meta.session_id == "(aggregate)" and self._current:
-                for r in self._current.reports:
-                    msgs.extend(self._claude_user_messages(r))
+            elif is_agg:
+                for r in reports:
+                    msgs.extend(TcerGui._claude_user_messages(r))
             else:
-                msgs = self._claude_user_messages(report)
+                msgs = TcerGui._claude_user_messages(report)
             label = "Claude"
-
-        if msgs:
-            popups.UserMsgsPopup(self.root, msgs)
-        else:
-            messagebox.showinfo("用户消息", f"当前 {label} 会话未记录到用户消息。")
+        return msgs, label
 
     @staticmethod
     def _claude_user_messages(report) -> list[str]:
@@ -465,7 +529,8 @@ class TcerGui:
             return []
         try:
             _, main, session_dir = reader.session_artifacts(path)
-        except Exception:  # noqa: BLE001
+        except (OSError, ValueError, IndexError):
+            # 路径形态异常（非标准会话布局）→ 退回按单文件读取。
             return reader.read_user_messages(path) if path.is_file() else []
         msgs: list[str] = []
         if main.is_file():
@@ -493,32 +558,6 @@ class TcerGui:
             messagebox.showinfo("项目记忆文件", "当前项目没有 memory/ 目录或目录为空。")
 
     # --------------------------------------------------------------- tools
-    def run_calibration(self) -> None:
-        proj = self._selected_project()
-        if proj is None:
-            messagebox.showinfo("LOC 校准", "请先选择一个项目。")
-            return
-        if proj.source in ("codex", "opencode", "grok"):
-            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok"}.get(proj.source, proj.source)
-            messagebox.showinfo("LOC 校准", f"{label} 会话当前仅支持只读分析，暂不支持 LOC 校准。")
-            return
-        self.filter.set_status("校准中…")
-        threading.Thread(target=self._calibration_worker, args=(proj.key,),
-                         daemon=True).start()
-
-    def _calibration_worker(self, project: str) -> None:
-        try:
-            cals = calibrate_project(project, code_dir=self._code_dir)
-            lines = []
-            for cal in cals:
-                lines.append(f"{cal.session_id[:38]}  "
-                             f"工具 +{cal.tcer_added} -{cal.tcer_deleted}  "
-                             f"git +{cal.git_added} -{cal.git_deleted}  "
-                             f"偏差 {cal.net_deviation:+d}")
-            self._q.put(("calibration", (cals, "\n".join(lines))))
-        except Exception as e:  # noqa: BLE001
-            self._q.put(("calibration_err", f"校准出错: {e}"))
-
     def compute_baselines(self) -> None:
         if not self._current:
             messagebox.showinfo("计算基准", "请先分析一个项目。")
@@ -527,12 +566,8 @@ class TcerGui:
         need = metrics.MIN_BASELINE_SESSIONS
         values = metrics.compute_baselines(self._current.reports)
         if values is None:
-            # Need scan_code_dir for NCPI, and enough complete sessions.
             if len(eligible) == 0:
-                msg = (
-                    "没有可参与计算的会话（需同时具备 TCER、NCPI、CPE）。\n"
-                    "提示：在「高级选项」开启「扫描代码目录」以填充 NCPI。"
-                )
+                msg = "没有可参与计算的会话（需同时具备 TCER 与 CPE，即有效净增行与成本）。"
             else:
                 msg = (
                     f"有效会话不足：需要至少 {need} 个完整会话，"
@@ -548,38 +583,125 @@ class TcerGui:
 
         popups.BaselinesPopup(self.root, values, len(eligible), _apply)
 
+    def show_tool_sequence(self) -> None:
+        report = self._rendered_report
+        if not report or len(report.usage.tool_ops) < 2:
+            self.filter.set_status("工具调用不足，无法分析序列")
+            return
+        suffix = (" · 项目汇总" if report.meta.session_id == "(aggregate)"
+                  else f" · {(report.meta.session_id or '')[:16]}…")
+        popups.ToolSequencePopup(self.root, report.usage, suffix)
+
+    def show_project_overview(self) -> None:
+        """跨项目总览：后台分析全部项目（走 mtime 缓存），弹窗可排序对比。"""
+        if not self._projects:
+            self.filter.set_status("无项目可汇总")
+            return
+        params = self.filter.get_params()
+        projects = list(self._projects)
+        self.filter.set_status(f"项目总览计算中…（{len(projects)} 个项目）")
+
+        def _work() -> None:
+            rows = []
+            errors = 0
+            for p in projects:
+                try:
+                    a = analyze.analyze_project(
+                        p.key, source=getattr(p, "source", "claude"),
+                        project_ref=p if hasattr(p, "session_paths") else None,
+                        task_type=params["task_type"],
+                        since=params["since"], until=params["until"],
+                        no_loc=self._no_loc,
+                    )
+                except Exception:  # noqa: BLE001 — 单项目失败不拦总览
+                    errors += 1
+                    continue
+                if a.n_sessions:
+                    rows.append((p, a))
+            self._q.put(("overview", rows, errors))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def show_session_timeline(self) -> None:
+        if not self._current:
+            self.filter.set_status("无数据")
+            return
+        sid = self._selected_session_id
+        report = self._session_report(sid) if sid else None
+        if report is None:
+            self.filter.set_status("请先在会话列表选中一个会话")
+            return
+        if not report.usage.turn_stats:
+            self.filter.set_status("该会话未记录逐回合数据")
+            return
+        popups.SessionTimelinePopup(self.root, report)
+
+    def show_session_compare(self) -> None:
+        if not self._current or len(self._current.reports) < 2:
+            self.filter.set_status("至少需要 2 个会话才能对比")
+            return
+        popups.SessionComparePopup(self.root, self._current.reports,
+                                   preselect_sid=self._selected_session_id)
+
     def show_advanced(self) -> None:
-        def _apply(code_dir, no_loc, scan_code_dir):
-            self._code_dir = code_dir
+        def _apply(no_loc):
             self._no_loc = no_loc
-            self._scan_code_dir = scan_code_dir
             self.reanalyze()
 
-        popups.AdvancedPopup(self.root, self._code_dir or "", self._no_loc,
-                             self._scan_code_dir, _apply)
+        popups.AdvancedPopup(self.root, self._no_loc, _apply)
 
     # --------------------------------------------------------------- export
-    def export(self, fmt: str) -> None:
+    def export(self, fmt: str, scope: str = "project") -> None:
         if not self._current:
             self.filter.set_status("无数据可导出")
             return
-        ext = {"json": "json", "csv": "csv", "md": "md"}[fmt]
+        a = self._current
+        report = None
+        if scope == "session":
+            sid = self._selected_session_id
+            report = self._session_report(sid) if sid else None
+            if report is None:
+                self.filter.set_status("未选中会话，无法导出会话报告")
+                return
+        proj = self._selected_project()
+        proj_name = views.project_label(proj) if proj is not None else a.project_hash
+        source_label = (views.project_source_label(proj) if proj is not None
+                        else (a.source or "claude").capitalize())
+        if scope == "session":
+            stem = f"tcer-会话-{(self._selected_session_id or 'session')[:12]}"
+        else:
+            stem = f"tcer-报告-{proj_name}"
+        stem = "".join(ch for ch in stem if ch not in '<>:"/\\|?*').strip() or "tcer-report"
+        ext = {"json": "json", "csv": "csv", "md": "md", "html": "html"}[fmt]
         path = filedialog.asksaveasfilename(
             defaultextension=f".{ext}",
             filetypes=[(f"{ext.upper()} 文件", f"*.{ext}"), ("所有文件", "*.*")],
-            initialfile=f"tcer-report.{ext}",
+            initialfile=f"{stem}.{ext}",
         )
         if not path:
             return
-        a = self._current
         try:
-            if fmt == "json":
+            if scope == "session":
+                if fmt == "html":
+                    content = html_report.render_session_html(
+                        report, project_name=proj_name, source_label=source_label)
+                elif fmt == "json":
+                    content = export_mod.session_to_json(report)
+                else:
+                    content = export_mod.to_markdown(
+                        [report], report, 1, project_name=proj_name)
+            elif fmt == "html":
+                content = html_report.render_project_html(
+                    a.reports, a.aggregate, project_name=proj_name,
+                    source_label=source_label, n_sessions=a.n_sessions,
+                    n_subagents=a.n_subagents)
+            elif fmt == "json":
                 content = export_mod.to_json(a.reports, a.aggregate, a.n_sessions)
             elif fmt == "csv":
                 content = export_mod.to_csv(a.reports)
             else:
                 content = export_mod.to_markdown(a.reports, a.aggregate, a.n_sessions,
-                                                 a.code_dir, project_name=a.project_hash)
+                                                 project_name=proj_name)
             Path(path).write_text(content, encoding="utf-8")
             self.filter.set_status(f"已导出 → {Path(path).name}")
         except OSError as e:
@@ -587,12 +709,12 @@ class TcerGui:
 
     # --------------------------------------------------------------- upload
     def show_upload(self) -> None:
-        projects = [(p.key, f"[{views.project_source_label(p)}] {views.project_label(p)}")
+        projects = [(views.ref_uid(p), f"[{views.project_source_label(p)}] {views.project_label(p)}")
                     for p in self._projects]
         default_proj = None
         proj = self._selected_project()
         if proj is not None:
-            default_proj = proj.key
+            default_proj = views.ref_uid(proj)
         popups.UploadDialog(
             self.root,
             prefs=self._upload_prefs,
@@ -611,11 +733,8 @@ class TcerGui:
         # (Re)arm or cancel the auto-upload timer to match the new setting.
         self._schedule_auto_upload()
 
-    def _project_ref_by_key(self, key: str):
-        for p in self._projects:
-            if p.key == key:
-                return p
-        return None
+    def _project_ref_by_uid(self, uid: str):
+        return views.find_ref_by_uid(self._projects, uid)
 
     def _start_upload(self, prefs: dict, dialog=None) -> None:
         """Analyze each selected project fresh, then upload its own report.
@@ -631,7 +750,7 @@ class TcerGui:
             if dialog is not None:
                 dialog.set_status("请至少选择一个项目", error=True)
             return
-        refs = [(k, self._project_ref_by_key(k)) for k in keys]
+        refs = [(k, self._project_ref_by_uid(k)) for k in keys]
         missing = [k for k, r in refs if r is None]
         refs = [(k, r) for k, r in refs if r is not None]
         if not refs:
@@ -643,9 +762,7 @@ class TcerGui:
             task_type=params["task_type"],
             since=params["since"],
             until=params["until"],
-            code_dir=self._code_dir,
             no_loc=self._no_loc,
-            scan_code_dir=self._scan_code_dir,
         )
         threading.Thread(
             target=self._upload_worker,
@@ -740,7 +857,78 @@ class TcerGui:
         except ImportError:
             print("error: tkinter is not available in this Python build.")
             return 1
+        _enable_windows_hidpi()
+        _set_windows_app_id()
         root = tk.Tk()
+        _apply_tk_scaling(root)
+        _set_window_icon(root)
         cls(root)
         root.mainloop()
         return 0
+
+
+def _enable_windows_hidpi() -> None:
+    """Windows 高 DPI 感知。必须在创建 Tk 之前调用——否则系统把 96 DPI
+    位图拉伸到高分屏，整个界面发糊（观感上「不精致」的最大来源）。"""
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # SYSTEM_DPI_AWARE
+    except (OSError, AttributeError):
+        pass
+
+
+def _set_windows_app_id() -> None:
+    """设置 AppUserModelID，让 Windows 任务栏显示本程序图标。
+
+    Tk 程序默认无 AppID，任务栏按 ``python.exe`` 分组、显示默认 Python 图标——
+    即使 ``iconbitmap`` 已设好窗口图标。显式设 AppID 后任务栏才认本程序自己的
+    图标（与标题栏一致）。必须在创建 Tk 之前调用。
+    """
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("leo.TCER.app")
+    except (OSError, AttributeError):
+        pass
+
+
+def _apply_tk_scaling(root) -> None:
+    """按实际 DPI 设置 Tk 缩放，点单位字体随之放大到物理正确尺寸。"""
+    try:
+        dpi = root.winfo_fpixels("1i")
+        if dpi > 0:
+            root.tk.call("tk", "scaling", dpi / 72.0)
+    except tk.TclError:
+        pass
+
+
+def _set_window_icon(root) -> None:
+    """设置窗口图标（标题栏 + 任务栏）。
+
+    Windows 用多尺寸 ``.ico``（``iconbitmap``）——任务栏才会正确显示；
+    ``iconphoto`` 在 Windows 任务栏常失效、仍显默认 Tk 羽毛图标。其他平台
+    fallback 到 PNG ``iconphoto``。PhotoImage 存 ``root._tcer_icon`` 持引用防 GC。
+    """
+    import os
+    import sys
+    assets = os.path.join(os.path.dirname(__file__), "assets")
+    if sys.platform == "win32":
+        ico = os.path.join(assets, "tcer_logo.ico")
+        if os.path.isfile(ico):
+            try:
+                root.iconbitmap(default=ico)
+                return
+            except tk.TclError:
+                pass
+    png = os.path.join(assets, "tcer_logo.png")
+    if os.path.isfile(png):
+        try:
+            root._tcer_icon = tk.PhotoImage(file=png)
+            root.iconphoto(True, root._tcer_icon)
+        except tk.TclError:
+            pass
