@@ -164,6 +164,42 @@ def test_list_projects_independent_per_root(tmp_path, monkeypatch):
     assert {r.config_root.name for r in refs} == {".claude", ".zclaude"}
 
 
+def test_since_date_to_ms_utc_matches_analyze():
+    """since_date_to_ms 必须与 analyze._parse_date_to_ms (UTC) 逐字节一致——
+    否则左栏 mtime 过滤与会话级 started_at 过滤会对同一 since 分歧。"""
+    from datetime import datetime, timezone
+    from tcer.core import analyze
+    for s in ("2026-07-30", "2025-01-01", "2000-12-31"):
+        expected = int(datetime.strptime(s, "%Y-%m-%d")
+                       .replace(tzinfo=timezone.utc).timestamp() * 1000)
+        assert paths.since_date_to_ms(s) == expected
+        assert paths.since_date_to_ms(s) == analyze._parse_date_to_ms(s)
+    assert paths.since_date_to_ms("") is None
+    assert paths.since_date_to_ms(None) is None
+    assert paths.since_date_to_ms("2026/07/30") is None
+
+
+def test_project_latest_activity_ms_claude(tmp_path, monkeypatch):
+    """Claude 项目最近活动 = max 会话文件 mtime；空项目 → None。"""
+    import os
+    from tcer.core.models import ProjectRef
+    root = tmp_path / ".claude"
+    _seed_claude_project(root, "h", sid="a")
+    _seed_claude_project(root, "h", sid="b")
+    early, late = 1_700_000_000_000, 1_750_000_000_000
+    os.utime(root / "projects" / "h" / "a.jsonl", ns=(early * 1_000_000,) * 2)
+    os.utime(root / "projects" / "h" / "b.jsonl", ns=(late * 1_000_000,) * 2)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    paths.reset_claude_roots_cache()
+    ref = ProjectRef(source="claude", key="h", display_name="h", cwd=None,
+                     path=root / "projects" / "h")
+    assert paths.project_latest_activity_ms(ref) == late
+    (root / "projects" / "empty").mkdir(parents=True)
+    ref_empty = ProjectRef(source="claude", key="empty", display_name="empty",
+                           cwd=None, path=root / "projects" / "empty")
+    assert paths.project_latest_activity_ms(ref_empty) is None
+
+
 def test_discover_jsonl_roots_param(tmp_path, monkeypatch):
     """roots= 限定单根；默认（None）跨根 union（向后兼容）。"""
     from tcer.core import paths, reader

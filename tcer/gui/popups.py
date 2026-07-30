@@ -689,9 +689,11 @@ class MemoryFilesPopup:
         # 按钮栏：打开目录（居中）
         btn_bar = tk.Frame(win, bg=theme.BG)
         btn_bar.pack(fill="x", padx=10, pady=(4, 8))
-        flat_button(btn_bar, f"📂 在{FILE_MANAGER_NAME}中打开目录",
+        from .views import ui_icon
+        flat_button(btn_bar, f"在{FILE_MANAGER_NAME}中打开目录",
                     lambda: open_in_file_manager(memory_dir),
-                    padx=theme.PAD_L).pack(anchor="center")
+                    padx=theme.PAD_L, image=ui_icon(btn_bar, "folder"),
+                    compound="left").pack(anchor="center")
 
         sf = ScrollFrame(win, bg=theme.PANEL)
         sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))

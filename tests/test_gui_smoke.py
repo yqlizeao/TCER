@@ -276,3 +276,134 @@ def test_user_msgs_popup_renders(root):
     assert first.cget("state") == "disabled"          # 只读但可选中复制
     assert "短消息" in first.get("1.0", "end-1c")      # 文本已写入
     assert int(first.cget("height")) >= 1
+
+
+def test_calendar_popup_renders_and_picks(root):
+    """CalendarPopup 构建 + 月份切换 + 选日期/清除回调不崩（拦 Toplevel 回归）。"""
+    from tcer.gui.widgets import CalendarPopup
+
+    picked: list = []
+    anchor = tk.Label(root, text="x")
+    anchor.pack()
+    root.update_idletasks()
+    p = CalendarPopup(anchor, lambda s: picked.append(s), anchor=anchor,
+                      initial="2026-07-15")
+    root.update_idletasks()
+    assert p._year == 2026 and p._month == 7   # initial 解析定位到该月
+    p._shift(-1)                                # ← 6 月
+    assert p._month == 6
+    p._shift(1)                                 # → 回 7 月
+    p._pick(1)                                  # 点选 7/1 → 回调并关闭
+    assert picked == ["2026-07-01"]
+
+    p2 = CalendarPopup(anchor, lambda s: picked.append(s), anchor=anchor, initial="")
+    root.update_idletasks()
+    p2._clear()                                 # ✕ 清除 → 空串回调
+    assert picked[-1] == ""
+    anchor.destroy()
+
+
+def test_filter_bar_presets_today(root):
+    """FilterBar 预设：今天 → since=今日；全部 → 起止归空。"""
+    from datetime import datetime
+    from tcer.gui.views import FilterBar
+
+    class _Ctl:
+        def __init__(self):
+            self.view_mode = tk.StringVar(value="project")
+
+        def __getattr__(self, name):            # reanalyze / show_* / refresh_* 占位
+            return lambda *a, **k: None
+
+    frame = tk.Frame(root)
+    frame.pack()
+    bar = FilterBar(frame, _Ctl())
+    root.update_idletasks()
+
+    bar._set_preset("today")
+    assert bar.since_var.get() == datetime.now().strftime("%Y-%m-%d")
+    assert bar.until_var.get() == ""
+
+    bar._set_preset("all")
+    assert bar.since_var.get() == "" and bar.until_var.get() == ""
+    frame.destroy()
+
+
+def test_project_column_set_hidden(root):
+    """ProjectColumn 隐藏范围外项目：pack_forget + 计数标签 + notify=False 不回调。"""
+    from tcer.gui.views import ProjectColumn
+
+    class _Ctl:
+        def __init__(self):
+            self.selected = "UNSET"
+
+        def on_select_project(self, idx):
+            self.selected = idx
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class _P:
+        def __init__(self, key):
+            self.key = key
+            self.source = "claude"
+            self.name = key
+
+    frame = tk.Frame(root)
+    frame.pack()
+    ctl = _Ctl()
+    col = ProjectColumn(frame, ctl)
+    col.update([_P("a"), _P("b"), _P("c")], hidden_projects={1})
+    root.update_idletasks()
+    assert col._cards[1].frame.winfo_manager() == ""    # 隐藏 → 未被几何管理器管理
+    assert col._cards[0].frame.winfo_manager() != ""    # 可见
+    assert "隐藏 1" in col.count_label.cget("text")
+    col.set_hidden(set())                                # 恢复全显
+    root.update_idletasks()
+    assert col._cards[1].frame.winfo_manager() != ""
+    assert "隐藏" not in col.count_label.cget("text")
+    ctl.selected = "UNSET"
+    col.select_idx(0, notify=False)                      # 不回调 controller
+    assert ctl.selected == "UNSET"
+    frame.destroy()
+
+
+def test_filter_bar_since_routes_to_apply_time_filter(root):
+    """起始日期变化走 apply_time_filter；结束日期/任务类型走 reanalyze。"""
+    from tcer.gui.views import FilterBar
+
+    class _Ctl:
+        def __init__(self):
+            self.view_mode = tk.StringVar(value="project")
+            self.calls: list = []
+
+        def apply_time_filter(self):
+            self.calls.append("apply")
+
+        def reanalyze(self):
+            self.calls.append("reanalyze")
+
+        def refresh_projects(self):
+            self.calls.append("refresh")
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    frame = tk.Frame(root)
+    frame.pack()
+    ctl = _Ctl()
+    bar = FilterBar(frame, ctl)
+    root.update_idletasks()
+
+    bar._set_preset("today")
+    assert ctl.calls == ["apply"]
+    ctl.calls.clear()
+    bar._validate_and_reanalyze(bar.since_var)
+    assert ctl.calls == ["apply"]
+    ctl.calls.clear()
+    bar._validate_and_reanalyze(bar.until_var)
+    assert ctl.calls == ["reanalyze"]
+    ctl.calls.clear()
+    bar._on_task_type_change(None)
+    assert ctl.calls == ["reanalyze"]
+    frame.destroy()

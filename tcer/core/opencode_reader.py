@@ -160,6 +160,51 @@ def sessions_for_project(project: str | ProjectRef) -> list[str]:
     return [str(r["id"]) for r in rows]
 
 
+def latest_activity_ms(project: str | ProjectRef) -> int | None:
+    """max(session.time_created) for the project, as epoch ms.
+
+    ``time_created`` is an integer ms column → value is already epoch ms.
+    Scoping mirrors ``sessions_for_project`` (directory → project_id → null);
+    legacy ``session_paths`` refs (JSON files) fall back to max file mtime.
+    Returns None if no DB / no matching rows / NULL max.
+    """
+    ref = project if isinstance(project, ProjectRef) else resolve_project(project)
+    if ref is None or ref.path is None:
+        return None
+    if ref.session_paths:
+        latest = None
+        for p in ref.session_paths:
+            try:
+                m = p.stat().st_mtime_ns // 1_000_000
+            except OSError:
+                continue
+            if latest is None or m > latest:
+                latest = m
+        return latest
+    project_id, key_cwd = _parse_project_key(ref.key)
+    cwd = ref.cwd or key_cwd
+    val = None
+    with _connect(ref.path) as con:
+        row = None
+        if cwd and not _is_useless_worktree(cwd):
+            row = con.execute(
+                "select max(time_created) as m from session where directory = ?",
+                (cwd,),
+            ).fetchone()
+        if (row is None or row["m"] is None) and project_id and project_id != _NO_PROJECT_KEY:
+            row = con.execute(
+                "select max(time_created) as m from session where project_id = ?",
+                (project_id,),
+            ).fetchone()
+        if (row is None or row["m"] is None) and project_id == _NO_PROJECT_KEY:
+            row = con.execute(
+                "select max(time_created) as m from session where project_id is null"
+            ).fetchone()
+        if row is not None:
+            val = row["m"]
+    return parse_timestamp_ms(val) if val is not None else None
+
+
 def read_session_meta(db_path: Path, session_id: str) -> SessionMeta:
     if _is_legacy_session(session_id):
         return _legacy_session_meta(Path(session_id))
