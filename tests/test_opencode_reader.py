@@ -226,6 +226,37 @@ def test_opencode_reasoning_ratio_at_most_one(tmp_path, monkeypatch):
     assert r.reasoning_output_ratio == pytest.approx(50 / 250)
 
 
+def test_opencode_latest_activity_ms(tmp_path, monkeypatch):
+    """项目最近活动 = max(session.time_created)（整数 ms 列）。"""
+    import sqlite3
+    from tcer.core.models import ProjectRef
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    cwd = str(tmp_path / "repo")
+    db = _make_db(tmp_path / "opencode.db", cwd)
+    refs = opencode_reader.list_project_refs()
+    assert len(refs) == 1
+    # _make_db 已插 ses-1(time_created=1782720000000)；补一个更晚的 ses-2。
+    con = sqlite3.connect(db)
+    con.execute(
+        "insert into session (id, project_id, directory, time_created) "
+        "values (?, ?, ?, ?)",
+        ("ses-2", "proj-1", cwd, 1799000000000),
+    )
+    con.commit()
+    con.close()
+    assert opencode_reader.latest_activity_ms(refs[0]) == 1799000000000
+    # 空 DB / 无匹配会话 → None
+    empty_db = tmp_path / "empty" / "opencode.db"
+    empty_db.parent.mkdir()
+    ec = sqlite3.connect(empty_db)
+    ec.execute("create table session(id text primary key, directory text, "
+               "project_id text, time_created integer)")
+    ec.close()
+    empty_ref = ProjectRef(source="opencode", key="opencode:none", display_name="e",
+                           cwd=str(tmp_path / "nope"), path=empty_db)
+    assert opencode_reader.latest_activity_ms(empty_ref) is None
+
+
 def test_opencode_peak_input_from_step_finish(tmp_path, monkeypatch):
     """Peak must come from step-finish snapshots, not session-summed totals."""
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))

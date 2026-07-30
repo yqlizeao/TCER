@@ -22,7 +22,7 @@ from .metric_defs import (
     report_values, format_value,
     model_display, model_raw, model_tip,
 )
-from .widgets import Card, MetricCell, ScrollFrame, Tooltip, flat_button
+from .widgets import CalendarPopup, Card, MetricCell, ScrollFrame, Tooltip, flat_button
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
 
@@ -91,6 +91,15 @@ def source_icon(master, icon_key: str):
             img = None
     _ICON_CACHE[icon_key] = img
     return img
+
+
+def ui_icon(master, name: str):
+    """16px 通用 UI 图标（``assets/ui-<name>.png``），与 source_icon 同一套模块级缓存。
+
+    工具栏动作、页签等通用图标经此加载；无资源返回 None，调用方回退文字。
+    来源 Icons8 material-outlined 白色，构建期缩 16×16，运行时零依赖。
+    """
+    return source_icon(master, f"ui-{name}")
 
 
 def project_icon_key(project) -> str:
@@ -227,9 +236,16 @@ class FilterBar:
         self.until_var = tk.StringVar(value="")
         self._date_entry(bar, self.until_var, "结束日期").pack(side="left", padx=2)
 
-        for label, preset in (("本周", "week"), ("本月", "month"), ("全部", "all")):
+        for label, preset in (("今天", "today"), ("本周", "week"), ("本月", "month"), ("全部", "all")):
             flat_button(bar, label, lambda p=preset: self._set_preset(p),
                         padx=theme.PAD_S).pack(side="left", padx=theme.PAD_XS)
+
+        # 刷新全部项目列表：重新扫描磁盘发现新会话/新项目，常驻入口（原右键菜单项）
+        refresh_btn = flat_button(bar, "刷新", self.controller.refresh_projects,
+                                  padx=theme.PAD_S, image=ui_icon(bar, "refresh"),
+                                  compound="left")
+        refresh_btn.pack(side="left", padx=(theme.PAD_M, theme.PAD_XS))
+        Tooltip(refresh_btn, "重新扫描磁盘，刷新全部项目列表")
 
         # -- Actions (right side) --
         for factory in [
@@ -257,7 +273,8 @@ class FilterBar:
 
     def _make_tool_menu(self, parent) -> tk.Menubutton:
         tb = tk.Menubutton(parent, text="工具 ▾", relief="flat", bg=theme.PANEL, fg=theme.FG,
-                           padx=6, activebackground=theme.BG, activeforeground=theme.FG)
+                           padx=6, activebackground=theme.BG, activeforeground=theme.FG,
+                           image=ui_icon(parent, "tools"), compound="left")
         tmenu = tk.Menu(tb, tearoff=False, bg=theme.PANEL, fg=theme.FG,
                         activebackground=theme.ACCENT, activeforeground=theme.FG)
         tmenu.add_command(label="项目总览", command=self.controller.show_project_overview)
@@ -272,7 +289,8 @@ class FilterBar:
 
     def _make_export_menu(self, parent) -> tk.Menubutton:
         mb = tk.Menubutton(parent, text="导出 ▾", relief="flat", bg=theme.PANEL, fg=theme.FG,
-                           padx=6, activebackground=theme.BG, activeforeground=theme.FG)
+                           padx=6, activebackground=theme.BG, activeforeground=theme.FG,
+                           image=ui_icon(parent, "export"), compound="left")
         menu = tk.Menu(mb, tearoff=False, bg=theme.PANEL, fg=theme.FG,
                        activebackground=theme.ACCENT, activeforeground=theme.FG)
         for label, fmt in (("项目报告 (HTML)", "html"), ("项目报告 (Markdown)", "md"),
@@ -289,18 +307,40 @@ class FilterBar:
 
     def _make_upload_button(self, parent) -> tk.Button:
         btn = flat_button(parent, "上传…", self.controller.show_upload,
-                          padx=theme.PAD_M)
+                          padx=theme.PAD_M, image=ui_icon(parent, "upload"), compound="left")
         Tooltip(btn, "上传当前项目的效率报告到 TCER Web")
         return btn
 
     def _date_entry(self, bar, var, tip):
-        e = tk.Entry(bar, textvariable=var, width=10, bg=theme.PANEL, fg=theme.FG,
+        wrap = tk.Frame(bar, bg=theme.BG)
+        e = tk.Entry(wrap, textvariable=var, width=10, bg=theme.PANEL, fg=theme.FG,
                      insertbackground=theme.FG, relief="flat", highlightthickness=1,
                      highlightbackground="#3e3e42", highlightcolor=theme.ACCENT)
         e.bind("<Return>", lambda ev: self._validate_and_reanalyze(var))
         e.bind("<FocusOut>", lambda ev: self._validate_and_reanalyze(var))
-        Tooltip(e, tip + "（YYYY-MM-DD 格式）。按回车或失焦后生效。")
-        return e
+        Tooltip(e, tip + "（YYYY-MM-DD）。回车/失焦生效，或点 ▦ 选择日期。")
+        e.pack(side="left")
+        cal_icon = ui_icon(wrap, "calendar")
+        cal = tk.Label(wrap, text="" if cal_icon else "▦", image=cal_icon, compound="left",
+                       bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI, cursor="hand2", padx=5,
+                       highlightthickness=1, highlightbackground="#3e3e42")
+        Tooltip(cal, "点击选择日期")
+        cal.bind("<Enter>", lambda _ev: cal.config(fg=theme.ACCENT), add="+")
+        cal.bind("<Leave>", lambda _ev: cal.config(fg=theme.MUTED), add="+")
+        cal.bind("<Button-1>", lambda ev: self._popup_calendar(cal, var))
+        cal.pack(side="left")
+        return wrap
+
+    def _popup_calendar(self, anchor, var) -> None:
+        """点日历图标弹出选日期；选定后写入输入框并重新分析。"""
+        def on_select(s: str) -> None:
+            var.set(s)
+            # 起始日期联动左栏隐藏；结束日期只重新分析会话。
+            if var is self.since_var:
+                self.controller.apply_time_filter()
+            else:
+                self.controller.reanalyze()
+        CalendarPopup(anchor, on_select, anchor=anchor, initial=var.get())
 
     @staticmethod
     def _validate_date(s: str) -> bool:
@@ -315,16 +355,22 @@ class FilterBar:
 
     def _validate_and_reanalyze(self, var) -> None:
         v = var.get().strip()
+        # 起始日期变化要联动左栏隐藏（apply_time_filter）；结束日期只影响会话级 reanalyze。
+        target = (self.controller.apply_time_filter
+                  if var is self.since_var else self.controller.reanalyze)
         if self._validate_date(v):
-            self.controller.reanalyze()
+            target()
         else:
             var.set("")
-            self.controller.reanalyze()
+            target()
 
     def _set_preset(self, preset: str) -> None:
         from datetime import datetime, timedelta
         today = datetime.now()
-        if preset == "week":
+        if preset == "today":
+            self.since_var.set(today.strftime("%Y-%m-%d"))
+            self.until_var.set("")
+        elif preset == "week":
             monday = today - timedelta(days=today.weekday())
             self.since_var.set(monday.strftime("%Y-%m-%d"))
             self.until_var.set("")
@@ -334,7 +380,7 @@ class FilterBar:
         else:  # all
             self.since_var.set("")
             self.until_var.set("")
-        self.controller.reanalyze()
+        self.controller.apply_time_filter()
 
     def _on_task_type_change(self, event) -> None:
         """任务类型变化时的回调"""
@@ -390,13 +436,16 @@ class ProjectColumn:
         self.controller = controller
         self._cards: list[Card] = []
         self._selected = None
+        self._selected_idx: int | None = None
+        self._hidden: set[int] = set()
 
         col = tk.Frame(parent, bg=theme.PANEL)
         col.pack(side="left", fill="both", expand=True)
 
         header = tk.Frame(col, bg=theme.PANEL)
         header.pack(fill="x", padx=6, pady=4)
-        self.count_label = tk.Label(header, text="项目", bg=theme.PANEL, fg=theme.FG,
+        self.count_label = tk.Label(header, text="项目", image=ui_icon(header, "project"),
+                                    compound="left", bg=theme.PANEL, fg=theme.FG,
                                     font=theme.FONT_HEADING, anchor="w")
         self.count_label.pack(side="left")
 
@@ -406,7 +455,8 @@ class ProjectColumn:
         self.container = sf.inner
 
     def update(self, projects, empty_projects: set | None = None,
-               preferred_uid: str | None = None) -> None:
+               preferred_uid: str | None = None,
+               hidden_projects: set[int] | None = None) -> None:
         for card in self._cards:
             card.frame.destroy()
         self._cards.clear()
@@ -414,12 +464,16 @@ class ProjectColumn:
             self._empty_hint.destroy()
             self._empty_hint = None
         self._selected = None
+        self._selected_idx = None
         self._projects = projects
         self._empty = empty_projects or set()
+        self._hidden = set(hidden_projects or set())
         for idx, d in enumerate(projects):
             card = self._make_card(d, idx, is_empty=(idx in self._empty))
             self._cards.append(card)
-        self.count_label.config(text=f"项目（{len(projects)}）")
+            if idx in self._hidden:            # 时间范围外：建好即隐藏
+                card.frame.pack_forget()
+        self._refresh_count_label()
         if not projects:
             # 空状态引导：告诉用户去哪里产生数据，而不是留一片空白。
             self._empty_hint = tk.Label(
@@ -435,7 +489,7 @@ class ProjectColumn:
                 justify="left", pady=theme.PAD_L * 2)
             self._empty_hint.pack(padx=theme.PAD_M)
         self.scroll.update_scroll(reset=True)
-        # 选中项目：优先恢复上次选中（启动时），否则第一个有数据的项目。
+        # 选中项目：优先恢复上次选中（启动时），否则第一个有数据且未隐藏的项目。
         if self._cards:
             idx = None
             if preferred_uid is not None:
@@ -443,12 +497,13 @@ class ProjectColumn:
                     (i for i, p in enumerate(projects)
                      if (ref_uid(p) == preferred_uid
                          or getattr(p, "key", None) == preferred_uid)
-                     and i not in self._empty),
+                     and i not in self._empty and i not in self._hidden),
                     None,
                 )
             if idx is None:
                 idx = next(
-                    (i for i in range(len(self._cards)) if i not in self._empty),
+                    (i for i in range(len(self._cards))
+                     if i not in self._empty and i not in self._hidden),
                     None,
                 )
             if idx is not None:
@@ -490,13 +545,46 @@ class ProjectColumn:
             return  # 空项目不响应点击
         self._select(card, idx)
 
-    def _select(self, card, idx=None):
+    def _select(self, card, idx=None, *, notify: bool = True):
         if self._selected is not None:
             self._selected.set_selected(False)
         self._selected = card
+        self._selected_idx = idx
         card.set_selected(True)
-        if idx is not None:
+        if idx is not None and notify:
             self.controller.on_select_project(idx)
+
+    def select_idx(self, idx: int, *, notify: bool = True) -> None:
+        """按索引视觉选中（bounds 安全）。notify=False 不回调 controller。"""
+        if 0 <= idx < len(self._cards):
+            self._select(self._cards[idx], idx, notify=notify)
+
+    def set_hidden(self, hidden) -> None:
+        """轻量显隐：不重建卡片，按索引序 re-pack 可见项、forget 隐藏项。
+
+        若当前选中卡被隐藏，清其高亮（改选由 controller 决定）。
+        """
+        self._hidden = set(hidden)
+        for idx, card in enumerate(self._cards):
+            if idx in self._hidden:
+                card.frame.pack_forget()
+            else:
+                card.frame.pack(fill="x", padx=1, pady=1)   # 按索引序，顺序保持
+        if self._selected_idx is not None and self._selected_idx in self._hidden:
+            if self._selected is not None:
+                self._selected.set_selected(False)
+            self._selected = None
+            self._selected_idx = None
+        self._refresh_count_label()
+        self.scroll.update_scroll()
+
+    def _refresh_count_label(self) -> None:
+        n = len(self._projects)
+        h = len(self._hidden)
+        if h:
+            self.count_label.config(text=f"项目（{n - h}·隐藏 {h}）")
+        else:
+            self.count_label.config(text=f"项目（{n}）")
 
     def _on_right_click(self, event, idx, project_dir):
         """Right-click context menu on a project card."""
@@ -507,45 +595,45 @@ class ProjectColumn:
 
         if is_empty:
             menu.add_command(
-                label=f"📭 {name[:30]}（无会话数据）", state="disabled",
+                label=f"{name[:30]}（无会话数据）", state="disabled",
+                image=ui_icon(self.container, "empty"), compound="left",
             )
         else:
             menu.add_command(
-                label=f"🔄 刷新此项目 · {name[:30]}",
+                label=f"刷新此项目 · {name[:30]}",
                 command=lambda: self._select_and_refresh(idx),
+                image=ui_icon(self.container, "refresh"), compound="left",
             )
 
             menu.add_separator()
 
             menu.add_command(
-                label="📊 查看项目概览（指标分类）",
+                label="查看项目概览（指标分类）",
                 command=lambda: self._select_and_view(idx, "project"),
+                image=ui_icon(self.container, "grid"), compound="left",
             )
             menu.add_command(
-                label="📊 查看会话详情视图",
+                label="查看会话详情视图",
                 command=lambda: self._select_and_view(idx, "session"),
+                image=ui_icon(self.container, "details"), compound="left",
             )
 
         menu.add_separator()
 
         menu.add_command(
-            label=f"📂 在{_file_manager_label()}中打开",
+            label=f"在{_file_manager_label()}中打开",
             command=lambda: self._open_in_explorer(project_dir),
+            image=ui_icon(self.container, "folder"), compound="left",
         )
         menu.add_command(
-            label="📋 复制项目路径",
+            label="复制项目路径",
             command=lambda: self._copy_text(project_open_path(project_dir)),
+            image=ui_icon(self.container, "copy"), compound="left",
         )
         menu.add_command(
-            label="📋 复制项目名称",
+            label="复制项目名称",
             command=lambda: self._copy_text(name),
-        )
-
-        menu.add_separator()
-
-        menu.add_command(
-            label="🔄 刷新全部项目列表",
-            command=lambda: self.controller.refresh_projects(),
+            image=ui_icon(self.container, "copy"), compound="left",
         )
 
         menu.tk_popup(event.x_root, event.y_root)
@@ -586,7 +674,8 @@ class SessionColumn:
 
         header = tk.Frame(col, bg=theme.PANEL)
         header.pack(fill="x", padx=6, pady=4)
-        self.count_label = tk.Label(header, text="会话", bg=theme.PANEL, fg=theme.FG,
+        self.count_label = tk.Label(header, text="会话", image=ui_icon(header, "session"),
+                                    compound="left", bg=theme.PANEL, fg=theme.FG,
                                     font=theme.FONT_HEADING, anchor="w")
         self.count_label.pack(side="left")
         # 搜索框：按标题 / 会话 ID 过滤卡片
@@ -596,7 +685,9 @@ class SessionColumn:
                           relief="flat", highlightthickness=1,
                           highlightbackground="#3e3e42", font=theme.FONT_UI_SMALL)
         search.pack(side="right", padx=(4, 0))
-        tk.Label(header, text="🔍", bg=theme.PANEL, fg=theme.MUTED,
+        _si = ui_icon(header, "search")
+        tk.Label(header, text="" if _si else "🔍", image=_si, compound="left",
+                 bg=theme.PANEL, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL).pack(side="right")
         Tooltip(search, "按标题 / 会话 ID 过滤（实时）")
         self._filter_var.trace_add("write", lambda *_a: self._render())
@@ -685,32 +776,37 @@ class SessionColumn:
 
         # Session info sub-items
         menu.add_command(
-            label=f"📋 查看详情 · {sid[:20]}…",
+            label=f"查看详情 · {sid[:20]}…",
             command=lambda: self.controller.show_session_detail(sid),
+            image=ui_icon(self.container, "details"), compound="left",
         )
         menu.add_command(
-            label="🔧 查看工具调用",
+            label="查看工具调用",
             command=lambda: popups.ToolCallsPopup(
                 self.controller.root, report.usage, f" · {sid[:16]}…"),
+            image=ui_icon(self.container, "wrench"), compound="left",
         )
         # All sources keep a count; bodies are lazy-loaded on popup open.
         has_user_msgs = report.usage.user_msgs > 0
         menu.add_command(
-            label=f"💬 查看用户消息（{report.usage.user_msgs} 条）",
+            label=f"查看用户消息（{report.usage.user_msgs} 条）",
             command=lambda: self._show_user_msgs(report),
             state="normal" if has_user_msgs else "disabled",
+            image=ui_icon(self.container, "chat"), compound="left",
         )
         has_files = bool(report.files_touched_details)
         menu.add_command(
-            label=f"📁 查看涉及文件（{report.files_touched} 个）",
+            label=f"查看涉及文件（{report.files_touched} 个）",
             command=lambda: popups.FilesTouchedPopup(
                 self.controller.root, report.files_touched_details),
             state="normal" if has_files else "disabled",
+            image=ui_icon(self.container, "folder"), compound="left",
         )
         menu.add_command(
-            label="🤖 查看模型使用",
+            label="查看模型使用",
             command=lambda: popups.ModelsPopup(
                 self.controller.root, report.usage, f" · {sid[:16]}…"),
+            image=ui_icon(self.container, "model"), compound="left",
         )
 
         menu.add_separator()
@@ -718,42 +814,48 @@ class SessionColumn:
         # Analysis sub-items
         has_ctei = report.ctei is not None
         menu.add_command(
-            label="🎯 查看效率雷达",
+            label="查看效率雷达",
             command=lambda: popups.RadarPopup(
                 self.controller.root, report, self._reports),
             state="normal" if has_ctei else "disabled",
+            image=ui_icon(self.container, "target"), compound="left",
         )
         menu.add_command(
-            label="📈 在趋势图中定位",
+            label="在趋势图中定位",
             command=lambda: self._navigate_to_trend(sid),
+            image=ui_icon(self.container, "trend"), compound="left",
         )
 
         menu.add_separator()
 
         # File location
         menu.add_command(
-            label=f"📂 在{_file_manager_label()}中打开",
+            label=f"在{_file_manager_label()}中打开",
             command=lambda: self._open_session_file(report),
+            image=ui_icon(self.container, "folder"), compound="left",
         )
 
         # Copy actions
         menu.add_command(
-            label="📋 复制会话 ID",
+            label="复制会话 ID",
             command=lambda: self._copy_text(sid),
+            image=ui_icon(self.container, "copy"), compound="left",
         )
         title = report.meta.title or "(无标题)"
         menu.add_command(
-            label="📋 复制会话标题",
+            label="复制会话标题",
             command=lambda: self._copy_text(title),
+            image=ui_icon(self.container, "copy"), compound="left",
         )
         cost_str = format_value("cost", report.cost)
         tcer_str = format_value("tcer", report.tcer)
         ctei_str = format_value("ctei", report.ctei)
         menu.add_command(
-            label=f"📋 复制摘要（TCER={tcer_str} · CTEI={ctei_str} · {cost_str}）",
+            label=f"复制摘要（TCER={tcer_str} · CTEI={ctei_str} · {cost_str}）",
             command=lambda: self._copy_text(
                 f"会话: {sid}\n标题: {title}\n"
                 f"TCER: {tcer_str} · CTEI: {ctei_str} · 成本: {cost_str}"),
+            image=ui_icon(self.container, "copy"), compound="left",
         )
 
         menu.add_separator()
@@ -761,11 +863,12 @@ class SessionColumn:
         # Destructive action — last item, gated behind a二次确认对话框.
         readonly = report.meta.source in ("codex", "opencode", "grok", "omp")
         delete_state = "disabled" if readonly else "normal"
-        delete_label = "🗑 删除会话…" if not readonly else f"🗑 删除会话（{project_source_label(report.meta)} 只读）"
+        delete_label = "删除会话…" if not readonly else f"删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(
             label=delete_label,
             command=lambda: self._confirm_delete(report, sid),
             state=delete_state,
+            image=ui_icon(self.container, "trash"), compound="left",
         )
 
         menu.tk_popup(event.x_root, event.y_root)

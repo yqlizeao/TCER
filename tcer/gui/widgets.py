@@ -296,6 +296,142 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, **kw):
     return btn
 
 
+class CalendarPopup:
+    """轻量日历选择弹窗（纯标准库，深色主题）。
+
+    无边框 ``Toplevel``：◀ 年月 ▶ 头部 + 周一首日 7×6 日期网格 + ✕ 清除。
+    点选某日回调 ``on_select("YYYY-MM-DD")`` 后关闭；失焦 / Esc / 点外部亦关闭。
+    用于上栏日期过滤的「点选代替手输」。``anchor`` 决定弹窗定位锚点。
+    """
+
+    _WD = ("一", "二", "三", "四", "五", "六", "日")  # 周一首日
+
+    def __init__(self, parent, on_select, *, anchor=None, initial: str = "") -> None:
+        from datetime import datetime
+
+        self._on_select = on_select
+        self.win = tk.Toplevel(parent)
+        self.win.wm_overrideredirect(True)          # 无标题栏
+        self.win.configure(bg=theme.BORDER)
+
+        today = datetime.now()
+        if initial:
+            try:
+                d = datetime.strptime(initial, "%Y-%m-%d")
+                self._year, self._month = d.year, d.month
+            except ValueError:
+                self._year, self._month = today.year, today.month
+        else:
+            self._year, self._month = today.year, today.month
+        self._today = today
+
+        self._build()
+        self._locate(anchor)
+        self.win.bind("<Escape>", lambda _e: self.close())
+        # 延迟 arm FocusOut：窗口刚建时的焦点抖动会误触发立即关闭。
+        self.win.after(150, lambda: self.win.bind("<FocusOut>", lambda _e: self.close()))
+
+    # -- layout -----------------------------------------------------------
+    def _build(self) -> None:
+        head = tk.Frame(self.win, bg=theme.PANEL)
+        head.pack(fill="x", padx=1, pady=1)
+        prev = tk.Label(head, text=" ◀ ", bg=theme.PANEL, fg=theme.MUTED,
+                        font=theme.FONT_UI, cursor="hand2")
+        prev.pack(side="left", padx=2, pady=3)
+        prev.bind("<Button-1>", lambda _e: self._shift(-1))
+        self._title = tk.Label(head, text="", bg=theme.PANEL, fg=theme.FG,
+                               font=theme.FONT_UI_BOLD, width=9)
+        self._title.pack(side="left", expand=True, fill="x", pady=3)
+        nxt = tk.Label(head, text=" ▶ ", bg=theme.PANEL, fg=theme.MUTED,
+                       font=theme.FONT_UI, cursor="hand2")
+        nxt.pack(side="left", padx=2, pady=3)
+        nxt.bind("<Button-1>", lambda _e: self._shift(1))
+        clr = tk.Label(head, text=" ✕ ", bg=theme.PANEL, fg=theme.MUTED,
+                       font=theme.FONT_UI, cursor="hand2")
+        clr.pack(side="left", padx=2, pady=3)
+        Tooltip(clr, "清除日期")
+        clr.bind("<Button-1>", lambda _e: self._clear(), add="+")
+
+        body = tk.Frame(self.win, bg=theme.PANEL)
+        body.pack(padx=1, pady=(0, 1))
+        # 星期标头与日期网格各占独立子 frame —— body 内一律 pack，网格内一律 grid，
+        # 避免「同一 parent 混用 pack/grid」的 TclError。
+        wd_row = tk.Frame(body, bg=theme.PANEL)
+        wd_row.pack()
+        for i, name in enumerate(self._WD):
+            tk.Label(wd_row, text=name, bg=theme.PANEL, fg=theme.MUTED, width=3,
+                     font=theme.FONT_UI_SMALL).grid(row=0, column=i, padx=1, pady=1)
+        self._grid = tk.Frame(body, bg=theme.PANEL)
+        self._grid.pack()
+        self._render()
+
+    def _render(self) -> None:
+        import calendar as _cal
+        for c in self._grid.winfo_children():
+            c.destroy()
+        self._title.config(text=f"{self._year}年{self._month}月")
+        first_wd, n_days = _cal.monthrange(self._year, self._month)  # Monday=0
+        r, col = 0, first_wd
+        for day in range(1, n_days + 1):
+            is_today = (self._year == self._today.year
+                        and self._month == self._today.month
+                        and day == self._today.day)
+            cell = tk.Label(self._grid, text=str(day), bg=theme.PANEL_2, fg=theme.FG,
+                            width=3, font=theme.FONT_UI_BOLD if is_today else theme.FONT_UI,
+                            cursor="hand2")
+            if is_today:
+                cell.config(fg=theme.SUCCESS)
+            cell.bind("<Enter>", lambda _e, c=cell, t=is_today:
+                      c.config(bg=theme.ACCENT, fg="#ffffff"), add="+")
+            cell.bind("<Leave>", lambda _e, c=cell, t=is_today:
+                      c.config(bg=theme.PANEL_2,
+                               fg=(theme.SUCCESS if t else theme.FG)), add="+")
+            cell.bind("<Button-1>", lambda _e, d=day: self._pick(d), add="+")
+            cell.grid(row=r, column=col, padx=1, pady=1)
+            col += 1
+            if col > 6:
+                col, r = 0, r + 1
+
+    # -- actions ----------------------------------------------------------
+    def _shift(self, delta: int) -> None:
+        m, y = self._month + delta, self._year
+        if m < 1:
+            m, y = 12, y - 1
+        elif m > 12:
+            m, y = 1, y + 1
+        self._year, self._month = y, m
+        self._render()
+
+    def _pick(self, day: int) -> None:
+        from datetime import datetime
+        self._on_select(datetime(self._year, self._month, day).strftime("%Y-%m-%d"))
+        self.close()
+
+    def _clear(self) -> None:
+        self._on_select("")
+        self.close()
+
+    def _locate(self, anchor) -> None:
+        self.win.update_idletasks()
+        w, h = self.win.winfo_reqwidth(), self.win.winfo_reqheight()
+        if anchor is not None:
+            x = anchor.winfo_rootx()
+            y = anchor.winfo_rooty() + anchor.winfo_height() + 2
+        else:
+            x, y = self.win.winfo_pointerx() - w // 2, self.win.winfo_pointery() - h // 2
+        sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
+        x = min(max(0, x), max(0, sw - w))
+        y = min(max(0, y), max(0, sh - h))
+        self.win.wm_geometry(f"+{int(x)}+{int(y)}")
+        self.win.focus_force()
+
+    def close(self) -> None:
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
 def new_window(parent, title, size, bg=theme.BG):
     """Create a centered Toplevel relative to *parent* (shared popup shell)."""
     import tkinter as tk

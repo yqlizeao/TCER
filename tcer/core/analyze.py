@@ -64,7 +64,14 @@ def _filter_by_started_at(
     since: str | None,
     until: str | None,
 ) -> list[Path]:
-    """Keep files whose usage ``started_at`` falls in [since, until] (YYYY-MM-DD)."""
+    """Keep files whose activity window [started_at, ended_at] overlaps [since, until].
+
+    A session that started before ``since`` but was still active within the window
+    counts (active boundary = ``ended_at``, falling back to ``started_at``). This
+    matches the "今天有活动" intuition and stays consistent with the project-list
+    mtime filter (last-write ≈ ended_at), so a project shown in the left column
+    always has sessions to show when opened.
+    """
     since_ms = _parse_date_to_ms(since) if since else None
     until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None
     if not since_ms and not until_ms:
@@ -74,7 +81,9 @@ def _filter_by_started_at(
         u = usage_of(f)
         if u.started_at is None:
             continue
-        if since_ms and u.started_at < since_ms:
+        # 跨天会话只要在窗口内还活跃就算命中：下界用 ended_at（缺则降级 started_at）。
+        active_until = u.ended_at or u.started_at
+        if since_ms and active_until < since_ms:
             continue
         if until_ms and u.started_at > until_ms:
             continue

@@ -17,7 +17,10 @@ from tkinter import filedialog, messagebox, ttk
 
 from tcer.core import analyze, export as export_mod, metrics
 from tcer.core import ui_prefs, upload_client, upload_prefs
-from tcer.core.paths import list_project_refs, project_has_sessions, ref_root
+from tcer.core.paths import (
+    list_project_refs, project_has_sessions, project_latest_activity_ms,
+    ref_root, since_date_to_ms,
+)
 from tcer.core.reader import discover_jsonl
 from . import html_report, popups, theme, views
 from .views import CteiRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
@@ -28,6 +31,7 @@ class TcerGui:
         self.root = root
         self._q: queue.Queue = queue.Queue()
         self._projects: list = []
+        self._activity_cache: dict[int, int | None] = {}
         self._current: analyze.ProjectAnalysis | None = None
         self._selected_project_idx: int | None = None
         self._selected_session_id: str | None = None
@@ -107,10 +111,10 @@ class TcerGui:
         tab_b = tk.Frame(nb, bg=theme.PANEL)
         tab_t = tk.Frame(nb, bg=theme.PANEL)
         tab_c = tk.Frame(nb, bg=theme.PANEL)
-        nb.add(tab_m, text="指标分类")
-        nb.add(tab_b, text="综合效率分排名")
-        nb.add(tab_t, text="趋势")
-        nb.add(tab_c, text="模型对比")
+        nb.add(tab_m, text="指标分类", image=views.ui_icon(nb, "grid"), compound="left")
+        nb.add(tab_b, text="综合效率分排名", image=views.ui_icon(nb, "rank"), compound="left")
+        nb.add(tab_t, text="趋势", image=views.ui_icon(nb, "trend"), compound="left")
+        nb.add(tab_c, text="模型对比", image=views.ui_icon(nb, "compare"), compound="left")
 
         self.metric_panel = MetricPanel(tab_m, self)
         self.ranking_view = CteiRankingView(tab_b, controller=self)
@@ -144,11 +148,16 @@ class TcerGui:
             i for i, p in enumerate(self._projects)
             if not project_has_sessions(p)
         }
+        # 每个项目最近活动时间（切 source 时算一次；切时间筛选只比缓存，零 IO）。
+        self._activity_cache = {
+            i: project_latest_activity_ms(p) for i, p in enumerate(self._projects)
+        }
         # 启动时恢复上次选中的项目（一次性；之后的刷新回到默认选首个）。
         preferred = self._restore_project_uid
         self._restore_project_uid = None
         self.project_col.update(self._projects, self._empty_projects,
-                                preferred_uid=preferred)
+                                preferred_uid=preferred,
+                                hidden_projects=self._compute_hidden())
         n_empty = len(self._empty_projects)
         n_live = len(self._projects) - n_empty
         status = f"发现 {len(self._projects)} 个项目"
@@ -175,6 +184,40 @@ class TcerGui:
         if self._selected_project_idx is None or self._selected_project_idx >= len(self._projects):
             return None
         return self._projects[self._selected_project_idx]
+
+    def _compute_hidden(self) -> set[int]:
+        """按当前 since 隐藏「最近活动早于 since」或无活动的项目 idx。
+
+        until 不参与左栏（仅影响会话级 reanalyze）。无 since → 空集（全显）。
+        """
+        since_ms = since_date_to_ms(self.filter.get_params().get("since"))
+        if since_ms is None:
+            return set()
+        return {
+            i for i in range(len(self._projects))
+            if (self._activity_cache.get(i) is None
+                or self._activity_cache[i] < since_ms)
+        }
+
+    def apply_time_filter(self) -> None:
+        """时间筛选变化时：按 since 隐藏左栏项目，必要时改选可见项，再 reanalyze 一次。
+
+        until 不参与左栏。任务类型变化不走此路（直接 reanalyze）。
+        """
+        hidden = self._compute_hidden()
+        self.project_col.set_hidden(hidden)
+        cur = self._selected_project_idx
+        if cur is None or cur in hidden:
+            new = next((i for i in range(len(self._projects))
+                        if i not in hidden and i not in self._empty_projects), None)
+            if new is not None:
+                self._selected_project_idx = new
+                self.project_col.select_idx(new, notify=False)
+            else:
+                self._clear_analysis_view()
+                self.filter.set_status("所选时间范围内无项目活动")
+                return
+        self.reanalyze()
 
     # --------------------------------------------------------------- analysis
     def reanalyze(self) -> None:
@@ -908,23 +951,30 @@ def _apply_tk_scaling(root) -> None:
 
 
 def _set_window_icon(root) -> None:
-    """设置窗口图标（标题栏 + 任务栏）。
+    """设置窗口图标（标题栏 + 任务栏）——多尺寸 iconphoto。
 
-    Windows 用多尺寸 ``.ico``（``iconbitmap``）——任务栏才会正确显示；
-    ``iconphoto`` 在 Windows 任务栏常失效、仍显默认 Tk 羽毛图标。其他平台
-    fallback 到 PNG ``iconphoto``。PhotoImage 存 ``root._tcer_icon`` 持引用防 GC。
+    传 16/32/48/64/128/256 多张图，Windows 各场景选最匹配尺寸：标题栏选 16、
+    任务栏选 48/64、Alt-Tab 选大图。这比单张大图大幅缩放清晰（标题栏不再糊），
+    也避开 ``iconbitmap`` 底层 ``LoadImage`` 仅取单尺寸再二次缩放的问题。Tk 8.6
+    的 ``iconphoto`` 支持多图。PhotoImage 列表存 ``root._tcer_icons`` 持引用防 GC。
     """
     import os
-    import sys
     assets = os.path.join(os.path.dirname(__file__), "assets")
-    if sys.platform == "win32":
-        ico = os.path.join(assets, "tcer_logo.ico")
-        if os.path.isfile(ico):
+    imgs = []
+    for s in (32, 48, 64, 128, 256):
+        p = os.path.join(assets, f"tcer_logo_{s}.png")
+        if os.path.isfile(p):
             try:
-                root.iconbitmap(default=ico)
-                return
+                imgs.append(tk.PhotoImage(file=p))
             except tk.TclError:
                 pass
+    if imgs:
+        root._tcer_icons = imgs
+        try:
+            root.iconphoto(True, *imgs)
+            return
+        except tk.TclError:
+            pass
     png = os.path.join(assets, "tcer_logo.png")
     if os.path.isfile(png):
         try:

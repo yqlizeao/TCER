@@ -317,6 +317,61 @@ def project_has_sessions(ref: ProjectRef) -> bool:
     return False
 
 
+def since_date_to_ms(date_str: str | None) -> int | None:
+    """``YYYY-MM-DD`` → epoch ms at 00:00 **UTC**, or None if empty/unparseable.
+
+    Intentionally mirrors ``analyze._parse_date_to_ms`` (UTC) so the project-level
+    mtime filter and the session-level started_at filter agree on the same
+    threshold for one ``since`` string. Local tz would desync the left column
+    from the right panel. (paths cannot import analyze — analyze imports paths.)
+    """
+    if not date_str:
+        return None
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return int(dt.timestamp() * 1000)
+
+
+def _max_mtime_ms(paths) -> int | None:
+    """Max file mtime across *paths* as epoch ms, or None if none stat-able."""
+    latest = None
+    for p in paths:
+        try:
+            m = p.stat().st_mtime_ns // 1_000_000
+        except OSError:
+            continue
+        if latest is None or m > latest:
+            latest = m
+    return latest
+
+
+def project_latest_activity_ms(ref: ProjectRef) -> int | None:
+    """Epoch ms of *ref*'s most-recent session activity (approx ≈ last write).
+
+    Claude/codex/grok/omp: max session-file mtime. OpenCode: max(session.time_created)
+    from SQLite (== authoritative started_at). Returns None when there are no
+    scannable files / the project is empty / all stats failed. Lazy-imports
+    readers like ``project_has_sessions`` to avoid import cycles with ``paths``.
+    """
+    if ref.source == "claude":
+        from tcer.core import reader
+        root = ref_root(ref)
+        files = reader.discover_jsonl(ref.key, roots=[root] if root is not None else None)
+        return _max_mtime_ms(files)
+    if ref.source in ("codex", "grok", "omp"):
+        return _max_mtime_ms(ref.session_paths)
+    if ref.source == "opencode":
+        from tcer.core import opencode_reader
+        try:
+            return opencode_reader.latest_activity_ms(ref)
+        except Exception:  # noqa: BLE001 — unreadable DB → treat as no activity
+            return None
+    return None
+
+
 def list_project_refs(source: str = "all") -> list[ProjectRef]:
     """Return source-aware project refs for the GUI.
     ``source`` is one of ``"all"``, ``"claude"``, ``"codex"``, ``"opencode"``,
