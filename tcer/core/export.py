@@ -247,6 +247,14 @@ def report_row_dict(r: SessionReport) -> dict:
         "edit_verify_ratio": r.edit_verify_ratio,
         "first_edit_turn": r.first_edit_turn,
         "bash_ratio": r.bash_ratio,
+        # Raw tool-name → call count. Keys stay verbatim (``Skill``,
+        # ``mcp__server__tool``, …) so downstream consumers can derive the
+        # Skill / MCP / plugin dimensions; CSV keeps ignoring it (dict column).
+        "tool_calls": dict(sorted(u.tool_calls.items())),
+        # "<Tool>:<variant>" → count (``Skill:dataviz``, ``Agent:Explore``).
+        # Claude sessions only for now — the other CLIs don't expose the skill /
+        # subagent identity in a shape the readers already parse.
+        "tool_variants": dict(sorted(u.tool_variants.items())),
         "models": sorted(u.models),
         "models_label": fmt.models_label(u),
         "cost_by_model": {m: round(c, 6) for m, c in sorted(metrics.cost_by_model(u).items())},
@@ -309,6 +317,9 @@ _CSV_EXCLUDED = frozenset({
     "title", "path", "cwd", "started_at", "ended_at",
     "git_repository", "permission_profile",
     "rate_limit_names", "abort_reasons", "mcp_calls_by_attr", "cost_by_model",
+    # Dict-valued: one CSV column per tool name would be unbounded and unstable
+    # across sessions. Uploaded as JSON to the web layer instead.
+    "tool_calls", "tool_variants",
 })
 
 

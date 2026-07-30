@@ -221,6 +221,34 @@ def iter_messages(path: Path):
             yield obj
 
 
+# Tools whose bare name hides what was actually run; the interesting identity
+# lives in one of these input keys. Order matters: first key present wins.
+_VARIANT_KEYS: dict[str, tuple[str, ...]] = {
+    "Skill": ("skill", "name", "command"),
+    "Task": ("subagent_type", "agent_type"),
+    "Agent": ("subagent_type", "agent_type"),
+}
+
+
+def record_tool_variant(u: TokenUsage, tool_name: str, inp) -> None:
+    """Record ``"<Tool>:<variant>"`` for tools whose name alone isn't identifying.
+
+    ``Skill``/``Task``/``Agent`` all appear in ``tool_calls`` under one key no
+    matter which skill or subagent ran, so the Skill / subagent dimensions have
+    to come from the call input. Anything unparseable is silently skipped —
+    this is an enrichment, never a reason to fail a scan.
+    """
+    keys = _VARIANT_KEYS.get(tool_name)
+    if not keys or not isinstance(inp, dict):
+        return
+    for key in keys:
+        val = inp.get(key)
+        if isinstance(val, str) and val.strip():
+            label = f"{tool_name}:{val.strip()}"
+            u.tool_variants[label] = u.tool_variants.get(label, 0) + 1
+            return
+
+
 def aggregate_usage(
     path: Path,
     *,
@@ -579,6 +607,7 @@ def _scan_session_uncached(
                                 tool=tool_name,
                                 path=fp if isinstance(fp, str) else "",
                             ))
+                            record_tool_variant(u, tool_name, inp)
                             if u.turn_stats and u.turn_stats[-1].turn == current_turn:
                                 u.turn_stats[-1].tool_calls += 1
                             if loc_acc is not None and isinstance(inp, dict):

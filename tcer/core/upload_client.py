@@ -160,7 +160,7 @@ def build_payload(
 
 def _lazy_user_messages(report: SessionReport) -> list[str]:
     """Load user message bodies when analysis omitted them (Claude lazy path)."""
-    from tcer.core import codex_reader, grok_reader, opencode_reader, reader
+    from tcer.core import codex_reader, grok_reader, omp_reader, opencode_reader, reader
 
     source = report.meta.source or "claude"
     path = report.meta.path
@@ -173,6 +173,8 @@ def _lazy_user_messages(report: SessionReport) -> list[str]:
             return opencode_reader.read_user_messages(path, report.meta.session_id)
         if source == "grok":
             return grok_reader.read_user_messages(path)
+        if source == "omp":
+            return omp_reader.read_user_messages(path)
         # Claude: main + subagents under session dir
         _, main, session_dir = reader.session_artifacts(path)
         msgs: list[str] = []
@@ -192,8 +194,9 @@ def _read_conversation(report: SessionReport) -> list[dict]:
 
     Dispatches to the reader matching the session's ``source`` — each agent
     stores its turn stream in a different on-disk shape (Claude JSONL, Codex
-    event JSONL, Grok ACP updates, OpenCode SQLite), so a single parser can't
-    handle all four. Every reader's ``read_conversation`` returns the same block
+    event JSONL, Grok ACP updates, OpenCode SQLite, omp SessionEntry JSONL), so a
+    single parser can't handle all five. Every reader's ``read_conversation``
+    returns the same block
     shape (see :func:`tcer.core.reader.read_conversation`) so the web session
     view renders every source uniformly.
 
@@ -202,7 +205,7 @@ def _read_conversation(report: SessionReport) -> list[dict]:
     Blocks are concatenated in file order. OpenCode is keyed by
     ``(db_path, session_id)`` rather than a JSONL path.
     """
-    from tcer.core import codex_reader, grok_reader, opencode_reader, reader
+    from tcer.core import codex_reader, grok_reader, omp_reader, opencode_reader, reader
 
     meta = report.meta
     source = getattr(meta, "source", "claude")
@@ -220,6 +223,7 @@ def _read_conversation(report: SessionReport) -> list[dict]:
     read_fn = {
         "codex": codex_reader.read_conversation,
         "grok": grok_reader.read_conversation,
+        "omp": omp_reader.read_conversation,
     }.get(source, reader.read_conversation)
 
     paths = list(getattr(meta, "session_paths", ()) or ())
