@@ -341,3 +341,36 @@ def test_analyze_auto_task_type_infers_per_session(tmp_path, monkeypatch):
     # Aggregate uses majority (tie → creation first in majority_task_type order,
     # here 1+1 so creation wins by taxonomy order).
     assert result.aggregate.task_type in ("code_creation", "non_coding")
+
+
+def test_filter_activity_window_overlaps():
+    """since 过滤按活跃区间 [started, ended]：跨天会话在窗口内仍活跃则命中。
+
+    与左栏 mtime（最后写入≈ended）语义一致，避免「左栏显示、点进去 0 会话」。
+    """
+    from datetime import datetime
+    from tcer.core.analyze import _filter_by_started_at
+    from tcer.core.models import TokenUsage
+
+    def ms(s: str) -> int:
+        return int(datetime.strptime(s, "%Y-%m-%d").timestamp() * 1000)  # naive → 本地
+
+    def usage(started: str, ended: str | None) -> TokenUsage:
+        u = TokenUsage()
+        u.started_at = ms(started)
+        u.ended_at = ms(ended) if ended else None
+        return u
+
+    files = [Path("a"), Path("b"), Path("c")]
+    table = {
+        Path("a"): usage("2026-07-29", "2026-07-30"),   # 跨天：昨天起、今天还活跃
+        Path("b"): usage("2026-07-09", "2026-07-09"),   # 单天旧
+        Path("c"): usage("2026-07-30", "2026-07-30"),   # 单天新
+    }
+    kept = _filter_by_started_at(list(files), lambda f: table[f], "2026-07-30", None)
+    assert set(kept) == {Path("a"), Path("c")}          # 跨天 + 新命中；旧排除
+
+    # ended_at 缺失 → 降级 started_at（退回单天严格语义）
+    table[Path("a")] = usage("2026-07-29", None)
+    kept2 = _filter_by_started_at(list(files), lambda f: table[f], "2026-07-30", None)
+    assert set(kept2) == {Path("c")}

@@ -14,7 +14,7 @@ from tkinter import ttk
 
 from tcer.core import metrics
 from tcer.core.export import ctei_decompose, ctei_decompose_avg
-from tcer.core.format import fmt_dt
+from tcer.core.format import FMT_SHORT_MINUTE, fmt_dt
 from . import theme
 from .metric_defs import (
     GROUPS, MODEL_GROUPS, UNSUPPORTED_LABEL,
@@ -22,7 +22,8 @@ from .metric_defs import (
     report_values, format_value,
     model_display, model_raw, model_tip,
 )
-from .widgets import CalendarPopup, Card, MetricCell, ScrollFrame, Tooltip, flat_button
+from .widgets import (CalendarPopup, Card, CollapsibleSection, FlatMenu,
+                      MetricCell, ScrollFrame, Tooltip, flat_button)
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
 
@@ -186,17 +187,33 @@ class FilterBar:
         seg_bg = tk.Frame(bar, bg="#333333", padx=2, pady=2)
         seg_bg.pack(side="left", padx=(0, 12))
         self._view_btns: dict[str, tk.Label] = {}
-        for label, val in [("项目汇总", "project"), ("会话详情", "session")]:
-            btn = tk.Label(seg_bg, text=label, padx=8, pady=1, cursor="hand2",
+        self._view_pills: dict[str, tk.Frame] = {}
+        self._view_icon_lbls: dict[str, tk.Label] = {}
+        _seg_icons = {"project": ui_icon(seg_bg, "project"), "session": ui_icon(seg_bg, "session")}
+        for label, val in [("项目视角", "project"), ("会话视角", "session")]:
+            # 每个 pill 一个容器 Frame：图标/文字 Label 都装在里面，三者 bg
+            # 同步切换 → 图标与文字之间不留接缝（两个独立 Label 会有缝隙）。
+            pill = tk.Frame(seg_bg, bg="#333333")
+            pill.pack(side="left", padx=1)
+            self._view_pills[val] = pill
+            click = lambda e, v=val: self._set_view(v)
+            icon = _seg_icons.get(val)
+            if icon is not None:
+                il = tk.Label(pill, image=icon, bg="#333333", cursor="hand2")
+                il.pack(side="left", padx=(4, 0))
+                il.bind("<Button-1>", click)
+                self._view_icon_lbls[val] = il
+            btn = tk.Label(pill, text=label, pady=1, cursor="hand2",
                            font=theme.FONT_UI_SMALL)
-            btn.pack(side="left", padx=1)
-            btn.bind("<Button-1>", lambda e, v=val: self._set_view(v))
+            btn.pack(side="left", padx=(2, 6))
+            btn.bind("<Button-1>", click)
+            pill.bind("<Button-1>", click)  # 图标与文字之间的空隙也可点
             self._view_btns[val] = btn
         self._update_view_btns()
 
         # -- Filters --
-        tk.Label(bar, text="任务类型:", bg=theme.BG, fg=theme.FG).pack(side="left")
-        # Display names from config SSOT (+「自动」per-session inference).
+        # 任务类型选择弱化：从上栏移入「工具」菜单的级联子菜单（task_var 仍由本栏
+        # 持有，供 get_params / restore_prefs 使用；菜单 radiobutton 直接绑 task_var）。
         self._task_display_names = {
             metrics.AUTO_TASK_TYPE: "自动",
             **{k: (v.get("name") or k) for k, v in metrics.TASK_CATEGORIES.items()},
@@ -206,11 +223,6 @@ class FilterBar:
             default_task, next(iter(self._task_display_names.values()), "代码创作"))
         self.task_var = tk.StringVar(value=default_label)
         self._task_reverse_map = {v: k for k, v in self._task_display_names.items()}
-        task_cb = ttk.Combobox(bar, textvariable=self.task_var, width=10,
-                               values=list(self._task_display_names.values()), state="readonly")
-        task_cb.pack(side="left", padx=(4, 12))
-        task_cb.bind("<<ComboboxSelected>>", self._on_task_type_change)
-        Tooltip(task_cb, self._generate_task_type_tooltip())
 
         tk.Label(bar, text="来源:", bg=theme.BG, fg=theme.FG).pack(side="left")
         self.source_var = tk.StringVar(value="全部")
@@ -230,7 +242,9 @@ class FilterBar:
         Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex / OpenCode / Grok / Oh My Pi")
 
         tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left")
-        self.since_var = tk.StringVar(value="")
+        from datetime import datetime as _dt
+        # 默认起始日期=今天（启动即看当天会话）；until 留空，可由持久化恢复。
+        self.since_var = tk.StringVar(value=_dt.now().strftime("%Y-%m-%d"))
         self._date_entry(bar, self.since_var, "开始日期").pack(side="left", padx=2)
         tk.Label(bar, text="至", bg=theme.BG, fg=theme.FG).pack(side="left", padx=2)
         self.until_var = tk.StringVar(value="")
@@ -266,33 +280,54 @@ class FilterBar:
     def _update_view_btns(self) -> None:
         current = self.view_mode.get()
         for val, btn in self._view_btns.items():
-            if val == current:
-                btn.config(bg=theme.ACCENT, fg="#ffffff")
-            else:
-                btn.config(bg="#333333", fg=theme.MUTED)
+            bg = theme.ACCENT if val == current else "#333333"
+            fg = "#ffffff" if val == current else theme.MUTED
+            btn.config(bg=bg, fg=fg)
+            self._view_pills[val].config(bg=bg)
+            il = self._view_icon_lbls.get(val)
+            if il is not None:
+                il.config(bg=bg)
 
-    def _make_tool_menu(self, parent) -> tk.Menubutton:
-        tb = tk.Menubutton(parent, text="工具 ▾", relief="flat", bg=theme.PANEL, fg=theme.FG,
-                           padx=6, activebackground=theme.BG, activeforeground=theme.FG,
-                           image=ui_icon(parent, "tools"), compound="left")
-        tmenu = tk.Menu(tb, tearoff=False, bg=theme.PANEL, fg=theme.FG,
-                        activebackground=theme.ACCENT, activeforeground=theme.FG)
-        tmenu.add_command(label="项目总览", command=self.controller.show_project_overview)
-        tmenu.add_command(label="工具序列", command=self.controller.show_tool_sequence)
-        tmenu.add_command(label="会话时间线", command=self.controller.show_session_timeline)
-        tmenu.add_command(label="会话对比", command=self.controller.show_session_compare)
-        tmenu.add_command(label="计算个人基准", command=self.controller.compute_baselines)
-        tmenu.add_command(label="高级选项", command=self.controller.show_advanced)
-        tb.config(menu=tmenu)
-        Tooltip(tb, "项目总览 · 会话时间线 · 会话对比 · 工具序列 · 个人基准 · 高级选项")
-        return tb
+    def _pop_below(self, btn, build):
+        """点击 btn 时在其正下方弹出 FlatMenu（每次重建以反映最新状态）。"""
+        def cb():
+            menu = FlatMenu(btn)
+            build(menu)
+            btn.update_idletasks()
+            menu.tk_popup(btn.winfo_rootx(),
+                          btn.winfo_rooty() + btn.winfo_height())
+        return cb
 
-    def _make_export_menu(self, parent) -> tk.Menubutton:
-        mb = tk.Menubutton(parent, text="导出 ▾", relief="flat", bg=theme.PANEL, fg=theme.FG,
-                           padx=6, activebackground=theme.BG, activeforeground=theme.FG,
-                           image=ui_icon(parent, "export"), compound="left")
-        menu = tk.Menu(mb, tearoff=False, bg=theme.PANEL, fg=theme.FG,
-                       activebackground=theme.ACCENT, activeforeground=theme.FG)
+    def _make_tool_menu(self, parent):
+        btn = flat_button(parent, "工具 ▾", None, padx=6,
+                          image=ui_icon(parent, "tools"), compound="left")
+        btn.config(command=self._pop_below(btn, self._build_tool_menu))
+        Tooltip(btn, "项目总览 · 会话时间线 · 会话对比 · 工具序列 · 个人基准 · 任务类型 · 高级选项")
+        return btn
+
+    def _build_tool_menu(self, menu) -> None:
+        c = self.controller
+        menu.add_command(label="项目总览", command=c.show_project_overview)
+        menu.add_command(label="工具序列", command=c.show_tool_sequence)
+        menu.add_command(label="会话时间线", command=c.show_session_timeline)
+        menu.add_command(label="会话对比", command=c.show_session_compare)
+        menu.add_separator()
+        menu.add_command(label="计算个人基准", command=c.compute_baselines)
+        menu.add_command(label="任务类型", state="disabled")  # 分组标题（不可点）
+        for dn in self._task_display_names.values():
+            menu.add_radiobutton(label=dn, variable=self.task_var, value=dn,
+                                 command=self._on_task_type_change)
+        menu.add_separator()
+        menu.add_command(label="高级选项", command=c.show_advanced)
+
+    def _make_export_menu(self, parent):
+        btn = flat_button(parent, "导出 ▾", None, padx=6,
+                          image=ui_icon(parent, "export"), compound="left")
+        btn.config(command=self._pop_below(btn, self._build_export_menu))
+        Tooltip(btn, "项目级 / 会话级报告导出：HTML（自包含可分享）· Markdown · JSON · CSV")
+        return btn
+
+    def _build_export_menu(self, menu) -> None:
         for label, fmt in (("项目报告 (HTML)", "html"), ("项目报告 (Markdown)", "md"),
                            ("项目数据 (JSON)", "json"), ("项目数据 (CSV)", "csv")):
             menu.add_command(label=label, command=lambda f=fmt: self.controller.export(f))
@@ -301,9 +336,6 @@ class FilterBar:
                            ("当前会话数据 (JSON)", "json")):
             menu.add_command(label=label,
                              command=lambda f=fmt: self.controller.export(f, scope="session"))
-        mb.config(menu=menu)
-        Tooltip(mb, "项目级 / 会话级报告导出：HTML（自包含可分享）· Markdown · JSON · CSV")
-        return mb
 
     def _make_upload_button(self, parent) -> tk.Button:
         btn = flat_button(parent, "上传…", self.controller.show_upload,
@@ -382,25 +414,13 @@ class FilterBar:
             self.until_var.set("")
         self.controller.apply_time_filter()
 
-    def _on_task_type_change(self, event) -> None:
-        """任务类型变化时的回调"""
+    def _on_task_type_change(self, event=None) -> None:
+        """任务类型变化时的回调（菜单 command 无 event，故可选）"""
         # task_var 存储的是中文名称，直接触发重新分析
         self.controller.reanalyze()
 
     def _on_source_change(self, event) -> None:
         self.controller.refresh_projects()
-
-    def _generate_task_type_tooltip(self) -> str:
-        """生成任务类型的简要说明"""
-        lines = [
-            "【自动】按会话工具/产出信号推断类型（创作/维护/非编码），NTCER 更公平。",
-        ]
-        for cat_key, cat_info in metrics.TASK_CATEGORIES.items():
-            display_name = self._task_display_names.get(cat_key, cat_key)
-            lines.append(
-                f"【{display_name}】系数 {cat_info['ttaf']}，TCER {cat_info['typical_tcer_range']}"
-            )
-        return "\n".join(lines)
 
     def get_params(self) -> dict:
         """Analysis params owned by the bar (task type / time)."""
@@ -417,13 +437,17 @@ class FilterBar:
         return self._source_reverse_map.get(self.source_var.get(), "all")
 
     def restore_prefs(self, prefs: dict) -> None:
-        """恢复上次的来源/任务类型筛选（在首次 refresh_projects 之前调用）。"""
+        """恢复上次的来源/任务类型/时间区间筛选（在首次 refresh_projects 之前调用）。"""
         src = prefs.get("source")
         if src in self._source_display_names:
             self.source_var.set(self._source_display_names[src])
         tt = prefs.get("task_type")
         if tt in self._task_display_names:
             self.task_var.set(self._task_display_names[tt])
+        # since 不恢复——启动固定为今天；until 可恢复上次的结束日期。
+        until = prefs.get("until")
+        if isinstance(until, str) and self._validate_date(until):
+            self.until_var.set(until)
 
     def set_status(self, text: str) -> None:
         self.status.config(text=text)
@@ -444,10 +468,12 @@ class ProjectColumn:
 
         header = tk.Frame(col, bg=theme.PANEL)
         header.pack(fill="x", padx=6, pady=4)
-        self.count_label = tk.Label(header, text="项目", image=ui_icon(header, "project"),
-                                    compound="left", bg=theme.PANEL, fg=theme.FG,
+        _pi = ui_icon(header, "project")
+        if _pi is not None:
+            tk.Label(header, image=_pi, bg=theme.PANEL).pack(side="left")
+        self.count_label = tk.Label(header, text="项目", bg=theme.PANEL, fg=theme.FG,
                                     font=theme.FONT_HEADING, anchor="w")
-        self.count_label.pack(side="left")
+        self.count_label.pack(side="left", padx=(theme.PAD_S, 0))
 
         sf = ScrollFrame(col, bg=theme.PANEL)
         sf.canvas.pack(fill="both", expand=True, padx=6, pady=4)
@@ -523,18 +549,18 @@ class ProjectColumn:
         if icon is None:
             # 无图标资源：回退到 [源名] 文字前缀
             lbl = tk.Label(card.frame, text=f"[{label}] {name}", bg=theme.PANEL_2, fg=fg,
-                           font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-            lbl.pack(fill="x", padx=4, pady=3)
+                           font=theme.FONT_UI_BOLD, anchor="w")
+            lbl.pack(fill="x", padx=3, pady=3)
             card.bind_to(lbl)
             return card
         # 图标 + 名称横排，取代 [Claude] 之类的文字标注
         row = tk.Frame(card.frame, bg=theme.PANEL_2)
-        row.pack(fill="x", padx=4, pady=3)
+        row.pack(fill="x", padx=3, pady=3)
         img_lbl = tk.Label(row, image=icon, bg=theme.PANEL_2)
         img_lbl.pack(side="left", padx=(0, 4))
         Tooltip(img_lbl, label)  # 悬停图标显示来源名（图标取代了文字标注）
         name_lbl = tk.Label(row, text=name, bg=theme.PANEL_2, fg=fg,
-                            font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+                            font=theme.FONT_UI_BOLD, anchor="w")
         name_lbl.pack(side="left", fill="x", expand=True)
         for w in (row, img_lbl, name_lbl):
             card.bind_to(w)
@@ -582,7 +608,7 @@ class ProjectColumn:
         n = len(self._projects)
         h = len(self._hidden)
         if h:
-            self.count_label.config(text=f"项目（{n - h}·隐藏 {h}）")
+            self.count_label.config(text=f"项目（{n - h}）（隐藏 {h}）")
         else:
             self.count_label.config(text=f"项目（{n}）")
 
@@ -590,8 +616,7 @@ class ProjectColumn:
         """Right-click context menu on a project card."""
         name = project_label(project_dir)
         is_empty = idx in self._empty
-        menu = tk.Menu(self.container, tearoff=False, bg=theme.PANEL, fg=theme.FG,
-                       activebackground=theme.ACCENT, activeforeground=theme.FG)
+        menu = FlatMenu(self.container)
 
         if is_empty:
             menu.add_command(
@@ -610,12 +635,12 @@ class ProjectColumn:
             menu.add_command(
                 label="查看项目概览（指标分类）",
                 command=lambda: self._select_and_view(idx, "project"),
-                image=ui_icon(self.container, "grid"), compound="left",
+                image=ui_icon(self.container, "project"), compound="left",
             )
             menu.add_command(
                 label="查看会话详情视图",
                 command=lambda: self._select_and_view(idx, "session"),
-                image=ui_icon(self.container, "details"), compound="left",
+                image=ui_icon(self.container, "session"), compound="left",
             )
 
         menu.add_separator()
@@ -674,10 +699,12 @@ class SessionColumn:
 
         header = tk.Frame(col, bg=theme.PANEL)
         header.pack(fill="x", padx=6, pady=4)
-        self.count_label = tk.Label(header, text="会话", image=ui_icon(header, "session"),
-                                    compound="left", bg=theme.PANEL, fg=theme.FG,
+        _hi = ui_icon(header, "session")
+        if _hi is not None:
+            tk.Label(header, image=_hi, bg=theme.PANEL).pack(side="left")
+        self.count_label = tk.Label(header, text="会话", bg=theme.PANEL, fg=theme.FG,
                                     font=theme.FONT_HEADING, anchor="w")
-        self.count_label.pack(side="left")
+        self.count_label.pack(side="left", padx=(theme.PAD_S, 0))
         # 搜索框：按标题 / 会话 ID 过滤卡片
         self._filter_var = tk.StringVar(value="")
         search = tk.Entry(header, textvariable=self._filter_var, width=12,
@@ -744,7 +771,7 @@ class SessionColumn:
                     on_click=lambda c, s=sid: self._select(c, s),
                     on_right_click=lambda e, _r=r, _s=sid: self._on_right_click(e, _r, _s))
         time_ms = r.usage.ended_at or r.usage.started_at
-        t_lbl = tk.Label(card.frame, text=fmt_dt(time_ms, "%m-%d %H:%M") if time_ms else "-",
+        t_lbl = tk.Label(card.frame, text=fmt_dt(time_ms, FMT_SHORT_MINUTE) if time_ms else "-",
                          bg=theme.PANEL_2, fg="#888888", font=theme.FONT_MONO, anchor="w")
         t_lbl.pack(fill="x", padx=6, pady=(4, 1))
         title_disp = title[:35] + "..." if len(title) > 35 else title
@@ -771,14 +798,13 @@ class SessionColumn:
     def _on_right_click(self, event, report, sid):
         """Right-click context menu on a session card."""
         from . import popups
-        menu = tk.Menu(self.container, tearoff=False, bg=theme.PANEL, fg=theme.FG,
-                       activebackground=theme.ACCENT, activeforeground=theme.FG)
+        menu = FlatMenu(self.container)
 
         # Session info sub-items
         menu.add_command(
             label=f"查看详情 · {sid[:20]}…",
             command=lambda: self.controller.show_session_detail(sid),
-            image=ui_icon(self.container, "details"), compound="left",
+            image=ui_icon(self.container, "session"), compound="left",
         )
         menu.add_command(
             label="查看工具调用",
@@ -836,6 +862,11 @@ class SessionColumn:
         )
 
         # Copy actions
+        menu.add_command(
+            label="复制会话路径",
+            command=lambda: self._copy_text(str(report.meta.path)),
+            image=ui_icon(self.container, "copy"), compound="left",
+        )
         menu.add_command(
             label="复制会话 ID",
             command=lambda: self._copy_text(sid),
@@ -951,6 +982,16 @@ class _MetricGrid:
     expanded: bool = False
 
 
+@dataclass
+class _GroupState:
+    """Per-group collapse state: header arrow label, body frame holding the
+    group's subgroups/grids, and whether the group is collapsed."""
+    name: str
+    arrow: tk.Label
+    body: tk.Frame
+    collapsed: bool = False
+
+
 class MetricPanel:
     """Right-column tab 1: the G1–G6 metric grid, built from metric_defs."""
 
@@ -958,6 +999,7 @@ class MetricPanel:
         self.controller = controller
         self._cells: dict[str, MetricCell] = {}
         self._grids: list[_MetricGrid] = []
+        self._groups: list[_GroupState] = []
 
         sf = ScrollFrame(parent, bg=theme.BG)
         sf.canvas.pack(fill="both", expand=True)
@@ -967,26 +1009,41 @@ class MetricPanel:
             self._build_group(group)
 
     def _build_group(self, group) -> None:
-        header = tk.Frame(self.container, bg=theme.GROUP_COLORS[group.id], padx=6, pady=1)
-        header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text=f"▼ {group.id} {group.name}",
-                 bg=theme.GROUP_COLORS[group.id], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-
+        gframe = tk.Frame(self.container, bg=theme.BG)
+        gframe.pack(fill="x", pady=(1, 0))
+        header = tk.Frame(gframe, bg=theme.GROUP_COLORS[group.id], padx=6, pady=1)
+        header.pack(fill="x")
+        # 「代码产出与质量」(G4) 项多、常只需概览 → 默认折叠；其余默认展开。
+        collapsed = group.id == "G4"
+        arrow_lbl = tk.Label(header, text=f"{'▶' if collapsed else '▼'} {group.name}",
+                             bg=theme.GROUP_COLORS[group.id], fg=theme.FG,
+                             font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor="hand2")
+        arrow_lbl.pack(side="left")
+        # body 容纳该组全部子组/网格；折叠时 pack_forget 它（整组收起）。
+        body = tk.Frame(gframe, bg=theme.BG)
+        body.pack(fill="x")
         if group.subgroups:
             for sg in group.subgroups:
-                self._build_metric_grid(sg.metrics, sub_label=sg.name)
+                self._build_metric_grid(sg.metrics, sub_label=sg.name, parent=body)
         else:
-            self._build_metric_grid(group.metrics)
+            self._build_metric_grid(group.metrics, parent=body)
+        gs = _GroupState(name=group.name, arrow=arrow_lbl, body=body, collapsed=collapsed)
+        self._groups.append(gs)
+        for w in (header, arrow_lbl):
+            w.bind("<Button-1>", lambda e, s=gs: self._toggle_group(s))
+        if collapsed:
+            body.pack_forget()
 
-    def _build_metric_grid(self, metrics, sub_label: str | None = None) -> None:
+    def _build_metric_grid(self, metrics, sub_label: str | None = None,
+                           parent=None) -> None:
+        parent = parent or self.container
         if sub_label:
-            sub = tk.Frame(self.container, bg=theme.PANEL, padx=8, pady=0)
+            sub = tk.Frame(parent, bg=theme.PANEL, padx=8, pady=0)
             sub.pack(fill="x", pady=(1, 0))
             tk.Label(sub, text=f"· {sub_label}", bg=theme.PANEL, fg=theme.MUTED,
                      font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
-        grid = tk.Frame(self.container, bg=theme.PANEL, padx=4, pady=1)
+        grid = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=1)
         grid.pack(fill="x", pady=(0, 0))
         cells: list[MetricCell] = []
         for i, metric in enumerate(metrics):
@@ -1041,6 +1098,15 @@ class MetricPanel:
     def _toggle(self, state: _MetricGrid) -> None:
         state.expanded = not state.expanded
         self._apply_grid(state)
+
+    def _toggle_group(self, gs: _GroupState) -> None:
+        """点击分组标题：折叠/展开整组（隐藏该组 body 下所有子组与网格）。"""
+        gs.collapsed = not gs.collapsed
+        gs.arrow.config(text=f"{'▶' if gs.collapsed else '▼'} {gs.name}")
+        if gs.collapsed:
+            gs.body.pack_forget()
+        else:
+            gs.body.pack(fill="x")
 
     def _apply_grid(self, state: _MetricGrid) -> None:
         """Reflow one grid: hide empty (「-」) cells when collapsed, repack the
@@ -1097,13 +1163,10 @@ class CteiRankingView:
         self._sort_col: str = "ctei"
         self._sort_reverse: bool = True
 
-        # -- Grade summary bar (top, wrapped in group header) --
-        grade_header = tk.Frame(parent, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
-        grade_header.pack(fill="x", pady=(1, 0))
-        tk.Label(grade_header, text="▼ 评级分布", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-
-        self._grade_canvas = tk.Canvas(parent, bg=theme.PANEL, height=38,
+        # -- Grade summary bar (top, 可折叠) --
+        grade_sec = CollapsibleSection(parent, "评级分布",
+                                       theme.GROUP_COLORS["G_NEUTRAL"], expand=False)
+        self._grade_canvas = tk.Canvas(grade_sec.content, bg=theme.PANEL, height=38,
                                        highlightthickness=0)
         self._grade_canvas.pack(fill="x", padx=2, pady=(0, 1))
         self._grade_canvas.bind("<Configure>", lambda e: self._draw_grade_bar())
@@ -1125,14 +1188,10 @@ class CteiRankingView:
         decomp_frame = tk.Frame(paned, bg=theme.BG)
         paned.add(decomp_frame, minsize=340)
 
-        # -- Treeview with group header --
-        tree_header = tk.Frame(table_frame, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
-        tree_header.pack(fill="x", pady=(1, 0))
-        tk.Label(tree_header, text="▼ 会话排名", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-
+        # -- Treeview with 可折叠标题 --
+        tree_sec = CollapsibleSection(table_frame, "会话排名", theme.GROUP_COLORS["G2"])
         cols = ("rank", "session", "ctei_val", "grade")
-        self._tree = ttk.Treeview(table_frame, columns=cols, show="headings",
+        self._tree = ttk.Treeview(tree_sec.content, columns=cols, show="headings",
                                   selectmode="browse", height=20)
         self._tree.heading("rank",    text="#",    anchor="center",
                            command=lambda: self._sort_by("rank"))
@@ -1147,7 +1206,7 @@ class CteiRankingView:
         self._tree.column("ctei_val", width=70,  minwidth=50,  stretch=False, anchor="e")
         self._tree.column("grade",    width=70,  minwidth=50,  stretch=False, anchor="center")
 
-        sb = ttk.Scrollbar(table_frame, orient="vertical", command=self._tree.yview)
+        sb = ttk.Scrollbar(tree_sec.content, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")  # 常驻细条：先占右侧
         self._tree.pack(fill="both", expand=True)
@@ -1347,12 +1406,9 @@ class CteiRankingView:
 
     def _build_summary_card(self, report) -> None:
         """Summary card: CTEI + grade + rank, matching group header style."""
-        header = tk.Frame(self._decomp_inner, bg=theme.GROUP_COLORS["G6"], padx=6, pady=3)
-        header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text="▼ CTEI 概览", bg=theme.GROUP_COLORS["G6"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-
-        card = tk.Frame(self._decomp_inner, bg=theme.PANEL, padx=10, pady=8)
+        sec = CollapsibleSection(self._decomp_inner, "CTEI 概览",
+                                 theme.GROUP_COLORS["G6"], expand=False)
+        card = tk.Frame(sec.content, bg=theme.PANEL, padx=10, pady=8)
         card.pack(fill="x", pady=(0, 1))
 
         sid = report.meta.session_id or report.meta.path.stem
@@ -1391,12 +1447,9 @@ class CteiRankingView:
 
     def _build_factor_section(self, factors, report) -> None:
         """Factor bars: 4 CTEI factors with visual bars."""
-        header = tk.Frame(self._decomp_inner, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
-        header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text="▼ CTEI 因子分解", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-
-        grid = tk.Frame(self._decomp_inner, bg=theme.PANEL, padx=4, pady=4)
+        sec = CollapsibleSection(self._decomp_inner, "CTEI 因子分解",
+                                 theme.GROUP_COLORS["G2"], expand=False)
+        grid = tk.Frame(sec.content, bg=theme.PANEL, padx=4, pady=4)
         grid.pack(fill="x", pady=(0, 1))
 
         # Factor rows
@@ -1430,7 +1483,7 @@ class CteiRankingView:
                      font=(theme.FONT_MONO_NAME, 7)).pack(side="left", padx=4)
 
         # Product line
-        prod_frame = tk.Frame(self._decomp_inner, bg=theme.PANEL, padx=10, pady=6)
+        prod_frame = tk.Frame(sec.content, bg=theme.PANEL, padx=10, pady=6)
         prod_frame.pack(fill="x", pady=(0, 1))
         tk.Label(prod_frame, text="乘积 =", bg=theme.PANEL, fg=theme.MUTED,
                  font=theme.FONT_UI).pack(side="left")
@@ -1444,12 +1497,9 @@ class CteiRankingView:
         if avg is None:
             return
 
-        header = tk.Frame(self._decomp_inner, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
-        header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text="▼ 与项目均值对比", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-
-        grid = tk.Frame(self._decomp_inner, bg=theme.PANEL, padx=4, pady=4)
+        sec = CollapsibleSection(self._decomp_inner, "与项目均值对比",
+                                 theme.GROUP_COLORS["G2"], expand=False)
+        grid = tk.Frame(sec.content, bg=theme.PANEL, padx=4, pady=4)
         grid.pack(fill="x", pady=(0, 1))
 
         for i, factor in enumerate(CTEI_FACTORS):
@@ -1490,6 +1540,9 @@ class ModelCompareView:
     def __init__(self, parent, controller=None):
         self.parent = parent
         self._models: list = []
+        self._groups: list[_GroupState] = []
+        # 分组折叠状态（跨 update 保持）；「代码质量与行为」(M_QUAL) 默认折叠。
+        self._group_collapsed: dict[str, bool] = {"M_QUAL": True}
 
         sf = ScrollFrame(parent, bg=theme.BG)
         sf.canvas.pack(fill="both", expand=True)
@@ -1581,12 +1634,19 @@ class ModelCompareView:
 
     def _build_group(self, group) -> None:
         """Build one per-model metric group from a metric_defs.Group (SSOT)."""
-        header = tk.Frame(self._container, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
-        header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text=f"▼ {group.name}", bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        collapsed = self._group_collapsed.get(group.id, False)
+        gframe = tk.Frame(self._container, bg=theme.BG)
+        gframe.pack(fill="x", pady=(1, 0))
+        header = tk.Frame(gframe, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
+        header.pack(fill="x")
+        arrow_lbl = tk.Label(header, text=f"{'▶' if collapsed else '▼'} {group.name}",
+                             bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
+                             font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor="hand2")
+        arrow_lbl.pack(side="left")
+        body = tk.Frame(gframe, bg=theme.BG)
+        body.pack(fill="x")
 
-        grid = tk.Frame(self._container, bg=theme.PANEL, padx=4, pady=4)
+        grid = tk.Frame(body, bg=theme.PANEL, padx=4, pady=4)
         grid.pack(fill="x", pady=(0, 1))
 
         # Column headers (model names)
@@ -1634,6 +1694,23 @@ class ModelCompareView:
         # Make columns expandable
         for j in range(len(self._models) + 1):
             grid.grid_columnconfigure(j, weight=1)
+
+        gs = _GroupState(name=group.name, arrow=arrow_lbl, body=body, collapsed=collapsed)
+        self._groups.append(gs)
+        for w in (header, arrow_lbl):
+            w.bind("<Button-1>", lambda e, s=gs, gid=group.id: self._toggle_group(s, gid))
+        if collapsed:
+            body.pack_forget()
+
+    def _toggle_group(self, gs, gid) -> None:
+        """点击分组标题：折叠/展开整组（状态记入 self._group_collapsed，跨 update 保持）。"""
+        gs.collapsed = not gs.collapsed
+        self._group_collapsed[gid] = gs.collapsed
+        gs.arrow.config(text=f"{'▶' if gs.collapsed else '▼'} {gs.name}")
+        if gs.collapsed:
+            gs.body.pack_forget()
+        else:
+            gs.body.pack(fill="x")
 
 
 def _model_price_tip(mc) -> str:

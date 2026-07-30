@@ -145,6 +145,59 @@ def test_metric_panel_renders(root, reports):
     frame.destroy()
 
 
+def test_metric_panel_group_collapse(root, reports):
+    """MetricPanel 分组标题可点击折叠/展开整组（header 绑定 + body pack_forget）。"""
+    from tcer.gui.views import MetricPanel
+
+    class _Ctl:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    frame = tk.Frame(root)
+    frame.pack()
+    panel = MetricPanel(frame, _Ctl())
+    panel.update(reports[0])
+    root.update_idletasks()
+    assert panel._groups
+    gs = panel._groups[0]                       # G1 会话概况：默认展开
+    assert not gs.collapsed and gs.body.winfo_manager() != ""
+    g4 = panel._groups[3]                       # G4 代码产出与质量：默认折叠
+    assert g4.collapsed and g4.body.winfo_manager() == ""
+    assert g4.arrow.cget("text").startswith("▶")
+    panel._toggle_group(gs)
+    root.update_idletasks()
+    assert gs.collapsed
+    assert gs.body.winfo_manager() == ""        # pack_forget → 未被几何管理器管理
+    assert gs.arrow.cget("text").startswith("▶")
+    panel._toggle_group(gs)
+    root.update_idletasks()
+    assert not gs.collapsed and gs.body.winfo_manager() != ""
+    assert gs.arrow.cget("text").startswith("▼")
+    frame.destroy()
+
+
+def test_model_compare_group_collapse(root, reports):
+    """ModelCompareView 分组可折叠；M_QUAL（代码质量与行为）默认折叠，跨 update 保持。"""
+    from tcer.gui.views import ModelCompareView
+
+    frame = tk.Frame(root)
+    frame.pack()
+    cv = ModelCompareView(frame)
+    cv.update(reports)
+    root.update_idletasks()
+    qual = next((g for g in cv._groups if "代码质量" in g.name), None)
+    assert qual is not None
+    assert qual.collapsed and qual.body.winfo_manager() == ""   # M_QUAL 默认折叠
+    assert qual.arrow.cget("text").startswith("▶")
+    cv._toggle_group(qual, "M_QUAL")
+    root.update_idletasks()
+    assert not qual.collapsed and qual.body.winfo_manager() != ""
+    assert cv._group_collapsed["M_QUAL"] is False                # 状态记入 dict
+    other = next(g for g in cv._groups if "代码质量" not in g.name)
+    assert not other.collapsed                                   # 其他组默认展开
+    frame.destroy()
+
+
 def test_flat_button_and_card_hover(root):
     from tcer.gui.widgets import Card, flat_button
 
@@ -161,6 +214,26 @@ def test_flat_button_and_card_hover(root):
     card._on_unhover()
     card.set_selected(False)
     root.update_idletasks()
+    frame.destroy()
+
+
+def test_check_row_toggle(root):
+    """CheckRow：整行点击 toggle var；外部改 var 后 _draw 反映选中态。"""
+    from tcer.gui.widgets import CheckRow
+
+    var = tk.BooleanVar(value=False)
+    frame = tk.Frame(root)
+    frame.pack()
+    calls: list = []
+    row = CheckRow(frame, "测试项", var, on_toggle=lambda: calls.append(var.get()))
+    root.update_idletasks()
+    assert not var.get()
+    row.click()
+    assert var.get() and calls == [True]
+    var.set(False)          # 外部改 var（如单选取消其他）
+    row._draw()             # 重画应反映 var=False
+    row.click()
+    assert var.get()
     frame.destroy()
 
 
@@ -276,6 +349,36 @@ def test_user_msgs_popup_renders(root):
     assert first.cget("state") == "disabled"          # 只读但可选中复制
     assert "短消息" in first.get("1.0", "end-1c")      # 文本已写入
     assert int(first.cget("height")) >= 1
+
+
+def test_claude_user_messages_excludes_subagent_prompts(tmp_path):
+    """子代理文件的 user 消息(Task 派发 prompt)不并入用户消息弹窗。
+
+    子代理不与真人交互,其 jsonl 里的 user 消息全是主代理经 Task 工具下发的
+    指令("You are researching…"),并入会混出假"用户消息"。
+    """
+    import json
+    import types
+    from tcer.gui.app import TcerGui
+
+    sid = "SID-test"
+    proj = tmp_path / "hash"
+    proj.mkdir(parents=True)
+    main = proj / f"{sid}.jsonl"
+    main.write_text(json.dumps({"type": "user", "message": {"role": "user",
+                     "content": [{"type": "text", "text": "我的真实消息"}]}}) + "\n",
+                    encoding="utf-8")
+    sub_dir = proj / sid / "subagents"
+    sub_dir.mkdir(parents=True)
+    (sub_dir / "agent-x.jsonl").write_text(
+        json.dumps({"type": "user", "message": {"role": "user",
+            "content": [{"type": "text", "text": "You are researching the local repo…"}]}}) + "\n",
+        encoding="utf-8")
+
+    report = types.SimpleNamespace(meta=types.SimpleNamespace(path=main))
+    msgs = TcerGui._claude_user_messages(report)
+    assert msgs == ["我的真实消息"]
+    assert not any(m.startswith("You are ") for m in msgs)
 
 
 def test_calendar_popup_renders_and_picks(root):

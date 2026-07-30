@@ -37,7 +37,7 @@ class SessionComparePopup:
         seen: dict[str, int] = {}
         for r in self._reports:
             sid = r.meta.session_id or r.meta.path.stem
-            base = (f"{fmt.fmt_dt(r.usage.started_at, '%m-%d %H:%M')}"
+            base = (f"{fmt.fmt_dt(r.usage.started_at, fmt.FMT_SHORT_MINUTE)}"
                     f" · {(r.meta.title or sid)[:26]}")
             n = seen.get(base, 0) + 1
             seen[base] = n
@@ -111,7 +111,7 @@ class SessionComparePopup:
         header = tk.Frame(self._container, bg=theme.GROUP_COLORS[group.id],
                           padx=6, pady=3)
         header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text=f"▼ {group.id} {group.name}",
+        tk.Label(header, text=f"▼ {group.name}",
                  bg=theme.GROUP_COLORS[group.id], fg=theme.FG,
                  font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
@@ -273,7 +273,7 @@ class SessionTimelinePopup:
                 c.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#c586c0",
                               outline="")
             c.create_text(w - self._PAD_R, self._PAD_T - 12,
-                          text=f"耗时（紫线，峰值 {max_dur / 1000:.1f}s）",
+                          text=f"耗时（紫线，峰值 {fmt.fmt_duration_ms(max_dur, short=True)}）",
                           fill="#c586c0", font=theme.FONT_UI_SMALL, anchor="e")
 
         # X 轴回合刻度（稀疏）
@@ -326,14 +326,14 @@ class SessionTimelinePopup:
         else:
             lines = [f"回合 {idx + 1}"]
         if t.ts:
-            lines.append(fmt.fmt_dt(t.ts, "%m-%d %H:%M:%S"))
+            lines.append(fmt.fmt_dt(t.ts, fmt.FMT_SHORT_SECOND))
         lines.append(f"输入 {t.input_tokens:,} · 缓存写 {t.cache_write:,}")
         lines.append(f"缓存读 {t.cache_read:,} · 输出 {t.output_tokens:,}")
         if t.model:
             from tcer.core.pricing import label as _model_label
             lines.append(f"模型 {_model_label(t.model)}")
         if t.duration_ms is not None:
-            lines.append(f"耗时 {t.duration_ms / 1000:.1f}s")
+            lines.append(f"耗时 {fmt.fmt_duration_ms(t.duration_ms, short=True)}")
         if t.tool_calls:
             lines.append(f"工具调用 {t.tool_calls} 次")
         if t.errors:
@@ -379,7 +379,9 @@ class ProjectOverviewPopup:
                       f"{fmt.fmt_money(total_cost)} · 净增 {total_net:,} 行 · 点击表头排序",
                  bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
                      side="left", padx=12)
-        flat_button(head, "导出 HTML", self._export_html).pack(side="right")
+        from .views import ui_icon
+        flat_button(head, "导出 HTML", self._export_html,
+                    image=ui_icon(head, "export"), compound="left").pack(side="right")
 
         self._data = []
         for p, a in rows:

@@ -86,3 +86,49 @@ def bind_mousewheel(canvas, callback):
     handler = lambda e: callback(int(-e.delta / 120))
     canvas.bind_all("<MouseWheel>", handler)
     return lambda: canvas.unbind_all("<MouseWheel>")
+
+
+# ---------------------------------------------------------------------------
+# Windows 标题栏深色（主窗口 + 所有子窗口共用）
+# ---------------------------------------------------------------------------
+_DARK_THEME: bool | None = None  # 缓存系统 AppsUseLightTheme 读取结果
+
+
+def apply_dark_titlebar(widget) -> None:
+    """Windows: 让 Tk 窗口（主窗口或子窗口）标题栏跟随系统暗/亮主题。
+
+    Tk 默认不请求「沉浸式暗色标题栏」(DWMWA_USE_IMMERSIVE_DARK_MODE)，故系统
+    暗色模式下 Tk 标题栏仍浅色，与深色界面冲突。读注册表系统主题（首次缓存）
+    并设 DWM 属性。主窗口与 ``widgets.new_window`` 创建的子窗口统一调用。
+    **限制**：仅启动时检测，运行中切换系统主题需重启 GUI 才生效。
+    """
+    if PLATFORM != "win32":
+        return
+    global _DARK_THEME
+    try:
+        import ctypes
+        from ctypes import wintypes
+        if _DARK_THEME is None:
+            light = 1
+            HKCU = 0x80000001
+            SUB = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            key = wintypes.HKEY()
+            if ctypes.windll.advapi32.RegOpenKeyExW(HKCU, SUB, 0, 0x20019, ctypes.byref(key)) == 0:
+                val = wintypes.DWORD()
+                size = wintypes.DWORD(4)
+                if ctypes.windll.advapi32.RegQueryValueExW(
+                        key, "AppsUseLightTheme", None, None,
+                        ctypes.byref(val), ctypes.byref(size)) == 0:
+                    light = val.value
+                ctypes.windll.advapi32.RegCloseKey(key)
+            _DARK_THEME = light == 0  # AppsUseLightTheme=0 → 暗色
+        widget.update_idletasks()  # 确保窗口已映射，DWM 属性才生效
+        hwnd = widget.winfo_id()
+        parent = ctypes.windll.user32.GetParent(hwnd)  # Tk toplevel 的真实顶层 HWND
+        target = parent or hwnd
+        v = ctypes.c_int(1 if _DARK_THEME else 0)
+        for attr in (20, 19):  # 20=Win10 2004+/Win11，19=旧 build
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                target, attr, ctypes.byref(v), ctypes.sizeof(v))
+    except (OSError, AttributeError):
+        pass

@@ -29,16 +29,124 @@ class Tooltip:
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
+        self.tip.configure(bg=theme.BORDER)  # 外层露 1px 作边框（深色主题）
         self.tip.wm_geometry(f"+{x}+{y}")
-        lbl = tk.Label(self.tip, text=self.text, justify="left", bg="#fff8e1",
-                       fg="#222222", relief="solid", borderwidth=1,
+        lbl = tk.Label(self.tip, text=self.text, justify="left",
+                       bg=theme.PANEL_2, fg=theme.FG,
                        wraplength=460, font=theme.FONT_UI, padx=8, pady=5)
-        lbl.pack()
+        lbl.pack(padx=1, pady=1)  # 1px 边框 = Toplevel(bg=BORDER) 透出
 
     def _hide(self, _event=None) -> None:
         if self.tip:
             self.tip.destroy()
             self.tip = None
+
+
+class CheckRow:
+    """深色扁平勾选行：整行点击 toggle，选中=整行高亮（淡蓝底 + 白字），
+    未选=普通行。**无传统 checkbox 方块**——靠行背景表达选中，现代一体，不再有
+    「前面的方框与文字割裂」的老式感。
+
+    ``var`` 为 BooleanVar；``on_toggle`` 在切换后回调（调用方 _redraw 统一刷新）。
+    可选 ``icon``（文字左）、``hint``（文字右，淡色说明）。
+    """
+
+    _SEL_BG = "#15324f"   # 选中行底色（淡蓝；多选多行高亮不刺眼）
+
+    def __init__(self, parent, text, var, on_toggle=None, *, tooltip=None,
+                 font=None, icon=None, hint=None) -> None:
+        self.var = var
+        self._on_toggle = on_toggle
+        self._row = tk.Frame(parent, bg=theme.PANEL, cursor="hand2")
+        self._row.pack(fill="x", padx=2)
+        self._members: list = []
+        if icon is not None:
+            il = tk.Label(self._row, image=icon, bg=theme.PANEL)
+            il.pack(side="left", padx=(8, 4))
+            self._members.append(il)
+        if hint:
+            hl = tk.Label(self._row, text=hint, bg=theme.PANEL, fg=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="e")
+            hl.pack(side="right", padx=(4, 8))  # 先 pack 右侧，标题 expand 才不会挤掉它
+            self._members.append(hl)
+        self._lbl = tk.Label(self._row, text=text, bg=theme.PANEL, fg=theme.FG,
+                             font=font or theme.FONT_UI, anchor="w")
+        self._lbl.pack(side="left", fill="x", expand=True)
+        self._members.append(self._lbl)
+        self._apply()
+        for w in (self._row, *self._members):
+            w.bind("<Button-1>", lambda e: self.click(), add="+")
+        self._row.bind("<Enter>", self._on_hover, add="+")
+        self._row.bind("<Leave>", self._on_leave, add="+")
+        if tooltip:
+            for w in (self._row, self._lbl):
+                Tooltip(w, tooltip)
+
+    def click(self) -> None:
+        """切换 var 并回调；不自行刷新（由调用方 _redraw 统一刷新所有行）。"""
+        self.var.set(not self.var.get())
+        if self._on_toggle:
+            self._on_toggle()
+
+    def _apply(self) -> None:
+        on = self.var.get()
+        bg = self._SEL_BG if on else theme.PANEL
+        self._row.config(bg=bg)
+        for w in self._members:
+            try:
+                w.config(bg=bg)
+            except tk.TclError:
+                pass
+        self._lbl.config(fg="#ffffff" if on else theme.FG)
+
+    def _on_hover(self, _e=None) -> None:
+        if self.var.get():
+            return  # 选中态保持高亮，不被 hover 覆盖
+        bg = theme.HOVER_BG
+        self._row.config(bg=bg)
+        for w in self._members:
+            try:
+                w.config(bg=bg)
+            except tk.TclError:
+                pass
+
+    def _on_leave(self, _e=None) -> None:
+        self._apply()
+
+    def _draw(self) -> None:
+        """外部改 var 后刷新（兼容旧接口名，等价 _apply）。"""
+        self._apply()
+
+
+class CollapsibleSection:
+    """可折叠区：彩色标题(header,可点击)+ 内容容器(content frame)。
+
+    调用方把实际控件 pack 进 ``content``；点标题 toggle content 显隐。
+    用于把排名页/CTEI 分解等「▼ 装饰标题」统一赋予折叠能力（与指标分类、
+    模型对比的分组折叠一致）。``expand`` 控制 content 是否占满剩余空间。
+    """
+
+    def __init__(self, parent, title, color, *, expand: bool = True) -> None:
+        self._title = title
+        self._expand = expand
+        self._collapsed = False
+        self.header = tk.Frame(parent, bg=color, padx=6, pady=3)
+        self.header.pack(fill="x", pady=(1, 0))
+        self._arrow = tk.Label(self.header, text=f"▼ {title}", bg=color, fg=theme.FG,
+                               font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor="hand2")
+        self._arrow.pack(side="left")
+        self.content = tk.Frame(parent, bg=theme.BG)
+        self.content.pack(fill="both", expand=expand)
+        for w in (self.header, self._arrow):
+            w.bind("<Button-1>", lambda e: self.toggle(), add="+")
+
+    def toggle(self) -> None:
+        self._collapsed = not self._collapsed
+        self._arrow.config(text=f"{'▶' if self._collapsed else '▼'} {self._title}")
+        if self._collapsed:
+            self.content.pack_forget()
+        else:
+            self.content.pack(fill="both", expand=self._expand)
 
 
 class ScrollFrame:
@@ -279,9 +387,7 @@ class SelectableLabel(tk.Text):
         self.configure(height=max(1, lines + 1))
 
     def _copy_menu(self, event=None) -> None:
-        menu = tk.Menu(self, tearoff=0, bg=theme.PANEL, fg=theme.FG,
-                       activebackground=theme.HOVER_BG, activeforeground=theme.FG,
-                       borderwidth=0)
+        menu = FlatMenu(self)
         menu.add_command(label="复制", command=self._copy_all)
         menu.tk_popup(event.x_root, event.y_root)
 
@@ -306,6 +412,121 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, **kw):
     btn.bind("<Enter>", lambda _e: btn.config(bg=hover_bg), add="+")
     btn.bind("<Leave>", lambda _e: btn.config(bg=base_bg), add="+")
     return btn
+
+
+class FlatMenu:
+    """无边框深色弹出菜单——用 ``overrideredirect`` Toplevel 取代 ``tk.Menu``。
+
+    Why: Windows 的 ``tk.Menu`` 弹出会带一圈原生系统白边（#f0f0f0），且
+    ``borderwidth``/``relief`` 都管不了它（菜单窗口是 OS 画的），只能自绘。
+    API 对齐 ``tk.Menu`` 常用子集（add_command / add_separator / tk_popup），
+    调用方改动最小；1px 外框走 ``theme.BORDER``，悬停高亮走 ``theme.ACCENT``。
+    """
+
+    def __init__(self, parent):
+        self._closed = False
+        self._top = tk.Toplevel(parent)
+        self._top.overrideredirect(True)
+        self._top.configure(bg=theme.BORDER)               # 1px 外框色
+        self._body = tk.Frame(self._top, bg=theme.PANEL)
+        self._body.pack(fill="both", expand=True, padx=1, pady=1)  # 1px 露出外框
+        self._top.withdraw()
+
+    def add_command(self, label="", command=None, image=None, compound=None,
+                    state="normal", **_kw):
+        disabled = (state == "disabled")
+        row = tk.Frame(self._body, bg=theme.PANEL)
+        row.pack(fill="x")
+        fg = theme.MUTED if disabled else theme.FG
+        lbl = tk.Label(row, text=label, image=image, compound="left",
+                       bg=theme.PANEL, fg=fg, font=theme.FONT_UI,
+                       padx=14, pady=4, anchor="w")
+        lbl.pack(fill="x")
+        if not disabled:
+            def enter(_e):
+                row.configure(bg=theme.ACCENT)
+                lbl.configure(bg=theme.ACCENT, fg="#ffffff")
+            def leave(_e):
+                row.configure(bg=theme.PANEL)
+                lbl.configure(bg=theme.PANEL, fg=theme.FG)
+            def click(_e):
+                self._close()
+                if command is not None:
+                    command()
+            for w in (row, lbl):
+                w.configure(cursor="hand2")
+                w.bind("<Enter>", enter)
+                w.bind("<Leave>", leave)
+                w.bind("<Button-1>", click)
+        return row
+
+    def add_radiobutton(self, label="", variable=None, value=None, command=None, **_kw):
+        selected = variable is not None and variable.get() == value
+        prefix = "●  " if selected else "    "
+        row = tk.Frame(self._body, bg=theme.PANEL)
+        row.pack(fill="x")
+        lbl = tk.Label(row, text=prefix + label, bg=theme.PANEL, fg=theme.FG,
+                       font=theme.FONT_UI, padx=14, pady=4, anchor="w")
+        lbl.pack(fill="x")
+
+        def enter(_e):
+            row.configure(bg=theme.ACCENT)
+            lbl.configure(bg=theme.ACCENT, fg="#ffffff")
+
+        def leave(_e):
+            row.configure(bg=theme.PANEL)
+            lbl.configure(bg=theme.PANEL, fg=theme.FG)
+
+        def click(_e):
+            if variable is not None:
+                variable.set(value)
+            self._close()
+            if command is not None:
+                command()
+
+        for w in (row, lbl):
+            w.configure(cursor="hand2")
+            w.bind("<Enter>", enter)
+            w.bind("<Leave>", leave)
+            w.bind("<Button-1>", click)
+        return row
+
+    def add_separator(self):
+        tk.Frame(self._body, bg=theme.BORDER, height=1).pack(fill="x", padx=2, pady=2)
+
+    def tk_popup(self, x, y, *_args):
+        self._top.deiconify()
+        self._top.update_idletasks()
+        w, h = self._top.winfo_reqwidth(), self._top.winfo_reqheight()
+        sw, sh = self._top.winfo_screenwidth(), self._top.winfo_screenheight()
+        if x + w > sw:
+            x = max(0, sw - w)
+        if y + h > sh:
+            y = max(0, sh - h)
+        self._top.geometry(f"+{x}+{y}")
+        self._top.grab_set_global()
+        self._top.bind("<Button-1>", self._on_top_click, add="+")
+        self._top.bind("<Escape>", lambda _e: self._close())
+        self._top.focus_set()
+
+    def _on_top_click(self, e):
+        if self._closed:
+            return
+        # 命中项时由项的 Button-1 先处理（并 close）；落在菜单外才由这里关。
+        x0, y0 = self._top.winfo_rootx(), self._top.winfo_rooty()
+        x1, y1 = x0 + self._top.winfo_width(), y0 + self._top.winfo_height()
+        if not (x0 <= e.x_root <= x1 and y0 <= e.y_root <= y1):
+            self._close()
+
+    def _close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._top.grab_release()
+            self._top.destroy()
+        except tk.TclError:
+            pass
 
 
 class CalendarPopup:
@@ -460,4 +681,9 @@ def new_window(parent, title, size, bg=theme.BG):
     x = px + (pw - wpx) // 2
     y = py + (ph - hpx) // 2
     win.geometry(f"{wpx}x{hpx}+{x}+{y}")
+    from .platform import apply_dark_titlebar
+    apply_dark_titlebar(win)   # 创建即设
+    # 部分子窗口首次显示时尚未完成映射，DWM 属性可能没生效；<Map> 时再设一次兜底，
+    # 确保每个子窗口实际显示时标题栏与主窗口一致。
+    win.bind("<Map>", lambda e: apply_dark_titlebar(win), add="+")
     return win

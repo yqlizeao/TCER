@@ -275,7 +275,7 @@ def to_json(reports: list[SessionReport], agg: SessionReport, n_sessions: int) -
 
 
 _CSV_FIELDS = [
-    "session_id", "source", "is_subagent", "subagent_count", "assistant_turns", "input_tokens",
+    "session_id", "source", "started_at", "ended_at", "is_subagent", "subagent_count", "assistant_turns", "input_tokens",
     "cache_write_tokens", "cache_read_tokens", "output_tokens",
     "total_tokens", "chr", "io_ratio", "cost_usd", "cost_per_mt",
     "tcer", "cpe", "net_loc", "caf",
@@ -310,11 +310,11 @@ _CSV_FIELDS = [
     "models", "models_label",
 ]
 
-# report_row_dict 中有意不进 CSV 的键：隐私/宽度（title/path/cwd）、
-# 时间戳原值（有格式化派生列）、以及 dict/list 结构化字段。
+# report_row_dict 中有意不进 CSV 的键：隐私/宽度（title/path/cwd）、以及 dict/list 结构化字段。
+# started_at/ended_at 已列入 _CSV_FIELDS（epoch ms，与 JSON 导出对齐）。
 # 新增导出字段必须进 _CSV_FIELDS 或此集合之一——test_export 有漂移护栏。
 _CSV_EXCLUDED = frozenset({
-    "title", "path", "cwd", "started_at", "ended_at",
+    "title", "path", "cwd",
     "git_repository", "permission_profile",
     "rate_limit_names", "abort_reasons", "mcp_calls_by_attr", "cost_by_model",
     # Dict-valued: one CSV column per tool name would be unbounded and unstable
