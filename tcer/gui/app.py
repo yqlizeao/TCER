@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from tcer import __version__
 from tcer.core import analyze, export as export_mod, metrics
-from tcer.core import ui_prefs, update_check, upload_client, upload_prefs
+from tcer.core import ui_prefs, update_check, updater, upload_client, upload_prefs
 from tcer.core.paths import (
     list_project_refs, project_has_sessions, project_latest_activity_ms,
     ref_root, since_date_to_ms,
@@ -116,7 +116,7 @@ class TcerGui:
         if silent and (release is None
                        or not update_check.is_newer(release["tag"], __version__)):
             return  # 静默模式:无新版/失败都不打扰
-        popups.UpdatePopup(self.root, __version__, release)
+        popups.UpdatePopup(self.root, __version__, release, controller=self)
 
     def auto_check_enabled(self) -> bool:
         """是否已开启「启动时自动检查更新」(供工具菜单显示 ●/○ 勾选态)。
@@ -133,6 +133,44 @@ class TcerGui:
             ui_prefs.save(self._ui_prefs)
         except Exception:
             pass
+
+    def start_self_update(self, release, popup):
+        """后台下载新版本 → 替换当前可执行文件 → 重启(仅发布版,按钮已校验)。
+
+        进度经 ``root.after`` 回主线程更新弹窗(后台线程不直接碰 Tk 控件)。
+        """
+        asset = updater.asset_for_current_platform(release)
+        if asset is None:
+            self.root.after(0, lambda: popup.set_progress("未找到当前平台的安装包,请手动下载。"))
+            return
+        name, url = asset
+        dest = updater.download_target()
+
+        def _work():
+            try:
+                def cb(d, t):
+                    msg = f"下载中… {d // 1024} KB" + (f" / {t // 1024} KB" if t else "")
+                    try:
+                        self.root.after(0, lambda m=msg: popup.set_progress(m))
+                    except tk.TclError:
+                        pass
+                self.root.after(0, lambda: popup.set_progress(f"正在下载 {name}…"))
+                updater.download(url, dest, progress_cb=cb)
+                self.root.after(0, lambda: popup.set_progress("下载完成,即将重启以完成更新…"))
+                updater.apply_and_restart(dest)
+                self.root.after(800, self._quit_for_update)
+            except Exception as e:
+                self.root.after(0, lambda: popup.set_progress(f"更新失败:{e}"))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _quit_for_update(self):
+        """下载替换就绪后,退出当前进程让新版本接管。"""
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+        raise SystemExit(0)
 
     def _on_close(self) -> None:
         """关闭时保存界面偏好（几何/分栏/筛选/项目），失败不拦退出。"""

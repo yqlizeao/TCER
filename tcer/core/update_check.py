@@ -101,3 +101,48 @@ def is_newer(remote_tag, local=None):
         return r > c
     except Exception:
         return False
+
+
+def render_notes(md):
+    """把 GitHub release 的 markdown 粗清理为可读纯文本。
+
+    去 ``#``/``##`` 标题前缀、行内 `` `code` `` 反引号、``**粗体**``/``*斜体*`` 标记;
+    ``-``/``*`` 列表项转 ``•``、引用 ``>`` 去前缀;压缩连续空行。不做完整 markdown
+    渲染(Tk 无富文本),目标是去掉刺眼的源码符号、保留可读结构。
+    """
+    import re
+
+    def _inline(s):
+        s = re.sub(r"`([^`]+)`", r"\1", s)
+        s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)
+        s = re.sub(r"\*([^*]+)\*", r"\1", s)
+        return s
+
+    if not md:
+        return ""
+    out = []
+    for raw in md.splitlines():
+        s = raw.rstrip()
+        if not s.strip():
+            out.append("")
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", s)
+        if m:
+            out.append(_inline(m.group(2).strip()))
+            continue
+        m = re.match(r"^\s*[-*+]\s+(.*)$", s)
+        if m:
+            out.append("• " + _inline(m.group(1).strip()))
+            continue
+        if s.lstrip().startswith(">"):
+            out.append(_inline(s.lstrip().lstrip(">").strip()))
+            continue
+        out.append(_inline(s))
+    result, prev_blank = [], False
+    for line in out:
+        blank = not line.strip()
+        if blank and prev_blank:
+            continue
+        result.append(line)
+        prev_blank = blank
+    return "\n".join(result).strip()
