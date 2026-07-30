@@ -8,6 +8,7 @@ daemon thread; results come back through a queue polled from the Tk main loop.
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import traceback
 from pathlib import Path
@@ -25,6 +26,11 @@ from tcer.core.paths import (
 from tcer.core.reader import discover_jsonl
 from . import html_report, popups, theme, views
 from .views import CteiRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
+
+
+# 发布版(PyInstaller 打包,sys.frozen=True)默认开启「启动时自动检查更新」;
+# 源码运行(python -m tcer,frozen 不存在)默认关闭——开发者无需每次启动查更新。
+_DEFAULT_AUTO_CHECK = bool(getattr(sys, "frozen", False))
 
 
 class TcerGui:
@@ -65,9 +71,9 @@ class TcerGui:
 
         # 界面偏好：恢复上次窗口几何，否则居中（略上移避开任务栏）。
         self._ui_prefs = ui_prefs.load()
-        # 「启动时自动检查更新」默认开启(用户可在「工具」菜单关闭);联网仅查
-        # 公开 Release 信息、后台静默、不发送任何用户数据。
-        self._ui_prefs.setdefault("check_update_on_start", True)
+        # 「启动时自动检查更新」默认值随运行形态:发布版默认开、源码默认关;
+        # 联网仅查公开 Release 信息、后台静默、不发送任何用户数据。
+        self._ui_prefs.setdefault("check_update_on_start", _DEFAULT_AUTO_CHECK)
         self._restore_project_uid = self._ui_prefs.get("last_project")
         if ui_prefs.valid_geometry(self._ui_prefs.get("geometry")):
             root.geometry(self._ui_prefs["geometry"])
@@ -115,9 +121,10 @@ class TcerGui:
     def auto_check_enabled(self) -> bool:
         """是否已开启「启动时自动检查更新」(供工具菜单显示 ●/○ 勾选态)。
 
-        默认开启:用户未显式关闭即视为同意(联网仅查公开 Release,不发送用户数据)。
+        默认值随运行形态:发布版(sys.frozen)默认开,源码默认关;
+        用户手动改过后以其选择为准。
         """
-        return bool(self._ui_prefs.get("check_update_on_start", True))
+        return bool(self._ui_prefs.get("check_update_on_start", _DEFAULT_AUTO_CHECK))
 
     def toggle_auto_check(self) -> None:
         """翻转「启动时自动检查更新」开关并即时落盘(供工具菜单点击)。"""
