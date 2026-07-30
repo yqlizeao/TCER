@@ -15,6 +15,7 @@ _SPECIAL = {
     "models": {"model-a", "model-b"},
     "per_model": None,  # 用 bucket() 填,见下
     "tool_calls": {"Read": 3, "Edit": 2},
+    "tool_variants": {"Skill:dataviz": 2, "Agent:Explore": 1},
     "tool_errors_by_tool": {"Edit": 1},
     "tool_ops": [ToolOp(0, "Read", "a.py"), ToolOp(1, "Edit", "a.py")],
     "turn_stats": [TurnStat(0, ts=1_700_000_000_000, input_tokens=5,

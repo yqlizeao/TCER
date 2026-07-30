@@ -11,6 +11,9 @@ GET  /api/aliases            (Bearer) ?kind=project|model|person -> {aliases}
 POST /api/aliases            (Bearer) {kind, raw, canonical}    -> {ok}
 GET  /api/sessions           (Bearer) ?filters...               -> {sessions, total}
 GET  /api/session            (Bearer) ?id=                      -> {session detail}
+GET  /api/dimensions         (Bearer)                           -> {dimensions, metrics}
+GET  /api/compare            (Bearer) ?dimension=&metric=&...   -> {cohorts, caveat}
+GET  /api/insights           (Bearer) ?filters...               -> {findings, coverage}
 GET  /api/health                                                -> {ok:true}
 
 Static frontend is served from ``../frontend`` for any non-/api path.
@@ -35,8 +38,10 @@ from urllib.parse import parse_qs, urlparse
 
 # Allow running as a script (python web/backend/server.py) or as a module.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import analysis  # noqa: E402
 import auth  # noqa: E402
 import db  # noqa: E402
+import insights  # noqa: E402
 
 _FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend").resolve()
 _MAX_BODY = 64 * 1024 * 1024  # 64 MiB upload cap
@@ -108,6 +113,12 @@ class Handler(BaseHTTPRequestHandler):
             self._guard(lambda: self._h_sessions(qs))
         elif route == "/api/session":
             self._guard(lambda: self._h_session(qs))
+        elif route == "/api/dimensions":
+            self._guard(self._h_dimensions)
+        elif route == "/api/compare":
+            self._guard(lambda: self._h_compare(qs))
+        elif route == "/api/insights":
+            self._guard(lambda: self._h_insights(qs))
         elif route.startswith("/api/"):
             self._send_json({"error": "not found"}, 404)
         else:
@@ -197,6 +208,37 @@ class Handler(BaseHTTPRequestHandler):
 
     def _h_filters(self) -> None:
         self._send_json(db.distinct_values())
+
+    # -- Decision Lab ------------------------------------------------------- #
+    def _h_dimensions(self) -> None:
+        """Comparable knobs + metrics, so the UI never hardcodes the list."""
+        self._send_json({
+            "dimensions": [
+                {"key": d.key, "label": d.label, "multi": d.multi, "hint": d.hint}
+                for d in analysis.DIMENSIONS.values()
+            ],
+            "metrics": [
+                {"key": m.key, "label": m.label, "fmt": m.fmt,
+                 "higher_is_better": m.higher_is_better,
+                 "guardrail": m.guardrail, "hint": m.hint}
+                for m in analysis.METRICS.values()
+            ],
+            "min_sessions": analysis.MIN_COHORT_SESSIONS,
+        })
+
+    def _h_compare(self, qs: dict) -> None:
+        f = self._common_filters(qs)
+        dimension = self._one(qs, "dimension", "model")
+        metric = self._one(qs, "metric", analysis.PRIMARY_METRIC)
+        rows = db.fetch_analysis_rows(**f)
+        try:
+            self._send_json(analysis.compare(rows, dimension, metric))
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+
+    def _h_insights(self, qs: dict) -> None:
+        rows = db.fetch_analysis_rows(**self._common_filters(qs))
+        self._send_json(insights.generate(rows))
 
     def _h_overview(self, qs: dict) -> None:
         f = self._common_filters(qs)

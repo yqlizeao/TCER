@@ -106,6 +106,12 @@ class TokenUsage:
     started_at: int | None = None  # epoch ms of first counted assistant turn
     ended_at: int | None = None  # epoch ms of last counted assistant turn
     tool_calls: dict[str, int] = field(default_factory=dict)  # tool_name → call count
+    # Sub-identity of a tool call, ``"<Tool>:<variant>"`` → count. Only filled for
+    # tools whose name alone hides what was actually invoked: ``Skill:dataviz``,
+    # ``Agent:Explore``. Lets the web layer build Skill / subagent dimensions that
+    # ``tool_calls`` (keyed by the bare tool name) cannot express. MCP servers need
+    # no entry here — they are already encoded in the ``mcp__server__tool`` key.
+    tool_variants: dict[str, int] = field(default_factory=dict)
     session_duration_ms: int | None = None  # ended_at - started_at (computed property in practice)
     # --- new extraction fields ---
     user_msgs: int = 0  # count of type=="user" lines
@@ -243,6 +249,7 @@ class TokenUsage:
             started_at=merged_start,
             ended_at=merged_end,
             tool_calls=merged_tools,
+            tool_variants=_merge_dicts(self.tool_variants, other.tool_variants),
             session_duration_ms=merged_duration,
             user_msgs=self.user_msgs + other.user_msgs,
             tool_errors=self.tool_errors + other.tool_errors,

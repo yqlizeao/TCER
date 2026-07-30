@@ -32,14 +32,17 @@ import sys
 import time
 from pathlib import Path
 
-# Reuse the desktop app's model-id resolver for canonical model grouping.
+# Reuse the desktop app's model-id resolver for canonical model grouping, and
+# its CTEI formula so an aggregate score means the same thing in both places.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 try:
+    from tcer.core import metrics as tcer_metrics  # noqa: E402
     from tcer.core import pricing  # noqa: E402
 except Exception:  # pragma: no cover - web can still run without the package
     pricing = None  # type: ignore
+    tcer_metrics = None  # type: ignore
 
 _DB_PATH = Path(os.environ.get("TCER_WEB_DB") or (Path(__file__).parent / "tcer_web.db"))
 
@@ -78,6 +81,28 @@ CREATE TABLE IF NOT EXISTS uploads (
     read_before_write REAL,
     search_edit_ratio REAL,
     tool_error_rate   REAL,
+    -- Configuration dimensions: what the session was *run with*. These are the
+    -- knobs a team can actually change, so they are what the Decision Lab
+    -- compares cohorts on (model / agent CLI / harness config).
+    source            TEXT,           -- claude | codex | grok | opencode
+    task_type         TEXT,
+    reasoning_effort  TEXT,
+    approval_policy   TEXT,
+    permission_profile TEXT,
+    collaboration_mode TEXT,
+    cli_version       TEXT,
+    entrypoint        TEXT,
+    -- Denominators needed for correctly weighted ratio aggregation.
+    assistant_turns   INTEGER,
+    user_msgs         INTEGER,
+    code_added        INTEGER,
+    tool_call_count   INTEGER,
+    tool_error_count  INTEGER,
+    session_duration_minutes REAL,
+    high_churn_file_count    INTEGER,
+    cpe               REAL,
+    tool_calls_json   TEXT,           -- raw tool_name -> count (MCP dimension)
+    tool_variants_json TEXT,          -- "Skill:x" / "Agent:y" -> count
     raw_json      TEXT NOT NULL       -- full report_row_dict
 );
 
@@ -112,6 +137,24 @@ _MIGRATIONS = {
         "output_tokens": "INTEGER",
         "cache_write_tokens": "INTEGER",
         "cache_read_tokens": "INTEGER",
+        "source": "TEXT",
+        "task_type": "TEXT",
+        "reasoning_effort": "TEXT",
+        "approval_policy": "TEXT",
+        "permission_profile": "TEXT",
+        "collaboration_mode": "TEXT",
+        "cli_version": "TEXT",
+        "entrypoint": "TEXT",
+        "assistant_turns": "INTEGER",
+        "user_msgs": "INTEGER",
+        "code_added": "INTEGER",
+        "tool_call_count": "INTEGER",
+        "tool_error_count": "INTEGER",
+        "session_duration_minutes": "REAL",
+        "high_churn_file_count": "INTEGER",
+        "cpe": "REAL",
+        "tool_calls_json": "TEXT",
+        "tool_variants_json": "TEXT",
     },
 }
 
@@ -205,12 +248,37 @@ def _int(v) -> int | None:
         return None
 
 
+def _num(v) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _text(v) -> str | None:
+    """Normalize a config-dimension value to a non-empty string or None.
+
+    Empty strings must become NULL, not "", or the Decision Lab would treat
+    "unset" as a distinct cohort worth comparing against.
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
 _INSERT_COLS = (
     "batch_id", "uploaded_at", "uploaded_by", "person", "project", "kind",
     "session_id", "title", "model", "ts", "tcer", "ctei", "cost_usd", "net_loc",
     "total_tokens", "input_tokens", "output_tokens", "cache_write_tokens",
     "cache_read_tokens", "churn_ratio", "chr", "read_before_write",
-    "search_edit_ratio", "tool_error_rate", "raw_json",
+    "search_edit_ratio", "tool_error_rate",
+    "source", "task_type", "reasoning_effort", "approval_policy",
+    "permission_profile", "collaboration_mode", "cli_version", "entrypoint",
+    "assistant_turns", "user_msgs", "code_added", "tool_call_count",
+    "tool_error_count", "session_duration_minutes", "high_churn_file_count",
+    "cpe", "tool_calls_json", "tool_variants_json",
+    "raw_json",
 )
 
 
@@ -234,6 +302,12 @@ def insert_records(
     batch_id = secrets.token_hex(8)
 
     def _vals(row: dict, kind: str) -> tuple:
+        tool_calls = row.get("tool_calls")
+        tool_calls = tool_calls if isinstance(tool_calls, dict) else {}
+        tool_variants = row.get("tool_variants")
+        tool_variants = tool_variants if isinstance(tool_variants, dict) else {}
+        tool_total = sum(v for v in tool_calls.values()
+                         if isinstance(v, (int, float))) or None
         ts = row.get("started_at")
         if ts:
             ts = int(ts) // 1000 if ts > 10_000_000_000 else int(ts)
@@ -251,6 +325,18 @@ def insert_records(
             row.get("churn_ratio"),
             row.get("chr"), row.get("read_before_write"),
             row.get("search_edit_ratio"), row.get("tool_error_rate"),
+            _text(row.get("source")), _text(row.get("task_type")),
+            _text(row.get("reasoning_effort")), _text(row.get("approval_policy")),
+            _text(row.get("permission_profile")), _text(row.get("collaboration_mode")),
+            _text(row.get("cli_version")), _text(row.get("entrypoint")),
+            _int(row.get("assistant_turns")), _int(row.get("user_msgs")),
+            _int(row.get("code_added")), tool_total,
+            _int(row.get("tool_error_count")),
+            _num(row.get("session_duration_minutes")),
+            _int(row.get("high_churn_file_count")),
+            _num(row.get("cpe")),
+            json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
+            json.dumps(tool_variants, ensure_ascii=False) if tool_variants else None,
             json.dumps(row, ensure_ascii=False, default=str),
         )
 
@@ -391,8 +477,11 @@ def model_display(canonical: str) -> str:
 # --------------------------------------------------------------------------- #
 # Querying
 # --------------------------------------------------------------------------- #
+# Metrics that survive aggregation. ``ctei`` qualifies since it went
+# three-factor (see ``_agg_metrics``) — each factor aggregates, so a curve point
+# rolling up several sessions is meaningful.
 _METRICS = (
-    "tcer", "ctei", "cost_usd", "net_loc", "total_tokens", "churn_ratio",
+    "tcer", "ctei", "cost_usd", "cpe", "net_loc", "total_tokens", "churn_ratio",
     "chr", "read_before_write", "search_edit_ratio", "tool_error_rate",
 )
 
@@ -446,34 +535,108 @@ def _fetch_rows(
     return out
 
 
-def _agg_metrics(rows: list[dict]) -> dict:
-    """Roll a set of rows into one metrics dict (sums + recomputed ratios)."""
-    n = len(rows)
-    tok = sum(r["total_tokens"] or 0 for r in rows)
-    inp = sum(r["input_tokens"] or 0 for r in rows)
-    out = sum(r["output_tokens"] or 0 for r in rows)
-    cw = sum(r["cache_write_tokens"] or 0 for r in rows)
-    cr = sum(r["cache_read_tokens"] or 0 for r in rows)
-    net = sum(r["net_loc"] or 0 for r in rows)
-    cost = sum(r["cost_usd"] or 0.0 for r in rows)
+def _get(row: dict, key: str):
+    """Column read that tolerates rows written before a migration added it."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
 
-    def avg(key: str):
-        vals = [r[key] for r in rows if r[key] is not None]
-        return round(sum(vals) / len(vals), 4) if vals else None
+
+def _median(vals: list[float]) -> float | None:
+    if not vals:
+        return None
+    s = sorted(vals)
+    m = len(s) // 2
+    return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2
+
+
+def _agg_metrics(rows: list[dict]) -> dict:
+    """Roll a set of rows into one metrics dict.
+
+    Extensive quantities are summed; **ratios are recomputed from summed
+    numerators / denominators**, never averaged. A plain mean over per-session
+    ratios lets a 5k-token session outvote a 2M-token one and produces Simpson's
+    paradox on any grouping — the aggregate can move opposite to every subgroup.
+
+    Two ratios have no denominator in the schema (``read_before_write``,
+    ``search_edit_ratio`` are derived from tool-op sequences the server never
+    sees), so those fall back to the **median** across sessions — robust to the
+    heavy tail, and flagged as such via ``*_stat``.
+
+    ``ctei`` is **recomputed from the aggregate's own TCER / CPE / CHR** via
+    ``tcer.core.metrics.ctei`` — the same three-factor formula and the same
+    treatment the desktop audit's ``aggregate_ctei_recompute`` check enforces.
+    Averaging per-session CTEI would be wrong for the same reason averaging any
+    other ratio is: the sessions carry wildly different weight.
+    """
+    n = len(rows)
+    tok = sum(_get(r, "total_tokens") or 0 for r in rows)
+    inp = sum(_get(r, "input_tokens") or 0 for r in rows)
+    out = sum(_get(r, "output_tokens") or 0 for r in rows)
+    cw = sum(_get(r, "cache_write_tokens") or 0 for r in rows)
+    cr = sum(_get(r, "cache_read_tokens") or 0 for r in rows)
+    net = sum(_get(r, "net_loc") or 0 for r in rows)
+    cost = sum(_get(r, "cost_usd") or 0.0 for r in rows)
+    added = sum(_get(r, "code_added") or 0 for r in rows)
+    tool_calls = sum(_get(r, "tool_call_count") or 0 for r in rows)
+    tool_errs = sum(_get(r, "tool_error_count") or 0 for r in rows)
+
+    def med(key: str):
+        vals = [_get(r, key) for r in rows]
+        v = _median([x for x in vals if x is not None])
+        return round(v, 4) if v is not None else None
+
+    def weighted(weight_key: str, rate_key: str):
+        """Recover sum(numerator)/sum(weight) from per-session rate × weight."""
+        num = 0.0
+        den = 0.0
+        for r in rows:
+            w = _get(r, weight_key)
+            rate = _get(r, rate_key)
+            if w and rate is not None:
+                num += float(rate) * float(w)
+                den += float(w)
+        return round(num / den, 4) if den else None
 
     tcer = round(net / (tok / 1_000_000), 2) if tok else None
     cache_in = inp + cr + cw
     chr_ = round(cr / cache_in, 4) if cache_in else None
+    # Prefer the true ratio-of-sums; fall back to the weighted reconstruction
+    # for rows uploaded before code_added / tool_call_count existed.
+    churn = weighted("code_added", "churn_ratio") if added else med("churn_ratio")
+    if tool_calls:
+        err_rate = round(tool_errs / tool_calls, 4)
+    else:
+        err_rate = med("tool_error_rate")
+    cpe = round(cost / (net / 1000), 4) if net > 0 else None
+    chr_out = chr_ if chr_ is not None else med("chr")
+    ctei = grade = None
+    if tcer_metrics is not None:
+        ctei = tcer_metrics.ctei(tcer, cpe, chr_out)
+        if ctei is not None:
+            ctei = round(ctei, 4)
+            grade = tcer_metrics.grade(ctei)
     return {
         "sessions": n,
         "total_tokens": tok, "input_tokens": inp, "output_tokens": out,
         "cache_write_tokens": cw, "cache_read_tokens": cr,
-        "net_loc": net, "cost_usd": round(cost, 4),
-        "tcer": tcer, "chr": chr_ if chr_ is not None else avg("chr"),
-        "ctei": avg("ctei"), "churn_ratio": avg("churn_ratio"),
-        "read_before_write": avg("read_before_write"),
-        "search_edit_ratio": avg("search_edit_ratio"),
-        "tool_error_rate": avg("tool_error_rate"),
+        "net_loc": net, "code_added": added, "cost_usd": round(cost, 4),
+        "cpe": cpe,
+        "tcer": tcer, "chr": chr_out,
+        "ctei": ctei, "grade": grade,
+        "churn_ratio": churn,
+        "read_before_write": med("read_before_write"),
+        "search_edit_ratio": med("search_edit_ratio"),
+        "tool_error_rate": err_rate,
+        # Which statistic each ratio used, so the UI never implies "mean".
+        "_stat": {
+            "chr": "ratio_of_sums", "tcer": "ratio_of_sums",
+            "ctei": "recomputed",
+            "churn_ratio": "weighted" if added else "median",
+            "tool_error_rate": "ratio_of_sums" if tool_calls else "median",
+            "read_before_write": "median", "search_edit_ratio": "median",
+        },
     }
 
 
@@ -499,6 +662,27 @@ def distinct_values() -> dict:
     projects = sorted({canonical_project(p, project_amap) for p in raw_projects})
     models = sorted({canonical_model(m, model_amap) for m in raw_models})
     return {"persons": persons, "projects": projects, "models": models}
+
+
+def fetch_analysis_rows(
+    persons: list[str] | None = None,
+    projects: list[str] | None = None,
+    models: list[str] | None = None,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+) -> list[dict]:
+    """De-duplicated, canonicalized rows for the Decision Lab (``analysis``).
+
+    Same filtering as the dashboard endpoints so a cohort comparison always
+    describes exactly the rows the user is looking at.
+    """
+    project_amap, model_amap, person_amap = _alias_maps()
+    conn = connect()
+    try:
+        return _fetch_rows(conn, persons, projects, models, start_ts, end_ts,
+                           project_amap, model_amap, person_amap)
+    finally:
+        conn.close()
 
 
 def overview(
