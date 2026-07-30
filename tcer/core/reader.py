@@ -373,6 +373,10 @@ def _scan_session_uncached(
     seen: set[str] = set()
     call_id_to_name: dict[str, str] = {}  # tool_use_id → tool_name for error attribution
     turn_idx = 0  # next turn number to assign to a new response
+    # 子代理文件（subagents/*.jsonl）的 user 消息是 Task 工具派发的 prompt，非真人
+    # 输入 → 不计入 user_msgs / slash / correction / first_prompt / user_texts。
+    # token / LOC / tool_errors 等真实成本照常累计（子代理成本并入父会话）。
+    is_sub = is_subagent(path)
     current_turn = 0  # turn number of the response whose lines we are currently reading
     for obj in iter_messages(path):
         if cancel_check is not None:
@@ -473,20 +477,23 @@ def _scan_session_uncached(
                     isinstance(it, dict) and it.get("type") == "text"
                     for it in content
                 )
-            if is_real_user:
-                u.user_msgs += 1
+            if is_real_user and not is_sub:
                 # prompt 行为信号：只计数，不存正文（隐私边界与懒加载一致）。
                 txt = extract_text(content).strip()
                 if txt.startswith("/") or txt.startswith("<command-name>"):
                     u.slash_command_count += 1
                 elif _CORRECTION_RE.search(txt[:200]):
                     u.correction_msg_count += 1
-                if u.first_prompt_chars == 0 and txt and not _is_user_noise(txt):
-                    u.first_prompt_chars = len(txt)
-                if include_user_texts and txt and not _is_user_noise(txt):
-                    cleaned = _strip_tags(txt)
-                    if cleaned:
-                        u.user_message_texts.append(cleaned[:500])
+                # user_msgs 只计真实用户消息：排除 Claude Code 注入（task-
+                # notification / 命令输出 / IDE 选区等有 text 块但非真人输入）。
+                if txt and not _is_user_noise(txt):
+                    u.user_msgs += 1
+                    if u.first_prompt_chars == 0:
+                        u.first_prompt_chars = len(txt)
+                    if include_user_texts:
+                        cleaned = _strip_tags(txt)
+                        if cleaned:
+                            u.user_message_texts.append(cleaned[:500])
             # Count tool_result errors (from ALL user-role messages)
             if isinstance(content, list):
                 for item in content:

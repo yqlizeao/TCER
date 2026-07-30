@@ -751,13 +751,16 @@ def _synth_meta(session_id: str, sample: Path) -> SessionMeta:
 
 
 def _parse_date_to_ms(date_str: str, end_of_day: bool = False) -> int:
-    """Parse YYYY-MM-DD to ms timestamp (start or end of day UTC).
+    """Parse YYYY-MM-DD to ms timestamp (start or end of day, **local** timezone).
 
-    Raises ValueError on malformed input.
+    Naive ``datetime.timestamp()`` is interpreted in the system local timezone,
+    matching ``fmt_dt`` display and the FilterBar presets (``datetime.now()``) —
+    so "今天" means local midnight, not UTC midnight. Raises ValueError on
+    malformed input.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        dt = datetime.strptime(date_str, "%Y-%m-%d")  # naive → 本地时区
         if end_of_day:
             # End of day = 23:59:59.999999
             dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)

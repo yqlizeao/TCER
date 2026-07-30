@@ -131,7 +131,7 @@ def build_payload(
         "user": person,
         "project": project,
         "detail": bool(detail),
-        "generated_at": int(time.time()),
+        "generated_at": int(time.time() * 1000),
         "aggregate": agg_row,
     }
     if reports:

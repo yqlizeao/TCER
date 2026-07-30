@@ -93,7 +93,8 @@ def setup_style(ttk) -> None:
     except ttk.TclError:
         pass
     style.configure("Treeview", background=PANEL, fieldbackground=PANEL,
-                    foreground=FG, rowheight=22)
+                    foreground=FG, rowheight=22,
+                    bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
     style.configure("Treeview.Heading", background="#333333", foreground=FG,
                     relief="flat", borderwidth=1)
     # clam draws a raised (white-ish) border on heading hover/press — keep it dark & flat.
@@ -109,10 +110,13 @@ def setup_style(ttk) -> None:
                     foreground=FG, arrowcolor=MUTED, bordercolor=BORDER,
                     lightcolor=PANEL, darkcolor=PANEL, insertcolor=FG)
     style.map("TCombobox",
-              fieldbackground=[("readonly", PANEL)],
+              fieldbackground=[("readonly", PANEL), ("active", PANEL)],
               foreground=[("readonly", FG)],
               selectbackground=[("readonly", PANEL)],
-              selectforeground=[("readonly", FG)])
+              selectforeground=[("readonly", FG)],
+              # hover/active 态：clam 默认会把箭头与按钮底刷成白色，压回主题色。
+              background=[("active", PANEL_2)],
+              arrowcolor=[("active", FG)])
 
     # 滚动条极简细条（常驻）：clam 原生 trough/thumb + 自定义 layout 去箭头，只留滑块。
     # 配色走 style.configure（对 clam 原生元素有效），所有未显式指定 style 的
@@ -146,11 +150,30 @@ def setup_style(ttk) -> None:
               background=[("active", SCROLL_THUMB_HOVER),
                           ("pressed", SCROLL_THUMB_HOVER)])
 
-    # Notebook (tab) styling — dark theme matching left panel
-    style.configure("TNotebook", background=BG, borderwidth=0)
+    # Notebook (tab) styling — dark theme matching left panel.
+    # 客户区边框色显式压成 BG：clam 默认 bordercolor/lightcolor 是浅色，会沿标签页
+    # 内容画一圈白框（borderwidth=0 压不住元素自带的 1px 边），故三色同 BG 隐形。
+    style.configure("TNotebook", background=BG, borderwidth=0,
+                    bordercolor=BG, lightcolor=BG, darkcolor=BG)
     style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED,
-                    padding=[14, 4], font=(FONT_CJK, 9))
+                    padding=[14, 4], font=(FONT_CJK, 9),
+                    bordercolor=BG, lightcolor=BG, darkcolor=BG,
+                    focusthickness=0)  # 去掉点击页签后文字四周的虚线聚焦框
     style.map("TNotebook.Tab",
               background=[("selected", "#3e3e42"), ("active", "#333333")],
               foreground=[("selected", FG), ("active", FG)],
-              padding=[("selected", [16, 6])])
+              padding=[("selected", [16, 6])],
+              # 压住 clam 默认浅色 bevel：selected 态 lightcolor 默认 #eeebe7 会给选中
+              # 页签画一圈白描边，且 map 优先级高于 configure，故三色各态都得在 map 里设 BG。
+              lightcolor=[("selected", BG), ("active", BG), ("!disabled", BG)],
+              darkcolor=[("selected", BG), ("active", BG), ("!disabled", BG)],
+              bordercolor=[("selected", BG), ("active", BG), ("!disabled", BG)])
+    # 彻底去掉点击页签后的黑色虚线聚焦框：clam 的 Notebook.focus 元素即使
+    # focusthickness=0 仍会描 1px 虚线，故直接把它从 layout 移除（label 保留，图标+文字照常）。
+    style.layout("TNotebook.Tab", [
+        ("Notebook.tab", {"sticky": "nswe", "children": [
+            ("Notebook.padding", {"side": "top", "sticky": "nswe", "children": [
+                ("Notebook.label", {"side": "top", "sticky": ""})
+            ]})
+        ]})
+    ])

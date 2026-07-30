@@ -318,18 +318,18 @@ def project_has_sessions(ref: ProjectRef) -> bool:
 
 
 def since_date_to_ms(date_str: str | None) -> int | None:
-    """``YYYY-MM-DD`` → epoch ms at 00:00 **UTC**, or None if empty/unparseable.
+    """``YYYY-MM-DD`` → epoch ms at 00:00 **local**, or None if empty/unparseable.
 
-    Intentionally mirrors ``analyze._parse_date_to_ms`` (UTC) so the project-level
-    mtime filter and the session-level started_at filter agree on the same
-    threshold for one ``since`` string. Local tz would desync the left column
-    from the right panel. (paths cannot import analyze — analyze imports paths.)
+    Mirrors ``analyze._parse_date_to_ms`` (local) so the project-level mtime
+    filter, the session-level started/ended filter, and the on-screen display
+    (``fmt_dt`` — all local) share one threshold: "今天" means local midnight.
+    (paths cannot import analyze — analyze imports paths.)
     """
     if not date_str:
         return None
-    from datetime import datetime, timezone
+    from datetime import datetime
     try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        dt = datetime.strptime(date_str, "%Y-%m-%d")  # naive → 本地时区
     except ValueError:
         return None
     return int(dt.timestamp() * 1000)

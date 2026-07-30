@@ -164,14 +164,13 @@ def test_list_projects_independent_per_root(tmp_path, monkeypatch):
     assert {r.config_root.name for r in refs} == {".claude", ".zclaude"}
 
 
-def test_since_date_to_ms_utc_matches_analyze():
-    """since_date_to_ms 必须与 analyze._parse_date_to_ms (UTC) 逐字节一致——
-    否则左栏 mtime 过滤与会话级 started_at 过滤会对同一 since 分歧。"""
-    from datetime import datetime, timezone
+def test_since_date_to_ms_local_matches_analyze():
+    """since_date_to_ms 与 _parse_date_to_ms 都按本地时区解析（naive timestamp）——
+    与 fmt_dt 显示、FilterBar 预设（datetime.now）口径一致：『今天』= 本地 0 点。"""
+    from datetime import datetime
     from tcer.core import analyze
     for s in ("2026-07-30", "2025-01-01", "2000-12-31"):
-        expected = int(datetime.strptime(s, "%Y-%m-%d")
-                       .replace(tzinfo=timezone.utc).timestamp() * 1000)
+        expected = int(datetime.strptime(s, "%Y-%m-%d").timestamp() * 1000)  # naive → 本地
         assert paths.since_date_to_ms(s) == expected
         assert paths.since_date_to_ms(s) == analyze._parse_date_to_ms(s)
     assert paths.since_date_to_ms("") is None

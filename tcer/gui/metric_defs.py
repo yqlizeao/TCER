@@ -355,11 +355,7 @@ CONCEPT_NOTES: list[tuple[str, str, str]] = [
 def _duration_hours(report: SessionReport) -> str:
     u = report.usage
     if u.started_at and u.ended_at:
-        hours = (u.ended_at - u.started_at) / 1000 / 3600
-        if hours < 1:
-            minutes = hours * 60
-            return f"{minutes:.0f} 分钟"
-        return f"{hours:.1f} 小时"
+        return fmt.fmt_duration_ms(u.ended_at - u.started_at)
     return "-"
 
 
@@ -546,13 +542,14 @@ _DISPLAY_EXTRACTORS = {
         f"赞{r.usage.positive_ratings} · 踩{r.usage.negative_ratings}"
         if (r.usage.positive_ratings or r.usage.negative_ratings) else "-"),
     "permission_wait": lambda r: (
-        f"{r.usage.permission_wait_ms_total / 1000:.1f}（{r.usage.permission_request_count} 次）"
+        f"{fmt.fmt_duration_ms(r.usage.permission_wait_ms_total, short=True)}"
+        f"（{r.usage.permission_request_count} 次）"
         if r.usage.permission_request_count else "-"),
     "reasoning_time": lambda r: (
-        f"{r.usage.reasoning_ms_total / 1000:.1f}"
+        fmt.fmt_duration_ms(r.usage.reasoning_ms_total, short=True)
         if r.usage.reasoning_ms_total else "-"),
     "hook_overhead": lambda r: (
-        f"{r.usage.hook_duration_ms_total / 1000:.1f}s"
+        f"{fmt.fmt_duration_ms(r.usage.hook_duration_ms_total, short=True)}"
         f"（{r.usage.hook_run_count} 次"
         + (f"，{r.usage.hook_error_count} 失败" if r.usage.hook_error_count else "")
         + "）"
@@ -658,7 +655,7 @@ def format_plot(key: str, raw: float, m: "Metric | None") -> str:
         return f"${raw:.4f}"
     if m and m.unit in ("行", "个"):
         return f"{raw:,.0f}"
-    return f"{raw:g}"
+    return f"{raw:,.0f}" if abs(raw) >= 1000 else f"{raw:g}"
 
 
 # All keys referenced by GROUPS — used by tests to guard against drift

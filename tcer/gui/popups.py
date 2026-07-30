@@ -63,8 +63,8 @@ class SessionDetailPopup:
         tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
         meta_row("会话 ID", r.meta.session_id or "(无)")
         meta_row("工作目录", r.meta.cwd or "(未知)")
-        meta_row("开始", fmt.fmt_dt(u.started_at, "%Y-%m-%d %H:%M:%S"))
-        meta_row("结束", fmt.fmt_dt(u.ended_at, "%Y-%m-%d %H:%M:%S"))
+        meta_row("开始", fmt.fmt_dt(u.started_at, fmt.FMT_SECOND))
+        meta_row("结束", fmt.fmt_dt(u.ended_at, fmt.FMT_SECOND))
 
         # Per-model cost section
         _SKIP = {"<synthetic>", ""}
@@ -228,7 +228,7 @@ class ModelsPopup:
         from tcer.core.format import fmt_money
         from tcer.core.pricing import label as model_label
 
-        win = _new_window(parent, f"模型使用详情{title_suffix}", "560x620")
+        win = _new_window(parent, f"模型使用详情{title_suffix}", "620x620")
         tk.Label(win, text="模型使用详情", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
         tk.Label(win, text="各模型的 Token 用量、成本及四类 Token 构成", bg=theme.BG,

@@ -521,7 +521,7 @@ def test_prompt_behavior_signals(tmp_path):
     assert u.slash_command_count == 2
     assert u.correction_msg_count == 1
     assert u.first_prompt_chars == len("帮我实现一个解析器,要求如下:支持 JSONL")
-    assert u.user_msgs == 5
+    assert u.user_msgs == 4  # command-name 是注入，不计入 user_msgs（slash 仍计 2）
 
 
 def test_read_user_messages_filters_cc_injections(tmp_path):
@@ -563,5 +563,23 @@ def test_read_user_messages_filters_cc_injections(tmp_path):
     assert u.user_message_texts == ["请帮我修复这个 bug"]
     # first_prompt_chars skips injections → the real message's length.
     assert u.first_prompt_chars == len("请帮我修复这个 bug")
-    # user_msgs COUNT is unaffected — injections are still user-role turns.
-    assert u.user_msgs == 8
+    # user_msgs 也排除注入（task-notification 等非真人输入不计）→ 只剩 1 条真实。
+    assert u.user_msgs == 1
+
+
+def test_scan_skips_subagent_user_prompts(tmp_path):
+    """子代理文件的 user 消息（Task 派发 prompt）不计 user_msgs / first_prompt。
+
+    子代理是 Task 工具派生产物，其 user 消息是主代理下发的指令（非真人），
+    并入父会话时不应算作用户消息；token/LOC 等真实成本仍照常累计。
+    """
+    import json as _json
+    sub = tmp_path / "SID" / "subagents" / "agent.jsonl"
+    sub.parent.mkdir(parents=True)
+    sub.write_text(_json.dumps({"type": "user", "message": {"role": "user",
+        "content": [{"type": "text", "text": "You are researching the local repo…"}]}}) + "\n",
+        encoding="utf-8")
+    u, _ = reader.scan_session(sub, with_loc=False)
+    assert reader.is_subagent(sub) is True
+    assert u.user_msgs == 0
+    assert u.first_prompt_chars == 0

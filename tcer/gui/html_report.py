@@ -155,7 +155,7 @@ def _group_card(rep: SessionReport, g: metric_defs.Group) -> str:
     else:
         rows = [_metric_row(rep, m) for m in g.metrics]
     return (f'<div class="card"><h3 style="background:{head_bg}">'
-            f'{_esc(g.id)} · {_esc(g.name)}</h3><table>{"".join(rows)}</table></div>')
+            f'{_esc(g.name)}</h3><table>{"".join(rows)}</table></div>')
 
 
 def _groups_section(rep: SessionReport) -> str:
@@ -266,7 +266,7 @@ def _mini_timeline(report: SessionReport, cap: int = 200) -> str:
         color = theme.ERROR if t.errors else theme.ACCENT
         tip = f"回合 {t.turn + 1} · {tot:,} tok"
         if t.duration_ms is not None:
-            tip += f" · {t.duration_ms / 1000:.1f}s"
+            tip += f" · {fmt.fmt_duration_ms(t.duration_ms, short=True)}"
         spans.append(
             f'<span title="{_esc(tip)}" style="display:inline-block;width:3px;'
             f'margin-right:1px;height:{h}px;background:{color};'
@@ -307,7 +307,7 @@ def _meta_line(rep: SessionReport, *, source_label: str, extra: str = "") -> str
     ]
     if extra:
         parts.append(extra)
-    parts.append(f"生成于 <b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</b> · TCER v{_esc(_version())}")
+    parts.append(f"生成于 <b>{fmt.fmt_now()}</b> · TCER v{_esc(_version())}")
     return f'<div class="meta">{" ｜ ".join(parts)}</div>'
 
 
@@ -375,11 +375,11 @@ def _timeline_section(report: SessionReport) -> str:
             for v, color in ((t.input_tokens, "#569cd6"), (t.cache_write, "#ce9178"),
                              (t.cache_read, "#4ec9b0"), (t.output_tokens, "#dcdcaa"))
             if v > 0)
-        dur = f"{t.duration_ms / 1000:.1f}s" if t.duration_ms is not None else "-"
+        dur = fmt.fmt_duration_ms(t.duration_ms, short=True)
         err = f'<span style="color:{theme.ERROR}">⚠ {t.errors}</span>' if t.errors else ""
         rows.append(
             f"<tr><td class='v'>{i + 1}</td>"
-            f"<td>{_esc(fmt.fmt_dt(t.ts, '%m-%d %H:%M:%S') if t.ts else '-')}</td>"
+            f"<td>{_esc(fmt.fmt_dt(t.ts, fmt.FMT_SHORT_SECOND) if t.ts else '-')}</td>"
             f"<td>{segs}</td>"
             + _num_td(total, f"{total:,}")
             + _num_td(t.output_tokens, f"{t.output_tokens:,}")
@@ -454,7 +454,7 @@ def render_overview_html(rows: list[dict]) -> str:
         "<h1>TCER 项目总览</h1>",
         f'<div class="meta">{len(rows)} 个项目 ｜ <b>{total_tok:,}</b> Token ｜ '
         f"<b>{_esc(fmt.fmt_money(total_cost))}</b> ｜ 净增 <b>{total_net:,}</b> 行 ｜ "
-        f"生成于 <b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</b>"
+        f"生成于 <b>{fmt.fmt_now()}</b>"
         f" · TCER v{_esc(_version())}</div>",
         f'<div class="scroll"><table class="sortable"><thead>{head}</thead>'
         f'<tbody>{"".join(body)}</tbody></table></div>',

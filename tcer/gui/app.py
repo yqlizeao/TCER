@@ -43,14 +43,23 @@ class TcerGui:
         self._upload_prefs: dict = upload_prefs.load()
         self._auto_upload_after: str | None = None
 
-        root.title("TCER — Token 转码效率计量")
+        root.title("TCER")
         root.configure(bg=theme.BG)
         theme.setup_style(ttk)
         # Combobox 下拉列表是独立 Listbox，不吃 ttk style，只能经 option db 深色化。
         for opt, val in (("*TCombobox*Listbox*background", theme.PANEL),
                          ("*TCombobox*Listbox*foreground", theme.FG),
                          ("*TCombobox*Listbox*selectBackground", theme.ACCENT),
-                         ("*TCombobox*Listbox*selectForeground", "#ffffff")):
+                         ("*TCombobox*Listbox*selectForeground", "#ffffff"),
+                         # 去掉 tk 按钮/复选/单选点击后的聚焦框（Entry 不在此列——
+                         # 日期/搜索框的边框靠各自显式 highlightthickness=1 保留）。
+                         ("*Button*highlightThickness", 0),
+                         ("*Checkbutton*highlightThickness", 0),
+                         ("*Radiobutton*highlightThickness", 0),
+                         # 去掉右键/下拉菜单的系统边框：Menu 的 borderWidth/activeBorderWidth
+                         # 默认 1，边色随系统主题（浅色系统下是一圈很宽的白边）。
+                         ("*Menu*borderWidth", 0),
+                         ("*Menu*activeBorderWidth", 0)):
             root.option_add(opt, val)
 
         # 界面偏好：恢复上次窗口几何，否则居中（略上移避开任务栏）。
@@ -77,11 +86,13 @@ class TcerGui:
         """关闭时保存界面偏好（几何/分栏/筛选/项目），失败不拦退出。"""
         try:
             proj = self._selected_project()
+            params = self.filter.get_params()
             ui_prefs.save({
                 "geometry": self.root.geometry(),
                 "sashes": [self._paned.sash_coord(i)[0] for i in (0, 1)],
                 "source": self.filter.get_source(),
-                "task_type": self.filter.get_params().get("task_type"),
+                "task_type": params.get("task_type"),
+                "until": params.get("until"),
                 "last_project": views.ref_uid(proj) if proj else None,
             })
         except tk.TclError:
@@ -112,9 +123,9 @@ class TcerGui:
         tab_t = tk.Frame(nb, bg=theme.PANEL)
         tab_c = tk.Frame(nb, bg=theme.PANEL)
         nb.add(tab_m, text="指标分类", image=views.ui_icon(nb, "grid"), compound="left")
+        nb.add(tab_c, text="模型对比", image=views.ui_icon(nb, "compare"), compound="left")
         nb.add(tab_b, text="综合效率分排名", image=views.ui_icon(nb, "rank"), compound="left")
         nb.add(tab_t, text="趋势", image=views.ui_icon(nb, "trend"), compound="left")
-        nb.add(tab_c, text="模型对比", image=views.ui_icon(nb, "compare"), compound="left")
 
         self.metric_panel = MetricPanel(tab_m, self)
         self.ranking_view = CteiRankingView(tab_b, controller=self)
@@ -415,9 +426,9 @@ class TcerGui:
         mode = self.view_mode.get()
         suffix = "(会话)" if mode == "session" and self._selected_session_id else "(项目)"
         self._nb.tab(0, text=f"指标分类 {suffix}")
-        self._nb.tab(1, text="综合效率分排名")
-        self._nb.tab(2, text="趋势")
-        self._nb.tab(3, text=f"模型对比 {suffix}")
+        self._nb.tab(1, text=f"模型对比 {suffix}")
+        self._nb.tab(2, text="综合效率分排名")
+        self._nb.tab(3, text="趋势")
 
     def _session_report(self, sid: str):
         for r in self._current.reports:
@@ -565,24 +576,23 @@ class TcerGui:
 
     @staticmethod
     def _claude_user_messages(report) -> list[str]:
-        """Lazy-load Claude user texts for one session (main + subagent jsonl)."""
+        """Lazy-load Claude user texts for one session (main jsonl only).
+
+        Subagent files are skipped on purpose: their only user-role messages
+        are the Task tool's dispatch prompt (e.g. "You are researching…"),
+        never real human input — including them leaked subagent prompts into
+        the popup as fake "user messages".
+        """
         from tcer.core import reader
         path = report.meta.path
         if path is None:
             return []
         try:
-            _, main, session_dir = reader.session_artifacts(path)
+            _, main, _ = reader.session_artifacts(path)
         except (OSError, ValueError, IndexError):
             # 路径形态异常（非标准会话布局）→ 退回按单文件读取。
             return reader.read_user_messages(path) if path.is_file() else []
-        msgs: list[str] = []
-        if main.is_file():
-            msgs.extend(reader.read_user_messages(main))
-        sub_dir = session_dir / "subagents"
-        if sub_dir.is_dir():
-            for f in sorted(sub_dir.glob("*.jsonl")):
-                msgs.extend(reader.read_user_messages(f))
-        return msgs
+        return reader.read_user_messages(main) if main.is_file() else []
 
     def show_files_touched(self) -> None:
         report = self._rendered_report
@@ -905,6 +915,7 @@ class TcerGui:
         root = tk.Tk()
         _apply_tk_scaling(root)
         _set_window_icon(root)
+        _apply_dark_titlebar(root)
         cls(root)
         root.mainloop()
         return 0
@@ -982,3 +993,10 @@ def _set_window_icon(root) -> None:
             root.iconphoto(True, root._tcer_icon)
         except tk.TclError:
             pass
+
+
+def _apply_dark_titlebar(root) -> None:
+    """Windows: 标题栏跟随系统暗/亮主题。实现见 ``platform.apply_dark_titlebar``
+    （主窗口与所有子窗口共用；子窗口经 widgets.new_window 自动应用）。"""
+    from .platform import apply_dark_titlebar
+    apply_dark_titlebar(root)
