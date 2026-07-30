@@ -16,12 +16,22 @@ Tkinter 桌面界面，纯离线运行。需要 Python ≥3.11 标准库，零�
 
 ## 快速开始
 
-**推荐方式**：双击启动脚本
+**方式一：下载预编译版**（无需安装 Python）
+
+从 [Releases](https://github.com/yqlizeao/TCER/releases) 下载对应平台文件，双击即可运行。
+
+- **Windows**：`TCER-windows-x64.exe`，双击运行。
+- **macOS（M 芯片）**：`TCER-macos-arm64`。因未做代码签名，首次打开会被 Gatekeeper 拦截，任选其一解除：
+  - Finder 中**右键 → 打开**（确认对话框再点「打开」）；或
+  - 终端执行 `xattr -dr com.apple.quarantine /路径/TCER-macos-arm64`，随后 `chmod +x` 运行。
+
+启动时默认自动检查新版本（联网仅查公开 Release，不发送任何用户数据）；可在「工具」菜单点「检查更新…」手动检查或关闭自动检查。
+
+**方式二：已装 Python / 开发者**
 
 - Windows：`launch.bat`
 - macOS：`launch.command`
-
-**命令行**：
+- 命令行：
 
 ```bash
 python -m tcer

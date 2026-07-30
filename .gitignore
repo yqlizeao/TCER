@@ -9,11 +9,12 @@ __pycache__/
 .ruff_cache/
 .tox/
 
-# Packaging / build artifacts (this tool runs from src/, nothing is built)
+# Packaging / build artifacts (PyInstaller 本地产物;CI 产物走 Release 不入库)
 *.egg-info/
 build/
 dist/
 .eggs/
+*.spec
 
 # Virtual environments
 venv/

@@ -1,0 +1,103 @@
+name: Build Release
+
+# 打 tag (v*) 自动构建 Windows + macOS(arm64)预编译版并发 Release；
+# workflow_dispatch 可手动触发(仅出 artifact,不发 Release)。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 创建 Release 需要
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset_name: TCER-windows-x64.exe
+            ext: .exe
+            icon: tcer/gui/assets/tcer_logo.ico
+            sep: ';'                    # Windows add-data 分隔符
+          - os: macos-latest            # = Apple Silicon / M 芯片 runner
+            asset_name: TCER-macos-arm64
+            ext: ''
+            icon: tcer_logo.icns         # CI 内现生成
+            sep: ':'
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash                      # Windows runner 也走 Git Bash,统一 mv / sep
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Stamp version from tag      # v1.2.3 -> tcer/__init__.py __version__="1.2.3"
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          p = pathlib.Path("tcer/__init__.py")
+          p.write_text(re.sub(r'^__version__ = .*$', f'__version__ = "{tag}"',
+                              p.read_text(encoding="utf-8"), flags=re.M),
+                       encoding="utf-8")
+          print("stamped", tag)
+          PY
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Generate .icns (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p logo.iconset
+          SRC=tcer/gui/assets/tcer_logo.png
+          sips -z 16 16     "$SRC" --out logo.iconset/icon_16x16.png
+          sips -z 32 32     "$SRC" --out logo.iconset/icon_16x16@2x.png
+          sips -z 32 32     "$SRC" --out logo.iconset/icon_32x32.png
+          sips -z 64 64     "$SRC" --out logo.iconset/icon_32x32@2x.png
+          sips -z 128 128   "$SRC" --out logo.iconset/icon_128x128.png
+          sips -z 256 256   "$SRC" --out logo.iconset/icon_128x128@2x.png
+          sips -z 256 256   "$SRC" --out logo.iconset/icon_256x256.png
+          sips -z 512 512   "$SRC" --out logo.iconset/icon_256x256@2x.png
+          sips -z 512 512   "$SRC" --out logo.iconset/icon_512x512.png
+          sips -z 1024 1024 "$SRC" --out logo.iconset/icon_512x512@2x.png
+          iconutil -c icns logo.iconset -o tcer_logo.icns
+
+      - name: Build (PyInstaller onefile)
+        run: |
+          pyinstaller --noconfirm --onefile --windowed \
+            --name TCER \
+            --icon "${{ matrix.icon }}" \
+            --add-data "tcer/config${{ matrix.sep }}tcer/config" \
+            --add-data "tcer/gui/assets${{ matrix.sep }}tcer/gui/assets" \
+            tcer/__main__.py
+
+      - name: Rename to asset name
+        run: mv "dist/TCER${{ matrix.ext }}" "${{ matrix.asset_name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')   # 仅 tag 触发才发 Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create release & upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true
