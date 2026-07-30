@@ -135,7 +135,7 @@ def test_csv_fields_cover_all_row_keys():
 
 def test_ui_prefs_roundtrip(tmp_path, monkeypatch):
     from tcer.core import ui_prefs
-    monkeypatch.setattr(ui_prefs, "_PATH", tmp_path / "tcer_ui.json")
+    monkeypatch.setattr(ui_prefs, "_prefs_path", lambda: tmp_path / "tcer_ui.json")
     assert ui_prefs.load() == {}
     ui_prefs.save({"geometry": "1600x900+10+10", "sashes": [190, 420]})
     assert ui_prefs.load()["sashes"] == [190, 420]

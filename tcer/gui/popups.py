@@ -59,34 +59,36 @@ class UpdatePopup:
             flat_button(body, "前往 Releases 页", primary=True,
                         command=lambda: webbrowser.open(url)
                         ).pack(anchor="w", pady=(12, 0))
-        elif update_check.is_newer(release["tag"], current_version):
+            return
+
+        # 有结果:新版 / 已是最新,都展示该 release 的发布说明
+        newer = update_check.is_newer(release["tag"], current_version)
+        if newer:
             tk.Label(body, text="● 发现新版本", bg=theme.BG, fg=theme.SUCCESS,
                      font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(4, 2))
             tk.Label(body,
                      text=f"当前 v{current_version}   →   最新 {release['tag']}",
                      bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(anchor="w")
-            notes = (release.get("notes") or "").strip()
-            if notes:
-                sf = ScrollFrame(body, bg=theme.PANEL)
-                sf.canvas.pack(fill="both", expand=True, pady=(8, 0))
-                if len(notes) > self._NOTES_LIMIT:
-                    notes = notes[:self._NOTES_LIMIT].rstrip() + "\n…"
-                tk.Label(sf.inner, text=notes, bg=theme.PANEL, fg=theme.FG,
-                         font=theme.FONT_UI_SMALL, wraplength=400, justify="left",
-                         anchor="nw").pack(fill="x")
-            flat_button(body, "前往下载", primary=True,
-                        command=lambda: webbrowser.open(release.get("url") or "")
-                        ).pack(anchor="w", pady=(12, 0))
         else:
             tk.Label(body, text="● 已是最新版本", bg=theme.BG, fg=theme.SUCCESS,
                      font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(4, 2))
-            tk.Label(body, text=f"当前版本:v{current_version}", bg=theme.BG,
-                     fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(anchor="w")
-
-        # 底部:关闭
-        foot = tk.Frame(win, bg=theme.BG)
-        foot.pack(fill="x", padx=12, pady=(8, 12))
-        flat_button(foot, "关闭", command=win.destroy).pack(side="right")
+            tk.Label(body, text=f"当前版本 v{current_version}(已是最新)",
+                     bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(anchor="w")
+        # 发布说明:新版显示新版本内容,已是最新则显示当前版本内容
+        notes = (release.get("notes") or "").strip()
+        if notes:
+            sf = ScrollFrame(body, bg=theme.PANEL)
+            sf.canvas.pack(fill="both", expand=True, pady=(8, 0))
+            if len(notes) > self._NOTES_LIMIT:
+                notes = notes[:self._NOTES_LIMIT].rstrip() + "\n…"
+            tk.Label(sf.inner, text=notes, bg=theme.PANEL, fg=theme.FG,
+                     font=theme.FONT_UI_SMALL, wraplength=400, justify="left",
+                     anchor="nw").pack(fill="x")
+        if newer:
+            flat_button(body, "前往下载", primary=True,
+                        command=lambda: webbrowser.open(release.get("url") or "")
+                        ).pack(anchor="w", pady=(12, 0))
+        # 无底部「关闭」按钮:标题栏 × 即可关闭
 
 
 class SessionDetailPopup:

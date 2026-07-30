@@ -157,7 +157,7 @@ clam 主题默认带浅色 bevel / 白边，逐元素压回暗色。关键陷阱
 
 ## 14. 界面偏好持久化
 
-几何 / 分栏 / 筛选 / 上次项目经 `core/ui_prefs` 存 `~/.claude/tcer_ui.json`：关闭时保存、启动时恢复（`last_project` 一次性生效）。
+几何 / 分栏 / 筛选 / 上次项目 / 启动检查开关经 `core/ui_prefs` 存到 `core/app_dirs.prefs_dir()`（发布版优先 exe 同目录，不可写回退 `~/.tcer/`；早期 `~/.claude/` 位置自动迁移）：关闭时保存、启动时恢复（`last_project` 一次性生效）。
 
 ---
 

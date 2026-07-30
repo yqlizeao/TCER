@@ -1,8 +1,11 @@
 """Persistence for the GUI 上传 dialog's options.
 
-Reads/writes a small JSON file next to the Claude config dir
-(``<CLAUDE_CONFIG_DIR or ~/.claude>/tcer_upload.json``), mirroring the atomic
-write pattern used by ``metrics.save_baselines``.
+Reads/writes a small JSON file under ``app_dirs.prefs_dir()`` (发布版优先 exe
+同目录,回退 ``~/.tcer/``):``<prefs_dir>/tcer_upload.json``, mirroring the
+atomic write pattern used by ``metrics.save_baselines``.
+
+早期版本曾存 ``~/.claude/tcer_upload.json``,首次用到新目录时会自动迁移过来
+(详见 ``app_dirs``)。
 
 Stored keys: server_url, username, password (optionally, obfuscated — NOT
 encrypted), anonymous, last_project, detail, auto_upload, interval_min,
@@ -20,9 +23,12 @@ import json
 import os
 import tempfile
 
-from tcer.core.paths import _claude_dir
+from tcer.core.app_dirs import prefs_dir
 
-_PREFS_PATH = _claude_dir() / "tcer_upload.json"
+
+def _prefs_path():
+    return prefs_dir() / "tcer_upload.json"
+
 
 _DEFAULTS: dict = {
     "server_url": "http://127.0.0.1:8899",
@@ -53,7 +59,7 @@ def load() -> dict:
     """Return the stored prefs merged over defaults (never raises)."""
     prefs = dict(_DEFAULTS)
     try:
-        with _PREFS_PATH.open("r", encoding="utf-8") as fh:
+        with _prefs_path().open("r", encoding="utf-8") as fh:
             stored = json.load(fh)
     except (OSError, ValueError):
         return prefs
@@ -81,12 +87,13 @@ def save(prefs: dict) -> None:
     pwd = str(out.pop("password", "") or "")
     if remember and pwd:
         out["password_obf"] = _obfuscate(pwd)
-    _PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(_PREFS_PATH.parent), suffix=".tmp")
+    p = _prefs_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(out, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp, str(_PREFS_PATH))
+        os.replace(tmp, str(p))
     except BaseException:
         try:
             os.unlink(tmp)
