@@ -302,7 +302,7 @@ class FilterBar:
         btn = flat_button(parent, "工具 ▾", None, padx=6,
                           image=ui_icon(parent, "tools"), compound="left")
         btn.config(command=self._pop_below(btn, self._build_tool_menu))
-        Tooltip(btn, "项目总览 · 会话时间线 · 会话对比 · 工具序列 · 个人基准 · 任务类型 · 高级选项")
+        Tooltip(btn, "项目总览 · 会话时间线 · 会话对比 · 工具序列 · 个人基准 · 任务类型 · 高级选项 · 检查更新 / 版本信息")
         return btn
 
     def _build_tool_menu(self, menu) -> None:
@@ -319,6 +319,14 @@ class FilterBar:
                                  command=self._on_task_type_change)
         menu.add_separator()
         menu.add_command(label="高级选项", command=c.show_advanced)
+        menu.add_separator()
+        from tcer import __version__
+        menu.add_command(label=f"TCER  v{__version__}", state="disabled")  # 版本信息(标题,不可点)
+        menu.add_command(label="检查更新…", command=c.check_for_update)
+        menu.add_command(
+            label=("●  " if c.auto_check_enabled() else "○  ") + "启动时自动检查更新",
+            command=c.toggle_auto_check,
+        )
 
     def _make_export_menu(self, parent):
         btn = flat_button(parent, "导出 ▾", None, padx=6,

@@ -15,8 +15,9 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from tcer import __version__
 from tcer.core import analyze, export as export_mod, metrics
-from tcer.core import ui_prefs, upload_client, upload_prefs
+from tcer.core import ui_prefs, update_check, upload_client, upload_prefs
 from tcer.core.paths import (
     list_project_refs, project_has_sessions, project_latest_activity_ms,
     ref_root, since_date_to_ms,
@@ -64,6 +65,9 @@ class TcerGui:
 
         # 界面偏好：恢复上次窗口几何，否则居中（略上移避开任务栏）。
         self._ui_prefs = ui_prefs.load()
+        # 「启动时自动检查更新」默认开启(用户可在「工具」菜单关闭);联网仅查
+        # 公开 Release 信息、后台静默、不发送任何用户数据。
+        self._ui_prefs.setdefault("check_update_on_start", True)
         self._restore_project_uid = self._ui_prefs.get("last_project")
         if ui_prefs.valid_geometry(self._ui_prefs.get("geometry")):
             root.geometry(self._ui_prefs["geometry"])
@@ -81,6 +85,47 @@ class TcerGui:
         root.after(100, self._poll)
         if self._upload_prefs.get("auto_upload"):
             self._schedule_auto_upload()
+        if self._ui_prefs.get("check_update_on_start"):
+            # opt-in 启动自动检查更新:延后 2s 避开启动繁忙,仅「有新版」才弹窗
+            root.after(2000, lambda: self.check_for_update(silent=True))
+
+    # ------------------------------------------------------- update checking
+    def check_for_update(self, silent: bool = False) -> None:
+        """后台查 GitHub 最新版,回主线程弹「检查更新」窗口。
+
+        silent=True(启动自动检查):仅当有新版才弹,失败/最新不打扰。
+        silent=False(用户点按钮):总是弹窗(含「已是最新 / 检查失败」)。
+        联网在 daemon 线程进行,绝不阻塞 Tk 主循环。
+        """
+        def _work():
+            release = update_check.latest_release()
+            try:
+                self.root.after(0, lambda: self._show_update(release, silent))
+            except tk.TclError:
+                pass  # 窗口已关闭
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _show_update(self, release, silent: bool) -> None:
+        if silent and (release is None
+                       or not update_check.is_newer(release["tag"], __version__)):
+            return  # 静默模式:无新版/失败都不打扰
+        popups.UpdatePopup(self.root, __version__, release)
+
+    def auto_check_enabled(self) -> bool:
+        """是否已开启「启动时自动检查更新」(供工具菜单显示 ●/○ 勾选态)。
+
+        默认开启:用户未显式关闭即视为同意(联网仅查公开 Release,不发送用户数据)。
+        """
+        return bool(self._ui_prefs.get("check_update_on_start", True))
+
+    def toggle_auto_check(self) -> None:
+        """翻转「启动时自动检查更新」开关并即时落盘(供工具菜单点击)。"""
+        self._ui_prefs["check_update_on_start"] = not self.auto_check_enabled()
+        try:
+            ui_prefs.save(self._ui_prefs)
+        except Exception:
+            pass
 
     def _on_close(self) -> None:
         """关闭时保存界面偏好（几何/分栏/筛选/项目），失败不拦退出。"""
@@ -94,6 +139,7 @@ class TcerGui:
                 "task_type": params.get("task_type"),
                 "until": params.get("until"),
                 "last_project": views.ref_uid(proj) if proj else None,
+                "check_update_on_start": self._ui_prefs.get("check_update_on_start", False),
             })
         except tk.TclError:
             pass

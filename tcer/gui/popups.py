@@ -21,6 +21,74 @@ from .widgets import ScrollFrame, SelectableLabel, Tooltip, flat_button, new_win
 _new_window = new_window
 
 
+class UpdatePopup:
+    """检查更新结果弹窗:展示当前/最新版本、发布说明,并引导前往下载。
+
+    纯展示组件——不自己联网。由 controller 在后台线程拿到
+    ``update_check.latest_release()`` 结果后,回到主线程创建本弹窗。
+
+    *release* 为 ``latest_release()`` 的返回 dict 或 ``None``(检查失败)。
+    """
+
+    _NOTES_LIMIT = 1200  # 发布说明超长截断,避免弹窗无限增高
+
+    def __init__(self, parent, current_version, release) -> None:
+        import webbrowser
+
+        from tcer.core import update_check
+
+        self._current = current_version
+        self._release = release
+        win = _new_window(parent, "检查更新", "440x360")
+        win.grab_release()  # 非模态:不阻塞主界面(检查更新是辅助动作)
+
+        tk.Label(win, text="检查更新", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING, pady=10).pack()
+
+        body = tk.Frame(win, bg=theme.BG)
+        body.pack(fill="both", expand=True, padx=12)
+
+        if release is None:
+            # 检查失败——给 Releases 页兜底
+            tk.Label(body, text="检查失败:无法连接 GitHub。", bg=theme.BG,
+                     fg=theme.WARNING, font=theme.FONT_UI, wraplength=400,
+                     justify="left").pack(anchor="w", pady=(4, 2))
+            tk.Label(body, text=f"当前版本:v{current_version}", bg=theme.BG,
+                     fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(anchor="w")
+            url = f"https://github.com/{update_check.GITHUB_REPO}/releases"
+            flat_button(body, "前往 Releases 页", primary=True,
+                        command=lambda: webbrowser.open(url)
+                        ).pack(anchor="w", pady=(12, 0))
+        elif update_check.is_newer(release["tag"], current_version):
+            tk.Label(body, text="● 发现新版本", bg=theme.BG, fg=theme.SUCCESS,
+                     font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(4, 2))
+            tk.Label(body,
+                     text=f"当前 v{current_version}   →   最新 {release['tag']}",
+                     bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(anchor="w")
+            notes = (release.get("notes") or "").strip()
+            if notes:
+                sf = ScrollFrame(body, bg=theme.PANEL)
+                sf.canvas.pack(fill="both", expand=True, pady=(8, 0))
+                if len(notes) > self._NOTES_LIMIT:
+                    notes = notes[:self._NOTES_LIMIT].rstrip() + "\n…"
+                tk.Label(sf.inner, text=notes, bg=theme.PANEL, fg=theme.FG,
+                         font=theme.FONT_UI_SMALL, wraplength=400, justify="left",
+                         anchor="nw").pack(fill="x")
+            flat_button(body, "前往下载", primary=True,
+                        command=lambda: webbrowser.open(release.get("url") or "")
+                        ).pack(anchor="w", pady=(12, 0))
+        else:
+            tk.Label(body, text="● 已是最新版本", bg=theme.BG, fg=theme.SUCCESS,
+                     font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(4, 2))
+            tk.Label(body, text=f"当前版本:v{current_version}", bg=theme.BG,
+                     fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(anchor="w")
+
+        # 底部:关闭
+        foot = tk.Frame(win, bg=theme.BG)
+        foot.pack(fill="x", padx=12, pady=(8, 12))
+        flat_button(foot, "关闭", command=win.destroy).pack(side="right")
+
+
 class SessionDetailPopup:
     """会话详情 — metadata + per-model cost breakdown, unified card style."""
 
