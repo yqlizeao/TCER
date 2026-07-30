@@ -71,11 +71,23 @@ class ScrollFrame:
         # 常驻：只更新滑块位置/长度，不再按需显隐。
         self.vbar.set(first, last)
 
+    def _apply_scrollregion(self) -> None:
+        """设 scrollregion；内容高仅略超 canvas（<=6px 容差）时钳到 canvas 高，
+        yview 自然 (0,1) 锁定，避免滑块满槽却能滚几像素、把卡片带偏。"""
+        bbox = self.canvas.bbox("all")
+        if not bbox:
+            return
+        x0, y0, x1, y1 = bbox
+        ch = self.canvas.winfo_height()
+        if ch > 1 and (y1 - y0) <= ch + 6:
+            y1 = y0 + ch  # scrollregion 高钳到 canvas 高 → yview (0,1) 锁定
+        self.canvas.configure(scrollregion=(x0, y0, x1, y1))
+
     def _on_resize(self, event) -> None:
         self.canvas.itemconfig(self._win, width=event.width)
 
     def _on_inner_configure(self, _event=None) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._apply_scrollregion()
         if self._reset_pending:
             self.canvas.yview_moveto(0)
 
@@ -98,13 +110,13 @@ class ScrollFrame:
     def update_scroll(self, *, reset: bool = False) -> None:
         self._reset_pending = reset
         self.inner.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._apply_scrollregion()
         if reset:
             self.canvas.yview_moveto(0)
             self.canvas.after_idle(self._finish_reset)
 
     def _finish_reset(self) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._apply_scrollregion()
         self.canvas.yview_moveto(0)
         self._reset_pending = False
 
