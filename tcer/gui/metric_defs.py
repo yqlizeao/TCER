@@ -6,7 +6,7 @@ explanation, semantic color level, and how to extract+format its value from a
 popup render from ``GROUPS``, so adding or renaming a metric is a one-line change
 here. No Tkinter dependency.
 
-Code keys stay abbreviated (``chr`` / ``ctei`` / ``ncpi`` …); only the ``name``
+Code keys stay abbreviated (``chr`` / ``ctei`` / ``ntcer`` …); only the ``name``
 shown to users is full Chinese (TCER is the sole English abbreviation kept).
 """
 from __future__ import annotations
@@ -94,6 +94,29 @@ GROUPS: list[Group] = [
                "本地代理会话开始时记录的工作分支。", "basic"),
         Metric("git_commit", "Git 提交", "",
                "本地代理会话开始时记录的提交。", "basic"),
+        Metric("plan_modes", "计划模式", "",
+               "会话中进入计划模式（plan mode）的次数——先规划后动手的工作流信号。", "basic"),
+        Metric("slash_commands", "斜杠命令", "",
+               "以 / 开头或经命令面板发送的用户消息数——工作流自动化程度的信号。", "basic"),
+        Metric("correction_msgs", "纠正消息", "",
+               "含显式纠正措辞（不对/重来/撤销/undo…）的用户消息数。\n"
+               "偏高 = 输出方向频繁跑偏；保守词表匹配，仅作趋势参考。", "basic", "down"),
+        Metric("first_prompt_chars", "首条消息长度", "字",
+               "首条真实用户消息的字符数——任务描述的投入度；过短的开场常伴随更多来回澄清。", "basic"),
+        Metric("hook_overhead", "钩子开销", "",
+               "stop hook（lint/test 等用户配置的钩子）的累计耗时与失败次数——"
+               "「你自己装的钩子拖慢了多少」。", "basic", "down"),
+        Metric("queued_inputs", "排队输入", "",
+               "AI 运行期间用户排队发送输入的次数——打断/并行指令的行为信号。", "basic"),
+        Metric("ratings", "用户评价", "",
+               "会话中用户给出的显式好评/差评（👍/👎）次数，来自本地代理的信号记录。", "basic"),
+        Metric("permission_wait", "审批等待", "秒",
+               "工具执行前等待用户审批的累计时长——「人卡住 AI」的时间。\n"
+               "推荐：越低越流畅；括号内为审批请求次数。", "basic", "down"),
+        Metric("itl_p50", "输出间隔P50", "毫秒",
+               "inter-token latency 中位数：相邻输出块的间隔毫秒数，反映生成流畅度。", "basic", "down"),
+        Metric("itl_p99", "输出间隔P99", "毫秒",
+               "inter-token latency P99：输出卡顿的尾部延迟，偏高说明生成经常停顿。", "basic", "down"),
     ]),
     Group("G2", "Token 用量", [
         Metric("total_tokens", "总 Token", "",
@@ -112,7 +135,7 @@ GROUPS: list[Group] = [
                "本地代理上报的 model_context_window，表示当前模型上下文窗口大小。", "basic"),
         Metric("peak_input", "峰值输入", "",
                "单轮输入 Token 峰值 = max(每轮 input + cache_write + cache_read)。\n"
-               "窗口使用率的分子。Claude/Codex/Grok 按 API 回合统计；OpenCode 来自 step-finish 快照"
+               "窗口使用率的分子。Claude/Codex/Grok/omp 按 API 回合统计；OpenCode 来自 step-finish 快照"
                "（禁止用会话累计总输入当峰值，否则多轮会虚高几十倍）。", "basic"),
         Metric("context_window_used", "窗口使用率", "",
                "公式：峰值输入 ÷ 上下文窗口\n"
@@ -148,14 +171,19 @@ GROUPS: list[Group] = [
                    "公式：写入行 − 删除行\n"
                    "推荐：视任务而定（正值=增长，负值=重构/精简）\n"
                    "说明：来自会话内 Write/Edit/MultiEdit 逐条统计，不依赖 git。", "basic"),
-            Metric("added", "写入行", "", "工具调用写入的总代码行数（含重写/覆盖）。", "basic"),
-            Metric("deleted", "删除行", "", "工具调用删除的总代码行数。", "basic"),
+            Metric("added", "写入行", "", "工具调用写入的总行数（代码/文档/配置，含重写/覆盖）。", "basic"),
+            Metric("deleted", "删除行", "", "工具调用删除的总行数（代码/文档/配置）。", "basic"),
             Metric("files_touched", "涉及文件", "",
                    "会话中读取、写入或编辑过的独立文件数，点击查看列表。", "basic"),
             Metric("test_loc", "测试行", "",
                    "测试文件（*test*.py、*/tests/ 等）的净增行，反映测试投入。", "basic"),
             Metric("doc_loc", "文档行", "",
-                   "文档文件（*.md、*/docs/ 等）的净增行，反映文档投入。", "basic"),
+                   "文档/策划文本（*.md、*.txt、*.rst、*/docs/ 等）的净增行，反映文档投入。\n"
+                   "注：Word/Excel 等二进制文件不计——AI 的编辑是文本行模型，无法对其产出行数；"
+                   "策划通常在 .md/.txt 起草后再转成 Office。", "basic"),
+            Metric("git_commits", "落地提交", "",
+                   "会话期间产生的 git 提交数（由本地代理记录，TCER 不调 git）。\n"
+                   "写出来的代码有没有真正落地的直接信号；PR 创建/合并数见导出数据。", "basic", "up"),
         ]),
         Subgroup("行为", [
             Metric("read_write_ratio", "读写比", "",
@@ -170,10 +198,26 @@ GROUPS: list[Group] = [
                    "公式：（Grep + Glob）÷ 总工具调用\n"
                    "推荐：视任务而定（仅供参考）\n"
                    "说明：⚠️ 分子只含 Grep/Glob，但 Claude Code 大量探索走 Bash（rg/find/cat）与子代理,均不计入；分母含 Bash/TodoWrite 等，故实测普遍低于直觉。仅作粗略趋势参考。", "basic"),
+            Metric("bash_ratio", "Bash 占比", "",
+                   "公式：Bash/PowerShell 调用 ÷ 总工具调用\n"
+                   "说明：量化「经 Bash 完成的阅读/搜索」盲区暴露面——占比越高，"
+                   "读写比与探索占比越失真（cat/rg/find 不计入专用工具统计）。", "basic"),
+            Metric("first_edit_turn", "首次编辑回合", "",
+                   "第一次 Write/Edit 发生在第几回合——动手前的探索/热身长度。\n"
+                   "说明：调研/审查类会话可能从不动手（显示 -）；过早动手 + 高返工 = 盲写信号。", "basic"),
+            Metric("edit_verify_ratio", "改后验证率", "",
+                   "公式：Write/Edit 后 3 回合内出现 Bash（跑测试/编译/lint）的占比\n"
+                   "推荐：越高越好\n"
+                   "说明：与「搜索后编辑比」互补——搜完是否动手、改完是否验证。", "basic", "up"),
             Metric("search_edit_ratio", "搜索后编辑比", "",
                    "公式：搜索（Grep/Glob）后 3 回合内发生 Edit/Write 的占比\n"
                    "推荐：越高越好\n"
                    "说明：衡量「搜完是否跟进修改」的工作流;按回合就近匹配(不绑定具体文件，因 Grep 的 path 多为目录)；偏低=搜索后未动手(探索过度)。", "basic", "up"),
+            Metric("read_truncations", "读取截断", "",
+                   "Read 结果因过长被截断的次数——每次截断都读入了用不上的内容又要重读，"
+                   "是上下文浪费的直接信号。", "basic", "down"),
+            Metric("reasoning_time", "思考耗时", "秒",
+                   "推理（reasoning）内容块的累计生成耗时。", "basic"),
             Metric("thinking_count", "思考次数", "",
                    "AI 输出 thinking（推理）内容块的次数,消耗 output token。⚠️ 对推理类模型(mimo/glm/带思考的 Claude)几乎每回合都有,≈回合数,并非「复杂度」信号;关闭思考的会话则恒为 0。", "basic"),
             Metric("reasoning_ratio", "推理输出占比", "",
@@ -199,6 +243,10 @@ GROUPS: list[Group] = [
                    "公式：工具出错次数 ÷ 总工具调用\n"
                    "推荐：越低越好\n"
                    "说明：反映操作可靠性，偏高常因文件不存在、命令失败、Edit 匹配不到；审查/探索类自然略高。", "basic", "down"),
+            Metric("first_pass_ratio", "一次写对率", "",
+                   "公式：只编辑 1 次的文件数 ÷ 被编辑文件总数\n"
+                   "推荐：越高越好\n"
+                   "说明：与「高返工文件」互补的正面质量信号——一次到位、无需返场修改的文件占比。", "basic", "up"),
             Metric("high_churn_files", "高返工文件", "",
                    "公式：被编辑 ≥3 次的文件数\n"
                    "推荐：越少越好\n"
@@ -211,14 +259,31 @@ GROUPS: list[Group] = [
                    "公式：task_complete ÷ task_started\n"
                    "说明：本地代理任务开始 / 完成 / 中断事件给出的任务完成情况。", "basic", "up"),
             Metric("ttft", "首字延迟", "秒",
-                   "本地代理记录的首字延迟，表示任务从开始到首个模型输出的耗时。", "basic", "down"),
+                   "本地代理记录的首字延迟，表示任务从开始到首个模型输出的耗时（会话最小值）。", "basic", "down"),
+            Metric("ttft_p95", "首字延迟P95", "秒",
+                   "逐回合首字延迟样本的 P95 尾部值——「最卡的那些回合有多慢」，"
+                   "比最小值更能反映真实等待体验。", "basic", "down"),
+            Metric("rate_limit_peak", "配额峰值", "",
+                   "限流窗口配额的峰值占用比例（primary/secondary 取最大）。\n"
+                   "接近 100% 说明会话逼近限流边缘，比「限流命中次数」更早预警。", "basic", "down"),
             Metric("patch_success", "补丁成功率", "",
                    "公式：patch_apply_end.success ÷ patch_apply_end 总数\n"
                    "说明：本地代理补丁应用事件的成功率，能解释 Edit 失败或工具错误率。", "basic", "up"),
             Metric("aborted_tasks", "中断任务", "",
                    "本地代理任务中断次数。用户中断、取消或运行中止时会增加。", "basic", "down"),
             Metric("rate_limit_hits", "限流命中", "",
-                   "本地代理限流记录中出现限流命中的次数。", "basic", "down"),
+                   "限流命中次数：Claude 为 429 API 错误行，Codex 为限流快照记录。", "basic", "down"),
+            Metric("cancellations", "用户取消", "",
+                   "用户中途取消回合的次数——对当前输出不满意或方向跑偏的信号。", "basic", "down"),
+            Metric("regenerations", "重新生成", "",
+                   "用户要求重新生成回答的次数——直接的「这次输出不行」信号。", "basic", "down"),
+            Metric("reverted_lines", "回退行", "",
+                   "AI 写入后又被回退（rewind/revert）的代码行数——写了但没被采纳的产出。", "basic", "down"),
+            Metric("user_modified", "人工修正", "",
+                   "AI 写入文件后被用户手动修改过的工具结果数（toolUseResult.userModified）。\n"
+                   "偏高说明 AI 产出常需要人再加工——最直接的产出质量信号之一。", "basic", "down"),
+            Metric("revert_events", "回退事件", "",
+                   "用户回退（revert/rewind）AI 改动的事件数——「产出被拒绝」的显式信号。", "basic", "down"),
         ]),
     ]),
     Group("G5", "成本分析", [
@@ -241,13 +306,14 @@ GROUPS: list[Group] = [
                "怎么看：越高越省；新功能通常 >50，参考中位数约 76.6；调试/重构天然偏低，正常。\n"
                "💡 想提高：提高缓存命中率、少返工、别让 AI 反复重写整文件。", "basic", "up"),
         Metric("ctei", "综合效率分", "",
-               "把 4 件事打包成一个总分：产出效率(TCER) × 对项目的贡献(贡献度) × 每行省不省钱 × 缓存用得好不好，再跟一条参考线比。\n"
+               "把 3 件事打包成一个总分：产出效率(TCER) × 每行省不省钱(成本) × 缓存用得好不好，再跟参考线比。\n"
                "怎么看：>2 优秀 · 1–2 良好 · 0.5–1 中等 · 0.1–0.5 低效 · <0.1 极端低效。\n"
-               "⚠️ 它是 4 个比率相乘，数值可能很大(单会话偶尔上百)，别纠结绝对值——主要看排名页的相对高低和趋势。要看「这次到底干得好不好」，直接看 TCER、返工率、每千行成本更靠谱。\n"
-               "⚠️ 只看单会话；「全部会话」聚合视图显示「-」。\n⚠️ 公式含「代码库贡献度」，默认未扫描代码库时也显示「-」——需在「工具→高级选项」开启「扫描代码库目录」。", "compound", "up"),
+               "⚠️ 它是 3 个比率相乘，别纠结绝对值——主要看排名页的相对高低和趋势。"
+               "要看「这次到底干得好不好」，直接看 TCER、返工率、每千行成本更直观。\n"
+               "全部来自会话数据，单会话与项目聚合均有效。", "compound", "up"),
         Metric("grade", "评级", "",
-               "上面「综合效率分」对应的等级标签：优秀/良好/中等/低效/极端低效，颜色和排名页的条形图一致。\n"
-               "⚠️ 聚合视图显示「-」，请在排名页看每个会话的评级。\n默认未扫描代码库时也显示「-」（依赖综合效率分）。", "basic"),
+               "上面「综合效率分」对应的等级标签：优秀/良好/中等/低效/极端低效，"
+               "颜色和排名页的条形图一致。", "basic"),
         Metric("task_type", "任务类型", "",
                "你这次主要在干啥：写新代码(创作)、改老代码(维护)、还是不写代码(调研/审查)。\n"
                "💡 选对很重要——下面的「归一化效率」靠它把不同任务拉到同一起跑线公平比。点下拉看三类区别(创作100% · 维护45% · 非编码20%)。", "compound"),
@@ -259,22 +325,9 @@ GROUPS: list[Group] = [
                "把 TCER 按任务难度折扣还原后的效率，让「调试」和「写新功能」能公平比较。\n"
                "怎么看：越高越好；跨任务类型比较时，看这个比看 TCER 更公平。\n"
                "例：调试 TCER=30，但调试本就难，还原后 ≈75，其实不差。", "compound", "up"),
-        Metric("ncpi", "代码库贡献度", "",
-               "这次写的净代码，相当于整个项目现有代码的百分之几。\n"
-               "怎么看：新项目能到 10%+，成熟大项目 1–2% 就算显著；项目越大占比越低很自然。\n"
-               "⚠️ 单会话指标；聚合视图显示「-」(累计写入会超过项目现有规模)。\n默认未扫描代码库时也显示「-」——需在「工具→高级选项」开启「扫描代码库目录」(大项目会很慢)。", "basic", "up"),
-        Metric("psac", "阶段调整系数", "",
-               "项目越大，改一点点就越难产出新行(「维护税」)。这个系数给大项目的效率打个补偿，>1 表示项目还年轻。\n"
-               "💡 偏技术的修正项，日常可忽略；它只用来算下面的「阶段调整后效率」。\n默认未扫描代码库时显示「-」。", "compound"),
-        Metric("tcer_phase_adj", "阶段调整后效率", "行/百万",
-               "把项目规模的影响剔除后的 TCER，方便拿大项目和小项目公平比。\n"
-               "怎么看：越高越好。\n"
-               "💡 和「归一化效率」一样是公平化后的值，日常看 TCER 本身就够。\n默认未扫描代码库时显示「-」。", "compound", "up"),
         Metric("bl_tcer", "TCER 基准", "行/百万",
                "一条「参考线」，不是你的成绩——「综合效率分」拿你的 TCER 跟它比来打分。默认 76.59，来自框架自带的 16 个样本会话。\n"
                "💡 想改成「跟你自己的历史平均」比，可用本项目数据生成个人基准来替换。", "basic"),
-        Metric("bl_ncpi", "贡献度基准", "",
-               "「综合效率分」里给贡献度打分用的参考线(默认 0.101)，不是你的成绩。可用个人基准替换。", "basic"),
         Metric("bl_cpe", "成本基准", "美元/千行",
                "「综合效率分」里给每千行成本打分用的参考线(默认 8.22)，不是你的成绩。可用个人基准替换。", "basic"),
     ]),
@@ -290,7 +343,7 @@ CONCEPT_NOTES: list[tuple[str, str, str]] = [
     ("LOC 统计假设 ⚠️",
      "【重要】Write 工具调用假设写入的是新文件（原大小 = 0）。若 Write 覆盖已有文件，"
      "added 会高估、deleted 会遗漏。Edit 不受影响（只看增量）。「高频改动文件」计数是潜在高估的上界。"
-     "若需精确量化偏差，用「校准 LOC」功能对标 git 历史。", "basic"),
+     "basic"),
     ("如何提高效率",
      "想提升 TCER/CTEI？几个实用建议：①保持提示词稳定（提高缓存命中率）；"
      "②用 Edit 而非 Write 修改已有文件（更精确，返工率低）；"
@@ -365,21 +418,31 @@ _SESSION_FMT: dict[str, str] = {
     "non_cached_input_ratio": "pct",
     # G4
     "net_loc": "int", "added": "int", "deleted": "int", "churn": "pct",
+    "bash_ratio": "pct", "first_edit_turn": "int", "edit_verify_ratio": "pct",
     "test_loc": "int", "doc_loc": "int", "read_write_ratio": "float:0.0",
     "edit_ratio": "pct", "exploration_ratio": "pct", "thinking_count": "int",
     "files_touched": "int", "search_edit_ratio": "pct", "read_before_write": "pct",
     "tool_error_rate": "pct", "high_churn_files": "int", "unseen_writes": "int",
+    "first_pass_ratio": "pct",
     "memory_files": "int", "reasoning_ratio": "pct", "compactions": "int",
     "web_searches": "int", "image_inputs": "int", "task_completion": "pct",
-    "ttft": "float:0.0", "patch_success": "pct", "aborted_tasks": "int",
+    "ttft": "float:0.0", "ttft_p95": "float:0.0", "rate_limit_peak": "pct",
+    "patch_success": "pct", "aborted_tasks": "int",
     "rate_limit_hits": "int",
+    "cancellations": "int", "regenerations": "int", "reverted_lines": "int",
+    "git_commits": "int", "user_modified": "int", "revert_events": "int",
+    # G1 新增
+    "ratings": "text", "permission_wait": "text",
+    "itl_p50": "int", "itl_p99": "int",
+    "hook_overhead": "text", "queued_inputs": "int",
+    "slash_commands": "int", "correction_msgs": "int", "first_prompt_chars": "int",
+    "plan_modes": "int", "read_truncations": "int", "reasoning_time": "text",
     # G5
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
     # G6
     "tcer": "float:0.0", "ctei": "float:0.000", "ttaf": "float:0.00",
-    "ntcer": "float:0.00", "ncpi": "float:0.000", "psac": "float:0.000",
-    "tcer_phase_adj": "float:0.00",
-    "bl_tcer": "float:0.00", "bl_ncpi": "float:0.000", "bl_cpe": "float:0.00",
+    "ntcer": "float:0.00",
+    "bl_tcer": "float:0.00", "bl_cpe": "float:0.00",
 }
 
 # key → attribute name on SessionReport when they differ from the metric key.
@@ -387,10 +450,12 @@ _REPORT_ATTR = {
     "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
     "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
     "high_churn_files": "high_churn_file_count", "latency": "avg_turn_latency_sec",
+    "first_pass_ratio": "first_pass_file_ratio",
     "context_window_used": "context_window_used_ratio",
     "reasoning_ratio": "reasoning_output_ratio",
     "task_completion": "task_completion_rate",
     "ttft": "time_to_first_token_sec",
+    "ttft_p95": "ttft_p95_sec",
     "patch_success": "patch_apply_success_rate",
 }
 # key → attribute name on report.usage (token counters live there).
@@ -405,11 +470,25 @@ _USAGE_ATTR = {
     "web_searches": "web_search_count",
     "aborted_tasks": "aborted_task_count",
     "rate_limit_hits": "rate_limit_reached_count",
+    "rate_limit_peak": "rate_limit_peak_used",
+    "cancellations": "cancellation_count",
+    "regenerations": "regeneration_count",
+    "reverted_lines": "reverted_lines",
+    "git_commits": "git_commit_count",
+    "user_modified": "user_modified_count",
+    "revert_events": "revert_events",
+    "itl_p50": "itl_p50_ms",
+    "itl_p99": "itl_p99_ms",
+    "queued_inputs": "queued_input_count",
+    "slash_commands": "slash_command_count",
+    "correction_msgs": "correction_msg_count",
+    "first_prompt_chars": "first_prompt_chars",
+    "plan_modes": "plan_mode_count",
+    "read_truncations": "read_truncation_count",
 }
 # key → callable returning the current baseline constant (read-only reference).
 _BASELINE = {
     "bl_tcer": lambda: _metrics.TCER_BASELINE,
-    "bl_ncpi": lambda: _metrics.NCPI_BASELINE,
     "bl_cpe": lambda: _metrics.CPE_BASELINE,
 }
 
@@ -463,6 +542,21 @@ _DISPLAY_EXTRACTORS = {
     "task_type": lambda r: _task_category_name(r.task_type) or "-",
     "memory_files": lambda r: str(len(r.memory_files)) if r.memory_files is not None else "-",
     "image_inputs": lambda r: fmt.fmt_int(r.usage.image_count + r.usage.local_image_count),
+    "ratings": lambda r: (
+        f"👍{r.usage.positive_ratings} · 👎{r.usage.negative_ratings}"
+        if (r.usage.positive_ratings or r.usage.negative_ratings) else "-"),
+    "permission_wait": lambda r: (
+        f"{r.usage.permission_wait_ms_total / 1000:.1f}（{r.usage.permission_request_count} 次）"
+        if r.usage.permission_request_count else "-"),
+    "reasoning_time": lambda r: (
+        f"{r.usage.reasoning_ms_total / 1000:.1f}"
+        if r.usage.reasoning_ms_total else "-"),
+    "hook_overhead": lambda r: (
+        f"{r.usage.hook_duration_ms_total / 1000:.1f}s"
+        f"（{r.usage.hook_run_count} 次"
+        + (f"，{r.usage.hook_error_count} 失败" if r.usage.hook_error_count else "")
+        + "）"
+        if r.usage.hook_run_count else "-"),
 }
 
 
@@ -477,6 +571,8 @@ def _native(report: SessionReport, key: str):
 
 def display(report: SessionReport, key: str) -> str:
     """The display string for one metric of one SessionReport (session/aggregate)."""
+    if not is_supported(report, key):
+        return UNSUPPORTED_LABEL
     ext = _DISPLAY_EXTRACTORS.get(key)
     if ext is not None:
         return ext(report)
@@ -509,6 +605,8 @@ def raw_value(report, key: str) -> float | None:
         "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
         "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
     }
+    if not is_supported(report, key):
+        return None  # 该源不提供此字段，图表不画点（避免把「不支持」画成 0）
     try:
         if key == "chr":
             return report.chr * 100.0 if report.chr is not None else None
@@ -522,6 +620,20 @@ def raw_value(report, key: str) -> float | None:
             return float(sum(u.tool_calls.values())) if u.tool_calls else None
         if key == "image_inputs":
             return float(u.image_count + u.local_image_count)
+        if key == "ratings":
+            # 图表取净评价（好评 − 差评）；无评价 → None 不画点
+            if u.positive_ratings or u.negative_ratings:
+                return float(u.positive_ratings - u.negative_ratings)
+            return None
+        if key == "permission_wait":
+            return (u.permission_wait_ms_total / 1000
+                    if u.permission_request_count else None)
+        if key == "hook_overhead":
+            return (u.hook_duration_ms_total / 1000
+                    if u.hook_run_count else None)
+        if key == "reasoning_time":
+            return (u.reasoning_ms_total / 1000
+                    if u.reasoning_ms_total else None)
         if key in _USAGE_ATTR:
             v = getattr(u, _USAGE_ATTR[key])
             return float(v) if v is not None else None
@@ -561,6 +673,92 @@ METRIC_BY_KEY: dict[str, Metric] = {m.key: m for group in GROUPS for m in group.
 # format spec lives on the Metric object too (frozen dataclass → object.__setattr__).
 for _m in METRIC_BY_KEY.values():
     object.__setattr__(_m, "fmt", _SESSION_FMT.get(_m.key, "text"))
+
+
+# ============================================================
+# 源能力感知 — 区分「该数据源不提供此字段」(不适用) 与「真的没有数据」(-)。
+# 只标注数据源*根本不产生*该字段的清晰情形；字段存在但可能为空的部分支持
+# (如 OpenCode 多回合 peak_input 留 0)不在此列，仍按 "-" 处理。
+# display() / raw_value() 统一拦截，指标网格、弹窗、图表与 HTML 报告自动继承。
+# ============================================================
+
+UNSUPPORTED_LABEL = "不适用"
+
+SOURCE_LABELS = {
+    "claude": "Claude", "codex": "Codex", "opencode": "OpenCode",
+    "grok": "Grok", "omp": "Oh My Pi",
+}
+
+# key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
+_SOURCE_SUPPORT: dict[str, frozenset[str]] = {
+    # Claude 独有
+    "subagent": frozenset({"claude"}),
+    "memory_files": frozenset({"claude"}),
+    # Claude 的推理输出并入「输出」，不单独上报
+    "reasoning_tokens": frozenset({"codex", "opencode", "grok"}),
+    "reasoning_ratio": frozenset({"codex", "opencode", "grok"}),
+    # Codex/Grok 运行时信号（Grok 来自 signals.json）
+    "context_window": frozenset({"codex", "grok"}),
+    "context_window_used": frozenset({"codex", "grok"}),
+    "ttft": frozenset({"codex", "grok", "omp"}),
+    "ttft_p95": frozenset({"codex", "omp"}),
+    "rate_limit_peak": frozenset({"codex"}),
+    "patch_success": frozenset({"codex"}),
+    "aborted_tasks": frozenset({"codex"}),
+    # Grok signals.json / events.jsonl 独有
+    "cancellations": frozenset({"grok"}),
+    "regenerations": frozenset({"grok"}),
+    "reverted_lines": frozenset({"grok"}),
+    "user_modified": frozenset({"claude"}),
+    "revert_events": frozenset({"opencode", "grok"}),
+    "hook_overhead": frozenset({"claude"}),
+    "queued_inputs": frozenset({"claude"}),
+    "slash_commands": frozenset({"claude"}),
+    "correction_msgs": frozenset({"claude"}),
+    "first_prompt_chars": frozenset({"claude"}),
+    "plan_modes": frozenset({"claude"}),
+    "read_truncations": frozenset({"claude"}),
+    "reasoning_time": frozenset({"opencode"}),
+    "git_commits": frozenset({"grok"}),
+    "ratings": frozenset({"grok"}),
+    "permission_wait": frozenset({"grok"}),
+    "itl_p50": frozenset({"grok"}),
+    "itl_p99": frozenset({"grok"}),
+    # 部分源组合（Claude 的限流/压缩/网页搜索来自 system 子类型与
+    # usage.server_tool_use，reader 已解析）
+    "rate_limit_hits": frozenset({"claude", "codex"}),
+    "task_completion": frozenset({"codex", "grok"}),
+    "compactions": frozenset({"claude", "codex", "opencode"}),
+    "web_searches": frozenset({"claude", "codex", "grok", "omp"}),
+    "image_inputs": frozenset({"codex", "opencode"}),
+    # Codex 不上报缓存写入 (reader 恒 0)，显示 0 会误导
+    "cache_write": frozenset({"claude", "opencode", "grok", "omp"}),
+    "cache_write_ratio": frozenset({"claude", "opencode", "grok", "omp"}),
+    "cache_efficiency": frozenset({"claude", "opencode", "grok", "omp"}),
+}
+
+
+def report_source(report) -> str:
+    return getattr(report.meta, "source", None) or "claude"
+
+
+def is_supported(report, key: str) -> bool:
+    """False 当且仅当该 report 的数据源不提供该指标字段。"""
+    allowed = _SOURCE_SUPPORT.get(key)
+    return allowed is None or report_source(report) in allowed
+
+
+def _support_note(key: str) -> str:
+    allowed = _SOURCE_SUPPORT[key]
+    names = "、".join(SOURCE_LABELS[s] for s in SOURCE_LABELS if s in allowed)
+    return f"⚠️ 仅以下数据源提供此字段：{names}；其余来源显示「{UNSUPPORTED_LABEL}」。"
+
+
+# 把支持范围附到 tip 上（静态、随 SSOT 生效，HTML 报告的 title 提示同样继承）。
+for _k, _allowed in _SOURCE_SUPPORT.items():
+    _m = METRIC_BY_KEY.get(_k)
+    if _m is not None:
+        object.__setattr__(_m, "tip", f"{_m.tip}\n{_support_note(_k)}")
 
 
 # ============================================================
@@ -716,7 +914,6 @@ def _chr_weight_label() -> str:
 
 CTEI_FACTORS: list[CteiFactor] = [
     CteiFactor("eff_factor", "效率因子", "TCER÷基准"),
-    CteiFactor("density_factor", "产出密度", "NCPI÷基准"),
     CteiFactor("cost_factor", "成本效率", "基准÷CPE"),
     CteiFactor("cache_factor", "缓存因子", f"1+CHR×{_chr_weight_label()}"),
 ]

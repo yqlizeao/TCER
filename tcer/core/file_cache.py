@@ -8,6 +8,10 @@ Not thread-safe for concurrent writers of the same key; analysis workers are
 cooperative (one logical analysis at a time with cancel). Cache hits return the
 **same** object reference — callers must not mutate cached payloads in place
 (``TokenUsage.merge`` already returns a new instance).
+
+Cancellation-safe by construction: cooperative cancel raises inside the
+factory, so a partial scan never reaches ``_CACHE`` — callers may pass
+cancellable factories and still get caching for completed scans.
 """
 from __future__ import annotations
 
@@ -58,10 +62,12 @@ def get_or_compute(
     key = (*sig, extra)
     hit = _CACHE.get(key)
     if hit is not None:
+        # LRU: refresh insertion order so hot entries survive eviction.
+        _CACHE[key] = _CACHE.pop(key)
         return hit  # type: ignore[return-value]
     value = factory()
     if len(_CACHE) >= _MAX_ENTRIES:
-        # Drop an arbitrary oldest insertion (CPython 3.7+ dict order).
+        # Drop the least-recently-used entry (CPython 3.7+ dict order).
         try:
             del _CACHE[next(iter(_CACHE))]
         except (StopIteration, KeyError):

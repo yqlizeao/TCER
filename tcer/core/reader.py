@@ -12,17 +12,41 @@ from datetime import datetime
 from pathlib import Path
 
 from tcer.core.models import SessionMeta, ToolOp, TokenUsage
+from tcer.core.parse_util import as_int as _as_int
 from tcer.core.paths import claude_config_dirs
 from tcer.core import pricing
 
-# Title-extraction noise to skip, matching cc-switch's filters.
-_TITLE_NOISE_PREFIXES = ("<local-command-caveat", "<command-name>", "<ide_opened_file>",
-                         "<command-message>", "/clear")
-# After tag removal, skip these system-generated phrases
-_TITLE_NOISE_AFTER_CLEAN = ("The user opened the file", "You are an expert")
+# User-role texts that Claude Code injects (not real human input). These
+# ``<…>`` tags / markers are matched on the RAW text BEFORE :func:`_strip_tags`
+# removes the tags — matching after stripping erases the tags and lets them
+# through (observed ~17% of popup rows were injections before this fix).
+_TITLE_NOISE_PREFIXES = (
+    "<local-command-caveat", "<local-command-stdout", "<local-command-stderr",
+    "<command-name>", "<command-message>",
+    "<ide_opened_file>", "<ide_selection>",
+    "<task-notification>", "<system-reminder>",
+    "/clear",
+    "[Request interrupted",
+)
+# After tag removal, skip these system-generated phrases (covers bodies whose
+# opening tag was consumed elsewhere, plus plain-text injections such as the
+# compact-continuation preamble).
+_TITLE_NOISE_AFTER_CLEAN = (
+    "The user opened the file", "The user selected the lines",
+    "This session is being continued from a previous conversation",
+    "You are an expert",
+)
 TITLE_MAX_CHARS = 80
 
 _TAG_RE = re.compile(r'<[^>]+>')
+
+# 纠正措辞（保守清单）：用户对上一轮输出不满意的显式信号。只在消息前 200 字符
+# 内匹配，避免长引用文本误报；命中即计入 correction_msg_count。
+_CORRECTION_RE = re.compile(
+    r"不对|错了|不是这样|重来|重新来|重新做|撤销|回退|回滚|别这么|别这样"
+    r"|\bundo\b|\brevert\b|\bwrong\b|\bredo\b",
+    re.IGNORECASE,
+)
 
 
 def _strip_tags(txt: str) -> str:
@@ -30,12 +54,31 @@ def _strip_tags(txt: str) -> str:
     return _TAG_RE.sub('', txt).strip()
 
 
-def discover_jsonl(project_hash: str | None = None) -> list[Path]:
+def _is_user_noise(txt: str) -> bool:
+    """Whether a user-role text is Claude-Code-injected, not real human input.
+
+    Two-stage check mirroring title extraction: ``<…>`` noise prefixes are
+    matched on the RAW text *before* tag stripping — the prefixes ARE tags, so
+    stripping first would delete them and always miss (the pre-fix bug).
+    Then the cleaned text is checked against post-strip phrases.
+    """
+    if txt.startswith(_TITLE_NOISE_PREFIXES):
+        return True
+    cleaned = _strip_tags(txt)
+    return cleaned.startswith(_TITLE_NOISE_AFTER_CLEAN)
+
+
+def discover_jsonl(project_hash: str | None = None, *,
+                   roots: list[Path] | None = None) -> list[Path]:
     """Recursively collect every ``*.jsonl`` under a project (or all projects).
 
-    Searches every Claude config root (see :func:`paths.claude_config_dirs`) so a
-    project hash present in multiple custom profiles (e.g. ``.claude`` and
-    ``.zclaude``) yields the union of its session files across roots.
+    By default searches every Claude config root (see
+    :func:`paths.claude_config_dirs`) so a project hash present in multiple custom
+    profiles (e.g. ``.claude`` and ``.zclaude``) yields the union of its session
+    files across roots. Pass *roots* to restrict the search to specific config
+    roots only — used by per-root analysis now that cross-root dedup is dropped
+    (a project that lives under both ``.claude`` and ``.claude-proxy`` is listed
+    once per root, each scoped to its own sessions).
 
     On Windows, also unions folders whose names match *project_hash* case-
     insensitively (``C--GitHub-X`` vs ``c--GitHub-X`` drive-letter variants).
@@ -44,8 +87,9 @@ def discover_jsonl(project_hash: str | None = None) -> list[Path]:
 
     from tcer.core.paths import project_hash_key
 
+    scan_roots = roots if roots is not None else claude_config_dirs()
     files: list[Path] = []
-    for root in claude_config_dirs():
+    for root in scan_roots:
         projs = root / "projects"
         if not projs.is_dir():
             continue
@@ -244,9 +288,10 @@ def read_user_messages(path: Path) -> list[str]:
         if not is_real_user:
             continue
         txt = extract_text(content).strip()
+        if not txt or _is_user_noise(txt):
+            continue
+        txt = _strip_tags(txt)
         if txt:
-            txt = _strip_tags(txt)
-        if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
             messages.append(txt[:500])
     return messages
 
@@ -256,8 +301,6 @@ def scan_session(
     *,
     with_loc: bool = True,
     include_user_texts: bool = True,
-    cwd: str | Path | None = None,
-    disk_prior: bool = False,
     cancel_check=None,
     use_cache: bool = True,
 ) -> tuple[TokenUsage, "SessionLoc | None"]:
@@ -279,8 +322,7 @@ def scan_session(
 
     **Time window**: tracks ``started_at`` / ``ended_at`` from *all* assistant turns
     (including zero-usage ones) so sessions with only zero-usage replies still get
-    timestamps (needed for accurate git-ground-truth in calibration and for GUI time
-    sorting).
+    timestamps (needed for GUI time sorting).
 
     **Tool calls**: counts each tool_use block by name (NOT deduped by message.id,
     since multiple tool_use blocks in one response are genuine separate calls).
@@ -293,32 +335,20 @@ def scan_session(
     ``include_user_texts``: when False, only ``user_msgs`` is counted (cheaper /
     smaller reports); use :func:`read_user_messages` for bodies.
 
-    ``cwd`` / ``disk_prior``: when computing LOC, seed first Write from on-disk
-    line counts (F1 mitigation); relative paths need ``cwd``.
-
-    ``use_cache``: process-level mtime/size cache (see ``file_cache``). Disabled
-    when ``cancel_check`` is set so a cancelled mid-scan never poisons the cache.
+    ``use_cache``: process-level mtime/size cache (see ``file_cache``). Safe with
+    ``cancel_check``: a cancel raises inside the factory, so a partial scan never
+    reaches the cache — only completed scans are stored.
     """
     from tcer.core import file_cache
 
-    # Cooperative cancel must not leave a partial result in the cache.
-    can_cache = use_cache and cancel_check is None
-    cwd_key = str(cwd) if cwd is not None else ""
-    extra = (
-        "scan_session",
-        bool(with_loc),
-        bool(include_user_texts),
-        bool(disk_prior),
-        cwd_key,
-    )
+    can_cache = use_cache
+    extra = ("scan_session", bool(with_loc), bool(include_user_texts))
 
     def _compute():
         return _scan_session_uncached(
             path,
             with_loc=with_loc,
             include_user_texts=include_user_texts,
-            cwd=cwd,
-            disk_prior=disk_prior,
             cancel_check=cancel_check,
         )
 
@@ -332,17 +362,14 @@ def _scan_session_uncached(
     *,
     with_loc: bool,
     include_user_texts: bool,
-    cwd: str | Path | None,
-    disk_prior: bool,
     cancel_check,
 ) -> tuple[TokenUsage, "SessionLoc | None"]:
     # Lazy import: loc imports reader at module level.
-    from tcer.core.loc import SessionLoc, _LocAccumulator
+    from tcer.core.loc import SessionLoc, _is_code, _LocAccumulator
+    from tcer.core.models import TurnStat
 
     u = TokenUsage()
-    loc_acc = (
-        _LocAccumulator(cwd=cwd, disk_prior=disk_prior) if with_loc else None
-    )
+    loc_acc = _LocAccumulator() if with_loc else None
     seen: set[str] = set()
     call_id_to_name: dict[str, str] = {}  # tool_use_id → tool_name for error attribution
     turn_idx = 0  # next turn number to assign to a new response
@@ -350,6 +377,82 @@ def _scan_session_uncached(
     for obj in iter_messages(path):
         if cancel_check is not None:
             cancel_check()
+
+        # 用户在 AI 运行时排队输入（打断/并行输入信号）。
+        if obj.get("type") == "queue-operation":
+            u.queued_input_count += 1
+            continue
+
+        # attachment 子类型：计划模式使用、读取截断（上下文浪费）。
+        if obj.get("type") == "attachment":
+            att = obj.get("attachment")
+            sub = att.get("type") if isinstance(att, dict) else None
+            if sub == "plan_mode":
+                u.plan_mode_count += 1
+            elif sub == "read_truncation_notice":
+                u.read_truncation_count += 1
+            continue
+
+        # 非 message 行：system 子类型携带真实回合耗时 / 限流 / 压缩信号。
+        if obj.get("type") == "system":
+            sub = obj.get("subtype")
+            if sub == "stop_hook_summary":
+                u.hook_run_count += _as_int(obj.get("hookCount"))
+                errs = obj.get("hookErrors")
+                u.hook_error_count += (len(errs) if isinstance(errs, list)
+                                       else _as_int(errs))
+                infos = obj.get("hookInfos")
+                if isinstance(infos, list):
+                    for info in infos:
+                        if isinstance(info, dict):
+                            u.hook_duration_ms_total += _as_int(info.get("durationMs"))
+            elif sub == "turn_duration":
+                # 权威的每回合耗时（不含用户暂停），回填到最近一个回合。
+                dur = _as_int(obj.get("durationMs"))
+                if dur and u.turn_stats and u.turn_stats[-1].duration_ms is None:
+                    u.turn_stats[-1].duration_ms = dur
+            elif sub == "api_error":
+                err = obj.get("error")
+                status = _as_int(err.get("status")) if isinstance(err, dict) else 0
+                if status == 429:
+                    u.rate_limit_reached_count += 1
+                    u.rate_limit_names.add("api-429")
+            elif sub == "compact_boundary":
+                u.compaction_count += 1
+            continue
+
+        # 工具结果行的 toolUseResult：originalFile → LOC F1 修正；
+        # userModified → 「AI 写完后被人改过」采纳信号。
+        tur = obj.get("toolUseResult")
+        if isinstance(tur, dict):
+            # MCP 精确归因：结果行携带 attributionMcpServer/Tool（每次调用一行）。
+            srv = obj.get("attributionMcpServer")
+            if isinstance(srv, str) and srv:
+                tool_attr = obj.get("attributionMcpTool")
+                key_attr = f"{srv}/{tool_attr}" if isinstance(tool_attr, str) and tool_attr else srv
+                u.mcp_calls_by_attr[key_attr] = u.mcp_calls_by_attr.get(key_attr, 0) + 1
+            if loc_acc is not None and "originalFile" in tur:
+                loc_acc.note_write_original(tur.get("filePath"),
+                                            tur.get("originalFile"))
+            if tur.get("userModified") is True:
+                u.user_modified_count += 1
+            # structuredPatch：Claude 自算 diff 的 +/- 行数，作为回放 LOC 的
+            # 独立交叉校验（同样只计代码后缀文件）。
+            sp = tur.get("structuredPatch")
+            fp_sp = tur.get("filePath")
+            if (isinstance(sp, list) and isinstance(fp_sp, str)
+                    and _is_code(fp_sp)):
+                for hunk in sp:
+                    lines = hunk.get("lines") if isinstance(hunk, dict) else None
+                    if not isinstance(lines, list):
+                        continue
+                    for ln in lines:
+                        if isinstance(ln, str) and ln:
+                            if ln[0] == "+":
+                                u.patch_diff_added += 1
+                            elif ln[0] == "-":
+                                u.patch_diff_deleted += 1
+
         msg = obj.get("message")
         if not isinstance(msg, dict):
             continue
@@ -372,12 +475,18 @@ def _scan_session_uncached(
                 )
             if is_real_user:
                 u.user_msgs += 1
-                if include_user_texts:
-                    txt = extract_text(content).strip()
-                    if txt:
-                        txt = _strip_tags(txt)
-                    if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
-                        u.user_message_texts.append(txt[:500])
+                # prompt 行为信号：只计数，不存正文（隐私边界与懒加载一致）。
+                txt = extract_text(content).strip()
+                if txt.startswith("/") or txt.startswith("<command-name>"):
+                    u.slash_command_count += 1
+                elif _CORRECTION_RE.search(txt[:200]):
+                    u.correction_msg_count += 1
+                if u.first_prompt_chars == 0 and txt and not _is_user_noise(txt):
+                    u.first_prompt_chars = len(txt)
+                if include_user_texts and txt and not _is_user_noise(txt):
+                    cleaned = _strip_tags(txt)
+                    if cleaned:
+                        u.user_message_texts.append(cleaned[:500])
             # Count tool_result errors (from ALL user-role messages)
             if isinstance(content, list):
                 for item in content:
@@ -385,6 +494,8 @@ def _scan_session_uncached(
                             and item.get("type") == "tool_result"
                             and item.get("is_error")):
                         u.tool_errors += 1
+                        if u.turn_stats:
+                            u.turn_stats[-1].errors += 1
                         # Attribute error to specific tool via call_id mapping
                         tid = item.get("tool_use_id")
                         if isinstance(tid, str):
@@ -418,6 +529,10 @@ def _scan_session_uncached(
                 cw = _as_int(usage.get("cache_creation_input_tokens"))
                 cr = _as_int(usage.get("cache_read_input_tokens"))
                 o = _as_int(usage.get("output_tokens"))
+                # 缓存写 TTL 分档：1h 写单价是 5m 的 1.6 倍，计价时加溢价。
+                cc = usage.get("cache_creation")
+                cw1h = (min(_as_int(cc.get("ephemeral_1h_input_tokens")), cw)
+                        if isinstance(cc, dict) else 0)
                 # Count assistant turns: only lines with real usage count as turns.
                 # Zero-usage stubs (mimo thinking blocks, synthetic stubs) are tracked
                 # separately in empty_usage_skipped and do not inflate assistant_msgs.
@@ -437,7 +552,22 @@ def _scan_session_uncached(
                     u.cache_creation_input_tokens += cw
                     u.cache_read_input_tokens += cr
                     u.output_tokens += o
+                    u.cache_write_1h_tokens += cw1h
                     u.peak_input_tokens = max(u.peak_input_tokens, i + cw + cr)
+                    model_raw = msg.get("model")
+                    u.turn_stats.append(TurnStat(
+                        turn=current_turn, ts=ts,
+                        input_tokens=i, cache_write=cw, cache_read=cr,
+                        output_tokens=o,
+                        model=(pricing.normalize(model_raw)
+                               if isinstance(model_raw, str) and model_raw
+                               and model_raw != "<synthetic>" else ""),
+                    ))
+                # Claude 的网页搜索/抓取计数在 usage.server_tool_use 里（每响应一次）。
+                stu = usage.get("server_tool_use")
+                if isinstance(stu, dict):
+                    u.web_search_count += (_as_int(stu.get("web_search_requests"))
+                                           + _as_int(stu.get("web_fetch_requests")))
                 model = msg.get("model")
                 # Skip synthetic stubs (ccswitch 429 errors, "No response requested")
                 # — they use the same message.model field but are not real model turns.
@@ -446,7 +576,7 @@ def _scan_session_uncached(
                     bucket_key = pricing.normalize(model)
                 else:
                     bucket_key = ""
-                u.bucket(bucket_key).add(i, cw, cr, o)
+                u.bucket(bucket_key).add(i, cw, cr, o, cw1h)
 
             # Extract tool_use / thinking from content on EVERY line of the
             # response — continuation lines (dedup duplicates) carry the tool_use
@@ -478,6 +608,8 @@ def _scan_session_uncached(
                                 path=fp if isinstance(fp, str) else "",
                             ))
                             record_tool_variant(u, tool_name, inp)
+                            if u.turn_stats and u.turn_stats[-1].turn == current_turn:
+                                u.turn_stats[-1].tool_calls += 1
                             if loc_acc is not None and isinstance(inp, dict):
                                 loc_acc.on_tool_use(tool_name, inp)
                     elif item_type == "thinking":
@@ -592,6 +724,10 @@ def read_session_meta(path: Path) -> SessionMeta:
     session_id: str | None = None
     cwd: str | None = None
     entrypoint: str | None = None
+    cli_version: str | None = None
+    git_branch: str | None = None
+    reasoning_effort: str | None = None
+    permission_mode: str | None = None
 
     # Newest ai-title in the tail wins. Keep overwriting → the last non-empty
     # aiTitle in the tail is the freshest the file has.
@@ -629,16 +765,24 @@ def read_session_meta(path: Path) -> SessionMeta:
             ep = obj.get("entrypoint")
             if isinstance(ep, str):
                 entrypoint = ep
+        # 行级元数据：每条 assistant/user 行都携带（cc 2.x）。取首个非空值。
+        if cli_version is None and isinstance(obj.get("version"), str):
+            cli_version = obj["version"] or None
+        if git_branch is None and isinstance(obj.get("gitBranch"), str):
+            git_branch = obj["gitBranch"] or None
+        if reasoning_effort is None and isinstance(obj.get("effort"), str):
+            reasoning_effort = obj["effort"] or None
+        if permission_mode is None and isinstance(obj.get("permissionMode"), str):
+            permission_mode = obj["permissionMode"] or None
         # First real user message — only used when no ai-title exists at all.
         if fallback_title is None:
             msg = obj.get("message")
             if isinstance(msg, dict) and msg.get("role") == "user":
                 txt = extract_text(msg.get("content")).strip()
-                if txt and not txt.startswith(_TITLE_NOISE_PREFIXES):
+                if txt and not _is_user_noise(txt):
                     # Remove all XML-like tags (e.g. <ide_opened_file>...</ide_opened_file>)
                     txt = _strip_tags(txt)
-                    # Skip system-generated phrases after cleaning
-                    if txt and not txt.startswith(_TITLE_NOISE_AFTER_CLEAN):
+                    if txt:
                         fallback_title = txt
 
     # Priority: newest tail ai-title > head ai-title > first user message.
@@ -652,6 +796,10 @@ def read_session_meta(path: Path) -> SessionMeta:
         path=path,
         is_subagent=is_subagent(path),
         entrypoint=entrypoint,
+        cli_version=cli_version,
+        git_branch=git_branch,
+        reasoning_effort=reasoning_effort,
+        permission_profile=permission_mode,
     )
 
 
@@ -768,11 +916,3 @@ def truncate_summary(text: str, max_chars: int) -> str:
         return trimmed
     return trimmed[:max_chars] + "..."
 
-
-def _as_int(v) -> int:
-    if v is None or isinstance(v, bool):
-        return 0
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0

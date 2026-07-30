@@ -170,41 +170,35 @@ def test_merge_user_message_texts():
 
 
 # --------------------------------------------------------------------------- #
-# Composite (G6): CTEI / TTAF / TA-TCER / PSAC / CAF / grade
+# Composite (G6): CTEI / TTAF / TA-TCER / CAF / grade
 # --------------------------------------------------------------------------- #
 # Framework reference baselines (§6.3, 16-session dataset). Hardcoded here so the
 # formula-reproduction tests stay valid even when a user has overwritten
 # composite_baselines.json with their own personal baselines.
-_FW = {"tcer_baseline": 76.59, "ncpi_baseline": 0.101, "cpe_baseline": 8.22}
+_FW = {"tcer_baseline": 76.59, "cpe_baseline": 8.22}
 
 
-def test_ctei_reproduces_report_excellent_session():
-    # Report §6.3, session 4.22/5.3-codex: TCER=111.04, NCPI=0.189, CPE=4.45,
-    # CHR≈0 → published CTEI = 5.017. Validates the formula + baselines.
-    c = metrics.ctei(111.04, 0.189, 4.45, 0.0, **_FW)
-    assert c == pytest_approx(5.017, rel=0.01)
-    assert metrics.grade(c) == "优秀"
-
-
-def test_ctei_reproduces_report_extreme_low_session():
-    # Report §6.3, session 5.13/5.4: TCER=28.62, NCPI=0.051, CPE=28.40 → CTEI=0.055.
-    c = metrics.ctei(28.62, 0.051, 28.40, 0.0, **_FW)
-    assert c == pytest_approx(0.055, rel=0.02)
-    assert metrics.grade(c) == "极端低效"
+def test_ctei_three_factor_formula():
+    # 三因子：CTEI = (TCER/基准) × (CPE基准/CPE) × (1+CHR×0.5)。
+    c = metrics.ctei(111.04, 4.45, 0.0, **_FW)
+    assert c == pytest_approx((111.04 / 76.59) * (8.22 / 4.45), rel=1e-6)
+    c_low = metrics.ctei(28.62, 28.40, 0.0, **_FW)
+    assert c_low == pytest_approx((28.62 / 76.59) * (8.22 / 28.40), rel=1e-6)
+    assert metrics.grade(c_low) == "低效"
 
 
 def test_ctei_chr_factor_rewards_cache():
     # CHR factor = 1 + CHR*0.5: 40% CHR → +20% CTEI vs CHR=0.
-    base = metrics.ctei(76.59, 0.101, 8.22, 0.0, **_FW)
-    with_chr = metrics.ctei(76.59, 0.101, 8.22, 0.40, **_FW)
+    base = metrics.ctei(76.59, 8.22, 0.0, **_FW)
+    with_chr = metrics.ctei(76.59, 8.22, 0.40, **_FW)
     assert base == pytest_approx(1.0, rel=0.01)  # all-baseline session scores ~1.0
     assert with_chr == pytest_approx(base * 1.20, rel=0.01)
 
 
 def test_ctei_none_when_inputs_missing():
-    assert metrics.ctei(None, 0.1, 8.0, 0.0) is None
-    assert metrics.ctei(80.0, None, 8.0, 0.0) is None
-    assert metrics.ctei(80.0, 0.1, 0, 0.0) is None  # CPE=0 → undefined
+    assert metrics.ctei(None, 8.0, 0.0) is None
+    assert metrics.ctei(80.0, 0, 0.0) is None  # CPE=0 → undefined
+    assert metrics.ctei(80.0, None, 0.0) is None
 
 
 def test_ttaf_table_matches_report():
@@ -346,15 +340,6 @@ def test_ttaf_table_completeness():
     )
 
 
-def test_psac_formula():
-    # PSAC = 83.64 / (83.64 - 0.000866*LOC). At LOC=23694 → ~1.325.
-    p = metrics.psac(23694)
-    expected = 83.64 / (83.64 - 0.000866 * 23694)
-    assert p == pytest_approx(expected)
-    assert p == pytest_approx(1.325, rel=0.01)
-    assert metrics.psac(None) is None
-
-
 def test_caf_formula():
     # CAF = TotalInput / (input + cache_write). Heavy cache reads → CAF >> 1.
     u = _u(i=100, cw=100, cr=800)  # total_input=1000, denom=200
@@ -372,15 +357,12 @@ def test_grade_thresholds():
 
 
 def test_compute_populates_composite_fields():
-    # End-to-end: compute() fills NCPI / CAF / TA-TCER / PSAC / CTEI when given
-    # loc_accumulated + task_type. total = 1Mt, net_loc=500 → TCER=500.
+    # End-to-end: compute() fills CAF / TA-TCER / CTEI（三因子，无需仓库扫描）。
     u = _u(i=400_000, cw=100_000, o=500_000)  # total 1,000,000
-    r = metrics.compute(META, u, net_loc=500, loc_accumulated=10_000, task_type="code_maintenance")
+    r = metrics.compute(META, u, net_loc=500, task_type="code_maintenance")
     assert r.tcer == pytest_approx(500.0)
-    assert r.ncpi == pytest_approx(500 / 10_000)
     assert r.ntcer == pytest_approx(500.0 / 0.45)
     assert r.ta_tcer == pytest_approx(500.0 / 0.45)  # backward compat
-    assert r.psac is not None and r.tcer_phase_adj == pytest_approx(r.tcer * r.psac)
     assert r.caf == pytest_approx(500_000 / 500_000)  # total_input / (input+cacheW)
     assert r.ctei is not None and r.grade is not None
     assert r.task_type == "code_maintenance"
@@ -388,12 +370,11 @@ def test_compute_populates_composite_fields():
     assert r.ttaf == 0.45
 
 
-def test_compute_composite_none_without_loc_accumulated():
-    # No loc_accumulated → NCPI/PSAC/CTEI stay None, but CAF (token-only) still set.
+def test_compute_composite_none_without_net_loc():
+    # net_loc=None → TCER/CPE/CTEI 皆 None，但 CAF（纯 token）仍有值。
     u = _u(i=400_000, cw=100_000, o=500_000)
-    r = metrics.compute(META, u, net_loc=500, task_type="code_creation")
-    assert r.ncpi is None
-    assert r.psac is None
+    r = metrics.compute(META, u, net_loc=None, task_type="code_creation")
+    assert r.tcer is None
     assert r.ctei is None
     assert r.caf is not None  # CAF needs only token usage
     assert r.task_type == "code_creation"
@@ -426,7 +407,7 @@ def _single_model_report(model, *, added, deleted, reworked=None,
     mu.input_tokens = i
     mu.output_tokens = o
     u.models.add(model)
-    return metrics.compute(META, u, net_loc=net_loc, loc_accumulated=100_000,
+    return metrics.compute(META, u, net_loc=net_loc,
                            code_added=added, code_deleted=deleted,
                            code_reworked=reworked)
 
@@ -606,3 +587,31 @@ def test_user_msgs_passthrough():
     assert len(r.usage.user_message_texts) == 2
 
 
+
+
+def test_infer_task_type_extended_signals():
+    """扩展信号:文档主导→非编码;高错误率+重 Bash→维护;缺失时不变。"""
+    # 中等产出、几乎全是文档 → 非编码(文档/调研)
+    assert metrics.infer_task_type(
+        net_loc=50, total_tokens=1_000_000,
+        doc_net_loc=45,
+    ) == "non_coding"
+    # 同样产出但无文档信号 → 保持原判(创作/维护)
+    assert metrics.infer_task_type(
+        net_loc=50, total_tokens=1_000_000,
+    ) != "non_coding"
+    # 强创作信号(高伪 TCER)不被单一文档信号翻转
+    assert metrics.infer_task_type(
+        net_loc=200, total_tokens=1_000_000,
+        doc_net_loc=180,
+    ) == "code_creation"
+    # 中等产出 + 高工具错误率 + 重 Bash → 维护
+    assert metrics.infer_task_type(
+        net_loc=30, total_tokens=1_000_000,
+        tool_error_rate=0.2, bash_ratio=0.6,
+    ) == "code_maintenance"
+    # 中等产出、测试行主导 → 维护倾斜
+    assert metrics.infer_task_type(
+        net_loc=50, total_tokens=1_000_000,
+        test_net_loc=40,
+    ) == "code_maintenance"

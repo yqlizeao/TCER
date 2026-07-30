@@ -150,9 +150,16 @@ def _rule_best_choice(rows: list[dict], dimension: str) -> list[dict]:
 
 
 def _rule_cost_not_worth_it(rows: list[dict], dimension: str) -> list[dict]:
-    """A setting that costs significantly more without a matching output gain."""
+    """A setting that costs significantly more without a matching output gain.
+
+    Measured on **CPE** (cost per 1000 net lines), not raw per-session cost.
+    Per-session cost is dominated by how big the session was — a 2000-line
+    session costs more than a 20-line one no matter what model ran it, which
+    buries a 40% price premium under session-size noise. CPE normalizes that
+    away, so "更贵" means "花更多钱拿到同样的产出".
+    """
     out_rep = an.compare(rows, dimension, an.PRIMARY_METRIC)
-    cost_rep = an.compare(rows, dimension, "cost_usd")
+    cost_rep = an.compare(rows, dimension, "cpe")
     dim = an.DIMENSIONS[dimension]
     out_by = {c["label"]: c for c in out_rep["cohorts"]}
     findings = []

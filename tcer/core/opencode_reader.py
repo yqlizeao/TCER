@@ -18,7 +18,8 @@ from functools import lru_cache
 from pathlib import Path
 
 from tcer.core import pricing
-from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp
+from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
+from tcer.core.parse_util import as_int as _as_int, first_str as _first_str
 from tcer.core.paths import opencode_dir
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
@@ -190,6 +191,9 @@ def read_session_meta(db_path: Path, session_id: str) -> SessionMeta:
     permission = _json_obj(row["permission"])
     title = row["title"] if isinstance(row["title"], str) and row["title"] else None
     cwd = _first_str(row["directory"], row["project_worktree"])
+    keys = set(row.keys())
+    version = (row["version"] if "version" in keys
+               and isinstance(row["version"], str) and row["version"] else None)
     return SessionMeta(
         session_id=session_id,
         cwd=cwd,
@@ -198,6 +202,7 @@ def read_session_meta(db_path: Path, session_id: str) -> SessionMeta:
         is_subagent=bool(row["parent_id"]),
         entrypoint="opencode",
         source="opencode",
+        cli_version=version,
         model_provider=provider,
         approval_policy=_permission_label(permission),
     )
@@ -231,6 +236,21 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
     if model_key:
         u.models.add(model_key)
 
+    # revert 列非空 = 用户回退过 AI 的改动（最直接的「产出被拒绝」信号）。
+    if "revert" in session.keys():
+        rev = session["revert"]
+        if rev is not None and str(rev).strip() not in ("", "null", "{}", "[]"):
+            u.revert_events += 1
+
+    # OpenCode 自报成本 → 与 TCER 价表计价交叉校验（0/缺失视为未知）。
+    if "cost" in session.keys():
+        try:
+            reported = float(session["cost"] or 0)
+        except (TypeError, ValueError):
+            reported = 0.0
+        if reported > 0:
+            u.reported_cost_usd = reported
+
     turn_by_message: dict[str, int] = {}
     assistant_seen = 0
     for msg in messages:
@@ -245,6 +265,15 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
             mkey = _message_model_key(data) or model_key
             if mkey:
                 u.models.add(mkey)
+            # 逐消息 token 快照 → peak 补齐（多回合且无 step-finish 时不再留 0）。
+            tok = data.get("tokens")
+            if isinstance(tok, dict):
+                cache = tok.get("cache")
+                cr = _as_int(cache.get("read")) if isinstance(cache, dict) else 0
+                cw = _as_int(cache.get("write")) if isinstance(cache, dict) else 0
+                step_in = _as_int(tok.get("input")) + cr + cw
+                if step_in > 0:
+                    u.peak_input_tokens = max(u.peak_input_tokens, step_in)
     if assistant_seen:
         u.assistant_msgs = max(u.assistant_msgs, assistant_seen)
 
@@ -256,6 +285,13 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
         turn = turn_by_message.get(mid, max(0, assistant_seen - 1))
         if ptype == "reasoning":
             u.thinking_count += 1
+            # reasoning part 带 time.{start,end} → 思考耗时。
+            t = data.get("time")
+            if isinstance(t, dict):
+                start = _as_int(t.get("start"))
+                end = _as_int(t.get("end"))
+                if end > start > 0:
+                    u.reasoning_ms_total += end - start
         elif ptype == "file":
             if _is_image_mime(data.get("mime")):
                 u.image_count += 1
@@ -277,6 +313,7 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
         elif ptype in ("step-finish", "step_finish"):
             # Live OpenCode: per-step token snapshot for peak window pressure.
             _note_step_input_peak(u, data)
+            _note_step_turn_stat(u, data, turn, parse_timestamp_ms(part["time_created"]))
         elif ptype == "compaction":
             u.compaction_count += 1
 
@@ -421,13 +458,7 @@ def read_conversation(db_path: Path, session_id: str) -> list[dict]:
 _EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 
-def _loc_scan(
-    db_path: Path,
-    session_id: str,
-    *,
-    cwd: str | Path | None = None,
-    disk_prior: bool = False,
-):
+def _loc_scan(db_path: Path, session_id: str):
     """Single pass: ``(SessionLoc, has_signal)`` for one OpenCode session.
 
     Prefer persisted ``summary_*`` counters when present; else replay edit/write
@@ -444,7 +475,7 @@ def _loc_scan(
         files = _as_int(_dig(obj, "summary", "files") or obj.get("summary_files"))
         if added or deleted or files:
             return SessionLoc(added=added, deleted=deleted), True
-        return _legacy_tool_loc(Path(session_id), obj, cwd=cwd, disk_prior=disk_prior)
+        return _legacy_tool_loc(Path(session_id), obj)
 
     with _connect(db_path) as con:
         row = con.execute(
@@ -484,12 +515,7 @@ def _loc_scan(
             file_edit_counts=edit_counts,
         ), True
 
-    session_cwd = cwd
-    if session_cwd is None and "directory" in keys:
-        d = row["directory"]
-        if isinstance(d, str) and d:
-            session_cwd = d
-    acc = _LocAccumulator(cwd=session_cwd, disk_prior=disk_prior)
+    acc = _LocAccumulator()
     saw_edit = False
     for part in parts:
         data = _json_obj(part["data"])
@@ -507,15 +533,9 @@ def _loc_scan(
     return acc.finish(), saw_edit
 
 
-def session_loc_full(
-    db_path: Path,
-    session_id: str,
-    *,
-    cwd: str | Path | None = None,
-    disk_prior: bool = False,
-):
+def session_loc_full(db_path: Path, session_id: str):
     """Return LOC for one OpenCode session (summary counters or tool replay)."""
-    return _loc_scan(db_path, session_id, cwd=cwd, disk_prior=disk_prior)[0]
+    return _loc_scan(db_path, session_id)[0]
 
 
 def has_loc_signal(db_path: Path, session_id: str) -> bool:
@@ -526,11 +546,11 @@ def has_loc_signal(db_path: Path, session_id: str) -> bool:
         return False
 
 
-def _legacy_tool_loc(session_path: Path, obj: dict, *, cwd, disk_prior: bool):
+def _legacy_tool_loc(session_path: Path, obj: dict):
     """Best-effort ``(SessionLoc, saw_edit)`` from legacy JSON tool parts."""
     from tcer.core.loc import _LocAccumulator
 
-    acc = _LocAccumulator(cwd=cwd, disk_prior=disk_prior)
+    acc = _LocAccumulator()
     saw_edit = False
     for data in _legacy_iter_tool_parts(session_path, obj):
         name = _first_str(data.get("tool"), data.get("toolName"), data.get("name"))
@@ -1014,6 +1034,24 @@ def _note_step_input_peak(u: TokenUsage, data: dict) -> None:
         u.peak_input_tokens = max(u.peak_input_tokens, step_in)
 
 
+def _note_step_turn_stat(u: TokenUsage, data: dict, turn: int, ts: int | None) -> None:
+    """step-finish 快照 → 时间线 TurnStat（仅展示用，不参与聚合 token）。"""
+    tok = data.get("tokens")
+    if not isinstance(tok, dict):
+        return
+    i = _as_int(tok.get("input"))
+    o = _as_int(tok.get("output")) + _as_int(tok.get("reasoning"))
+    cache = tok.get("cache")
+    cr = _as_int(cache.get("read")) if isinstance(cache, dict) else 0
+    cw = _as_int(cache.get("write")) if isinstance(cache, dict) else 0
+    if i + o + cr + cw <= 0:
+        return
+    u.turn_stats.append(TurnStat(
+        turn=turn, ts=ts, input_tokens=i, cache_write=cw,
+        cache_read=cr, output_tokens=o,
+    ))
+
+
 # OpenCode tool ids → TCER-canonical names (case-insensitive keys).
 _OPENCODE_TOOL_MAP = {
     "read": "Read",
@@ -1179,20 +1217,6 @@ def _display_name(name, cwd: str | None) -> str:
     return _NO_PROJECT_LABEL
 
 
-def _first_str(*values) -> str | None:
-    for v in values:
-        if isinstance(v, str) and v:
-            return v
-    return None
-
-
-def _as_int(v) -> int:
-    if v is None or isinstance(v, bool):
-        return 0
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _is_image_mime(value) -> bool:

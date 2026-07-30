@@ -1,14 +1,14 @@
 """TCER core metric formulas and pricing.
 
 Basic formulas follow CLAUDE.md. The 综合评分 group (G6) — TTAF / NTCER /
-PSAC / CAF / CTEI — follows the metric framework (§6.2–6.5), which is the
+CAF / CTEI — follows the metric framework (§6.2–6.5), which is the
 authoritative original framework.
 
 Costs are priced per model via ``pricing`` (each model's tokens at its own
 $/MTok rate), falling back to the Anthropic list-price ``default`` for unknown
 or mixed-model usage; see ``cost_usd``.
 
-Composite-layer constants (TTAF, CTEI baselines, PSAC regression, CHR weight)
+Composite-layer constants (TTAF, CTEI baselines, CHR weight)
 are loaded from ``config/composite_baselines.json`` — a hand-editable config so
 you can override the framework's reference-dataset defaults with your own
 accumulated data.
@@ -40,7 +40,7 @@ _COMPOSITE_CONFIG_PATH = Path(__file__).parent.parent / "config" / "composite_ba
 
 @lru_cache(maxsize=1)
 def _load_composite_config() -> dict:
-    """Load composite-layer config (task categories / baselines / PSAC / CHR weight)."""
+    """Load composite-layer config (task categories / baselines / CHR weight)."""
     with _COMPOSITE_CONFIG_PATH.open("r", encoding="utf-8") as fh:
         return json.load(fh)
 
@@ -63,27 +63,18 @@ def _get_baselines() -> dict[str, float]:
     return _load_composite_config()["ctei_baselines"]
 
 
-def _get_psac_params() -> dict[str, float]:
-    return _load_composite_config()["psac"]
-
-
 def _get_chr_weight() -> float:
     return _load_composite_config()["chr_weight"]
 
 
 def _refresh_composite_globals() -> None:
     """Reload module-level constants from config (after cache clear / save)."""
-    global TASK_CATEGORIES, TTAF, TCER_BASELINE, NCPI_BASELINE, CPE_BASELINE
-    global PSAC_INTERCEPT, PSAC_SLOPE, CHR_WEIGHT
+    global TASK_CATEGORIES, TTAF, TCER_BASELINE, CPE_BASELINE, CHR_WEIGHT
     TASK_CATEGORIES = _get_task_categories()
     TTAF = _get_ttaf()
     b = _get_baselines()
     TCER_BASELINE = b["tcer"]
-    NCPI_BASELINE = b["ncpi"]
     CPE_BASELINE = b["cpe"]
-    p = _get_psac_params()
-    PSAC_INTERCEPT = p["intercept"]
-    PSAC_SLOPE = p["slope"]
     CHR_WEIGHT = _get_chr_weight()
 
 
@@ -93,10 +84,7 @@ _load_composite_config.cache_clear()
 TASK_CATEGORIES: dict[str, dict] = {}
 TTAF: dict[str, float] = {}
 TCER_BASELINE = 0.0
-NCPI_BASELINE = 0.0
 CPE_BASELINE = 0.0
-PSAC_INTERCEPT = 0.0
-PSAC_SLOPE = 0.0
 CHR_WEIGHT = 0.0
 _refresh_composite_globals()
 
@@ -182,6 +170,12 @@ _INFER_DEFAULTS = {
     "edit_maint": 0.60,        # edit_ratio ≥ this → maintenance
     "rwr_maint": 2.0,
     "rwr_noncoding": 5.0,
+    # 扩展信号（均为可选输入，缺失时不参与打分）
+    "doc_share_noncoding": 0.8,   # 文档行占净增 ≥ → 文档/调研类
+    "test_share_maint": 0.6,      # 测试行占净增 ≥ → 测试补充（维护）
+    "err_rate_maint": 0.15,       # 工具错误率 ≥ → 调试特征
+    "bash_maint": 0.5,            # Bash 占比 ≥ → 运维/调试重 shell
+    "web_noncoding": 3.0,         # 网页搜索次数 ≥ → 调研
 }
 
 
@@ -205,6 +199,11 @@ def infer_task_type(
     exploration_ratio: float | None = None,
     edit_ratio: float | None = None,
     read_write_ratio: float | None = None,
+    test_net_loc: int | None = None,
+    doc_net_loc: int | None = None,
+    tool_error_rate: float | None = None,
+    bash_ratio: float | None = None,
+    web_search_count: int | None = None,
 ) -> str:
     """Heuristic task category from LOC + tool-behavior signals.
 
@@ -282,6 +281,19 @@ def infer_task_type(
         elif rwr < 1.0:
             scores["code_creation"] += 0.5
 
+    # --- 扩展信号（保守低权重，只做倾斜不做定性） ---
+    if net_loc is not None and net_loc > 0:
+        if doc_net_loc is not None and doc_net_loc / net_loc >= th["doc_share_noncoding"]:
+            scores["non_coding"] += 2.5   # 产出几乎全是文档 → 文档/调研
+        if test_net_loc is not None and test_net_loc / net_loc >= th["test_share_maint"]:
+            scores["code_maintenance"] += 1.0  # 测试补充多归维护
+    if tool_error_rate is not None and tool_error_rate >= th["err_rate_maint"]:
+        scores["code_maintenance"] += 1.0     # 高错误率 = 调试/试错特征
+    if bash_ratio is not None and bash_ratio >= th["bash_maint"]:
+        scores["code_maintenance"] += 1.0     # 重 shell = 运维/调试
+    if web_search_count is not None and web_search_count >= th["web_noncoding"]:
+        scores["non_coding"] += 1.0           # 频繁联网搜索 = 调研
+
     # Prefer keys that exist in the live config table.
     ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
     for key, _ in ranked:
@@ -296,15 +308,23 @@ def infer_task_type_from_usage(
     u: TokenUsage,
     *,
     net_loc: int | None,
+    test_net_loc: int | None = None,
+    doc_net_loc: int | None = None,
 ) -> str:
-    """Infer task type from a ``TokenUsage`` (+ optional net LOC)."""
+    """Infer task type from a ``TokenUsage`` (+ optional net LOC / test / doc split)."""
     tool_m = tool_usage_metrics(u)
+    total_tools = sum(u.tool_calls.values())
     return infer_task_type(
         net_loc=net_loc,
         total_tokens=u.total,
         exploration_ratio=tool_m.get("exploration_ratio"),
         edit_ratio=tool_m.get("edit_ratio"),
         read_write_ratio=tool_m.get("read_write_ratio"),
+        test_net_loc=test_net_loc,
+        doc_net_loc=doc_net_loc,
+        tool_error_rate=(u.tool_errors / total_tools) if total_tools else None,
+        bash_ratio=tool_m.get("bash_ratio"),
+        web_search_count=u.web_search_count,
     )
 
 
@@ -328,11 +348,10 @@ def majority_task_type(types: list[str | None]) -> str:
 
 
 def baseline_eligible_reports(reports) -> list:
-    """Sessions with complete TCER / NCPI / CPE (required for personal baselines)."""
+    """Sessions with complete TCER / CPE (required for personal baselines)."""
     return [
         r for r in reports
         if getattr(r, "tcer", None) is not None
-        and getattr(r, "ncpi", None) is not None
         and getattr(r, "cpe", None) is not None
     ]
 
@@ -342,10 +361,10 @@ def compute_baselines(
     *,
     min_sessions: int | None = None,
 ) -> dict | None:
-    """Derive personal CTEI baselines (TCER/CPE median, NCPI mean) from sessions.
+    """Derive personal CTEI baselines (TCER/CPE median) from sessions.
 
     Returns None if fewer than ``min_sessions`` (default
-    :data:`MIN_BASELINE_SESSIONS`) sessions have complete TCER/NCPI/CPE data.
+    :data:`MIN_BASELINE_SESSIONS`) sessions have complete TCER/CPE data.
     Small samples make median/mean jump wildly; Framework §8.3 expects a real
     reference set. Pass ``min_sessions=1`` in unit tests that only check the
     arithmetic.
@@ -358,7 +377,6 @@ def compute_baselines(
         return None
     return {
         "tcer": statistics.median(r.tcer for r in valid),
-        "ncpi": statistics.mean(r.ncpi for r in valid),
         "cpe": statistics.median(r.cpe for r in valid),
     }
 
@@ -432,17 +450,18 @@ class ModelComparison:
     churn_ratio: float | None = None
     read_before_write: float | None = None
     files_per_session: float | None = None
-    # 内部累加器
-    _primary_count: int = 0  # 主模型会话数（>50% token），作产出/行为/质量指标的分母
+    # 内部累加器（按 token 权重分摊：单模型会话权重 1.0，混合会话按占比拆分，
+    # 不再把混合会话的行为数据整段丢弃或全额记给主模型）
+    _weight_sum: float = 0.0  # Σ 会话权重，作产出/行为/质量指标的分母
     _rbw_sum: float = 0.0
-    _rbw_count: int = 0
+    _rbw_weight: float = 0.0
     _tool_calls: dict = None
-    _tool_errors: int = 0
-    _code_added: int = 0
-    _code_deleted: int = 0
-    _code_reworked: int = 0
-    _net_loc: int = 0
-    _files_touched: int = 0
+    _tool_errors: float = 0.0
+    _code_added: float = 0.0
+    _code_deleted: float = 0.0
+    _code_reworked: float = 0.0
+    _net_loc: float = 0.0
+    _files_touched: float = 0.0
 
     def __post_init__(self):
         if self._tool_calls is None:
@@ -472,26 +491,27 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
             mc.cache_creation_tokens += mu.cache_creation_input_tokens
             mc.cache_read_tokens += mu.cache_read_input_tokens
             mc.session_count += 1
-            # 主模型会话（该模型占该会话 >50% token）才统计产出/行为/质量
+            # 产出/行为/质量按该模型在会话内的 token 占比分摊。单模型会话
+            # 权重恰为 1.0（与旧的「主模型全额归因」结果一致）；混合会话按
+            # 占比拆分（旧逻辑要么整段丢弃、要么全额记给 >50% 的主模型）。
             mu_total = mu.input_tokens + mu.output_tokens + mu.cache_creation_input_tokens + mu.cache_read_input_tokens
-            is_primary = u.total > 0 and mu_total / u.total > 0.5
-            if is_primary:
-                mc._primary_count += 1
-                # 行为特征 (仅按主模型会话统计)
+            w = (mu_total / u.total) if u.total > 0 else 0.0
+            if w > 0:
+                mc._weight_sum += w
                 for tool, cnt in u.tool_calls.items():
-                    mc._tool_calls[tool] = mc._tool_calls.get(tool, 0) + cnt
-                mc._tool_errors += u.tool_errors
-                mc._code_added += r.code_added or 0
-                mc._code_deleted += r.code_deleted or 0
+                    mc._tool_calls[tool] = mc._tool_calls.get(tool, 0) + cnt * w
+                mc._tool_errors += u.tool_errors * w
+                mc._code_added += (r.code_added or 0) * w
+                mc._code_deleted += (r.code_deleted or 0) * w
                 # Mirror compute(): self-rework count, falling back to gross
                 # deletions when a session predates the code_reworked field.
                 reworked = r.code_reworked if r.code_reworked is not None else r.code_deleted
-                mc._code_reworked += reworked or 0
-                mc._net_loc += r.net_loc or 0
-                mc._files_touched += r.files_touched or 0
+                mc._code_reworked += (reworked or 0) * w
+                mc._net_loc += (r.net_loc or 0) * w
+                mc._files_touched += (r.files_touched or 0) * w
                 if r.read_before_write is not None:
-                    mc._rbw_sum += r.read_before_write
-                    mc._rbw_count += 1
+                    mc._rbw_sum += r.read_before_write * w
+                    mc._rbw_weight += w
 
     # Compute derived metrics
     grand_tokens = sum(mc.total_tokens for mc in buckets.values())
@@ -508,7 +528,7 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
         mc.code_per_dollar = mc._net_loc / mc.cost if mc.cost > 0 else None
         mc.token_share = mc.total_tokens / grand_tokens * 100 if grand_tokens else 0
         # 产出效率
-        mc.net_loc_per_session = mc._net_loc / mc._primary_count if mc._primary_count > 0 else None
+        mc.net_loc_per_session = mc._net_loc / mc._weight_sum if mc._weight_sum > 0 else None
         # 行为特征
         total_tools = sum(mc._tool_calls.values())
         if total_tools > 0:
@@ -529,8 +549,8 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
             mc.tool_error_rate = mc._tool_errors / total_tools
         # 代码质量 (self-rework, consistent with compute()/SessionReport.churn_ratio)
         mc.churn_ratio = mc._code_reworked / mc._code_added if mc._code_added > 0 else None
-        mc.read_before_write = mc._rbw_sum / mc._rbw_count if mc._rbw_count > 0 else None
-        mc.files_per_session = mc._files_touched / mc._primary_count if mc._primary_count > 0 else None
+        mc.read_before_write = mc._rbw_sum / mc._rbw_weight if mc._rbw_weight > 0 else None
+        mc.files_per_session = mc._files_touched / mc._weight_sum if mc._weight_sum > 0 else None
     for mc in buckets.values():
         mc.cost_share = mc.cost / grand_cost * 100 if grand_cost else 0
 
@@ -550,11 +570,18 @@ class _FakeModelUsage:
 
 
 
+# Anthropic 缓存写分档：价表 cache_write 是 5m 率（1.25×input）；1h 率为 2×input，
+# 即在 5m 率上加 (2/1.25 − 1) = 0.6 倍溢价。无分档信息的源 cache_write_1h_tokens=0。
+CACHE_1H_PREMIUM = 0.6
+
+
 def _cost_from(o, r: dict[str, float]) -> float:
     """USD cost of one token record ``o`` at rate map ``r`` (TokenUsage or ModelUsage)."""
+    cw1h = getattr(o, "cache_write_1h_tokens", 0)
     return (
         o.input_tokens * r["input"]
         + o.cache_creation_input_tokens * r["cache_write"]
+        + cw1h * r["cache_write"] * CACHE_1H_PREMIUM
         + o.cache_read_input_tokens * r["cache_read"]
         + o.output_tokens * r["output"]
     ) / 1_000_000
@@ -709,6 +736,9 @@ def tool_usage_metrics(u: TokenUsage) -> dict[str, float | None]:
         "read_write_ratio": read / (write + edit) if (write + edit) else None,
         "edit_ratio": edit / (edit + write) if (edit + write) else None,
         "exploration_ratio": explore / total_tools if total_tools else None,
+        # Bash 占比：量化「探索/阅读经 Bash 完成」的盲区暴露面（cat/rg/find 不计入
+        # read/exploration，占比越高，上面两个比率越失真）。
+        "bash_ratio": bash / total_tools if total_tools else None,
         # exposed for debugging / future metrics (not required by callers)
         "_bash_like": bash,
         "_explore_count": explore,
@@ -794,9 +824,28 @@ def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
             searches_with_edit += 1
     ste = (searches_with_edit / searches) if searches else None
 
+    # 改→验闭环率：Write/Edit 后 WINDOW 回合内出现 Bash/PowerShell（跑测试/
+    # 编译/lint 的唯一通道）。低值 = 改完不验证就继续。
+    verify_turns = sorted({op.turn for op in u.tool_ops
+                           if op.tool in ("Bash", "PowerShell")})
+    edits = edits_with_verify = 0
+    for op in u.tool_ops:
+        if op.tool not in _WRITE_EDIT:
+            continue
+        edits += 1
+        if any(op.turn < vt <= op.turn + WINDOW for vt in verify_turns):
+            edits_with_verify += 1
+    vae = (edits_with_verify / edits) if edits else None
+
+    # 首次编辑回合（1-based）：动手前的探索/热身长度。None = 纯阅读会话。
+    first_edit = min((op.turn for op in u.tool_ops if op.tool in _WRITE_EDIT),
+                     default=None)
+
     return {
         "search_edit_ratio": ste,
         "read_before_write": rbw,
+        "edit_verify_ratio": vae,
+        "first_edit_turn": (first_edit + 1) if first_edit is not None else None,
     }
 
 
@@ -810,13 +859,6 @@ def caf(u: TokenUsage) -> float | None:
     """
     denom = u.input_tokens + u.cache_creation_input_tokens
     return (u.total_input / denom) if denom else None
-
-
-def ncpi(net_loc: int | None, loc_accumulated: int | None) -> float | None:
-    """Net Code Production Index = net_loc / accumulated codebase LOC."""
-    if net_loc is None or not loc_accumulated:
-        return None
-    return net_loc / loc_accumulated
 
 
 def normalized_tcer(tcer: float | None, task_type: str | None) -> float | None:
@@ -835,18 +877,6 @@ def normalized_tcer(tcer: float | None, task_type: str | None) -> float | None:
     if not factor:
         return None
     return tcer / float(factor)
-
-
-def psac(loc_accumulated: int | None) -> float | None:
-    """Project-Stage Adjustment Coefficient (framework §6.5).
-
-    PSAC = intercept / (intercept - slope * LOC_current). Multiply TCER by this
-    to neutralize the structural TCER decline of larger codebases.
-    """
-    if loc_accumulated is None:
-        return None
-    denom = PSAC_INTERCEPT - PSAC_SLOPE * loc_accumulated
-    return (PSAC_INTERCEPT / denom) if denom else None
 
 
 def chr_factor(chr_: float | None) -> float:
@@ -875,27 +905,23 @@ def churn_ratio(added: int | None, reworked: int | None) -> float | None:
 
 def ctei(
     tcer: float | None,
-    ncpi_: float | None,
     cpe: float | None,
     chr_: float | None,
     *,
     tcer_baseline: float = TCER_BASELINE,
-    ncpi_baseline: float = NCPI_BASELINE,
     cpe_baseline: float = CPE_BASELINE,
 ) -> float | None:
-    """Composite Token Efficiency Index (framework §6.3).
+    """Composite Token Efficiency Index（三因子）。
 
-    CTEI = (TCER/baseline) × (NCPI/baseline) × (CPE_baseline/CPE) × (1+CHR*0.5)
-    Reproduces the framework's published per-session scores to <0.1%.
+    CTEI = (TCER/基准) × (CPE基准/CPE) × (1+CHR×0.5)
+
+    历史上还有第四个「产出密度」因子（NCPI/基准）——其分母是真实代码库总行数，
+    需要扫描本地仓库，与「纯离线、仅分析会话数据」的产品定位冲突，已移除。
+    三个因子都可聚合，项目聚合视图同样有效（聚合层不再禁用 CTEI/评级）。
     """
-    if tcer is None or ncpi_ is None or not cpe:
+    if tcer is None or not cpe:
         return None
-    return (
-        (tcer / tcer_baseline)
-        * (ncpi_ / ncpi_baseline)
-        * (cpe_baseline / cpe)
-        * chr_factor(chr_)
-    )
+    return (tcer / tcer_baseline) * (cpe_baseline / cpe) * chr_factor(chr_)
 
 
 # CTEI rating bands (framework §6.3), best → worst: ``(label, lower_bound)``.
@@ -929,7 +955,6 @@ def compute(
     u: TokenUsage,
     net_loc: int | None,
     *,
-    loc_accumulated: int | None = None,
     task_type: str | None = None,
     code_added: int | None = None,
     code_deleted: int | None = None,
@@ -938,14 +963,12 @@ def compute(
     test_net_loc: int | None = None,
     doc_net_loc: int | None = None,
     tcer_baseline: float = TCER_BASELINE,
-    ncpi_baseline: float = NCPI_BASELINE,
     cpe_baseline: float = CPE_BASELINE,
 ) -> SessionReport:
     """Compute the full per-session report from accumulated usage + net LOC.
 
-    Composite fields (NCPI / CAF / NTCER / PSAC / CTEI / grade) and the
-    churn ratio are filled in opportunistically: each is None unless its inputs
-    are available.
+    Composite fields (CAF / NTCER / CTEI / grade) and the churn ratio are
+    filled in opportunistically: each is None unless its inputs are available.
     """
     total_input = u.total_input
     total = u.total
@@ -968,13 +991,10 @@ def compute(
     ttaf_value = get_task_ttaf(task_type) if task_type else None
 
     # --- composite layer ---
-    ncpi_ = ncpi(net_loc, loc_accumulated)
     caf_ = caf(u)
     ta = normalized_tcer(tcer, task_type)
-    psac_ = psac(loc_accumulated)
-    tcer_phase = (tcer * psac_) if (tcer is not None and psac_ is not None) else None
-    ctei_ = ctei(tcer, ncpi_, cpe, chr_, tcer_baseline=tcer_baseline,
-                 ncpi_baseline=ncpi_baseline, cpe_baseline=cpe_baseline)
+    ctei_ = ctei(tcer, cpe, chr_, tcer_baseline=tcer_baseline,
+                 cpe_baseline=cpe_baseline)
 
     # --- timing metrics ---
     avg_turn_lat = avg_turn_latency_sec(u)
@@ -997,6 +1017,12 @@ def compute(
     total_tools = sum(u.tool_calls.values())
     tool_err_rate = u.tool_errors / total_tools if total_tools else None
     ttft_sec = (u.time_to_first_token_ms / 1000) if u.time_to_first_token_ms else None
+    if u.ttft_ms_samples:
+        ordered = sorted(u.ttft_ms_samples)
+        p95_idx = min(len(ordered) - 1, int(0.95 * (len(ordered) - 1) + 0.5))
+        ttft_p95 = ordered[p95_idx] / 1000
+    else:
+        ttft_p95 = None
     task_completion = (
         u.completed_task_count / u.task_count
         if u.task_count else None
@@ -1036,16 +1062,12 @@ def compute(
         net_loc=net_loc,
         tcer=tcer,
         cpe=cpe,
-        loc_accumulated=loc_accumulated,
-        ncpi=ncpi_,
         caf=caf_,
         task_type=task_type,
         task_category=task_category,
         ttaf=ttaf_value,
         ntcer=ta,
         ta_tcer=ta,  # backward compat
-        psac=psac_,
-        tcer_phase_adj=tcer_phase,
         ctei=ctei_,
         grade=grade(ctei_),
         code_added=code_added,
@@ -1080,7 +1102,11 @@ def compute(
         thinking_count=u.thinking_count,
         search_edit_ratio=fq["search_edit_ratio"],
         read_before_write=fq["read_before_write"],
+        edit_verify_ratio=fq["edit_verify_ratio"],
+        first_edit_turn=fq["first_edit_turn"],
+        bash_ratio=tool_m["bash_ratio"],
         time_to_first_token_sec=ttft_sec,
+        ttft_p95_sec=ttft_p95,
         task_completion_rate=task_completion,
         patch_apply_success_rate=patch_success,
         context_window_used_ratio=context_window_ratio,

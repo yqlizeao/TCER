@@ -106,6 +106,8 @@ def _cpe(row: dict) -> float | None:
 METRICS: dict[str, Metric] = {m.key: m for m in (
     Metric("tcer", "TCER（净增行/百万Token）", lambda r: _f(r, "tcer"), True, "float2",
            hint="产出效率：每百万 token 换来多少净增代码行"),
+    Metric("ctei", "CTEI 综合分", lambda r: _f(r, "ctei"), True, "float3",
+           hint="三因子综合效率（TCER × 成本 × 缓存），含基准 magic number，仅作参考"),
     Metric("net_loc", "净增代码行/会话", lambda r: _f(r, "net_loc"), True, "int",
            hint="单次会话的绝对产出规模"),
     Metric("cpe", "成本/千行（$）", _cpe, False, "money",

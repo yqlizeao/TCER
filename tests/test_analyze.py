@@ -70,7 +70,7 @@ def test_task_categories_ssot_matches_config():
         assert metrics.TASK_CATEGORIES[k]["ttaf"] == cfg["task_categories"][k]["ttaf"]
 
 
-def test_analyze_claude_folds_subagent_and_clears_aggregate_ctei(tmp_path, monkeypatch):
+def test_analyze_claude_folds_subagent_and_aggregate_ctei_valid(tmp_path, monkeypatch):
     proj, h = _seed_claude_project(tmp_path, monkeypatch)
     main = proj / "SID-MAIN.jsonl"
     sub = proj / "SID-MAIN" / "subagents" / "agent-1.jsonl"
@@ -107,10 +107,9 @@ def test_analyze_claude_folds_subagent_and_clears_aggregate_ctei(tmp_path, monke
     # Same path edited 3 times across main+sub → one high-churn file, not two.
     assert r.high_churn_file_count == 1
     assert r.high_churn_details and "a.py" in r.high_churn_details
-    # Aggregate suppresses NCPI/CTEI/grade (single-session concept).
-    assert result.aggregate.ncpi is None
-    assert result.aggregate.ctei is None
-    assert result.aggregate.grade is None
+    # CTEI 三因子化后聚合有效（不再抑制）。
+    assert result.aggregate.ctei is not None
+    assert result.aggregate.grade is not None
     # Default task_type yields NTCER when TCER is computable.
     assert r.task_type == "code_creation"
     assert r.ntcer is not None
@@ -197,6 +196,27 @@ def test_analyze_cancel_raises(tmp_path, monkeypatch):
         analyze.analyze_project(h, cancel_event=ev)
 
 
+def test_analyze_project_scopes_to_ref_root(tmp_path, monkeypatch):
+    """ref.config_root 限定 analyze 只见该根会话（跨根同 hash 不串）。"""
+    from tcer.core.models import ProjectRef
+    h = "c--GitHub-Demo"
+    root_a = tmp_path / ".claude"
+    root_b = tmp_path / ".zclaude"
+    _write_jsonl(root_a / "projects" / h / "SID-A.jsonl",
+                 [_assistant(_usage(100, 0, 0, 50), msg_id="ma",
+                             content=[{"type": "text", "text": "a"}])])
+    _write_jsonl(root_b / "projects" / h / "SID-B.jsonl",
+                 [_assistant(_usage(200, 0, 0, 50), msg_id="mb",
+                             content=[{"type": "text", "text": "b"}])])
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root_a))
+    paths.reset_claude_roots_cache()
+    ref_a = ProjectRef(source="claude", key=h, display_name=h, cwd=None,
+                       path=root_a / "projects" / h, config_root=root_a)
+    result = analyze.analyze_project(h, project_ref=ref_a, no_loc=True)
+    assert len(result.reports) == 1
+    assert result.reports[0].meta.path.stem == "SID-A"  # 只 root_a；root_b 的 SID-B 不串入
+
+
 def test_file_cache_invalidates_on_mtime(tmp_path):
     from tcer.core import file_cache
 
@@ -215,6 +235,56 @@ def test_file_cache_invalidates_on_mtime(tmp_path):
     u3, _ = reader.scan_session(p, with_loc=False, include_user_texts=False)
     assert u3.input_tokens == 99
     assert u3 is not u1
+    file_cache.clear()
+
+
+def test_scan_session_caches_with_cancel_check(tmp_path):
+    # GUI always passes cancel_check; completed scans must still be cached.
+    from tcer.core import file_cache
+
+    file_cache.clear()
+    p = tmp_path / "s.jsonl"
+    _write_jsonl(p, [_assistant(_usage(1, 0, 0, 1), msg_id="a")])
+    noop = lambda: None
+    u1, _ = reader.scan_session(p, with_loc=False, include_user_texts=False,
+                                cancel_check=noop)
+    u2, _ = reader.scan_session(p, with_loc=False, include_user_texts=False,
+                                cancel_check=noop)
+    assert u1 is u2
+    assert file_cache.stats()["entries"] >= 1
+    file_cache.clear()
+
+
+def test_cancelled_scan_not_cached(tmp_path):
+    # A cancel raises inside the factory → the partial scan never enters the cache.
+    from tcer.core import file_cache
+
+    file_cache.clear()
+    p = tmp_path / "s.jsonl"
+    _write_jsonl(p, [_assistant(_usage(1, 0, 0, 1), msg_id="a")])
+
+    def _cancel():
+        raise analyze.AnalysisCancelled()
+
+    with pytest.raises(analyze.AnalysisCancelled):
+        reader.scan_session(p, with_loc=False, include_user_texts=False,
+                            cancel_check=_cancel)
+    assert file_cache.stats()["entries"] == 0
+    file_cache.clear()
+
+
+def test_analyze_with_cancel_event_populates_cache(tmp_path, monkeypatch):
+    # End-to-end: analyze_project with a (never-set) cancel_event — the GUI's
+    # normal mode — must populate the mtime cache so reanalyze is cheap.
+    from tcer.core import file_cache
+
+    file_cache.clear()
+    proj, h = _seed_claude_project(tmp_path, monkeypatch)
+    _write_jsonl(proj / "s1.jsonl", [
+        _assistant(_usage(), msg_id="a", ts="2026-03-06T10:00:00Z"),
+    ])
+    analyze.analyze_project(h, cancel_event=threading.Event())
+    assert file_cache.stats()["entries"] >= 1
     file_cache.clear()
 
 

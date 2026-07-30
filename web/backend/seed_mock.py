@@ -28,7 +28,10 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import db  # noqa: E402
+
+from tcer.core import metrics  # noqa: E402  (baselines + the CTEI formula)
 
 PEOPLE = ["joey", "alice", "bob"]
 PROJECTS = ["TCER", "WebApp", "DataPipe"]
@@ -39,11 +42,16 @@ MODELS = [
     ("GLM-4.6", "glm-4-6"),
 ]
 
-# Per-model rough efficiency profile so charts show visible separation.
+# Per-model profile, expressed as multiples of the real baselines so the derived
+# CTEI lands in the plausible 0.3–3 band instead of the hundreds. TCER and CPE
+# are *targets*; net_loc / total_tokens / cost are solved backwards from them so
+# every row is internally consistent (tcer == net_loc / (tokens/1e6), etc.).
+# Getting this wrong is not cosmetic: an independently-random per-session ctei
+# would contradict the aggregate ctei the server recomputes from the sums.
 MODEL_PROFILE = {
-    "Opus 4.8": dict(tcer=(900, 1500), ctei=(0.7, 0.95), chr=(0.85, 0.96)),
-    "Sonnet 5": dict(tcer=(1100, 1800), ctei=(0.6, 0.85), chr=(0.80, 0.93)),
-    "GLM-4.6": dict(tcer=(700, 1200), ctei=(0.4, 0.7), chr=(0.6, 0.85)),
+    "Opus 4.8": dict(tcer_x=(0.9, 1.6), cpe_x=(0.7, 1.2), chr=(0.85, 0.96)),
+    "Sonnet 5": dict(tcer_x=(1.1, 2.0), cpe_x=(0.6, 1.0), chr=(0.80, 0.93)),
+    "GLM-4.6": dict(tcer_x=(0.5, 1.0), cpe_x=(1.0, 1.8), chr=(0.60, 0.85)),
 }
 
 SOURCES = ["claude", "codex", "grok"]
@@ -87,7 +95,7 @@ def main() -> int:
             # not every person touches every project
             if random.random() < 0.25:
                 continue
-            n_days = random.randint(8, 20)
+            n_days = random.randint(14, 30)
             for _ in range(n_days):
                 days_ago = random.randint(0, 29)
                 started_ms = (now - days_ago * day - random.randint(0, day)) * 1000
@@ -105,10 +113,7 @@ def main() -> int:
                     skills.append("legacy-helper")
                 mcps = ["zread"] if random.random() < 0.35 else []
 
-                ctei = _rng(*prof["ctei"])
                 chr_ = _rng(*prof["chr"])
-                net_loc = random.randint(50, 900)
-                total_tokens = random.randint(20_000, 400_000)
                 # Overhead add-ons burn extra tokens for the same output, which
                 # is exactly how a useless plugin shows up in real data: TCER
                 # (net LOC per million tokens) falls because the denominator grew.
@@ -117,11 +122,18 @@ def main() -> int:
                     overhead *= _rng(1.3, 1.7)
                 if mcps:
                     overhead *= _rng(1.2, 1.5)
-                total_tokens = int(total_tokens * overhead)
-                tcer = _rng(*prof["tcer"]) * TASK_TCER_FACTOR[task_type] / overhead
+
+                # TCER target, then solve net_loc from a drawn token budget.
+                # Drawing tokens first (rather than lines first) keeps session
+                # size in a realistic band — solving tokens from lines lets a
+                # low-TCER non-coding session imply hundreds of millions of them.
+                tcer = metrics.TCER_BASELINE * _rng(*prof["tcer_x"])
+                tcer *= TASK_TCER_FACTOR[task_type] / overhead
                 if "dataviz" in skills:
                     tcer *= _rng(1.25, 1.55)
-                tcer = round(tcer, 4)
+                total_tokens = random.randint(2_000_000, 40_000_000)
+                net_loc = max(1, int(round(tcer * total_tokens / 1_000_000)))
+                tcer = round(net_loc / (total_tokens / 1_000_000), 4)
                 # Split total into a plausible in / out / cache breakdown so the
                 # dashboard KPI card (输入/输出/缓存创建/缓存命中) has real numbers.
                 cache_read = int(total_tokens * _rng(0.55, 0.75))
@@ -129,13 +141,14 @@ def main() -> int:
                 inp = int(total_tokens * _rng(0.04, 0.10))
                 out = max(0, total_tokens - cache_read - cache_write - inp)
                 # Bigger sessions rework more — the small-batch signal.
-                size_pressure = min(1.0, total_tokens / 400_000)
+                size_pressure = min(1.0, total_tokens / 30_000_000)
                 churn = _rng(0.02, 0.15) + 0.22 * size_pressure
-                # Cost tracks tokens (as it does in reality) rather than being
-                # independent noise; high effort adds ~45% on top and buys
-                # nothing measurable.
-                cost = (total_tokens / 1e6) * _rng(6.0, 11.0)
-                cost *= 1.45 if effort == "high" else 1.0
+                # CPE target (again a multiple of the real baseline), then cost
+                # solved from it. high effort adds ~45% and buys nothing
+                # measurable — the "更贵但没换来产出" signal.
+                cpe = metrics.CPE_BASELINE * _rng(*prof["cpe_x"])
+                cpe *= 1.45 if effort == "high" else 1.0
+                cost = cpe * (net_loc / 1000)
                 tool_calls = {"Read": random.randint(3, 40),
                               "Edit": random.randint(1, 25),
                               "Bash": random.randint(0, 15)}
@@ -148,9 +161,13 @@ def main() -> int:
                     "session_id": f"{person}-{project}-{days_ago}-{random.randint(1000,9999)}",
                     "title": f"{project} · {label} 会话",
                     "tcer": tcer,
-                    "ctei": ctei,
+                    # Derived, never drawn independently — a per-session ctei
+                    # that disagrees with its own tcer/cpe/chr would contradict
+                    # the aggregate ctei the server recomputes from the sums.
+                    "ctei": round(metrics.ctei(tcer, cpe, chr_), 4),
+                    "grade": metrics.grade(metrics.ctei(tcer, cpe, chr_)),
                     "cost_usd": round(cost, 4),
-                    "cpe": round(cost / (net_loc / 1000), 4),
+                    "cpe": round(cpe, 4),
                     "net_loc": net_loc,
                     "code_added": net_loc + random.randint(0, 400),
                     "total_tokens": total_tokens,

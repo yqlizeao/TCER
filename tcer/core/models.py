@@ -13,12 +13,13 @@ class ProjectRef:
     are virtual groups of session JSONL files sharing the same cwd.
     """
 
-    source: str  # "claude" / "codex" / "opencode" / "grok"
+    source: str  # "claude" / "codex" / "opencode" / "grok" / "omp"
     key: str
     display_name: str
     cwd: str | None
     path: Path | None = None
     session_paths: tuple[Path, ...] = ()
+    config_root: Path | None = None
 
     @property
     def name(self) -> str:
@@ -38,12 +39,16 @@ class ModelUsage:
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     output_tokens: int = 0
+    # cache_creation 中走 1h TTL 的子集（Anthropic 1h 写单价 2×input，5m 为
+    # 1.25×input）。计价时对该子集加溢价；无分档信息的源保持 0（按 5m 价）。
+    cache_write_1h_tokens: int = 0
 
-    def add(self, i: int, cw: int, cr: int, o: int) -> None:
+    def add(self, i: int, cw: int, cr: int, o: int, cw1h: int = 0) -> None:
         self.input_tokens += i
         self.cache_creation_input_tokens += cw
         self.cache_read_input_tokens += cr
         self.output_tokens += o
+        self.cache_write_1h_tokens += cw1h
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,28 @@ class ToolOp:
     turn: int       # assistant message sequence (0-based)
     tool: str       # "Read" / "Write" / "Edit" / "Grep" / "Glob" / …
     path: str       # file_path from tool input ("" if unavailable)
+
+
+@dataclass
+class TurnStat:
+    """Per-turn token/timing record for the session timeline view.
+
+    One entry per assistant turn with real usage. ``duration_ms`` comes from
+    authoritative per-turn events when the source provides them (Claude
+    ``system/turn_duration``, Codex ``task_complete.duration_ms``, Grok
+    ``turn_completed``); None otherwise.
+    """
+
+    turn: int
+    ts: int | None = None            # epoch ms of the turn's first line
+    input_tokens: int = 0
+    cache_write: int = 0
+    cache_read: int = 0
+    output_tokens: int = 0
+    duration_ms: int | None = None
+    tool_calls: int = 0
+    errors: int = 0
+    model: str = ""                  # 该回合的模型（归一化 id；混用/未知为 ""）
 
 
 @dataclass
@@ -71,6 +98,7 @@ class TokenUsage:
     cache_creation_input_tokens: int = 0  # cache writes, $3.75/MTok
     cache_read_input_tokens: int = 0  # cache reads, $0.30/MTok
     output_tokens: int = 0
+    cache_write_1h_tokens: int = 0  # cache_creation 中 1h TTL 子集（计价加溢价）
     models: set[str] = field(default_factory=set)
     per_model: dict[str, ModelUsage] = field(default_factory=dict)
     assistant_msgs: int = 0  # assistant turns with real token usage (zero-usage stubs excluded)
@@ -91,6 +119,7 @@ class TokenUsage:
     tool_errors_by_tool: dict[str, int] = field(default_factory=dict)  # tool_name → error count
     thinking_count: int = 0  # count of thinking content blocks
     tool_ops: list[ToolOp] = field(default_factory=list)  # ordered tool calls for temporal analysis
+    turn_stats: list[TurnStat] = field(default_factory=list)  # per-turn timeline records
     user_message_texts: list[str] = field(default_factory=list)  # extracted user message text
     reasoning_output_tokens: int = 0  # Codex exposes this separately; output_tokens already includes it
     model_context_window: int | None = None
@@ -113,6 +142,45 @@ class TokenUsage:
     rate_limit_snapshots: int = 0
     rate_limit_reached_count: int = 0
     rate_limit_names: set[str] = field(default_factory=set)
+    rate_limit_peak_used: float | None = None  # 配额峰值占用（0..1，Codex used_percent/100）
+    ttft_ms_samples: list[int] = field(default_factory=list)  # 逐回合 TTFT（p95 用）
+    abort_reasons: dict[str, int] = field(default_factory=dict)  # 中断原因 → 次数
+    # --- Grok signals.json / events.jsonl（会话级聚合信号与事件） ---
+    cancellation_count: int = 0        # 用户取消回合次数
+    regeneration_count: int = 0        # 重新生成次数
+    positive_ratings: int = 0          # 用户显式好评
+    negative_ratings: int = 0          # 用户显式差评
+    git_commit_count: int = 0          # 会话内 git 提交数（工具侧记录，非调 git）
+    pr_created_count: int = 0
+    pr_merged_count: int = 0
+    reverted_lines: int = 0            # AI 写入后被回退的行数（agentLinesAddedReverted）
+    permission_request_count: int = 0  # 工具审批请求次数
+    permission_wait_ms_total: int = 0  # 审批等待总毫秒（人卡住 AI 的时间）
+    itl_p50_ms: int | None = None      # inter-token latency P50
+    itl_p99_ms: int | None = None
+    # --- prompt 行为信号（只计数，不存正文） ---
+    slash_command_count: int = 0    # 以 / 开头或 <command-name> 的用户消息数
+    correction_msg_count: int = 0   # 含纠正措辞（不对/重来/撤销/undo…）的用户消息数
+    first_prompt_chars: int = 0     # 首条真实用户消息的字符数（0=未知）
+    # --- Claude 深挖第三批 ---
+    mcp_calls_by_attr: dict[str, int] = field(default_factory=dict)  # "server/tool" → 次数（精确 MCP 归因）
+    hook_run_count: int = 0            # stop hook 执行次数
+    hook_error_count: int = 0          # stop hook 失败次数
+    hook_duration_ms_total: int = 0    # stop hook 累计耗时
+    queued_input_count: int = 0        # 用户在 AI 运行时排队输入的次数（打断/并行输入）
+    plan_mode_count: int = 0           # 计划模式进入次数（attachment plan_mode）
+    read_truncation_count: int = 0     # 读文件被截断次数（上下文浪费信号）
+    reasoning_ms_total: int = 0        # 思考耗时累计毫秒（OpenCode reasoning part）
+    # --- 采纳信号 ---
+    user_modified_count: int = 0       # AI 写入后被用户手动修改的工具结果数（Claude）
+    revert_events: int = 0             # 会话被回退的事件数（OpenCode revert / Grok hasReverted）
+    # --- structuredPatch 独立差分（Claude 自算 diff 的 +/- 行，仅代码后缀文件）。
+    # 与回放 LOC 相互独立的第二套估计，用于交叉校验；不参与 TCER 计算。
+    patch_diff_added: int = 0
+    patch_diff_deleted: int = 0
+    # 数据源自报成本（OpenCode session.cost）——与 TCER 价表计价交叉校验；
+    # 0/缺失视为未知（None）。不参与任何指标计算。
+    reported_cost_usd: float | None = None
 
     @property
     def total_input(self) -> int:
@@ -158,6 +226,14 @@ class TokenUsage:
             ToolOp(op.turn + self_max_turn + 1, op.tool, op.path)
             for op in other.tool_ops
         ]
+        # turn_stats 同步 rebase（拼接时间线；聚合对象的时间线是串接而非并发）
+        self_max_ts_turn = max((t.turn for t in self.turn_stats), default=-1)
+        rebased_other_stats = [
+            TurnStat(t.turn + self_max_ts_turn + 1, t.ts, t.input_tokens,
+                     t.cache_write, t.cache_read, t.output_tokens,
+                     t.duration_ms, t.tool_calls, t.errors, t.model)
+            for t in other.turn_stats
+        ]
 
         return TokenUsage(
             input_tokens=self.input_tokens + other.input_tokens,
@@ -165,6 +241,7 @@ class TokenUsage:
             + other.cache_creation_input_tokens,
             cache_read_input_tokens=self.cache_read_input_tokens + other.cache_read_input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
+            cache_write_1h_tokens=self.cache_write_1h_tokens + other.cache_write_1h_tokens,
             models=self.models | other.models,
             per_model=_merge_per_model(self.per_model, other.per_model),
             assistant_msgs=self.assistant_msgs + other.assistant_msgs,
@@ -179,6 +256,7 @@ class TokenUsage:
             tool_errors_by_tool=_merge_dicts(self.tool_errors_by_tool, other.tool_errors_by_tool),
             thinking_count=self.thinking_count + other.thinking_count,
             tool_ops=self.tool_ops + rebased_other_ops,
+            turn_stats=self.turn_stats + rebased_other_stats,
             user_message_texts=self.user_message_texts + other.user_message_texts,
             reasoning_output_tokens=self.reasoning_output_tokens + other.reasoning_output_tokens,
             model_context_window=_max_ms(self.model_context_window, other.model_context_window),
@@ -198,6 +276,42 @@ class TokenUsage:
             rate_limit_snapshots=self.rate_limit_snapshots + other.rate_limit_snapshots,
             rate_limit_reached_count=self.rate_limit_reached_count + other.rate_limit_reached_count,
             rate_limit_names=self.rate_limit_names | other.rate_limit_names,
+            rate_limit_peak_used=_max_opt(self.rate_limit_peak_used,
+                                          other.rate_limit_peak_used),
+            ttft_ms_samples=self.ttft_ms_samples + other.ttft_ms_samples,
+            abort_reasons=_merge_dicts(self.abort_reasons, other.abort_reasons),
+            cancellation_count=self.cancellation_count + other.cancellation_count,
+            regeneration_count=self.regeneration_count + other.regeneration_count,
+            positive_ratings=self.positive_ratings + other.positive_ratings,
+            negative_ratings=self.negative_ratings + other.negative_ratings,
+            git_commit_count=self.git_commit_count + other.git_commit_count,
+            pr_created_count=self.pr_created_count + other.pr_created_count,
+            pr_merged_count=self.pr_merged_count + other.pr_merged_count,
+            reverted_lines=self.reverted_lines + other.reverted_lines,
+            permission_request_count=self.permission_request_count
+            + other.permission_request_count,
+            permission_wait_ms_total=self.permission_wait_ms_total
+            + other.permission_wait_ms_total,
+            # 分位数不可加，聚合取最差值（max）
+            itl_p50_ms=_max_ms(self.itl_p50_ms, other.itl_p50_ms),
+            itl_p99_ms=_max_ms(self.itl_p99_ms, other.itl_p99_ms),
+            slash_command_count=self.slash_command_count + other.slash_command_count,
+            correction_msg_count=self.correction_msg_count + other.correction_msg_count,
+            # 首条消息长度：主会话优先（merge 左侧），子代理不覆盖
+            first_prompt_chars=self.first_prompt_chars or other.first_prompt_chars,
+            mcp_calls_by_attr=_merge_dicts(self.mcp_calls_by_attr, other.mcp_calls_by_attr),
+            hook_run_count=self.hook_run_count + other.hook_run_count,
+            hook_error_count=self.hook_error_count + other.hook_error_count,
+            hook_duration_ms_total=self.hook_duration_ms_total + other.hook_duration_ms_total,
+            queued_input_count=self.queued_input_count + other.queued_input_count,
+            plan_mode_count=self.plan_mode_count + other.plan_mode_count,
+            read_truncation_count=self.read_truncation_count + other.read_truncation_count,
+            reasoning_ms_total=self.reasoning_ms_total + other.reasoning_ms_total,
+            user_modified_count=self.user_modified_count + other.user_modified_count,
+            revert_events=self.revert_events + other.revert_events,
+            patch_diff_added=self.patch_diff_added + other.patch_diff_added,
+            patch_diff_deleted=self.patch_diff_deleted + other.patch_diff_deleted,
+            reported_cost_usd=_sum_opt(self.reported_cost_usd, other.reported_cost_usd),
         )
 
 
@@ -213,7 +327,8 @@ def _merge_per_model(
                 dst = ModelUsage()
                 out[model] = dst
             dst.add(mu.input_tokens, mu.cache_creation_input_tokens,
-                    mu.cache_read_input_tokens, mu.output_tokens)
+                    mu.cache_read_input_tokens, mu.output_tokens,
+                    mu.cache_write_1h_tokens)
     return out
 
 
@@ -223,6 +338,18 @@ def _merge_dicts(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
     for k, v in b.items():
         out[k] = out.get(k, 0) + v
     return out
+
+
+def _max_opt(a: float | None, b: float | None) -> float | None:
+    vals = [v for v in (a, b) if v is not None]
+    return max(vals) if vals else None
+
+
+def _sum_opt(a: float | None, b: float | None) -> float | None:
+    """None-aware 求和：双 None → None，否则缺失按 0。"""
+    if a is None and b is None:
+        return None
+    return (a or 0.0) + (b or 0.0)
 
 
 def _min_ms(a: int | None, b: int | None) -> int | None:
@@ -245,7 +372,7 @@ class SessionMeta:
     path: Path
     is_subagent: bool
     entrypoint: str | None = None  # "claude-vscode" / "claude-cli" / etc.
-    source: str = "claude"  # "claude" / "codex" / "opencode" / "grok"
+    source: str = "claude"  # "claude" / "codex" / "opencode" / "grok" / "omp"
     cli_version: str | None = None
     model_provider: str | None = None
     thread_source: str | None = None
@@ -272,18 +399,14 @@ class SessionReport:
     net_loc: int | None
     tcer: float | None  # LOC/Mt
     cpe: float | None  # $ per 1000 LOC
-    # --- 综合评分 (G6), populated when loc_accumulated / task_type available ---
-    loc_accumulated: int | None = None  # current codebase size (for NCPI / PSAC)
-    ncpi: float | None = None  # net code production index = net_loc / loc_accumulated
+    # --- 综合评分 (G6) ---
     caf: float | None = None  # cache adjustment factor
     task_type: str | None = None  # one of metrics.TASK_CATEGORIES keys
     task_category: str | None = None  # one of metrics.TASK_CATEGORIES keys
     ttaf: float | None = None  # task type adjustment factor
     ntcer: float | None = None  # normalized TCER = tcer / TTAF
     ta_tcer: float | None = None  # backward compat alias for ntcer
-    psac: float | None = None  # project-stage adjustment coefficient
-    tcer_phase_adj: float | None = None  # tcer * psac
-    ctei: float | None = None  # composite token efficiency index
+    ctei: float | None = None  # composite token efficiency index（三因子，见 metrics.ctei）
     grade: str | None = None  # CTEI rating label
     # --- 代码产出与质量 (G4) ---
     code_added: int | None = None  # gross code lines added (from tool calls)
@@ -309,6 +432,7 @@ class SessionReport:
     # --- file-level quality ---
     high_churn_file_count: int = 0  # files edited ≥3 times
     high_churn_details: dict | None = None  # {path: count} for files edited ≥3 (for popup)
+    first_pass_file_ratio: float | None = None  # 只编辑 1 次的文件占比（一次写对率）
     test_net_loc: int | None = None  # net LOC in test files
     doc_net_loc: int | None = None  # net LOC in doc files
     test_loc_ratio: float | None = None  # test_net / net_loc
@@ -320,10 +444,14 @@ class SessionReport:
     thinking_count: int = 0  # thinking content blocks
     search_edit_ratio: float | None = None  # edits / (searches + edits)
     read_before_write: float | None = None  # files read before being written/edited
+    edit_verify_ratio: float | None = None  # Write/Edit 后 3 回合内跑 Bash 的占比（改→验闭环）
+    first_edit_turn: int | None = None      # 首次 Write/Edit 的回合号（1-based；None=未动手）
+    bash_ratio: float | None = None         # Bash/PowerShell ÷ 总工具调用（盲区暴露面）
     memory_files: list[str] | None = None   # project memory/*.md paths (project-level only)
     memory_dir: str | None = None           # absolute path to the memory/ directory
     # --- Codex/local-agent runtime metrics ---
     time_to_first_token_sec: float | None = None
+    ttft_p95_sec: float | None = None  # TTFT 尾部延迟（逐回合样本的 P95）
     task_completion_rate: float | None = None
     patch_apply_success_rate: float | None = None
     context_window_used_ratio: float | None = None

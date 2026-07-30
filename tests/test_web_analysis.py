@@ -303,14 +303,27 @@ def test_aggregate_ratios_are_ratios_of_sums_not_means_of_ratios():
     assert agg["_stat"]["churn_ratio"] == "weighted"
 
 
-def test_aggregate_never_reports_ctei():
-    """CLAUDE.md rule 9: CTEI/NCPI are single-session concepts."""
+def test_aggregate_ctei_is_recomputed_not_averaged():
+    """CLAUDE.md rule 9: CTEI went three-factor, so it aggregates — but only if
+    recomputed from the aggregate's own TCER/CPE/CHR, matching the desktop
+    audit's ``aggregate_ctei_recompute`` check. Averaging per-session CTEI is
+    the same category of error as averaging any other ratio."""
     db = pytest.importorskip("db")
-    rows = [{"total_tokens": 100, "net_loc": 10, "cost_usd": 1.0, "ctei": 5.0,
-             "input_tokens": 10, "output_tokens": 10, "cache_write_tokens": 10,
-             "cache_read_tokens": 70, "code_added": 10, "churn_ratio": 0.1,
-             "chr": 0.7, "tool_call_count": 1, "tool_error_count": 0,
-             "tool_error_rate": 0.0, "read_before_write": 0.5,
-             "search_edit_ratio": 0.5}]
-    assert "ctei" not in db._agg_metrics(rows)
-    assert "ctei" not in db._METRICS
+    metrics = pytest.importorskip("tcer.core.metrics")
+
+    def mk(tok, net, cost, ctei):
+        return {"total_tokens": tok, "net_loc": net, "cost_usd": cost, "ctei": ctei,
+                "input_tokens": tok // 10, "output_tokens": tok // 10,
+                "cache_write_tokens": tok // 10, "cache_read_tokens": tok - 3 * (tok // 10),
+                "code_added": net, "churn_ratio": 0.1, "chr": 0.7,
+                "tool_call_count": 1, "tool_error_count": 0, "tool_error_rate": 0.0,
+                "read_before_write": 0.5, "search_edit_ratio": 0.5}
+
+    # Per-session CTEI values are deliberately absurd (999 / 0) so an average
+    # would be nowhere near the recomputed answer.
+    agg = db._agg_metrics([mk(1_000_000, 1000, 10.0, 999.0), mk(1000, 1, 0.01, 0.0)])
+    expected = metrics.ctei(agg["tcer"], agg["cpe"], agg["chr"])
+    assert agg["ctei"] == pytest.approx(round(expected, 4))
+    assert agg["grade"] == metrics.grade(agg["ctei"])
+    assert agg["_stat"]["ctei"] == "recomputed"
+    assert "ctei" in db._METRICS

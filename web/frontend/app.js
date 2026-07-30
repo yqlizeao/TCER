@@ -24,10 +24,11 @@ async function api(path, opts = {}) {
 }
 
 // ---- 指标定义（前端唯一展示源，与后端字段名对齐）-------------------------
-// CTEI 不在此列：它是单会话指标（NCPI 以当前代码库行数为分母），聚合后必然虚高，
-// 桌面端在聚合报告里已置空，服务端 _agg_metrics 也不再产出，前端必须一致。
+// CTEI 三因子化后聚合有效（服务端按 metrics.ctei 从聚合 TCER/CPE/CHR 重算，
+// 不是对各会话取平均），故保留在曲线指标里。
 const METRICS = [
   { key: "tcer", name: "TCER 效率", unit: "行/百万Token", fmt: "float2" },
+  { key: "ctei", name: "CTEI 综合分", unit: "", fmt: "float3" },
   { key: "net_loc", name: "净增行", unit: "行", fmt: "int" },
   { key: "total_tokens", name: "总 Token", unit: "", fmt: "tok" },
   { key: "cost_usd", name: "成本", unit: "USD", fmt: "money" },
@@ -276,6 +277,7 @@ const DETAIL_COLS = [
   { key: "cost_usd", name: "成本", fmt: "money" },
   { key: "tcer", name: "TCER", fmt: "float2" },
   { key: "cpe", name: "成本/千行", fmt: "money" },
+  { key: "ctei", name: "CTEI", fmt: "float3" },
   { key: "chr", name: "缓存命中", fmt: "pct" },
   { key: "churn_ratio", name: "返工率", fmt: "pct" },
   { key: "read_before_write", name: "先读后写", fmt: "pct" },

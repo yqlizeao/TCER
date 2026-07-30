@@ -69,13 +69,15 @@ mcp-agent 的评测框架（面向开发者自测）、
 1. **没有对比语义。** 只有按人/项目/模型的曲线，没有「A 比 B 好多少、是否可信」。
 2. **没有混杂控制（最大的科学漏洞）。** 模型 A 的 TCER 高于 B，很可能只是因为 A 恰好用在了
    代码创作任务、B 用在了调试任务。不分层直接比 = 结论随机。
-3. **维度不够，问不出用户要的问题。** 上传行里其实有 `source`（4 个 CLI）、`reasoning_effort`、
+3. **维度不够，问不出用户要的问题。** 上传行里其实有 `source`（5 个 CLI）、`reasoning_effort`、
    `approval_policy`、`permission_profile`、`collaboration_mode`、`cli_version`、`task_type`，
    但 DB 一个都没提升为列；**`tool_calls` 压根没导出**——所以 Skill / MCP / 插件维度**当前完全不可分析**。
 4. **没有去噪。** `_agg_metrics` 对比率类指标取**朴素算术平均**，会话 token 量差两个数量级时
    直接触发 Simpson 悖论；重尾分布下一次 2M token 的会话能带偏整组。
-5. **违反项目自身 SSOT。** `CLAUDE.md` 规则 9 明确「聚合层禁用 NCPI/CTEI/评级」，
-   而 `_agg_metrics` 里写着 `"ctei": avg("ctei")` ——桌面端置空、web 端却照算，两端结论打架。
+5. **聚合 CTEI 取了算术平均。** `_agg_metrics` 里写着 `"ctei": avg("ctei")`。
+   CTEI 三因子化后确实可以聚合，但正确做法是**从聚合后的 TCER/CPE/CHR 按公式重算**
+   （桌面端 audit 的 `aggregate_ctei_recompute` 就是这么校验的），对各会话 CTEI 取平均
+   犯的是和「对比率取平均」同一类错误。
 6. **没有可执行输出。** 看完图，用户仍然不知道该改什么。
 
 ---
@@ -91,7 +93,7 @@ mcp-agent 的评测框架（面向开发者自测）、
 
 ### 为什么是 R3
 
-- **只有 TCER 能做。** 四个 CLI 的会话被归一到同一套指标，这是 C 类厂商方案结构性做不到的。
+- **只有 TCER 能做。** 五个 CLI 的会话被归一到同一套指标，这是 C 类厂商方案结构性做不到的。
 - **数据已经在手。** `source` / `reasoning_effort` / `permission_profile` / `tool_calls` 都在会话里，
   只差导出与建模，不需要新的采集能力。
 - **不破坏纯离线。** 全是本地 SQLite 上的统计计算，零联网、零依赖。
@@ -107,7 +109,7 @@ mcp-agent 的评测框架（面向开发者自测）、
 
 **聚合（aggregate）——正确的聚合，而非求和**
 - 比率类指标一律**按分母加权**重算，不取算术平均（消 Simpson 悖论）。
-- 遵守 SSOT：聚合层**不出 CTEI/NCPI/评级**。
+- 遵守 SSOT：聚合 CTEI **按 `metrics.ctei` 公式重算**，不对各会话取平均。
 - Skill / MCP 从 `tool_calls` 的键自动派生（`Skill` 调用、`mcp__<server>__<tool>` 前缀）。
 
 **去噪（de-noise）——默认不信小样本**
@@ -159,7 +161,7 @@ bootstrap + 分层用纯标准库实现不到 200 行，无第三方依赖，符
    - 新增列 `source` / `task_type` / `reasoning_effort` / `approval_policy` /
      `permission_profile` / `collaboration_mode` / `cli_version` / `assistant_turns` /
      `session_duration_minutes` / `high_churn_file_count` / `tool_calls_json`（增量迁移，向后兼容）；
-   - `_agg_metrics` 改为**分母加权**重算比率，并按 SSOT **移除聚合 CTEI**。
+   - `_agg_metrics` 改为**分母加权**重算比率，聚合 CTEI 改为按 `metrics.ctei` 公式重算。
 3. `web/backend/analysis.py`（新）：队列构建、分层、稳健统计、bootstrap CI、证据分级、建议规则。
 4. `web/backend/server.py`：新增 `GET /api/compare`、`GET /api/insights`、`GET /api/dimensions`。
 5. `web/frontend/`：新增「决策实验室」视图（维度选择 + 队列对比表 + 效应量条 + 建议卡片）。
