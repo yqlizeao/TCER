@@ -1,4 +1,4 @@
-# TCER Web — 上传与仪表盘服务端
+# TCER Server — 上传与仪表盘服务端
 
 接收 TCER 客户端上传的效率报告，提供专业的多维效率仪表盘。后端纯 Python 标准库、
 运行时零联网；前端为单页应用（SPA），曲线图使用本地内置的 ECharts（Apache-2.0，
@@ -7,7 +7,7 @@
 ## 目录
 
 ```
-web/
+server/
 ├── backend/           纯 stdlib HTTP 服务
 │   ├── server.py      HTTP 服务 + 路由 + 静态托管
 │   ├── db.py          SQLite 存储 + 聚合查询（去重 / 归一 / 别名）
@@ -22,8 +22,6 @@ web/
 │   ├── style.css      深色主题
 │   └── vendor/
 │       └── echarts.min.js   本地内置图表库（Apache-2.0）
-├── RESEARCH-insights.md    竞品调研 / 现状缺口 / 路线取舍（决策实验室的由来）
-└── PLAN-client-upload.md   GUI 端上传功能实现计划（待实现）
 ```
 
 ## 界面
@@ -44,7 +42,7 @@ web/
   数据源（Claude / Codex / Grok / OpenCode / omp）的不同磁盘结构在客户端各自的
   `read_conversation` 里归一到同一 block 形状再上传。仅上传聚合信息、或未附带明细的记录
   在列表打「仅聚合」tag / 显示补传提示。
-- **决策实验室**（调研与选型见 [RESEARCH-insights.md](RESEARCH-insights.md)）：
+- **决策实验室**：
   - **行动建议**——规则引擎给出「该改什么」的可执行结论（模型选型 / Agent 工具选型 /
     harness 档位 / Skill 与 MCP 插件取舍 / 会话拆小），每条附证据、置信区间与证据等级；
     达不到门槛的维度进「未能给出结论」清单并说明原因。
@@ -54,20 +52,20 @@ web/
 ## 启动
 
 ```bash
-python web/backend/server.py
+python server/backend/server.py
 # 打开 http://127.0.0.1:8899  （默认账号 admin/admin，请尽快修改）
 ```
 
-环境变量：`TCER_WEB_HOST`（默认 127.0.0.1）、`TCER_WEB_PORT`（8899）、
-`TCER_WEB_SECRET`（Token 签名密钥，不设则每次重启随机——重启后旧 Token 失效）、
-`TCER_WEB_DB`（SQLite 路径，默认 `web/backend/tcer_web.db`）。
+环境变量：`TCER_SERVER_HOST`（默认 127.0.0.1）、`TCER_SERVER_PORT`（8899）、
+`TCER_SERVER_SECRET`（Token 签名密钥，不设则每次重启随机——重启后旧 Token 失效）、
+`TCER_SERVER_DB`（SQLite 路径，默认 `server/backend/tcer_server.db`）。
 
 ## 账号管理
 
 ```bash
-python web/backend/manage.py adduser  <用户名> <密码>
-python web/backend/manage.py passwd   <用户名> <新密码>
-python web/backend/manage.py listusers
+python server/backend/manage.py adduser  <用户名> <密码>
+python server/backend/manage.py passwd   <用户名> <新密码>
+python server/backend/manage.py listusers
 ```
 
 > 第一版仅做账号密码校验，登录后不区分权限；细粒度权限后续再补。
@@ -148,5 +146,5 @@ Body 直接复用客户端 `export.report_row_dict` 的字段；服务端只提�
 ## 造数
 
 ```bash
-python web/backend/seed_mock.py   # 近 30 天多人/多项目/多模型样本（含模型变体，验证自动归一）
+python server/backend/seed_mock.py   # 近 30 天多人/多项目/多模型样本（含模型变体，验证自动归一）
 ```

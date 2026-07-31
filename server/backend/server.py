@@ -1,4 +1,4 @@
-"""TCER web backend — pure-stdlib HTTP server.
+"""TCER server backend — pure-stdlib HTTP server.
 
 Endpoints
 ---------
@@ -19,13 +19,13 @@ GET  /api/health                                                -> {ok:true}
 Static frontend is served from ``../frontend`` for any non-/api path.
 
 Run:
-    python -m web.backend.server            # from repo root
-    python web/backend/server.py            # direct
+    python -m server.backend.server         # from repo root
+    python server/backend/server.py         # direct
 Env:
-    TCER_WEB_HOST (default 127.0.0.1)
-    TCER_WEB_PORT (default 8899)
-    TCER_WEB_SECRET  (token signing key; random if unset)
-    TCER_WEB_DB      (sqlite path)
+    TCER_SERVER_HOST (default 127.0.0.1)
+    TCER_SERVER_PORT (default 8899)
+    TCER_SERVER_SECRET  (token signing key; random if unset)
+    TCER_SERVER_DB      (sqlite path)
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-# Allow running as a script (python web/backend/server.py) or as a module.
+# Allow running as a script (python server/backend/server.py) or as a module.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import analysis  # noqa: E402
 import auth  # noqa: E402
@@ -56,7 +56,7 @@ _CONTENT_TYPES = {
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TCERWeb/0.2"
+    server_version = "TCERServer/0.2"
 
     # -- helpers ----------------------------------------------------------- #
     def _send_json(self, obj: dict, status: int = 200) -> None:
@@ -321,11 +321,11 @@ def main() -> None:
     # Bootstrap a default admin/admin account on an empty DB for first-run.
     if db.user_count() == 0:
         db.create_user("admin", "admin")
-        sys.stderr.write("[tcer-web] created default user admin/admin — change it!\n")
-    host = os.environ.get("TCER_WEB_HOST", "127.0.0.1")
-    port = int(os.environ.get("TCER_WEB_PORT", "8899"))
+        sys.stderr.write("[tcer-server] created default user admin/admin — change it!\n")
+    host = os.environ.get("TCER_SERVER_HOST", "127.0.0.1")
+    port = int(os.environ.get("TCER_SERVER_PORT", "8899"))
     httpd = ThreadingHTTPServer((host, port), Handler)
-    sys.stderr.write(f"[tcer-web] serving on http://{host}:{port}\n")
+    sys.stderr.write(f"[tcer-server] serving on http://{host}:{port}\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

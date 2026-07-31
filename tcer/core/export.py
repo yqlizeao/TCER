@@ -318,7 +318,7 @@ _CSV_EXCLUDED = frozenset({
     "git_repository", "permission_profile",
     "rate_limit_names", "abort_reasons", "mcp_calls_by_attr", "cost_by_model",
     # Dict-valued: one CSV column per tool name would be unbounded and unstable
-    # across sessions. Uploaded as JSON to the web layer instead.
+    # across sessions. Uploaded as JSON to the server layer instead.
     "tool_calls", "tool_variants",
 })
 

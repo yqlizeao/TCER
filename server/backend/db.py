@@ -1,10 +1,10 @@
 """SQLite storage for uploaded TCER reports.
 
 Pure stdlib for storage; reuses ``tcer.core.pricing`` for model-id
-normalization so the web layer agrees with the desktop app on which raw model
+normalization so the server layer agrees with the desktop app on which raw model
 strings are "the same model" (e.g. ``claude-opus-4-8`` ≡ ``claude-opus-4.8``).
 
-One file DB (``tcer_web.db`` next to this module by default, or ``TCER_WEB_DB``
+One file DB (``tcer_server.db`` next to this module by default, or ``TCER_SERVER_DB``
 env override). Tables:
 
 - ``users``            : login credentials (salted PBKDF2 hash).
@@ -40,11 +40,11 @@ if str(_REPO_ROOT) not in sys.path:
 try:
     from tcer.core import metrics as tcer_metrics  # noqa: E402
     from tcer.core import pricing  # noqa: E402
-except Exception:  # pragma: no cover - web can still run without the package
+except Exception:  # pragma: no cover - server can still run without the package
     pricing = None  # type: ignore
     tcer_metrics = None  # type: ignore
 
-_DB_PATH = Path(os.environ.get("TCER_WEB_DB") or (Path(__file__).parent / "tcer_web.db"))
+_DB_PATH = Path(os.environ.get("TCER_SERVER_DB") or (Path(__file__).parent / "tcer_server.db"))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (

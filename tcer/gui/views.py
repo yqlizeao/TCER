@@ -354,7 +354,7 @@ class FilterBar:
     def _make_upload_button(self, parent) -> tk.Button:
         btn = flat_button(parent, "上传…", self.controller.show_upload,
                           padx=theme.PAD_M, image=ui_icon(parent, "upload"), compound="left")
-        Tooltip(btn, "上传当前项目的效率报告到 TCER Web")
+        Tooltip(btn, "上传当前项目的效率报告到 TCER Server")
         return btn
 
     def _date_entry(self, bar, var, tip):

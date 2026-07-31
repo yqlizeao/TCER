@@ -1,10 +1,10 @@
-"""Seed the TCER web DB with mock data for acceptance testing.
+"""Seed the TCER server DB with mock data for acceptance testing.
 
 Generates sessions across several people / projects / models over the past
 ~30 days so every filter and all three dimension charts have something to show.
 Idempotent-ish: wipes existing rows first so re-running gives a clean set.
 
-    python web/backend/seed_mock.py
+    python server/backend/seed_mock.py
 
 The data has a **planted ground truth** so the Decision Lab can be checked
 against a known answer rather than eyeballed:
