@@ -49,6 +49,7 @@ class UpdatePopup:
                  font=theme.FONT_HEADING, pady=10).pack()
 
         body = tk.Frame(win, bg=theme.BG)
+        self._body = body
         body.pack(fill="both", expand=True, padx=12)
 
         if release is None:
@@ -112,6 +113,17 @@ class UpdatePopup:
             if not self._progress.winfo_ismapped():
                 self._progress.pack(anchor="w", pady=(8, 0))
             self._progress.config(text=text)
+        except tk.TclError:
+            pass
+
+    def offer_manual_download(self, url):
+        """自动更新失败后,提供「前往下载」回退(浏览器下载更鲁棒、可走代理)。"""
+        import webbrowser
+
+        try:
+            flat_button(self._body, "前往下载", primary=True,
+                        command=lambda: webbrowser.open(url or "")
+                        ).pack(anchor="w", pady=(8, 0))
         except tk.TclError:
             pass
 

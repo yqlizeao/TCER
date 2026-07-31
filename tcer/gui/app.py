@@ -161,6 +161,7 @@ class TcerGui:
                 self.root.after(800, self._quit_for_update)
             except Exception as e:
                 self.root.after(0, lambda: popup.set_progress(f"更新失败:{e}"))
+                self.root.after(0, lambda: popup.offer_manual_download(release.get("url", "")))
 
         threading.Thread(target=_work, daemon=True).start()
 

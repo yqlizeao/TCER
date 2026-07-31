@@ -50,7 +50,12 @@ def asset_for_current_platform(release):
 
 def download(url, dest, progress_cb=None, chunk=1 << 15):
     """流式下载 url 到 dest;progress_cb(done_bytes, total_bytes|None) 可选。"""
-    req = urllib.request.Request(url, headers={"User-Agent": "TCER"})
+    # GitHub release asset 经 objects CDN 分发,默认/短 UA 易被 403;
+    # 用浏览器样 UA + Accept 是官方推荐的 asset 下载方式。
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; TCER-Updater)",
+        "Accept": "application/octet-stream",
+    })
     with urllib.request.urlopen(req, timeout=60) as resp:
         total = resp.headers.get("Content-Length")
         total = int(total) if total else None
