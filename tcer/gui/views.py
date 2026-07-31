@@ -285,8 +285,10 @@ class FilterBar:
 
     def _update_view_btns(self) -> None:
         current = self.view_mode.get()
+        # 选中态用视角标识色：会话=蓝、项目=橙黄（与指标/模型页签视角图标同色系）。
+        _sel = {"session": theme.ACCENT, "project": theme.VIEW_PROJECT}
         for val, btn in self._view_btns.items():
-            bg = theme.ACCENT if val == current else "#333333"
+            bg = _sel.get(val, theme.ACCENT) if val == current else "#333333"
             fg = "#ffffff" if val == current else theme.MUTED
             btn.config(bg=bg, fg=fg)
             self._view_pills[val].config(bg=bg)
@@ -734,7 +736,7 @@ class SessionColumn:
                           relief="flat", borderwidth=0, highlightthickness=0,
                           font=theme.FONT_UI_SMALL)
         search.pack(side="left", padx=(2, 5), pady=1)
-        Tooltip(search, "按标题 / 会话 ID 过滤（实时）")
+        Tooltip(search, "按标题 / 会话 ID / 模型 过滤（实时）")
         # 红旗快速过滤：点击只看打了红旗的会话（与搜索词叠加）。
         self._flag_only = tk.BooleanVar(value=False)
         self._ff_img = {"off": ui_icon(header, "flag"), "on": ui_icon(header, "flag-on")}
@@ -815,6 +817,7 @@ class SessionColumn:
                 r for r in self._all_reports
                 if needle in (r.meta.title or "").casefold()
                 or needle in (r.meta.session_id or r.meta.path.stem).casefold()
+                or any(needle in _m.casefold() for _m in r.usage.models)
             ]
         else:
             self._reports = list(self._all_reports)

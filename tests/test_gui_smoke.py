@@ -544,3 +544,10 @@ def test_session_column_pin_flag_marks(root, reports):
     root.update_idletasks()
     assert len(col._reports) == 1
     assert col._reports[0].meta.session_id == "s2"
+    # 模型模糊搜索:搜 "opus" 匹配 claude-opus-4-8(全部 3 个)
+    col._flag_only.set(False)
+    col._filter_var.set("opus")
+    root.update_idletasks()
+    assert len(col._reports) == 3
+    col._filter_var.set("")
+    root.update_idletasks()

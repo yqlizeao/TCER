@@ -572,11 +572,17 @@ class TcerGui:
         self._update_model_compare()
 
     def _update_tab_names(self) -> None:
-        """Update tab names with (项目) or (会话) suffix based on view mode."""
+        """页签名加 (项目)/(会话) 后缀 + 彩色视角图标。
+
+        ttk 页签无法 per-tab 染文字色，故用 per-tab image 区分：指标分类/模型对比
+        显示彩色视角图标（会话=蓝双气泡、项目=橙文件），排名/趋势保留原功能图标。
+        """
         mode = self.view_mode.get()
-        suffix = "(会话)" if mode == "session" and self._selected_session_id else "(项目)"
-        self._nb.tab(0, text=f"指标分类 {suffix}")
-        self._nb.tab(1, text=f"模型对比 {suffix}")
+        is_session = mode == "session" and self._selected_session_id
+        suffix = "(会话)" if is_session else "(项目)"
+        view_icon = views.ui_icon(self._nb, "view-session" if is_session else "view-project")
+        self._nb.tab(0, text=f"指标分类 {suffix}", image=view_icon, compound="left")
+        self._nb.tab(1, text=f"模型对比 {suffix}", image=view_icon, compound="left")
         self._nb.tab(2, text="综合效率分排名")
         self._nb.tab(3, text="趋势")
 
