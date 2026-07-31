@@ -34,6 +34,7 @@ ACCENT = "#007acc"
 SUCCESS = "#4ec9b0"
 WARNING = "#ce9178"
 ERROR = "#f48771"
+VIEW_PROJECT = "#cc7a1e"   # 项目视角标识色（橙黄，与会话蓝 ACCENT 区分）
 
 # Metric semantic levels → display color.
 # basic (white): absolute baseline values and direct calculations.
