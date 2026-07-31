@@ -372,8 +372,10 @@ def _timeline_section(report: SessionReport) -> str:
         segs = "".join(
             f'<span style="display:inline-block;height:10px;width:{v / max_tok * 200:.0f}px;'
             f'background:{color}"></span>'
-            for v, color in ((t.input_tokens, "#569cd6"), (t.cache_write, "#ce9178"),
-                             (t.cache_read, "#4ec9b0"), (t.output_tokens, "#dcdcaa"))
+            for v, color in ((t.input_tokens, theme.TOKEN_COLORS["input"]),
+                             (t.cache_write, theme.TOKEN_COLORS["cache_write"]),
+                             (t.cache_read, theme.TOKEN_COLORS["cache_read"]),
+                             (t.output_tokens, theme.TOKEN_COLORS["output"]))
             if v > 0)
         dur = fmt.fmt_duration_ms(t.duration_ms, short=True)
         err = f'<span style="color:{theme.ERROR}">⚠ {t.errors}</span>' if t.errors else ""
@@ -388,10 +390,11 @@ def _timeline_section(report: SessionReport) -> str:
     head = ("<tr><th class='num'>回合</th><th>时间</th><th>Token 构成</th>"
             "<th class='num'>总 Token</th><th class='num'>输出</th>"
             "<th class='num'>耗时</th><th class='num'>工具</th><th>错误</th></tr>")
-    legend = ('<p class="note">构成条：<span style="color:#569cd6">■输入</span> '
-              '<span style="color:#ce9178">■缓存写</span> '
-              '<span style="color:#4ec9b0">■缓存读</span> '
-              '<span style="color:#dcdcaa">■输出</span>；'
+    _tc = theme.TOKEN_COLORS
+    legend = (f'<p class="note">构成条：<span style="color:{_tc["input"]}">■输入</span> '
+              f'<span style="color:{_tc["cache_write"]}">■缓存写</span> '
+              f'<span style="color:{_tc["cache_read"]}">■缓存读</span> '
+              f'<span style="color:{_tc["output"]}">■输出</span>；'
               "耗时仅在数据源提供权威回合耗时（不含用户暂停）时显示。</p>")
     return (f"<h2>会话时间线（{len(stats)} 回合）</h2>{legend}"
             f'<div class="scroll"><table class="sortable"><thead>{head}</thead>'

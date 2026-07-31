@@ -30,6 +30,21 @@
 - **收编常量**（曾散落为 magic hex，一律引用）：`CONTROL_BG` 控件底（分段控件/进度条槽/表头）、`CARD_HEADER_BG` 弹窗头部卡片底、`SEL_ROW_BG` 选中行淡蓝、`WARN_TINT_BG` 警示条暗橙底（配 `WARNING` 字）、`FG_WHITE` 选中态纯白字、`BORDER_HOVER` 卡片 hover 边框。
 - **CTEI 评级色**：`GRADE_HEX`（优秀→极端低效）是 grade 染色唯一源，排名分布条 / 趋势 CTEI 带都派生自它。
 - **分组色**：`GROUP_COLORS`（G1–G6 + `G_NEUTRAL`）是组级背景色，**为大块表头填充设计，偏暗**——细折线不可直接用（见 §9）。
+- **Token 构成四色** `TOKEN_COLORS`（输入蓝/缓存写橙/缓存读青/输出黄）：时间线、模型弹窗、HTML 报告、会话对比**必须同源取此 dict**——曾因两套配色冲突（青一处=输出、另一处=缓存读）跨窗误读。注意缓存写与 `WARNING`、缓存读与 `SUCCESS` 同值，语义靠上下文区分。
+- **图表 palette** `CHART_PALETTE`（6 色循环，语法高亮系）：多列对比、多模型色带、弹窗强调色统一从这取；小节标题 `SECTION_ACCENT`、基准值 `BASELINE_ACCENT`、奖牌 `MEDAL_COLORS`、危险操作 `DANGER`/`DANGER_ACTIVE`。
+
+### 色相 → 语义倒排表（新增语义色前先查，防撞色）
+
+| 色相 | 已占用语义 |
+|---|---|
+| 蓝 `#007acc` 系 | `ACCENT` 强调/会话视角；`HEATMAP_RAMP` 强度；`TOKEN_COLORS.input`；`CHART_PALETTE[0]` |
+| 青 `#4ec9b0` | `SUCCESS` 好方向；`TOKEN_COLORS.cache_read` |
+| 暖橙 `#ce9178` | `WARNING` 警示；成本条；`TOKEN_COLORS.cache_write` |
+| 橙 `#cc7a1e`/`#f39c12` | `VIEW_PROJECT` 项目视角；`LEVEL_COMPOUND` 复合指标标题；`HEATMAP_RAMP_BAD` 坏方向强度 |
+| 黄 `#dcdcaa` | `TOKEN_COLORS.output`；`BASELINE_ACCENT` 基准值 |
+| 金 `#e0b341`/`#ffd700` | `VALUE_BEST` 行最优；`MEDAL_COLORS[0]` 金牌 |
+| 红 `#f48771`/`#e53935` | `ERROR` 坏方向值；`DANGER` 危险操作 |
+| 紫 `#c586c0` | `CHART_PALETTE[4]` 分类色/记忆文件强调 |
 
 ---
 

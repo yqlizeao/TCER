@@ -195,3 +195,21 @@ HEATMAP_RAMP = ("#153a57", "#0f5d94", HOVER_ACCENT, "#6dbdf2")
 # 坏方向指标（sentiment="down"，如返工率）用橙阶：值越高越「差」，蓝的强度
 # 中性语义不适用，橙与 WARNING 同语义族但独立分档，暗→亮对应 低→高（差）。
 HEATMAP_RAMP_BAD = ("#4a2e15", "#8a5220", "#c97a2a", "#f2a75c")
+
+# --- 语义套色（收编自弹窗/图表散落 hex，VS Code 语法高亮系）---
+# Token 构成四色：时间线 / 模型弹窗 / HTML 报告 / 会话对比 必须同源。
+# 曾有两套冲突配色（ModelsPopup 青=输出，时间线 青=缓存读）造成跨窗误读。
+# 注意：cache_write 与 WARNING 同值、cache_read 与 SUCCESS 同值，语义靠上下文。
+TOKEN_COLORS = {
+    "input": "#569cd6",        # 蓝 — 输入
+    "cache_write": "#ce9178",  # 橙 — 缓存写（创建）
+    "cache_read": "#4ec9b0",   # 青 — 缓存读（命中）
+    "output": "#dcdcaa",       # 黄 — 输出
+}
+# 图表分类 palette（多列/多模型循环取色），与 TOKEN_COLORS 同族色。
+CHART_PALETTE = ("#569cd6", "#4ec9b0", "#dcdcaa", "#ce9178", "#c586c0", "#9cdcfe")
+SECTION_ACCENT = "#9cdcfe"    # 弹窗内小节标题淡蓝
+BASELINE_ACCENT = "#dcdcaa"   # 基准值黄（BaselinesPopup）
+MEDAL_COLORS = ("#ffd700", "#a335ee", "#0070dd")   # 排名奖牌 金/紫/蓝
+DANGER = "#e53935"            # 危险操作红（删除确认主按钮）
+DANGER_ACTIVE = "#c62828"     # 危险按钮按下/悬停态
