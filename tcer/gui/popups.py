@@ -93,7 +93,11 @@ class UpdatePopup:
                 flat_button(body, "前往下载", primary=True,
                             command=lambda: webbrowser.open(release.get("url") or "")
                             ).pack(anchor="w", pady=(8, 0))
-        # 发布说明(已清理 markdown):新版显示新版本内容,已是最新则显示当前版本内容
+        # 下载进度文字:按钮下方、发布说明上方(初始空,下载时由 set_progress 填字)
+        self._progress = tk.Label(body, text="", bg=theme.BG, fg=theme.MUTED,
+                                  font=theme.FONT_UI_SMALL, wraplength=400, justify="left")
+        self._progress.pack(anchor="w", pady=(4, 0))
+        # 发布说明(已清理 markdown):纯文本展示在进度下方
         notes = update_check.render_notes(release.get("notes") or "")
         if notes:
             sf = ScrollFrame(body, bg=theme.PANEL)
@@ -103,16 +107,11 @@ class UpdatePopup:
             tk.Label(sf.inner, text=notes, bg=theme.PANEL, fg=theme.FG,
                      font=theme.FONT_UI_SMALL, wraplength=400, justify="left",
                      anchor="nw").pack(fill="x")
-        # 下载进度文字(由 controller 经 set_progress 在主线程更新)
-        self._progress = tk.Label(body, text="", bg=theme.BG, fg=theme.MUTED,
-                                  font=theme.FONT_UI_SMALL, wraplength=400, justify="left")
         # 无底部「关闭」按钮:标题栏 × 即可关闭
 
     def set_progress(self, text):
-        """供 controller 在主线程更新下载进度文字。"""
+        """供 controller 在主线程更新下载进度文字(label 已在按钮下方常驻)。"""
         try:
-            if not self._progress.winfo_ismapped():
-                self._progress.pack(anchor="w", pady=(8, 0))
             self._progress.config(text=text)
         except tk.TclError:
             pass
