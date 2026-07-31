@@ -862,6 +862,7 @@ class RadarPopup:
 
         sid = (report.meta.session_id or report.meta.path.stem)[:16]
         win = _new_window(parent, f"效率雷达 · {sid}…", "460x560")
+        win.bind("<Escape>", lambda e: win.destroy())  # 无显式关闭按钮,Esc 兜底
         tk.Label(win, text="六维效率雷达", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=8).pack()
 
@@ -934,9 +935,7 @@ class RadarPopup:
 
         canvas.create_text(cx, 14, text="绝对刻度，外圈 = 100%",
                            fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-
-        flat_button(win, "关闭", win.destroy, primary=True,
-                    padx=theme.PAD_L * 2).pack(pady=theme.PAD_M)
+        # 无显式「关闭」按钮:标题栏 × / Esc 即可
 
     @staticmethod
     def _normalize(raw, ntype, ref):
