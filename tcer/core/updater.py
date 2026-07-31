@@ -71,6 +71,18 @@ def download(url, dest, progress_cb=None, chunk=1 << 15):
                     progress_cb(done, total)
 
 
+def _clean_launch_env():
+    """去掉 PyInstaller onefile 内部环境变量后再启动新 exe / updater 脚本。
+
+    Why: onefile bootloader 把 ``_PYI_APPLICATION_HOME_DIR`` 等变量注入环境;
+    若继承给新 exe,它的 bootloader 会当成 child 复用**旧** _MEI(已被旧进程
+    退出时清理),导致 ``python311.dll`` LoadLibrary 失败。清掉这些变量,新 exe
+    才会正常解压到自己的新 _MEI。
+    """
+    return {k: v for k, v in os.environ.items()
+            if not (k.startswith("_MEI") or k.startswith("_PYI"))}
+
+
 def apply_and_restart(new_binary):
     """用 new_binary 替换当前可执行文件并启动新进程。
 
@@ -106,8 +118,9 @@ def _windows_replace(exe, new_binary):
         'del "%~f0" >nul 2>nul\r\n',
         encoding="mbcs",
     )
-    # 独立进程跑 bat;本程序随后退出释放 exe 句柄
-    subprocess.Popen(["cmd", "/c", str(bat)], close_fds=True)
+    # 独立进程跑 bat;本程序随后退出释放 exe 句柄。清掉 _PYI*/_MEI* 环境变量,
+    # 免得 bat start 的新 exe 误复用旧 _MEI(python311.dll 找不到)。
+    subprocess.Popen(["cmd", "/c", str(bat)], env=_clean_launch_env(), close_fds=True)
 
 
 def _mac_replace(exe, new_binary):
@@ -120,4 +133,4 @@ def _mac_replace(exe, new_binary):
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
-    subprocess.Popen([str(exe)], close_fds=True)
+    subprocess.Popen([str(exe)], env=_clean_launch_env(), close_fds=True)
