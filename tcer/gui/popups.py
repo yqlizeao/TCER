@@ -131,7 +131,7 @@ class UpdatePopup:
 class SessionDetailPopup:
     """会话详情 — metadata + per-model cost breakdown, unified card style."""
 
-    _COST_COLOR = "#ce9178"  # warm orange for cost bars
+    _COST_COLOR = theme.WARNING  # 成本条暖橙（与 WARNING 同源）
 
     def __init__(self, parent, report) -> None:
         from tcer.core import metrics as metrics_mod
@@ -182,7 +182,7 @@ class SessionDetailPopup:
             tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
             sec = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=4)
             sec.pack(fill="x")
-            tk.Label(sec, text="逐模型成本", bg=theme.PANEL, fg="#9cdcfe",
+            tk.Label(sec, text="逐模型成本", bg=theme.PANEL, fg=theme.SECTION_ACCENT,
                      font=theme.FONT_UI_BOLD).pack(anchor="w")
 
             # Build sorted items
@@ -314,10 +314,10 @@ class ModelsPopup:
 
     # Token type colors (stacked bar segments)
     _COLORS = {
-        "input":          "#569cd6",  # blue
-        "output":         "#4ec9b0",  # teal
-        "cache_creation": "#dcdcaa",  # yellow
-        "cache_read":     "#6a6a6a",  # gray
+        "input":          theme.TOKEN_COLORS["input"],
+        "output":         theme.TOKEN_COLORS["output"],
+        "cache_creation": theme.TOKEN_COLORS["cache_write"],
+        "cache_read":     theme.TOKEN_COLORS["cache_read"],
     }
     # Token-type labels sourced from the metric SSOT (G2 names) so they read
     # identically to the 指标分类 tab — input/output/缓存创建/缓存命中.
@@ -441,9 +441,9 @@ class ModelsPopup:
 class CostBreakdownPopup:
     """成本明细 — per-model cost sorted by cost, with cost-effectiveness metric."""
 
-    _COLOR = "#ce9178"  # warm orange for cost bars
+    _COLOR = theme.WARNING  # 成本条暖橙（与 WARNING 同源）
     # Top 3 efficiency — gold / purple / blue
-    _MEDAL = ["#ffd700", "#a335ee", "#0070dd"]
+    _MEDAL = list(theme.MEDAL_COLORS)
 
     def __init__(self, parent, usage, title_suffix: str = "") -> None:
         from tcer.core import metrics as metrics_mod
@@ -552,7 +552,7 @@ class CostBreakdownPopup:
 class BaselinesPopup:
     """计算出的个人基准 + 应用按钮，统一卡片风格。"""
 
-    _COLOR = "#dcdcaa"  # yellow for baseline values
+    _COLOR = theme.BASELINE_ACCENT
 
     def __init__(self, parent, values: dict, n_sessions: int, on_apply) -> None:
         win = _new_window(parent, "计算个人基准", "440x360")
@@ -652,7 +652,7 @@ class AdvancedPopup:
 class UserMsgsPopup:
     """用户消息 — all user messages in this session, card-style layout."""
 
-    _ACCENT = "#569cd6"  # blue accent for badges
+    _ACCENT = theme.CHART_PALETTE[0]  # blue accent for badges
 
     def __init__(self, parent, messages: list[str]) -> None:
         total_chars = sum(len(m) for m in messages)
@@ -697,7 +697,7 @@ class UserMsgsPopup:
 class FilesTouchedPopup:
     """涉及文件 — all files read/written/edited, with proportional bars."""
 
-    _COLOR = "#569cd6"  # blue
+    _COLOR = theme.CHART_PALETTE[0]  # blue
 
     def __init__(self, parent, details: dict[str, int]) -> None:
         win = _new_window(parent, "涉及文件", "560x480")
@@ -732,7 +732,7 @@ class FilesTouchedPopup:
         if len(dir_counts) > 1:
             sec = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=4)
             sec.pack(fill="x")
-            tk.Label(sec, text="目录热度", bg=theme.PANEL, fg="#9cdcfe",
+            tk.Label(sec, text="目录热度", bg=theme.PANEL, fg=theme.SECTION_ACCENT,
                      font=theme.FONT_UI_BOLD).pack(anchor="w")
             max_dir = top_dirs[0][1]
             for d, cnt in top_dirs:
@@ -744,7 +744,7 @@ class FilesTouchedPopup:
                          width=48).pack(side="left")
                 bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=6)
                 bar_bg.pack(side="left", fill="x", expand=True, padx=4)
-                tk.Frame(bar_bg, bg="#ce9178", height=6).place(
+                tk.Frame(bar_bg, bg=theme.WARNING, height=6).place(
                     relx=0, rely=0, relwidth=cnt / max_dir, relheight=1.0)
                 tk.Label(row, text=str(cnt), bg=theme.PANEL, fg=theme.MUTED,
                          font=(theme.FONT_MONO_NAME, 8), width=5,
@@ -776,7 +776,7 @@ class MemoryFilesPopup:
     风格与 FilesTouchedPopup 一致（卡片 + 比例条），多一个「打开目录」按钮。
     """
 
-    _COLOR = "#c586c0"  # purple accent for memory files
+    _COLOR = theme.CHART_PALETTE[4]  # purple accent for memory files
 
     def __init__(self, parent, memory_dir: str, files: list[str]) -> None:
         from .platform import open_in_file_manager, FILE_MANAGER_NAME
@@ -972,8 +972,8 @@ class ConfirmDeletePopup:
     ``on_confirm()``。删除真正的磁盘操作由调用方在回调里完成。
     """
 
-    _DANGER = "#e53935"          # 醒目红 — 删除按钮
-    _DANGER_ACTIVE = "#c62828"   # 按下/悬停态
+    _DANGER = theme.DANGER
+    _DANGER_ACTIVE = theme.DANGER_ACTIVE
 
     def __init__(self, parent, *, title: str, session_id: str, on_confirm) -> None:
         win = _new_window(parent, "删除会话", "460x250")
@@ -1311,7 +1311,7 @@ def _copy(win, text: str) -> None:
     win.clipboard_clear()
     win.clipboard_append(text)
     # small transient confirmation
-    toast = tk.Label(win, text="已复制到剪贴板", bg=theme.SUCCESS, fg="#000000",
+    toast = tk.Label(win, text="已复制到剪贴板", bg=theme.SUCCESS, fg=theme.BG,
                      font=theme.FONT_UI, padx=8, pady=2)
     toast.place(relx=0.5, rely=0.02, anchor="n")
     win.after(1200, toast.destroy)

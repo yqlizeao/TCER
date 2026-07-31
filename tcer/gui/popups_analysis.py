@@ -22,7 +22,7 @@ class SessionComparePopup:
     全为「-」或「不适用」的行自动隐藏。
     """
 
-    _COL_COLORS = ["#569cd6", "#4ec9b0", "#dcdcaa"]
+    _COL_COLORS = list(theme.CHART_PALETTE[:3])
     _NONE = "（不选）"
 
     def __init__(self, parent, reports, preselect_sid: str | None = None) -> None:
@@ -166,10 +166,7 @@ class SessionTimelinePopup:
     （Claude turn_duration / Codex task_complete / Grok apiDurationMs）。
     """
 
-    _COLORS = {
-        "input": "#569cd6", "cache_write": "#ce9178",
-        "cache_read": "#4ec9b0", "output": "#dcdcaa",
-    }
+    _COLORS = theme.TOKEN_COLORS
     _PAD_L = 56
     _PAD_R = 16
     _PAD_T = 34
@@ -268,13 +265,13 @@ class SessionTimelinePopup:
                 y = base_y - (t.duration_ms / max_dur) * plot_h * 0.9
                 pts.append((x, y))
             for i in range(1, len(pts)):
-                c.create_line(*pts[i - 1], *pts[i], fill="#c586c0", width=2)
+                c.create_line(*pts[i - 1], *pts[i], fill=theme.CHART_PALETTE[4], width=2)
             for x, y in pts:
-                c.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#c586c0",
+                c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=theme.CHART_PALETTE[4],
                               outline="")
             c.create_text(w - self._PAD_R, self._PAD_T - 12,
                           text=f"耗时（紫线，峰值 {fmt.fmt_duration_ms(max_dur, short=True)}）",
-                          fill="#c586c0", font=theme.FONT_UI_SMALL, anchor="e")
+                          fill=theme.CHART_PALETTE[4], font=theme.FONT_UI_SMALL, anchor="e")
 
         # X 轴回合刻度（稀疏）
         tick_every = max(1, n // 12)
@@ -287,8 +284,7 @@ class SessionTimelinePopup:
         distinct_models = sorted({t.model for t in stats if t.model})
         if len(distinct_models) > 1:
             from tcer.core.pricing import label as _model_label
-            palette = ["#569cd6", "#4ec9b0", "#dcdcaa", "#ce9178",
-                       "#c586c0", "#9cdcfe"]
+            palette = list(theme.CHART_PALETTE)
             cmap = {m: palette[i % len(palette)]
                     for i, m in enumerate(distinct_models)}
             for idx, t in enumerate(stats):
