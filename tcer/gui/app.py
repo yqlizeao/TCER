@@ -57,7 +57,7 @@ class TcerGui:
         for opt, val in (("*TCombobox*Listbox*background", theme.PANEL),
                          ("*TCombobox*Listbox*foreground", theme.FG),
                          ("*TCombobox*Listbox*selectBackground", theme.ACCENT),
-                         ("*TCombobox*Listbox*selectForeground", "#ffffff"),
+                         ("*TCombobox*Listbox*selectForeground", theme.FG_WHITE),
                          # 去掉 tk 按钮/复选/单选点击后的聚焦框（Entry 不在此列——
                          # 日期/搜索框的边框靠各自显式 highlightthickness=1 保留）。
                          ("*Button*highlightThickness", 0),

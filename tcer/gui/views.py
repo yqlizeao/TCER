@@ -189,7 +189,7 @@ class FilterBar:
 
         # -- View switcher: segmented control --
         self.view_mode = controller.view_mode
-        seg_bg = tk.Frame(bar, bg="#333333", padx=2, pady=2)
+        seg_bg = tk.Frame(bar, bg=theme.CONTROL_BG, padx=2, pady=2)
         seg_bg.pack(side="left", padx=(0, 12))
         self._view_btns: dict[str, tk.Label] = {}
         self._view_pills: dict[str, tk.Frame] = {}
@@ -198,13 +198,13 @@ class FilterBar:
         for label, val in [("项目视角", "project"), ("会话视角", "session")]:
             # 每个 pill 一个容器 Frame：图标/文字 Label 都装在里面，三者 bg
             # 同步切换 → 图标与文字之间不留接缝（两个独立 Label 会有缝隙）。
-            pill = tk.Frame(seg_bg, bg="#333333")
+            pill = tk.Frame(seg_bg, bg=theme.CONTROL_BG)
             pill.pack(side="left", padx=1)
             self._view_pills[val] = pill
             click = lambda e, v=val: self._set_view(v)
             icon = _seg_icons.get(val)
             if icon is not None:
-                il = tk.Label(pill, image=icon, bg="#333333", cursor="hand2")
+                il = tk.Label(pill, image=icon, bg=theme.CONTROL_BG, cursor="hand2")
                 il.pack(side="left", padx=(4, 0))
                 il.bind("<Button-1>", click)
                 self._view_icon_lbls[val] = il
@@ -288,8 +288,8 @@ class FilterBar:
         # 选中态用视角标识色：会话=蓝、项目=橙黄（与指标/模型页签视角图标同色系）。
         _sel = {"session": theme.ACCENT, "project": theme.VIEW_PROJECT}
         for val, btn in self._view_btns.items():
-            bg = _sel.get(val, theme.ACCENT) if val == current else "#333333"
-            fg = "#ffffff" if val == current else theme.MUTED
+            bg = _sel.get(val, theme.ACCENT) if val == current else theme.CONTROL_BG
+            fg = theme.FG_WHITE if val == current else theme.MUTED
             btn.config(bg=bg, fg=fg)
             self._view_pills[val].config(bg=bg)
             il = self._view_icon_lbls.get(val)
@@ -363,7 +363,7 @@ class FilterBar:
         wrap = tk.Frame(bar, bg=theme.BG)
         e = tk.Entry(wrap, textvariable=var, width=10, bg=theme.PANEL, fg=theme.FG,
                      insertbackground=theme.FG, relief="flat", highlightthickness=1,
-                     highlightbackground="#3e3e42", highlightcolor=theme.ACCENT)
+                     highlightbackground=theme.BORDER, highlightcolor=theme.ACCENT)
         e.bind("<Return>", lambda ev: self._validate_and_reanalyze(var))
         e.bind("<FocusOut>", lambda ev: self._validate_and_reanalyze(var))
         Tooltip(e, tip + "（YYYY-MM-DD）。回车/失焦生效，或点 ▦ 选择日期。")
@@ -371,7 +371,7 @@ class FilterBar:
         cal_icon = ui_icon(wrap, "calendar")
         cal = tk.Label(wrap, text="" if cal_icon else "▦", image=cal_icon, compound="left",
                        bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI, cursor="hand2", padx=5,
-                       highlightthickness=1, highlightbackground="#3e3e42")
+                       highlightthickness=1, highlightbackground=theme.BORDER)
         Tooltip(cal, "点击选择日期")
         cal.bind("<Enter>", lambda _ev: cal.config(fg=theme.ACCENT), add="+")
         cal.bind("<Leave>", lambda _ev: cal.config(fg=theme.MUTED), add="+")
@@ -724,7 +724,7 @@ class SessionColumn:
         # 搜索框：放大镜置于框内左侧（Frame 包裹，视觉一体），点放大镜聚焦输入。
         self._filter_var = tk.StringVar(value="")
         search_wrap = tk.Frame(header, bg=theme.PANEL_2, highlightthickness=1,
-                               highlightbackground="#3e3e42")
+                               highlightbackground=theme.BORDER)
         search_wrap.pack(side="right")  # 先 pack → 占最右
         _si = ui_icon(search_wrap, "search")
         if _si is not None:
@@ -1438,10 +1438,10 @@ class CteiRankingView:
             if self._grade_filter and self._grade_filter != g:
                 fill = "#3a3a3a"
             c.create_rectangle(x, y0, x + seg_w, y0 + bar_h,
-                               fill=fill, outline="#1e1e1e", width=1)
+                               fill=fill, outline=theme.BG, width=1)
             if seg_w > 36:
                 c.create_text(x + seg_w / 2, y0 + bar_h / 2,
-                              text=f"{g} {n}", fill="#ffffff",
+                              text=f"{g} {n}", fill=theme.FG_WHITE,
                               font=theme.FONT_UI_SMALL, anchor="center")
             self._grade_rects.append((x, y0, x + seg_w, y0 + bar_h, g))
             x += seg_w + 2
@@ -1565,7 +1565,7 @@ class CteiRankingView:
 
         if grade:
             badge = tk.Label(row, text=grade, bg=theme.GRADE_HEX.get(grade, theme.MUTED),
-                             fg="#ffffff", font=theme.FONT_UI_SMALL_BOLD, padx=6, pady=1)
+                             fg=theme.FG_WHITE, font=theme.FONT_UI_SMALL_BOLD, padx=6, pady=1)
             badge.pack(side="left", padx=(0, 8))
 
         # Rank
@@ -1604,7 +1604,7 @@ class CteiRankingView:
                      font=theme.FONT_VALUE, width=6, anchor="e").pack(side="left", padx=4)
 
             # Bar
-            bar_bg = tk.Frame(row, bg="#333333", height=8)
+            bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=8)
             bar_bg.pack(side="left", fill="x", expand=True, padx=4)
             bar_w = min(1.0, val / 2.0)  # normalize to 0-1 (max ~2.0)
             if bar_w > 0:
@@ -1740,7 +1740,7 @@ class ModelCompareView:
                     cx = (x1 + x2) / 2
                     if x2 - x1 > 20:
                         canvas.create_text(cx, 10, text=mc.display_name,
-                                           fill="#1e1e1e",
+                                           fill=theme.BG,
                                            font=(theme.FONT_MONO_NAME, 7))
                     rx += rw
 

@@ -15,10 +15,18 @@ PAD_S = 4
 PAD_M = 8
 PAD_L = 12
 
+# --- 收编自散落 magic hex（style.md §11/§16 查漏补缺）---
+CONTROL_BG = "#333333"      # 控件底：分段控件容器/pill、进度条槽、Treeview 表头
+CARD_HEADER_BG = "#2a2a2e"  # 弹窗/卡片头部略抬升底（比 PANEL_2 更近 PANEL）
+SEL_ROW_BG = "#15324f"      # 选中行底色（CheckRow 淡蓝；多行高亮不刺眼）
+WARN_TINT_BG = "#3a2a1a"    # 警示提示条暗橙底（配 WARNING 前景字）
+FG_WHITE = "#ffffff"        # 选中态纯白字（比 FG 更亮一档）
+
 # 交互反馈色（hover 态），与 flat_button / Card 共用。
 HOVER_BG = "#33333a"
 HOVER_ACCENT = "#1a8ce0"
 BORDER = "#3e3e42"
+BORDER_HOVER = "#5a5a60"  # Card 等可点卡片 hover 边框提亮（灰、非蓝，选中才用 ACCENT）
 
 # 滚动条极简细条：深灰滑块（只比凹槽亮一点）、hover 稍亮（灰、非蓝）、凹槽近背景隐形（见 setup_style）。
 SCROLL_THUMB = "#3a3a3a"
@@ -96,7 +104,7 @@ def setup_style(ttk) -> None:
     style.configure("Treeview", background=PANEL, fieldbackground=PANEL,
                     foreground=FG, rowheight=22,
                     bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
-    style.configure("Treeview.Heading", background="#333333", foreground=FG,
+    style.configure("Treeview.Heading", background=CONTROL_BG, foreground=FG,
                     relief="flat", borderwidth=1)
     # clam draws a raised (white-ish) border on heading hover/press — keep it dark & flat.
     style.map("Treeview", background=[("selected", "#094771")])
@@ -161,7 +169,7 @@ def setup_style(ttk) -> None:
                     bordercolor=BG, lightcolor=BG, darkcolor=BG,
                     focusthickness=0)  # 去掉点击页签后文字四周的虚线聚焦框
     style.map("TNotebook.Tab",
-              background=[("selected", "#3e3e42"), ("active", "#333333")],
+              background=[("selected", BORDER), ("active", CONTROL_BG)],
               foreground=[("selected", FG), ("active", FG)],
               padding=[("selected", [16, 6])],
               # 压住 clam 默认浅色 bevel：selected 态 lightcolor 默认 #eeebe7 会给选中
@@ -178,3 +186,12 @@ def setup_style(ttk) -> None:
             ]})
         ]})
     ])
+
+# 时段热力图（GitHub 日历风）配色。不用 GitHub 绿系：其空格 #161b22 比 PANEL 更黑
+# 像「洞」，亮绿与 SUCCESS 撞语义（成本高≠好）。空格=略抬升灰；数据四档=ACCENT 蓝
+# 同色相 暗→亮（含 HOVER_ACCENT），蓝=强度中性，只表「多少」不表「好坏」。
+HEATMAP_EMPTY = PANEL_2
+HEATMAP_RAMP = ("#153a57", "#0f5d94", HOVER_ACCENT, "#6dbdf2")
+# 坏方向指标（sentiment="down"，如返工率）用橙阶：值越高越「差」，蓝的强度
+# 中性语义不适用，橙与 WARNING 同语义族但独立分档，暗→亮对应 低→高（差）。
+HEATMAP_RAMP_BAD = ("#4a2e15", "#8a5220", "#c97a2a", "#f2a75c")

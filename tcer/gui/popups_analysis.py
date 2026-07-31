@@ -235,7 +235,7 @@ class SessionTimelinePopup:
         c.create_text(self._PAD_L - 6, self._PAD_T + plot_h, text="0",
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
         c.create_line(self._PAD_L, self._PAD_T + plot_h,
-                      w - self._PAD_R, self._PAD_T + plot_h, fill="#3e3e42")
+                      w - self._PAD_R, self._PAD_T + plot_h, fill=theme.BORDER)
 
         self._bar_x = []
         base_y = self._PAD_T + plot_h
@@ -541,7 +541,7 @@ class ToolSequencePopup:
             row.pack(fill="x")
             tk.Label(row, text=f"{a} → {b}", bg=theme.PANEL, fg=theme.FG,
                      font=theme.FONT_MONO, width=28, anchor="w").pack(side="left")
-            bar_bg = tk.Frame(row, bg="#333333", height=10, width=220)
+            bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=10, width=220)
             bar_bg.pack(side="left", fill="x", expand=True, padx=6)
             bar_bg.pack_propagate(False)
             tk.Frame(bar_bg, bg=color, height=10).place(

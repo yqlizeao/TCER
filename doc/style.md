@@ -24,6 +24,10 @@
 - **间距**：`PAD_XS/S/M/L = 2/4/8/12`。容器 / 组件 padding 一律从这四档取，保持节奏。
 - **字体**：`FONT_UI`(9) / `FONT_UI_BOLD` / `FONT_UI_SMALL`(8) / `FONT_HEADING`(10) / `FONT_VALUE`(11 粗) / `FONT_MONO`；CJK 与等宽字体名走 `theme.platform`。
 - **数值颜色语义**：白色 = 基准值 / 纯数据；黄色（`LEVEL_COMPOUND`）= 含 magic number，仅参考。
+- **数值方向语义色**（模型对比等对比场景）：`VALUE_GOOD` 绿 = 好方向、`VALUE_BAD` 红 = 坏方向、`VALUE_NEUTRAL` 灰 = 无方向/零值；`VALUE_BEST`（金 `#e0b341`）= **该行最优值**。方向染色逻辑收口在 `MetricCell.set_value`（按 metric `sentiment` up/down 判向）。
+  - **金 ≠ 黄**：`VALUE_BEST`（金）标「行内最优」，`LEVEL_COMPOUND`（黄 `#f39c12`）标「含 magic number 的复合指标标题」——前者用于**值**、后者用于**标题**，不可混用。
+- **视角标识色**：`VIEW_PROJECT`（橙）= 项目视角，与会话蓝（`ACCENT`）配对区分——与 §2 身份图标标准（项目/会话）同属一套身份体系，给项目相关 UI 染色用它，**不要用 ACCENT**。
+- **收编常量**（曾散落为 magic hex，一律引用）：`CONTROL_BG` 控件底（分段控件/进度条槽/表头）、`CARD_HEADER_BG` 弹窗头部卡片底、`SEL_ROW_BG` 选中行淡蓝、`WARN_TINT_BG` 警示条暗橙底（配 `WARNING` 字）、`FG_WHITE` 选中态纯白字、`BORDER_HOVER` 卡片 hover 边框。
 - **CTEI 评级色**：`GRADE_HEX`（优秀→极端低效）是 grade 染色唯一源，排名分布条 / 趋势 CTEI 带都派生自它。
 - **分组色**：`GROUP_COLORS`（G1–G6 + `G_NEUTRAL`）是组级背景色，**为大块表头填充设计，偏暗**——细折线不可直接用（见 §9）。
 
@@ -133,7 +137,7 @@ clam 主题默认带浅色 bevel / 白边，逐元素压回暗色。关键陷阱
 
 ## 11. 分段控件（segmented toggle）
 
-深色 pill：`#333333` 容器 + 各 pill；选中 = `ACCENT` + 白字，未选 = `MUTED`。
+深色 pill：`theme.CONTROL_BG` 容器 + 各 pill；选中 = `ACCENT` + 白字，未选 = `MUTED`。
 
 - 每个 pill 包在**独立 Frame**里并同步 bg，避免选中态时 parent-bg 从子组件间隙透出「裂缝」。
 - 模式切换（趋势图 / 散点图 / 仪表盘 / 时段）即此样式。
@@ -144,7 +148,7 @@ clam 主题默认带浅色 bevel / 白边，逐元素压回暗色。关键陷阱
 
 `widgets.ScrollFrame` 自带**按需显示**的极简细条：clam 原生 thumb + 自定义 layout 去箭头，只留滑块。
 
-- thumb 深灰（`SCROLL_THUMB`）、hover 稍亮（**灰、非蓝**）、凹槽近背景隐形。
+- thumb 深灰（`SCROLL_THUMB`）、hover 稍亮 `SCROLL_THUMB_HOVER`（**灰、非蓝**）、凹槽近背景隐形。
 - 所有未显式指定 style 的 `ttk.Scrollbar` 统一继承。
 
 ---
@@ -171,9 +175,10 @@ clam 主题默认带浅色 bevel / 白边，逐元素压回暗色。关键陷阱
 
 `tk.Checkbutton` 的系统 indicator 在深色下是黑底方框、与文字割裂，老气。**全 GUI 不再用它。**
 
-→ 勾选类一律 `CheckRow`：**无 checkbox 方块**，选中 = 整行高亮（淡蓝 `#15324f` + 白字），未选 = 普通行，整行点击 toggle，hover 略亮。可选 `icon`（左）/`hint`（右，淡色说明）。
+→ 勾选类一律 `CheckRow`：**无 checkbox 方块**，选中 = 整行高亮（淡蓝 `theme.SEL_ROW_BG` + 白字），未选 = 普通行，整行点击 toggle，hover 略亮。可选 `icon`（左）/`hint`（右，淡色说明）。
 
-- 用于：趋势图指标选择（`MetricTrendSelector`）、仪表板「按日聚合」。
+- 用于：趋势图指标选择（`MetricTrendSelector`）、仪表板「按日聚合」、分析弹窗「跳过 LOC」。
+- **豁免**：UploadDialog 内 4 处 `tk.Checkbutton`（匿名/记住密码/会话详情/自动上传）归上传负责人，保持现状（代码以 `# style-exempt` 标记，契约测试跳过）。
 - 单选/多选/上限逻辑在调用方；`CheckRow.click()` 只 flip `var` + 回调，由调用方 `_redraw()` 统一刷新所有行（单选会改别行 `var`）。`hint` 需先于标题 pack（否则 `expand` 标题会挤掉它）。
 
 ---
@@ -215,3 +220,52 @@ Tk 子窗口（`Toplevel`）标题栏是系统渲染，深色应用下默认发�
 ## 20. Tooltip（悬停提示）深色
 
 `widgets.Tooltip`：`PANEL_2` 底 + `FG` 字，`Toplevel` `bg=BORDER` 透出 1px 边（替代老式 `relief="solid"` 黑边）。全局 hover 提示统一走它（曾用米黄浅色 `#fff8e1` + 深字，与深色主题冲突）。
+
+---
+
+## 21. 可选卡片 = `widgets.Card`
+
+可点选的列表卡片（会话/项目列表项）。`PANEL_2` 底 + 1px `BORDER` 边（`highlightthickness` 实现，非 relief）。
+
+- 交互三态：hover = 边框提亮 `BORDER_HOVER`（灰）；选中 = `ACCENT` 边框 + 加粗到 2px（`set_selected`）；选中态不被 hover 覆盖。
+- 内容 pack 进 `self.frame`；**子组件需可点击时必须 `bind_to` 注册**（Tk 事件不冒泡，子 Label 会吞掉点击）。
+- **何时不用**：纯静态展示面板直接用 `tk.Frame(bg=PANEL_2)`，不要为了边框套 Card。
+
+## 22. 指标格子 = `widgets.MetricCell`
+
+单指标 tile：彩色标题（色 = `LEVEL_COLORS[metric.level]`，§1 层级语义）+ 值（`FONT_VALUE` 等宽粗体）+ tooltip。
+
+- 值色由 `set_value` 按 metric `sentiment` 自动判向：up/down 方向 → `VALUE_GOOD`/`VALUE_BAD`，无方向或零值 → `VALUE_NEUTRAL`，数据源不支持（`UNSUPPORTED_LABEL`）→ `MUTED` 弱化（与「无数据 -」区分）。
+- 面板更新值走 `cell.var` / `set_value`，**不重建格子**。
+- 方向染色逻辑只在这里收口，调用方不要自行染值色。
+
+## 23. 可复制文本 = `widgets.SelectableLabel`
+
+`tk.Label` 无法选中复制；长文本（用户消息等）需可拷出 → 用 `state="disabled"` 的 `tk.Text` 伪装 Label（flat 无边框、同 bg/fg/font），可拖选 + Ctrl+C + 右键「复制全文」。选中底色 `HOVER_ACCENT` + `FG_WHITE` 字。
+
+- **换行按 `width` 字符列**，与像素宽度无关。**禁止从像素反推字符列**——未布局时 `winfo_width()=1` 会把行数算爆。定宽容器给显式 `width`，`count(displaylines)` 一次算高，无需 `<Configure>` 动态重算。
+- **何时不用**：短静态文本用普通 `tk.Label`（Text 组件更重，大量实例有性能开销）。
+
+## 24. 日历弹窗 = `widgets.CalendarPopup`
+
+日期过滤「点选代替手输」。无边框 `Toplevel`（§18 浮层类，无标题栏问题）：`BORDER` 底透出 1px 边 + `PANEL` 头部，◀ 年月 ▶ + 周一首日 7×6 网格 + ✕ 清除。
+
+- 选日回调 `on_select("YYYY-MM-DD")` 后自关；Esc / 失焦 / 点外关闭。
+- **FocusOut 延迟 150ms 再绑**——窗口刚建时焦点抖动会误触发立即关闭，这是刻意的，勿「简化」掉。
+
+## 25. 时段热力图（日历 / 周×小时 双视图）
+
+曾直接搬 GitHub 绿系（`#161b22…#39d353`），两个问题：①空格比 `PANEL` 更黑，无数据格像「挖洞」；②亮绿与 `SUCCESS` 撞语义——成本/返工率高的格子显亮绿，暗示「好」，方向反了。
+
+→ 空格 = `HEATMAP_EMPTY`（`PANEL_2` 略抬升灰）；数据四档 = `HEATMAP_RAMP`（`ACCENT` 蓝同色相 暗→亮，第三档 = `HOVER_ACCENT`）。蓝 = 强度中性，只表「多少」不表「好坏」。
+
+- 分档用**四分位**而非线性 min-max：会话数/成本右偏分布下线性分档会把多数格子挤进最低档、图面死暗。全同值退化时取次亮档保证可见。
+- 图例 5 格（空 + 四档）与格子取同一常量源，改色只动 theme；右侧动态显示**四分位档位边界**（`≤a · ≤b · ≤c · >c`，`_fmt_num` 格式），全同值/无数据时隐藏。
+- **坏方向指标走橙阶**：`sentiment="down"`（返工率等）用 `HEATMAP_RAMP_BAD`（`WARNING` 同族橙，暗→亮 = 低→高「差」），蓝的「强度中性」语义不适用；图例色块随指标同步换色。
+- **双视图**（§11 pill 切换）：日历（列=周，按天聚合）/ 周×小时（列=0–23 时，行=星期，X 轴每 3 小时一标）。两视图共用聚合器 `_aggregate(bucket_of)`、四分位分档、色阶。
+- **边际汇总条**：右=按星期几聚合（横条 + 数值，一眼「周几最高」），底=按周/按小时聚合（竖条）；条色取 ramp 中间档，与格子同源。
+- **今日格**：日历视图当天格 `FG_WHITE` 1px 描边定位「现在」。
+- **周末分隔**：周五/周六行间一条 `BORDER` 细线，工作日/周末节奏可辨。
+- **点击下钻**：点格子弹 `FlatMenu`（§4）列该时段会话（标题惯例 `meta.title or session_id or path.stem`，36 字截断，上限 15 条），选中经 `controller.on_select_session(sid)` 跳会话详情——聚合视图到明细的闭环。
+- **格径自适应**：`min(可用宽/周数, 可用高/7)` 夹在 22–44px——下限保 GitHub 观感与横向滚动，上限防少数据时格子成巨块。
+- **月份标签防重叠**：碰撞时**删前一个**（跨列少的月末部分月）、保新标签；被删标签若带年份则新标签升级为带年份格式，年份不丢；星期标签锚网格左缘 `ox`（非固定 `PAD_L`，网格居中时不脱节）。
