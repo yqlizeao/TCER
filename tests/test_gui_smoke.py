@@ -510,3 +510,37 @@ def test_filter_bar_since_routes_to_apply_time_filter(root):
     bar._on_task_type_change(None)
     assert ctl.calls == ["reanalyze"]
     frame.destroy()
+
+
+def test_session_column_pin_flag_marks(root, reports):
+    """会话卡片置顶/红旗:置顶排序、标记图标构建、_apply_marks 重排不崩。"""
+    from tcer.gui.views import SessionColumn
+
+    class _Ctl:
+        def __init__(self):
+            self.root = root
+        def on_select_session(self, sid): pass
+        def show_session_detail(self, sid): pass
+        def toggle_session_pin(self, sid): pass
+        def toggle_session_flag(self, sid): pass
+        def delete_session(self, report): pass
+
+    col = SessionColumn(root, _Ctl())
+    # s1 置顶(即便不是最新也排第一),s2 红旗(建 flag-on 图标)
+    col.update(reports, pinned={"s1"}, flagged={"s2"})
+    root.update_idletasks()
+    assert len(col._cards) == 3
+    assert col._reports[0].meta.session_id == "s1"   # 置顶优先于时间序
+    assert "s2" in col._flagged
+
+    # _apply_marks 改置顶集合 → 重排,新置顶项排前(s2 仍红旗)
+    col._apply_marks({"s3"}, {"s2"}, keep_sid="s3", reset=False)
+    root.update_idletasks()
+    assert col._reports[0].meta.session_id == "s3"
+    assert len(col._cards) == 3
+    # 红旗快速过滤：开启只看 flagged 会话(s2)
+    col._flag_only.set(True)
+    col._render()
+    root.update_idletasks()
+    assert len(col._reports) == 1
+    assert col._reports[0].meta.session_id == "s2"

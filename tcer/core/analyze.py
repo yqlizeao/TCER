@@ -14,7 +14,7 @@ from functools import reduce
 from pathlib import Path
 from typing import Callable
 
-from tcer.core import codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, reader
+from tcer.core import codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, pi_reader, reader
 from tcer.core.models import ProjectRef, SessionMeta, SessionReport, TokenUsage
 from tcer.core.paths import ref_root, resolve_project
 
@@ -741,7 +741,49 @@ _OMP = _SourceAdapter(
     subagents_of=lambda ref, f: len(omp_reader._subagent_files(f)),
 )
 
-_ADAPTERS = (_CODEX, _OPENCODE, _GROK, _OMP)
+
+# ---- pi hooks -------------------------------------------------------------- #
+# Pi reuses omp_reader's parsing layer (same JSONL schema); only the cache-key
+# namespace ("pi_*") and pi_reader entry points differ, so Pi sessions stay
+# separate from omp in the LRU and are tagged source="pi".
+def _pi_subagent_key(f: Path) -> tuple:
+    parts = []
+    for sub in pi_reader._subagent_files(f):
+        try:
+            st = sub.stat()
+            parts.append((sub.name, int(st.st_mtime_ns), int(st.st_size)))
+        except OSError:
+            parts.append((sub.name, 0, 0))
+    return tuple(parts)
+
+
+def _pi_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        f, ("pi_usage", _pi_subagent_key(f)), lambda: pi_reader.aggregate_usage(f))
+
+
+def _pi_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        f, ("pi_loc", _pi_subagent_key(f)), lambda: pi_reader._loc_scan(f))
+
+
+_PI = _SourceAdapter(
+    source="pi", entrypoint="pi",
+    resolve=pi_reader.resolve_project,
+    sessions=pi_reader.sessions_for_project,
+    read_meta=lambda ref, f: pi_reader.read_session_meta(f),
+    usage_of=_pi_usage_of,
+    loc_of=_pi_loc_of,
+    session_key=lambda ref, f: (pi_reader.read_session_meta(f).session_id or f.stem),
+    not_found="pi project '{project}' not found under ~/.pi/agent/sessions",
+    no_sessions="no pi session files for '{name}'",
+    no_match="no pi session matches '{session}'",
+    subagents_of=lambda ref, f: len(pi_reader._subagent_files(f)),
+)
+
+_ADAPTERS = (_CODEX, _OPENCODE, _GROK, _OMP, _PI)
 
 
 def _synth_meta(session_id: str, sample: Path) -> SessionMeta:

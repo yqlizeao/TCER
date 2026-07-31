@@ -556,24 +556,33 @@ def has_loc_signal(path: Path) -> bool:
 def _add_turn_usage(u: TokenUsage, usage: dict, model: str, turn: int, ts: int | None) -> None:
     """Fold one assistant ``usage`` block into ``u`` (+ a TurnStat step).
 
-    omp usage semantics mirror Anthropic: ``input`` excludes cache, with
+    omp/Pi usage semantics mirror Anthropic: ``input`` excludes cache, with
     ``cacheRead`` / ``cacheWrite`` reported separately (verified:
-    input + output == totalTokens when cache is 0).
+    input + output == totalTokens when cache is 0). Pi additionally exposes
+    ``cacheWrite1h`` (the 1h-cache-write subset, priced via
+    ``CACHE_1H_PREMIUM``) and ``reasoning`` (kept separately in
+    ``reasoning_output_tokens``; ``output`` already includes it for cost, per
+    the models.py convention — audit checks the token-consistency invariant).
+    omp data has neither field, so both read 0 and omp behaviour is unchanged.
     """
     i = _as_int(usage.get("input"))
     cr = _as_int(usage.get("cacheRead"))
     cw = _as_int(usage.get("cacheWrite"))
     o = _as_int(usage.get("output"))
-    if i + cr + cw + o == 0:
+    cw1h = _as_int(usage.get("cacheWrite1h"))   # Pi 1h-cache-write subset
+    reasoning = _as_int(usage.get("reasoning"))  # Pi reasoning output tokens
+    if i + cr + cw + o + cw1h + reasoning == 0:
         u.empty_usage_skipped += 1
         return
     u.assistant_msgs += 1
     u.input_tokens += i
     u.cache_read_input_tokens += cr
     u.cache_creation_input_tokens += cw
+    u.cache_write_1h_tokens += cw1h
     u.output_tokens += o
+    u.reasoning_output_tokens += reasoning
     key = model or ""
-    u.bucket(key).add(i, cw, cr, o)
+    u.bucket(key).add(i, cw, cr, o, cw1h)
     u.turn_stats.append(TurnStat(
         turn=turn, ts=ts,
         input_tokens=i, cache_read=cr, output_tokens=o,

@@ -119,7 +119,10 @@ def _match_candidates(model: str) -> list[str]:
 def _match_id(model: str) -> str | None:
     """Resolve a model string to a table key, with bidirectional prefix matching.
 
-    Resolution strategies in priority order:
+    Resolution strategies applied in **global priority order** — each strategy
+    runs across *every* candidate before the next strategy is tried, so a
+    higher-priority match on a mode-suffix-stripped candidate beats a
+    lower-priority match on the raw id:
     1. Exact match: ``model`` is a table key.
     2. Normalized exact: lowercase, drop ``-``/``_``, and spell a version dot
        literally from both damaged forms (``5p2`` → ``5.2``, ``5-6`` → ``5.6``).
@@ -127,12 +130,19 @@ def _match_id(model: str) -> str | None:
        ``gpt-5-6-sol`` onto ``gpt-5.6-sol``. Tried before prefix matching so a
        damaged id doesn't forward-prefix onto a shorter key (``glm-5p2`` onto
        ``glm-5``, or ``gpt-5-6-sol`` onto ``gpt-5``).
-    3. Forward prefix: ``model.startswith(mid)`` — handles date/``[1m]`` suffixes
+    3. Forward prefix: ``cand.startswith(mid)`` — handles date/``[1m]`` suffixes
        appended by Claude Code (e.g. ``claude-opus-4-8[1m]`` → ``claude-opus-4-8``).
-    4. Reverse prefix: ``mid.startswith(model)`` — handles shortened ids written
+    4. Reverse prefix: ``mid.startswith(cand)`` — handles shortened ids written
        by JSONL (e.g. ``claude-opus-4-6`` → ``claude-opus-4-6-20260206``).
        When multiple table keys share the same prefix, the **shortest** match wins
        (closest to the caller's string, least ambiguous).
+
+    The per-strategy (not per-candidate) ordering is load-bearing: omp emits
+    ``grok-4-5-thinking`` (dash-spelled ``grok-4.5`` + ``-thinking``), whose
+    candidates are ``[grok-4-5-thinking, grok-4-5]``. The raw candidate would
+    forward-prefix onto the shorter ``grok-4`` key (wrong label AND wrong price),
+    but the stripped candidate normalizes onto ``grok-4.5`` at the higher-priority
+    normalized-exact layer — which runs first, so the correct key wins.
 
     Candidates tried in order: raw id → last ``/`` segment (vendor path) →
     mode-suffix stripped forms (``-thinking``). Returns ``None`` if nothing in
@@ -141,24 +151,30 @@ def _match_id(model: str) -> str | None:
     if not model:
         return None
     models = _load()["models"]
-    for cand in _match_candidates(model):
-        # 1. Exact
+    cands = _match_candidates(model)
+
+    # 1. Exact
+    for cand in cands:
         if cand in models:
             return cand
-        # 2. Normalized exact (tolerant of case / missing dash / '5p2' for '5.2').
-        #    Tried BEFORE prefix matching so "glm-5p2" resolves to "glm-5.2" here
-        #    instead of forward-prefixing onto the shorter table key "glm-5".
-        nk = _norm_index().get(_normalize(cand))
+    # 2. Normalized exact (tolerant of case / missing dash / '5p2' for '5.2').
+    #    Tried BEFORE prefix matching so "glm-5p2" resolves to "glm-5.2" here
+    #    instead of forward-prefixing onto the shorter table key "glm-5".
+    norm = _norm_index()
+    for cand in cands:
+        nk = norm.get(_normalize(cand))
         if nk is not None:
             return nk
-        # 3. Forward prefix (candidate is longer than table key)
+    # 3. Forward prefix (candidate is longer than table key)
+    for cand in cands:
         best_fwd: str | None = None
         for mid in models:
             if cand.startswith(mid) and (best_fwd is None or len(mid) > len(best_fwd)):
                 best_fwd = mid
         if best_fwd is not None:
             return best_fwd
-        # 4. Reverse prefix (table key is longer than candidate)
+    # 4. Reverse prefix (table key is longer than candidate)
+    for cand in cands:
         best_rev: str | None = None
         for mid in models:
             if mid.startswith(cand) and (best_rev is None or len(mid) < len(best_rev)):

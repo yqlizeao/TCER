@@ -251,3 +251,23 @@ assistant `content`：`thinking`（`thinking`/`thinkingSignature`）/ `text`（`
 ### 子代理折叠
 
 omp 子代理会话存于主文件同名的 `<stem>/` 子目录，`_is_subagent_file` 识别后由 `aggregate_usage`/`_loc_scan`/`read_user_messages` 合并入父（真实成本保留，不单独计 session）。
+
+
+## Pi 数据格式（earendil-works/pi 上游）
+
+Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-agent`，bin 名 `pi`）是 omp 的**上游原生**（omp 是其 fork）。会话格式与 omp 同族，TCER 的 `pi_reader` 直接复用 `omp_reader` 的全部解析逻辑，仅以下差异：
+
+- **目录**：`~/.pi/agent/sessions/`（仅 `PI_CODING_AGENT_DIR` 重定位 agent 基目录；**无 `PI_CONFIG_DIR`**，默认根固定 `~/.pi`）。
+- **无定宽 `type:"title"` 标题槽** —— 首行直接是 `type:"session"` 头。
+- assistant 消息**无** omp-fork 加的 `contextSnapshot` / `duration` / `ttft` → `peak_input` 留 0、TTFT 不可用。
+- usage 多两个字段：
+
+```json
+"usage": { "input": 100, "output": 20, "cacheRead": 40, "cacheWrite": 10,
+           "cacheWrite1h": 4, "reasoning": 8,
+           "totalTokens": 170, "cost": { "total": 0.01 } }
+```
+
+  `cacheWrite1h`（1h 缓存写子集，按 `CACHE_1H_PREMIUM` 溢价计价）+ `reasoning`（推理 token，填 `reasoning_output_tokens`）。
+
+`SessionEntry` 行类型、工具映射、LOC 回放、子代理折叠均与 omp 一致（同 schema），详见上节。能力映射（`metric_defs._SOURCE_SUPPORT`）：pi 支持 reasoning / cache / web_search，**不支持** ttft / ttft_p95（数据无此字段）。

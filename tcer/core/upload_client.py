@@ -160,7 +160,7 @@ def build_payload(
 
 def _lazy_user_messages(report: SessionReport) -> list[str]:
     """Load user message bodies when analysis omitted them (Claude lazy path)."""
-    from tcer.core import codex_reader, grok_reader, omp_reader, opencode_reader, reader
+    from tcer.core import codex_reader, grok_reader, omp_reader, opencode_reader, pi_reader, reader
 
     source = report.meta.source or "claude"
     path = report.meta.path
@@ -175,6 +175,8 @@ def _lazy_user_messages(report: SessionReport) -> list[str]:
             return grok_reader.read_user_messages(path)
         if source == "omp":
             return omp_reader.read_user_messages(path)
+        if source == "pi":
+            return pi_reader.read_user_messages(path)
         # Claude: main + subagents under session dir
         _, main, session_dir = reader.session_artifacts(path)
         msgs: list[str] = []
@@ -205,7 +207,7 @@ def _read_conversation(report: SessionReport) -> list[dict]:
     Blocks are concatenated in file order. OpenCode is keyed by
     ``(db_path, session_id)`` rather than a JSONL path.
     """
-    from tcer.core import codex_reader, grok_reader, omp_reader, opencode_reader, reader
+    from tcer.core import codex_reader, grok_reader, omp_reader, opencode_reader, pi_reader, reader
 
     meta = report.meta
     source = getattr(meta, "source", "claude")
@@ -224,6 +226,7 @@ def _read_conversation(report: SessionReport) -> list[dict]:
         "codex": codex_reader.read_conversation,
         "grok": grok_reader.read_conversation,
         "omp": omp_reader.read_conversation,
+        "pi": pi_reader.read_conversation,
     }.get(source, reader.read_conversation)
 
     paths = list(getattr(meta, "session_paths", ()) or ())

@@ -238,6 +238,39 @@ def omp_sessions_dir() -> Path:
     return omp_agent_dir() / "sessions"
 
 
+def pi_dir() -> Path:
+    """Return the Pi config root (``~/.pi`` by default).
+
+    Pi (upstream ``earendil-works/pi``) is the parent project of the omp fork.
+    Unlike omp it has no ``PI_CONFIG_DIR``; the root is fixed at ``~/.pi``.
+    """
+    return Path.home() / ".pi"
+
+
+def pi_agent_dir() -> Path:
+    """Return the Pi *agent* base directory (``~/.pi/agent`` by default).
+
+    ``PI_CODING_AGENT_DIR`` relocates the whole agent base (sessions, blobs,
+    ``agent.db``) — the same env omp also honors. With the env unset, omp
+    (``~/.omp``) and Pi (``~/.pi``) stay separate; setting it makes both sources
+    point at one directory, so the same files would surface twice (once per
+    source). That is an explicit user override — documented, not guarded.
+    """
+    override = os.environ.get("PI_CODING_AGENT_DIR")
+    if override:
+        return Path(override)
+    return pi_dir() / "agent"
+
+
+def pi_sessions_dir() -> Path:
+    """Return the root directory containing Pi session JSONL files.
+
+    Pi stores sessions under ``<agent-dir>/sessions/<encoded-cwd>/*.jsonl``
+    (``~/.pi/agent/sessions`` by default; honors ``PI_CODING_AGENT_DIR``).
+    """
+    return pi_agent_dir() / "sessions"
+
+
 def encode_hash(cwd: str | Path) -> str:
     """Encode a working-directory path into its project-hash folder name.
 
@@ -306,7 +339,7 @@ def project_has_sessions(ref: ProjectRef) -> bool:
         from tcer.core import reader
         root = ref_root(ref)
         return bool(reader.discover_jsonl(ref.key, roots=[root] if root is not None else None))
-    if ref.source in ("codex", "grok", "omp"):
+    if ref.source in ("codex", "grok", "omp", "pi"):
         return bool(ref.session_paths)
     if ref.source == "opencode":
         from tcer.core import opencode_reader
@@ -361,7 +394,7 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
         root = ref_root(ref)
         files = reader.discover_jsonl(ref.key, roots=[root] if root is not None else None)
         return _max_mtime_ms(files)
-    if ref.source in ("codex", "grok", "omp"):
+    if ref.source in ("codex", "grok", "omp", "pi"):
         return _max_mtime_ms(ref.session_paths)
     if ref.source == "opencode":
         from tcer.core import opencode_reader
@@ -375,8 +408,9 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
 def list_project_refs(source: str = "all") -> list[ProjectRef]:
     """Return source-aware project refs for the GUI.
     ``source`` is one of ``"all"``, ``"claude"``, ``"codex"``, ``"opencode"``,
-    ``"grok"``, or ``"omp"``. Claude refs wrap real project directories;
-    Codex/OpenCode/Grok/omp refs are grouped by session cwd/project directory.
+    ``"grok"``, ``"omp"``, or ``"pi"``. Claude refs wrap real project
+    directories; Codex/OpenCode/Grok/omp/pi refs are grouped by session
+    cwd/project directory.
     """
     refs: list[ProjectRef] = []
     if source in ("all", "claude"):
@@ -407,6 +441,10 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
         from tcer.core import omp_reader
 
         refs.extend(omp_reader.list_project_refs())
+    if source in ("all", "pi"):
+        from tcer.core import pi_reader
+
+        refs.extend(pi_reader.list_project_refs())
     return sorted(refs, key=lambda r: (r.source, r.display_name.lower()))
 
 
