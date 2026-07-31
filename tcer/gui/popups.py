@@ -695,9 +695,27 @@ class UserMsgsPopup:
 
 
 class FilesTouchedPopup:
-    """涉及文件 — all files read/written/edited, with proportional bars."""
+    """涉及文件 — all files read/written/edited, with proportional bars.
 
-    _COLOR = theme.CHART_PALETTE[0]  # blue
+    每个文件按产出分类染色：代码=蓝、测试=紫、文档=青（与 loc 的
+    _is_test_file / _is_doc_file / _is_code 判定一致）。"""
+
+    _COLOR_CODE = theme.CHART_PALETTE[0]   # 蓝 — 代码
+    _COLOR_TEST = theme.CHART_PALETTE[4]   # 紫 — 测试
+    _COLOR_DOC = theme.TOKEN_COLORS["cache_read"]  # 青 — 文档
+    _COLOR_OTHER = theme.MUTED             # 灰 — 非产出（只读的图片/二进制等）
+
+    @classmethod
+    def _file_kind(cls, fp: str):
+        """(色, 类别名)：测试 / 文档 / 代码 / 其他（非产出）。"""
+        from tcer.core.loc import _is_test_file, _is_doc_file, _is_code
+        if _is_test_file(fp):
+            return cls._COLOR_TEST, "测试"
+        if _is_doc_file(fp):
+            return cls._COLOR_DOC, "文档"
+        if _is_code(fp):
+            return cls._COLOR_CODE, "代码"
+        return cls._COLOR_OTHER, "其他"
 
     def __init__(self, parent, details: dict[str, int]) -> None:
         win = _new_window(parent, "涉及文件", "560x480")
@@ -751,12 +769,28 @@ class FilesTouchedPopup:
                          anchor="e").pack(side="right")
             tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
 
+        # 分类图例（代码/测试/文档三色）
+        legend = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+        legend.pack(fill="x")
+        for color, name in ((self._COLOR_CODE, "代码"), (self._COLOR_TEST, "测试"),
+                            (self._COLOR_DOC, "文档")):
+            sw = tk.Frame(legend, bg=color, width=10, height=10)
+            sw.pack(side="left", padx=(0, 3))
+            sw.pack_propagate(False)
+            tk.Label(legend, text=name, bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 12))
+
         for fp, cnt in sorted_items:
             display = fp if len(fp) < 55 else "…" + fp[-52:]
+            color, kind = self._file_kind(fp)
 
             tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
             hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
             hdr.pack(fill="x")
+            # 类别标记（彩色小方块）+ 文件名
+            sw = tk.Frame(hdr, bg=color, width=8, height=8)
+            sw.pack(side="left", padx=(0, 5))
+            sw.pack_propagate(False)
             tk.Label(hdr, text=display, bg=theme.PANEL, fg=theme.FG, anchor="w",
                      font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
             tk.Label(hdr, text=f"{cnt} 次", bg=theme.PANEL, fg=theme.MUTED, anchor="e",
@@ -766,7 +800,7 @@ class FilesTouchedPopup:
             bar_frame.pack(fill="x")
             bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=8)
             bar_bg.pack(fill="x")
-            tk.Frame(bar_bg, bg=self._COLOR, height=8).place(
+            tk.Frame(bar_bg, bg=color, height=8).place(
                 relx=0, rely=0, relwidth=cnt / max_cnt, relheight=1.0)
 
 
