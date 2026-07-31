@@ -53,3 +53,11 @@ def test_no_handwritten_tk_button():
             if re.search(r"\btk\.Button\(", line) and "style-exempt" not in line:
                 bad.append(f"{f.name}:{i}")
     assert not bad, f"禁止手写 tk.Button，用 widgets.flat_button (style.md §3): {bad}"
+
+
+def test_format_plot_no_scientific_notation():
+    """style.md §8：图表 tooltip 数值禁科学计数法（:g 对 |v|<1e-4 会漏）。"""
+    from tcer.gui.metric_defs import format_plot
+    for v in (0.000012, 1.5e-05, -3e-06, 0.5, 999.9, 1234.5, 1.2e7, 0.0):
+        out = format_plot("cost", v, None)
+        assert "e" not in out.lower(), f"{v} -> {out}"

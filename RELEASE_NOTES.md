@@ -1,30 +1,31 @@
-# TCER v1.0.9
+# TCER v1.0.10
 
-本次更新重做「趋势 → 时段」热力图，并为界面样式建立可执行契约。
+本次更新完整重做产出文件分类，新增对 Godot 游戏开发的支持，并修复图表数值的科学计数法显示。
 
 ## 新功能
 
-### 时段热力图全面重做
-原 GitHub 绿系热力图存在配色不适配深色主题（空格发黑如「洞」、亮绿与「好」语义撞车）、线性分档下图面死暗等问题，本次整体重做：
+### 产出文件识别全面适配
+代码产出与质量（G4）指标依赖「什么是代码、什么是文档」的准确判定，本次大幅扩展：
 
-- **双视图**：日历视图（列=周、按天聚合）之外新增**周×小时视图**（7×24），回答「一天中几点效率高」，分段按钮一键切换。
-- **点击下钻**：点任意格子弹出该时段会话列表，选中跳转会话详情——从聚合视图到明细的闭环。
-- **边际汇总条**：右侧按星期几、底部按周/小时的汇总条，「我周五效率最高」直接可读。
-- **配色重制**：空格改略抬升灰（不再比面板更黑）；数据格改主题蓝四档（强度中性，只表多少不表好坏）；**坏方向指标**（返工率）自动切换橙色阶，避免「返工率高显亮绿」的语义误导。
-- **四分位分档**：替代线性 min-max，右偏数据（会话数/成本）下不再一片死暗；图例动态标注各档边界值。
-- **细节**：今日格白色描边、周末行分隔线、格径随画布自适应（22–44px）、月份标签防重叠（保留跨列多的月份，年份信息不丢）。
+- **代码后缀 28 → 80+**：补齐 Lua、Dart、R、Julia、Elixir、Haskell、Kotlin Script、PowerShell、zsh/fish、scss/sass/less、Astro、Jinja/Handlebars/ERB 模板、hlsl/glsl/wgsl 着色器、cmake/gradle/bazel 构建脚本、.proto、.ipynb 等。
+- **无后缀知名文件**：Makefile、Dockerfile、Jenkinsfile、Justfile、CMakeLists.txt 等此前全部漏计，现已识别为产出。
+- **文档判定修正**：`CMakeLists.txt` / `requirements.txt` / `robots.txt` 等「后缀像文档、实为工程文件」不再被误判为文档行；文档类型补齐 `.mdx` / `.markdown` / `.asciidoc` 及 CHANGELOG / LICENSE / CONTRIBUTING。
+
+### Godot 游戏开发支持
+针对使用 Godot 开发小游戏的场景，完整适配 16 种 Godot 文件类型，策划的产出效率现可被 TCER 衡量：
+
+- **脚本/着色器**（计为代码）：`.gd`（GDScript）、`.gdshader`、`.gdshaderinc`。
+- **场景/资源/工程**（计为配置产出）：`.tscn`（场景）、`.tres`（资源）、`.escn`、`project.godot`、`.import`、`.uid`（4.4+ sidecar）、`.theme`、`.gdextension`。
+- **老版本与 C#**：Godot 3 的 `.gdns`/`.gdnlib`，Mono 工程的 `.csproj`/`.sln`。
+- Godot 二进制格式（`.scn`/`.res`/`.pck`/`.translation`）刻意不计——文本行模型无法对二进制产生行增量。
+- 策划案（`.md` GDD）仍归为文档行，场景/资源归为配置产出，代码/文档分野对 Godot 项目语义正确。
 
 ## 改进
 
-### 样式规范落地为契约测试
-- 全 GUI 约 100 处散落 magic hex 收编为 theme 常量（`CONTROL_BG` / `SEL_ROW_BG` / `HEATMAP_RAMP` 等 12 个）。
-- 新增样式契约测试：禁 `tk.Menu` / `Checkbutton` / 手写 `tk.Button`，magic hex 棘轮（只减不增），违规信息直接指向 style.md 对应条款；豁免以 `# style-exempt` 行标记承载。
-- 分析弹窗「跳过 LOC」勾选项改用统一 `CheckRow` 样式。
-- 热力图新增离屏烟测，覆盖 pytest 测不到的 Canvas 绘制路径。
-
-### 文档
-- `doc/style.md` 补齐 `Card` / `MetricCell` / `SelectableLabel` / `CalendarPopup` 四个组件规范与「何时不用」指引，新增数值方向语义色、视角标识色说明及热力图设计记录（§21–25）。
+- **图表数值禁科学计数法**：修复图表 tooltip 兜底格式对极小值（如 |v|<1e-4 的成本/返工率）输出 `1.2e-05` 的问题，统一定点显示。
+- **测试文件识别**：补齐 `test_foo.py` 前缀式命名（pytest 主流惯例），此前仅识别 `foo_test.py` 后缀式。
+- 新增文件分类契约测试（约 50 条），覆盖代码/非产出/Godot/文档/测试五组，防分类回归。
 
 ---
 
-**完整变更**：`v1.0.8...v1.0.9`
+**完整变更**：`v1.0.9...v1.0.10`

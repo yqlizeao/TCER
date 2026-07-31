@@ -37,16 +37,55 @@ from tcer.core import reader
 
 # 程序员：纯代码源文件
 CODE_SUFFIXES = {
-    ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".go", ".java",
-    ".c", ".cpp", ".cc", ".h", ".hpp", ".cs", ".rb", ".php", ".swift", ".kt",
-    ".scala", ".sh", ".bash", ".sql", ".vue", ".svelte", ".html", ".css",
+    # 主流通用语言
+    ".py", ".pyi", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rs", ".go",
+    ".java", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".cs", ".rb",
+    ".php", ".swift", ".kt", ".kts", ".scala", ".dart", ".lua", ".r", ".jl",
+    ".ex", ".exs", ".erl", ".hs", ".ml", ".clj", ".groovy", ".pl", ".pm",
+    ".zig", ".nim", ".v", ".m", ".mm",
+    # 脚本 / Shell
+    ".sh", ".bash", ".zsh", ".fish", ".ps1", ".psm1", ".bat", ".cmd",
+    # 数据库 / 查询
+    ".sql", ".graphql", ".gql", ".prisma",
+    # 前端 / 模板 / 样式
+    ".vue", ".svelte", ".astro", ".html", ".htm", ".xhtml",
+    ".css", ".scss", ".sass", ".less", ".styl",
+    ".ejs", ".pug", ".jinja", ".jinja2", ".j2", ".hbs", ".erb",
+    # 游戏开发：Godot / Unity-adjacent / 通用着色器
+    ".gd",          # GDScript（Godot 主脚本语言）
+    ".gdshader",    # Godot 着色器
+    ".gdshaderinc", # Godot 着色器 include
+    ".shader", ".hlsl", ".glsl", ".vert", ".frag", ".comp", ".wgsl",
+    # 构建 / 工程脚本（代码语义）
+    ".cmake", ".gradle", ".bazel", ".bzl", ".nix", ".dockerfile",
+    # notebook / 协议
+    ".ipynb", ".proto",
 }
 # 策划/文档：可文本编辑的文档与表格数据（产生行增量，计入产出）
 TEXT_SUFFIXES = {
-    ".md", ".txt", ".rtf", ".rst", ".org", ".adoc", ".tex", ".csv",
+    ".md", ".mdx", ".markdown", ".txt", ".rtf", ".rst", ".org", ".adoc",
+    ".asciidoc", ".tex", ".csv", ".tsv",
 }
-# 开发配置（已计入产出）
-CONFIG_SUFFIXES = {".json", ".yaml", ".yml", ".toml"}
+# 开发配置（已计入产出）。含 Godot 文本化工程/场景/资源：.tscn（场景）、
+# .tres（资源）、.godot（project.godot 工程配置）、.import（导入元数据）、
+# .cfg——策划在 Godot 里的产出大量落在这些文件，必须计入 net_loc / TCER。
+CONFIG_SUFFIXES = {
+    ".json", ".jsonc", ".json5", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".conf", ".properties", ".env", ".editorconfig", ".xml", ".plist",
+    ".tscn", ".tres", ".godot", ".import", ".theme",
+    ".escn",         # 导出的文本场景
+    ".gdextension",  # Godot 4 原生扩展加载配置
+    ".uid",          # Godot 4.4+ 脚本/着色器 sidecar（应入库，会话中会被编辑）
+    ".gdns", ".gdnlib",   # Godot 3 NativeScript（老项目）
+    ".csproj", ".sln",    # Godot C#（Mono）工程文件（.cs 本体在 CODE_SUFFIXES）
+}
+
+# 无后缀但属产出的知名文件名（后缀闸门的例外白名单）。
+_PRODUCTIVE_BASENAMES = {
+    "dockerfile", "makefile", "gnumakefile", "justfile", "rakefile",
+    "gemfile", "brewfile", "procfile", "vagrantfile", "jenkinsfile",
+    "cmakelists.txt",   # 代码语义但 .txt 后缀，见 _DOC_EXCLUDE
+}
 
 # 产出总集（_is_code 闸门）：代码 ∪ 文本 ∪ 配置
 _PRODUCTIVE_SUFFIXES = CODE_SUFFIXES | TEXT_SUFFIXES | CONFIG_SUFFIXES
@@ -58,6 +97,7 @@ _EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 _TEST_PATTERNS = [
     r'/tests?/',           # /test/ or /tests/
     r'_tests?\.py$',       # foo_test.py
+    r'/test_[^/]+\.py$',   # test_foo.py（pytest 前缀惯例）
     r'\.test\.(ts|js|tsx|jsx)$',  # foo.test.ts
     r'/spec/',             # RSpec style
 ]
@@ -65,9 +105,15 @@ _TEST_PATTERNS = [
 # Path patterns for documentation / planner-text files (feeds 「文档行」).
 # 散文类文档——.csv 计入产出（在闸门里）但属数据、不算文档。
 _DOC_PATTERNS = [
-    r'\.(md|txt|rtf|rst|org|adoc|tex)$',
+    r'\.(md|mdx|markdown|txt|rtf|rst|org|adoc|asciidoc|tex)$',
     r'/docs?/',
-    r'README',
+    r'README', r'CHANGELOG', r'LICENSE', r'CONTRIBUTING',
+]
+# 后缀像文档、实为代码工程文件的例外（先于 _DOC_PATTERNS 判断）。
+_DOC_EXCLUDE = [
+    r'CMakeLists\.txt$',
+    r'requirements[^/]*\.txt$',   # requirements.txt / requirements-dev.txt
+    r'robots\.txt$',
 ]
 
 
@@ -80,6 +126,8 @@ def _is_test_file(file_path: str) -> bool:
 def _is_doc_file(file_path: str) -> bool:
     """Check if file path is a documentation / planner-text file."""
     normalized = file_path.replace('\\', '/')
+    if any(re.search(pat, normalized, re.IGNORECASE) for pat in _DOC_EXCLUDE):
+        return False
     return any(re.search(pat, normalized, re.IGNORECASE) for pat in _DOC_PATTERNS)
 
 
@@ -91,12 +139,13 @@ def _nlines(s) -> int:
 def _is_code(file_path: str) -> bool:
     """True for any countable text output — code, planner text, or config.
 
-    Name kept for back-compat; the gate now covers planner text files
-    (.txt/.rst/.org/…) too, not just programmer code. Binary Office formats
-    (.docx/.xlsx) are never text-line-editable, so they stay out — no line
-    deltas exist to count.
+    产出闸门：代码 ∪ 策划文本 ∪ 配置（含 Godot 场景/资源）都计入 net_loc。
+    另认无后缀知名文件（Makefile / Dockerfile / CMakeLists.txt 等）。
     """
-    return Path(file_path).suffix.lower() in _PRODUCTIVE_SUFFIXES
+    pp = Path(file_path)
+    if pp.suffix.lower() in _PRODUCTIVE_SUFFIXES:
+        return True
+    return pp.name.lower() in _PRODUCTIVE_BASENAMES
 
 
 @dataclass
