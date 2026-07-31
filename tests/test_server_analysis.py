@@ -1,4 +1,4 @@
-"""Tests for the web Decision Lab (stratified cohort comparison + advice).
+"""Tests for the server Decision Lab (stratified cohort comparison + advice).
 
 The statistics are the product here, so these tests pin down the properties
 that make the output trustworthy rather than just exercising the code paths:
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-_BACKEND = Path(__file__).resolve().parents[1] / "web" / "backend"
+_BACKEND = Path(__file__).resolve().parents[1] / "server" / "backend"
 sys.path.insert(0, str(_BACKEND))
 
 analysis = pytest.importorskip("analysis")

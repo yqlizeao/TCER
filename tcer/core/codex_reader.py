@@ -497,7 +497,7 @@ def read_user_messages(path: Path) -> list[str]:
 def read_conversation(path: Path) -> list[dict]:
     """Extract the full ordered conversation from a Codex session JSONL.
 
-    Mirrors :func:`tcer.core.reader.read_conversation`'s output shape so the web
+    Mirrors :func:`tcer.core.reader.read_conversation`'s output shape so the server
     session view can render every source uniformly. Codex stores the turn stream
     as ``{"type","payload"}`` events rather than Claude's ``message`` objects, so
     the mapping is:

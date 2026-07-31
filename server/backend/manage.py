@@ -1,9 +1,9 @@
-"""Tiny admin CLI for the TCER web backend (pure stdlib).
+"""Tiny admin CLI for the TCER server backend (pure stdlib).
 
 Usage:
-    python web/backend/manage.py adduser <username> <password>
-    python web/backend/manage.py passwd  <username> <password>
-    python web/backend/manage.py listusers
+    python server/backend/manage.py adduser <username> <password>
+    python server/backend/manage.py passwd  <username> <password>
+    python server/backend/manage.py listusers
 """
 from __future__ import annotations
 

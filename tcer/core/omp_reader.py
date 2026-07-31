@@ -384,7 +384,7 @@ def _read_user_messages_single(path: Path) -> list[str]:
 def read_conversation(path: Path) -> list[dict]:
     """Extract the full ordered conversation from an omp session JSONL.
 
-    Mirrors :func:`tcer.core.reader.read_conversation`'s output shape so the web
+    Mirrors :func:`tcer.core.reader.read_conversation`'s output shape so the server
     session view can render every source uniformly.
     """
     convo: list[dict] = []

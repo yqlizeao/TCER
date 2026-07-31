@@ -108,7 +108,7 @@ class TokenUsage:
     tool_calls: dict[str, int] = field(default_factory=dict)  # tool_name → call count
     # Sub-identity of a tool call, ``"<Tool>:<variant>"`` → count. Only filled for
     # tools whose name alone hides what was actually invoked: ``Skill:dataviz``,
-    # ``Agent:Explore``. Lets the web layer build Skill / subagent dimensions that
+    # ``Agent:Explore``. Lets the server layer build Skill / subagent dimensions that
     # ``tool_calls`` (keyed by the bare tool name) cannot express. MCP servers need
     # no entry here — they are already encoded in the ``mcp__server__tool`` key.
     tool_variants: dict[str, int] = field(default_factory=dict)

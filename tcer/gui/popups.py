@@ -1031,7 +1031,7 @@ class ConfirmDeletePopup:
 
 
 class UploadDialog:
-    """上传到 TCER Web — 服务器/账号/选项面板，统一卡片风格。
+    """上传到 TCER Server — 服务器/账号/选项面板，统一卡片风格。
 
     Collects server/credentials/options and hands them to ``on_upload`` (which
     runs the actual HTTP call off the Tk thread) via a callback. The dialog only
@@ -1051,9 +1051,9 @@ class UploadDialog:
         self._on_save_prefs = on_save_prefs
         self._projects = projects
 
-        win = _new_window(parent, "上传到 TCER Web", "480x720")
+        win = _new_window(parent, "上传到 TCER Server", "480x720")
         self._win = win
-        tk.Label(win, text="上传到 TCER Web", bg=theme.BG, fg=theme.FG,
+        tk.Label(win, text="上传到 TCER Server", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
 
         sf = ScrollFrame(win, bg=theme.PANEL)

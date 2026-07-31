@@ -4,7 +4,7 @@ A token is ``base64url(payload).base64url(hmac_sha256(payload))`` where payload
 is ``{"u": username, "exp": epoch_s}``. No server-side session store needed;
 validity is checked by recomputing the HMAC and the expiry.
 
-The signing secret comes from ``TCER_WEB_SECRET`` if set, else a random secret
+The signing secret comes from ``TCER_SERVER_SECRET`` if set, else a random secret
 generated at process start (tokens then invalidate on restart — fine for a
 first-pass single-node deploy).
 """
@@ -18,7 +18,7 @@ import os
 import secrets
 import time
 
-_SECRET = (os.environ.get("TCER_WEB_SECRET") or secrets.token_hex(32)).encode()
+_SECRET = (os.environ.get("TCER_SERVER_SECRET") or secrets.token_hex(32)).encode()
 _TTL_SECONDS = 12 * 3600
 
 

@@ -1,14 +1,14 @@
-"""HTTP client for pushing TCER reports to the web backend.
+"""HTTP client for pushing TCER reports to the server backend.
 
 Pure-stdlib (``urllib``) so the zero-dependency rule holds. Mirrors the
-``web/backend`` contract:
+``server/backend`` contract:
 
     POST /api/login   {username, password}            -> {token}
     POST /api/upload  (Bearer <token>) <payload>       -> {inserted}
 
 The payload is built from ``export.report_row_dict`` (server schema is aligned
 to those field names), wrapped with the envelope documented in
-``web/PLAN-client-upload.md`` §4.
+``server/README.md`` 的「上传结构」章节。
 """
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def _base(server_url: str) -> str:
 def anon_label(user: str | None) -> str:
     """Stable pseudonym for anonymous uploads.
 
-    Anonymous uploads still need a *consistent per-user* person label so the web
+    Anonymous uploads still need a *consistent per-user* person label so the server
     side can group one user's anonymized rows together (rather than collapsing
     everyone into a single 未标注 bucket). We derive a deterministic short hash
     from the username so the same user always maps to the same "匿名-xxxxxx"
@@ -103,7 +103,7 @@ def build_payload(
 
     Per-session rows are **always** sent (when any exist) so each session lands
     as its own row on the server — that's what drives the time axis and lets the
-    web side group / dedup by session-id. ``detail`` does NOT decide whether
+    server side group / dedup by session-id. ``detail`` does NOT decide whether
     sessions are split; it only decides whether each session row also carries the
     turn-by-turn conversation (user messages). ``detail=False`` sends per-session
     *metrics only*; ``detail=True`` attaches the conversation too.
@@ -118,7 +118,7 @@ def build_payload(
     session content, so title / path / cwd are sent as-is — scrubbing them while
     shipping the full transcript would be pointless.
     """
-    # Anonymous uploads carry a stable pseudonym (not null) so the web side can
+    # Anonymous uploads carry a stable pseudonym (not null) so the server side can
     # still group one user's rows together instead of piling everyone into 未标注.
     person = anon_label(user) if anonymous else user
     scrub = anonymous and not detail
@@ -141,13 +141,13 @@ def build_payload(
             if scrub:
                 # Anonymize local-identifying fields: title (may contain a task
                 # description), plus the on-disk path and cwd. Title becomes a
-                # neutral "项目-会话ID" placeholder so the web still has a label.
+                # neutral "项目-会话ID" placeholder so the server still has a label.
                 _scrub_identifying(row, project)
             if detail:
                 # Attach the FULL turn-by-turn conversation (user input, assistant
-                # replies, thinking, tool calls + their results) so the web session
+                # replies, thinking, tool calls + their results) so the server session
                 # view can replay it. ``user_messages`` is kept for backward
-                # compatibility with the existing server/web fields.
+                # compatibility with the existing server fields.
                 texts = list(r.usage.user_message_texts)
                 if not texts:
                     texts = _lazy_user_messages(r)
@@ -199,7 +199,7 @@ def _read_conversation(report: SessionReport) -> list[dict]:
     event JSONL, Grok ACP updates, OpenCode SQLite, omp SessionEntry JSONL), so a
     single parser can't handle all five. Every reader's ``read_conversation``
     returns the same block
-    shape (see :func:`tcer.core.reader.read_conversation`) so the web session
+    shape (see :func:`tcer.core.reader.read_conversation`) so the server session
     view renders every source uniformly.
 
     A Claude session may span several JSONL files (main + subagents);
