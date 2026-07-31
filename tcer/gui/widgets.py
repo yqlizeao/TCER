@@ -51,7 +51,7 @@ class CheckRow:
     可选 ``icon``（文字左）、``hint``（文字右，淡色说明）。
     """
 
-    _SEL_BG = "#15324f"   # 选中行底色（淡蓝；多选多行高亮不刺眼）
+    _SEL_BG = theme.SEL_ROW_BG   # 选中行底色（淡蓝；多选多行高亮不刺眼）
 
     def __init__(self, parent, text, var, on_toggle=None, *, tooltip=None,
                  font=None, icon=None, hint=None) -> None:
@@ -97,7 +97,7 @@ class CheckRow:
                 w.config(bg=bg)
             except tk.TclError:
                 pass
-        self._lbl.config(fg="#ffffff" if on else theme.FG)
+        self._lbl.config(fg=theme.FG_WHITE if on else theme.FG)
 
     def _on_hover(self, _e=None) -> None:
         if self.var.get():
@@ -254,7 +254,7 @@ class Card:
 
     def _on_hover(self, _e=None) -> None:
         if not self._selected:
-            self.frame.configure(highlightbackground="#5a5a60")
+            self.frame.configure(highlightbackground=theme.BORDER_HOVER)
 
     def _on_unhover(self, _e=None) -> None:
         if not self._selected:
@@ -350,7 +350,7 @@ class SelectableLabel(tk.Text):
                          highlightthickness=0, padx=padx, pady=pady,
                          width=width, height=1, cursor="arrow",
                          selectbackground=theme.HOVER_ACCENT,
-                         selectforeground="#ffffff",
+                         selectforeground=theme.FG_WHITE,
                          inactiveselectbackground=theme.HOVER_ACCENT,
                          exportselection=True, **kw)
         self.tag_configure("all", justify=justify)
@@ -403,8 +403,8 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, **kw):
     """
     base_bg = theme.ACCENT if primary else theme.PANEL
     hover_bg = theme.HOVER_ACCENT if primary else theme.HOVER_BG
-    fg = "#ffffff" if primary else theme.FG
-    btn = tk.Button(parent, text=text, command=command, relief="flat",
+    fg = theme.FG_WHITE if primary else theme.FG
+    btn = tk.Button(parent, text=text, command=command, relief="flat",  # style-exempt: flat_button 本体
                     bg=base_bg, fg=fg, bd=0, cursor="hand2",
                     activebackground=hover_bg, activeforeground=fg,
                     padx=theme.PAD_M if padx is None else padx,
@@ -445,7 +445,7 @@ class FlatMenu:
         if not disabled:
             def enter(_e):
                 row.configure(bg=theme.ACCENT)
-                lbl.configure(bg=theme.ACCENT, fg="#ffffff")
+                lbl.configure(bg=theme.ACCENT, fg=theme.FG_WHITE)
             def leave(_e):
                 row.configure(bg=theme.PANEL)
                 lbl.configure(bg=theme.PANEL, fg=theme.FG)
@@ -471,7 +471,7 @@ class FlatMenu:
 
         def enter(_e):
             row.configure(bg=theme.ACCENT)
-            lbl.configure(bg=theme.ACCENT, fg="#ffffff")
+            lbl.configure(bg=theme.ACCENT, fg=theme.FG_WHITE)
 
         def leave(_e):
             row.configure(bg=theme.PANEL)
@@ -615,7 +615,7 @@ class CalendarPopup:
             if is_today:
                 cell.config(fg=theme.SUCCESS)
             cell.bind("<Enter>", lambda _e, c=cell, t=is_today:
-                      c.config(bg=theme.ACCENT, fg="#ffffff"), add="+")
+                      c.config(bg=theme.ACCENT, fg=theme.FG_WHITE), add="+")
             cell.bind("<Leave>", lambda _e, c=cell, t=is_today:
                       c.config(bg=theme.PANEL_2,
                                fg=(theme.SUCCESS if t else theme.FG)), add="+")

@@ -14,7 +14,7 @@ from tcer.core import format as fmt
 from tcer.core import metrics
 from . import theme
 from .metric_defs import CONCEPT_NOTES, GROUPS, METRIC_BY_KEY
-from .widgets import ScrollFrame, SelectableLabel, Tooltip, flat_button, new_window
+from .widgets import CheckRow, ScrollFrame, SelectableLabel, Tooltip, flat_button, new_window
 
 
 # 共享弹窗外壳在 widgets.new_window；保留旧名兼容既有调用。
@@ -150,12 +150,12 @@ class SessionDetailPopup:
 
         # Summary header
         total_cost = metrics_mod.cost_usd(u)
-        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
         head.pack(fill="x", pady=10)
         tk.Label(head, text=f"{r.meta.title or '(无标题)'} · {fmt.models_label(u)}",
-                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
+                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
         tk.Label(head, text=f"{u.total:,} Token · {fmt.fmt_money(total_cost)}",
-                 bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI).pack()
+                 bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI).pack()
 
         # Metadata card
         def meta_row(key, val):
@@ -209,7 +209,7 @@ class SessionDetailPopup:
 
                 bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
                 bar_frame.pack(fill="x")
-                bar_bg = tk.Frame(bar_frame, bg="#333333", height=8)
+                bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=8)
                 bar_bg.pack(fill="x")
                 if max_cost > 0:
                     tk.Frame(bar_bg, bg=self._COST_COLOR, height=8).place(
@@ -260,12 +260,12 @@ class ToolCallsPopup:
             total = sum(tc.values())
             total_errs = usage.tool_errors
             # Summary header
-            head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+            head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
             head.pack(fill="x", pady=10)
             summary = f"总计 {total} 次调用 · {len(tc)} 种工具"
             if total_errs:
                 summary += f" · {total_errs} 次错误"
-            tk.Label(head, text=summary, bg="#2a2a2e",
+            tk.Label(head, text=summary, bg=theme.CARD_HEADER_BG,
                      fg=theme.ERROR if total_errs else theme.SUCCESS,
                      font=theme.FONT_UI_BOLD).pack()
 
@@ -287,7 +287,7 @@ class ToolCallsPopup:
                 # --- Stacked bar (relwidth-based, resize-safe) ---
                 bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
                 bar_frame.pack(fill="x")
-                bar_bg = tk.Frame(bar_frame, bg="#333333", height=10)
+                bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=10)
                 bar_bg.pack(fill="x")
                 if count > 0:
                     if ok > 0:
@@ -364,13 +364,13 @@ class ModelsPopup:
             unmatched = metrics_mod.unmatched_pricing_models(usage)
 
             # Summary header
-            head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+            head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
             head.pack(fill="x", pady=10)
             tk.Label(head, text=f"总计 {total_tokens:,} Token · {fmt_money(total_cost)} · "
                                 f"{len(per_model)} 个模型",
-                     bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+                     bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
             if unmatched:
-                warn = tk.Frame(inner, bg="#3a2a1a", padx=10, pady=6)
+                warn = tk.Frame(inner, bg=theme.WARN_TINT_BG, padx=10, pady=6)
                 warn.pack(fill="x", pady=(0, 4))
                 names = "、".join(pricing_mod.label(m) for m in unmatched[:6])
                 more = f" 等 {len(unmatched)} 个" if len(unmatched) > 6 else ""
@@ -378,7 +378,7 @@ class ModelsPopup:
                     warn,
                     text=f"⚠ {len(unmatched)} 个模型未在价表中（按默认 list 价）：{names}{more}\n"
                          f"成本可能偏差；可在 tcer/config/model_pricing.json 补充条目。",
-                    bg="#3a2a1a", fg=theme.WARNING,
+                    bg=theme.WARN_TINT_BG, fg=theme.WARNING,
                     font=theme.FONT_UI, justify="left", wraplength=500,
                 ).pack(anchor="w")
 
@@ -414,7 +414,7 @@ class ModelsPopup:
                 keys = ["input", "output", "cache_creation", "cache_read"]
                 bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
                 bar_frame.pack(fill="x")
-                bar_bg = tk.Frame(bar_frame, bg="#333333", height=10)
+                bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=10)
                 bar_bg.pack(fill="x")
                 if tok > 0:
                     relx = 0.0
@@ -491,17 +491,17 @@ class CostBreakdownPopup:
         items.sort(key=lambda x: x[1], reverse=True)
 
         # Summary header
-        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
         head.pack(fill="x", pady=10)
         tk.Label(head, text=f"总计 {fmt_money(total_cost)} · {len(per_model)} 个模型",
-                 bg="#2a2a2e", fg=self._COLOR, font=theme.FONT_UI_BOLD).pack()
+                 bg=theme.CARD_HEADER_BG, fg=self._COLOR, font=theme.FONT_UI_BOLD).pack()
         if unmatched:
-            warn = tk.Frame(inner, bg="#3a2a1a", padx=10, pady=6)
+            warn = tk.Frame(inner, bg=theme.WARN_TINT_BG, padx=10, pady=6)
             warn.pack(fill="x", pady=(0, 4))
             tk.Label(
                 warn,
                 text=f"⚠ {len(unmatched)} 个模型未在价表中，成本按默认 list 价估算（见各行「默认价」标记）。",
-                bg="#3a2a1a", fg=theme.WARNING, font=theme.FONT_UI, wraplength=500, justify="left",
+                bg=theme.WARN_TINT_BG, fg=theme.WARNING, font=theme.FONT_UI, wraplength=500, justify="left",
             ).pack(anchor="w")
 
         max_cost = items[0][1] if items else 1
@@ -525,7 +525,7 @@ class CostBreakdownPopup:
             # Cost bar
             bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
             bar_frame.pack(fill="x")
-            bar_bg = tk.Frame(bar_frame, bg="#333333", height=10)
+            bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=10)
             bar_bg.pack(fill="x")
             if max_cost > 0:
                 tk.Frame(bar_bg, bg=self._COLOR, height=10).place(
@@ -564,10 +564,10 @@ class BaselinesPopup:
         inner = sf.inner
 
         # Summary header
-        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
         head.pack(fill="x", pady=10)
         tk.Label(head, text=f"基于 {n_sessions} 个会话计算",
-                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
+                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
 
         # Baseline cards（含与当前生效基准的对比）
         current = {"tcer": metrics.TCER_BASELINE, "cpe": metrics.CPE_BASELINE}
@@ -634,11 +634,7 @@ class AdvancedPopup:
         card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=10)
         card.pack(fill="x")
         no_loc_var = tk.BooleanVar(value=no_loc)
-        tk.Checkbutton(card, text="跳过 LOC（仅 Token 指标，不算 TCER/CPE/CTEI）",
-                       variable=no_loc_var, bg=theme.PANEL, fg=theme.FG,
-                       selectcolor="#1e1e1e",
-                       activebackground=theme.PANEL, activeforeground=theme.FG,
-                       font=theme.FONT_UI).pack(anchor="w")
+        CheckRow(card, "跳过 LOC（仅 Token 指标，不算 TCER/CPE/CTEI）", no_loc_var)
         tk.Label(card,
                  text="全部指标均来自会话数据回放；TCER 不读取真实仓库、不依赖 git。",
                  bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
@@ -673,27 +669,27 @@ class UserMsgsPopup:
                      font=theme.FONT_UI, pady=40).pack()
         else:
             # Summary header
-            head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+            head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
             head.pack(fill="x", pady=10)
             tk.Label(head, text=f"共 {len(messages)} 条消息 · {total_chars:,} 字符",
-                     bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+                     bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
 
             for idx, txt in enumerate(messages, 1):
                 # Card frame
-                card = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+                card = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
                 card.pack(fill="x", pady=4)
 
                 # Header row: badge + char count
-                hdr = tk.Frame(card, bg="#2a2a2e")
+                hdr = tk.Frame(card, bg=theme.CARD_HEADER_BG)
                 hdr.pack(fill="x")
-                badge = tk.Label(hdr, text=f"#{idx}", bg=self._ACCENT, fg="#ffffff",
+                badge = tk.Label(hdr, text=f"#{idx}", bg=self._ACCENT, fg=theme.FG_WHITE,
                                  font=(theme.FONT_MONO_NAME, 8, "bold"), padx=6, pady=1)
                 badge.pack(side="left")
-                tk.Label(hdr, text=f"{len(txt)} 字符", bg="#2a2a2e", fg=theme.MUTED,
+                tk.Label(hdr, text=f"{len(txt)} 字符", bg=theme.CARD_HEADER_BG, fg=theme.MUTED,
                          font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
 
                 # Message text
-                SelectableLabel(card, text=txt, bg="#2a2a2e", fg=theme.FG,
+                SelectableLabel(card, text=txt, bg=theme.CARD_HEADER_BG, fg=theme.FG,
                                 font=theme.FONT_UI, justify="left",
                                 width=60).pack(fill="x", pady=(4, 0))
 
@@ -720,10 +716,10 @@ class FilesTouchedPopup:
         max_cnt = sorted_items[0][1] if sorted_items else 1
 
         # Summary header
-        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
         head.pack(fill="x", pady=10)
         tk.Label(head, text=f"共 {len(details)} 个文件 · 合计 {total_ops} 次操作",
-                 bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+                 bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
 
         # 目录热度：按父目录聚合操作次数（哪个模块最烫）。
         dir_counts: dict[str, int] = {}
@@ -746,7 +742,7 @@ class FilesTouchedPopup:
                 tk.Label(row, text=d_disp, bg=theme.PANEL, fg=theme.MUTED,
                          font=(theme.FONT_MONO_NAME, 8), anchor="w",
                          width=48).pack(side="left")
-                bar_bg = tk.Frame(row, bg="#333333", height=6)
+                bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=6)
                 bar_bg.pack(side="left", fill="x", expand=True, padx=4)
                 tk.Frame(bar_bg, bg="#ce9178", height=6).place(
                     relx=0, rely=0, relwidth=cnt / max_dir, relheight=1.0)
@@ -768,7 +764,7 @@ class FilesTouchedPopup:
 
             bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
             bar_frame.pack(fill="x")
-            bar_bg = tk.Frame(bar_frame, bg="#333333", height=8)
+            bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=8)
             bar_bg.pack(fill="x")
             tk.Frame(bar_bg, bg=self._COLOR, height=8).place(
                 relx=0, rely=0, relwidth=cnt / max_cnt, relheight=1.0)
@@ -807,10 +803,10 @@ class MemoryFilesPopup:
         inner = sf.inner
 
         # Summary header
-        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=8)
+        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
         head.pack(fill="x", pady=10)
         tk.Label(head, text=f"共 {count} 个文件 · memory/",
-                 bg="#2a2a2e", fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+                 bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
 
         if count == 0:
             tk.Label(inner, text="该目录下暂无记忆文件", bg=theme.PANEL,
@@ -842,7 +838,7 @@ class MemoryFilesPopup:
 
             bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
             bar_frame.pack(fill="x")
-            bar_bg = tk.Frame(bar_frame, bg="#333333", height=8)
+            bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=8)
             bar_bg.pack(fill="x")
             tk.Frame(bar_bg, bg=self._COLOR, height=8).place(
                 relx=0, rely=0, relwidth=size / max_size, relheight=1.0)
@@ -879,12 +875,12 @@ class RadarPopup:
                  font=theme.FONT_HEADING, pady=8).pack()
 
         # Summary header — CTEI string straight from the SSOT (matches 指标分类).
-        head = tk.Frame(win, bg="#2a2a2e", padx=10, pady=6)
+        head = tk.Frame(win, bg=theme.CARD_HEADER_BG, padx=10, pady=6)
         head.pack(fill="x", padx=10, pady=(0, 4))
         grade = report.grade or "-"
         ctei_val = metric_display(report, "ctei")
         tk.Label(head, text=f"{report.meta.title or sid}  CTEI {ctei_val}  评级 {grade}",
-                 bg="#2a2a2e", fg=theme.FG, font=theme.FONT_UI).pack()
+                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI).pack()
 
         # Radar canvas
         canvas = tk.Canvas(win, bg=theme.PANEL, highlightthickness=0,
@@ -912,7 +908,7 @@ class RadarPopup:
                 px = cx + R * frac * math.cos(angle)
                 py = cy - R * frac * math.sin(angle)
                 pts.extend([px, py])
-            canvas.create_polygon(pts, outline="#3e3e42", fill="", dash=(2, 3))
+            canvas.create_polygon(pts, outline=theme.BORDER, fill="", dash=(2, 3))
         canvas.create_text(cx + R * 0.52, cy - 4, text="50%",
                            fill="#444444", font=theme.FONT_MONO)
 
@@ -921,7 +917,7 @@ class RadarPopup:
             angle = math.pi / 2 + 2 * math.pi * ai / n
             ex = cx + R * math.cos(angle)
             ey = cy - R * math.sin(angle)
-            canvas.create_line(cx, cy, ex, ey, fill="#3e3e42")
+            canvas.create_line(cx, cy, ex, ey, fill=theme.BORDER)
             lx = cx + (R + 24) * math.cos(angle)
             ly = cy - (R + 24) * math.sin(angle)
             canvas.create_text(lx, ly, text=label, fill=theme.FG,
@@ -1013,12 +1009,12 @@ class ConfirmDeletePopup:
             win.destroy()
             on_confirm()
 
-        del_btn = tk.Button(btn_bar, text="删除会话", command=_do_delete,
-                            bg=self._DANGER, fg="#ffffff", relief="flat",
-                            activebackground=self._DANGER_ACTIVE, activeforeground="#ffffff",
+        del_btn = tk.Button(btn_bar, text="删除会话", command=_do_delete,  # style-exempt: style.md §3 豁免：删除确认红色警示
+                            bg=self._DANGER, fg=theme.FG_WHITE, relief="flat",
+                            activebackground=self._DANGER_ACTIVE, activeforeground=theme.FG_WHITE,
                             padx=16, pady=5, font=theme.FONT_UI_BOLD, cursor="hand2")
         del_btn.pack(side="right")
-        cancel_btn = tk.Button(btn_bar, text="取消", command=win.destroy,
+        cancel_btn = tk.Button(btn_bar, text="取消", command=win.destroy,  # style-exempt: style.md §3 豁免：删除确认
                               bg=theme.PANEL_2, fg=theme.FG, relief="flat",
                               activebackground=theme.PANEL, activeforeground=theme.FG,
                               padx=16, pady=5, font=theme.FONT_UI, cursor="hand2")
@@ -1074,11 +1070,11 @@ class UploadDialog:
         self.anon_var = tk.BooleanVar(value=bool(prefs.get("anonymous")))
         # 匿名上传：勾选后无需账号密码直接上传（后端接受无 token 的匿名请求）；
         # 生成稳定匿名代号并隐去标题/路径——但附带对话内容时隐去失效（main 的隐私告知）。
-        tk.Checkbutton(
+        tk.Checkbutton(  # style-exempt: style.md §16 豁免：UploadDialog 归上传负责人
             card2,
             text="匿名上传（无需账号密码；生成稳定匿名代号并隐去标题/路径——但附带对话内容时隐去失效）",
             variable=self.anon_var, bg=theme.PANEL, fg=theme.FG,
-            selectcolor="#1e1e1e", activebackground=theme.PANEL,
+            selectcolor=theme.BG, activebackground=theme.PANEL,
             activeforeground=theme.FG, font=theme.FONT_UI, anchor="w",
             command=self._apply_anon_state).pack(anchor="w", pady=(2, 0))
         self.user_var = tk.StringVar(value=prefs.get("username", ""))
@@ -1091,31 +1087,31 @@ class UploadDialog:
         self._cred_row = cred_row
         tk.Label(cred_row, text="账号", bg=theme.PANEL, fg=theme.FG,
                  font=theme.FONT_UI).pack(side="left")
-        tk.Entry(cred_row, textvariable=self.user_var, width=14, bg="#1e1e1e",
+        tk.Entry(cred_row, textvariable=self.user_var, width=14, bg=theme.BG,
                  fg=theme.FG, insertbackground=theme.FG, relief="flat",
-                 highlightthickness=1, highlightbackground="#3e3e42"
+                 highlightthickness=1, highlightbackground=theme.BORDER
                  ).pack(side="left", padx=(4, 14))
         tk.Label(cred_row, text="密码", bg=theme.PANEL, fg=theme.FG,
                  font=theme.FONT_UI).pack(side="left")
         tk.Entry(cred_row, textvariable=self.pwd_var, width=14, show="*",
-                 bg="#1e1e1e", fg=theme.FG, insertbackground=theme.FG, relief="flat",
-                 highlightthickness=1, highlightbackground="#3e3e42"
+                 bg=theme.BG, fg=theme.FG, insertbackground=theme.FG, relief="flat",
+                 highlightthickness=1, highlightbackground=theme.BORDER
                  ).pack(side="left", padx=4)
         # 记住密码（与凭据行同进同出）。
-        self._remember_chk = tk.Checkbutton(
+        self._remember_chk = tk.Checkbutton(  # style-exempt: style.md §16 豁免：UploadDialog 归上传负责人  # style-exempt: style.md §16 豁免：UploadDialog 归上传负责人
             card2, text="记住密码（明文 base64 混淆存储，非加密）",
             variable=self.remember_var, bg=theme.PANEL, fg=theme.FG,
-            selectcolor="#1e1e1e", activebackground=theme.PANEL,
+            selectcolor=theme.BG, activebackground=theme.PANEL,
             activeforeground=theme.FG, font=theme.FONT_UI, anchor="w")
 
         # 会话详情：每个会话始终作为独立指标行上传（后端按 session-id 去重）；勾选后额外
         # 附带该会话的逐条对话内容，否则仅上传指标。先 pack 作为凭据行的锚点。
         self.all_sessions_var = tk.BooleanVar(
             value=bool(prefs.get("all_sessions") or prefs.get("detail")))
-        self._all_sessions_chk = tk.Checkbutton(
+        self._all_sessions_chk = tk.Checkbutton(  # style-exempt: style.md §16 豁免：UploadDialog 归上传负责人  # style-exempt: style.md §16 豁免：UploadDialog 归上传负责人
             card2, text="附带会话详情（上传完整用户消息原文；匿名模式下隐去失效；默认仅上传指标）",
             variable=self.all_sessions_var, bg=theme.PANEL, fg=theme.FG,
-            selectcolor="#1e1e1e", activebackground=theme.PANEL,
+            selectcolor=theme.BG, activebackground=theme.PANEL,
             activeforeground=theme.FG, font=theme.FONT_UI, anchor="w")
         self._all_sessions_chk.pack(anchor="w", pady=(4, 0))
         # 凭据行/记住密码插到「会话详情」之前，再按匿名状态决定显隐。
@@ -1131,9 +1127,9 @@ class UploadDialog:
         lb_frame.pack(fill="x")
         self._proj_lb = tk.Listbox(
             lb_frame, selectmode="extended", height=7, exportselection=False,
-            bg="#1e1e1e", fg=theme.FG, relief="flat", highlightthickness=1,
-            highlightbackground="#3e3e42", selectbackground=theme.ACCENT,
-            selectforeground="#ffffff", font=theme.FONT_UI, activestyle="none")
+            bg=theme.BG, fg=theme.FG, relief="flat", highlightthickness=1,
+            highlightbackground=theme.BORDER, selectbackground=theme.ACCENT,
+            selectforeground=theme.FG_WHITE, font=theme.FONT_UI, activestyle="none")
         lb_sb = ttk.Scrollbar(lb_frame, orient="vertical", command=self._proj_lb.yview)
         self._proj_lb.configure(yscrollcommand=lb_sb.set)
         self._proj_lb.pack(side="left", fill="both", expand=True)
@@ -1154,11 +1150,11 @@ class UploadDialog:
 
         sel_btn_row = tk.Frame(card3, bg=theme.PANEL)
         sel_btn_row.pack(anchor="w", pady=(0, 4))
-        tk.Button(sel_btn_row, text="全选",
+        tk.Button(sel_btn_row, text="全选",  # style-exempt: style.md §3 豁免：UploadDialog
                   command=lambda: self._proj_lb.selection_set(0, "end"),
                   bg=theme.PANEL_2, fg=theme.FG, relief="flat", padx=8,
                   font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
-        tk.Button(sel_btn_row, text="清空",
+        tk.Button(sel_btn_row, text="清空",  # style-exempt: style.md §3 豁免：UploadDialog
                   command=lambda: self._proj_lb.selection_clear(0, "end"),
                   bg=theme.PANEL_2, fg=theme.FG, relief="flat", padx=8,
                   font=theme.FONT_UI_SMALL).pack(side="left")
@@ -1176,8 +1172,8 @@ class UploadDialog:
         auto_row = tk.Frame(action, bg=theme.BG)
         auto_row.pack(fill="x", pady=(0, 6))
         self.auto_var = tk.BooleanVar(value=bool(prefs.get("auto_upload")))
-        tk.Checkbutton(auto_row, text="自动上传", variable=self.auto_var,
-                       bg=theme.BG, fg=theme.FG, selectcolor="#1e1e1e",
+        tk.Checkbutton(auto_row, text="自动上传", variable=self.auto_var,  # style-exempt: style.md §16 豁免：UploadDialog 归上传负责人
+                       bg=theme.BG, fg=theme.FG, selectcolor=theme.BG,
                        activebackground=theme.BG, activeforeground=theme.FG,
                        font=theme.FONT_UI, command=self._on_auto_toggle
                        ).pack(side="left")
@@ -1196,9 +1192,9 @@ class UploadDialog:
         self.interval_cb.bind("<<ComboboxSelected>>",
                               lambda e: self._on_interval_change())
 
-        self._upload_btn = tk.Button(
+        self._upload_btn = tk.Button(  # style-exempt: style.md §3 豁免：UploadDialog
             action, text="立即上传", command=self._do_upload, bg=theme.ACCENT,
-            fg="#ffffff", relief="flat", padx=16, pady=6, font=theme.FONT_UI_BOLD,
+            fg=theme.FG_WHITE, relief="flat", padx=16, pady=6, font=theme.FONT_UI_BOLD,
             cursor="hand2")
         self._upload_btn.pack(fill="x")
 
@@ -1210,9 +1206,9 @@ class UploadDialog:
     # -- small builders --
     def _card(self, inner, title: str) -> tk.Frame:
         tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-        head = tk.Frame(inner, bg="#2a2a2e", padx=10, pady=6)
+        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=6)
         head.pack(fill="x")
-        tk.Label(head, text=title, bg="#2a2a2e", fg=theme.FG,
+        tk.Label(head, text=title, bg=theme.CARD_HEADER_BG, fg=theme.FG,
                  font=theme.FONT_UI_BOLD).pack(anchor="w")
         card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
         card.pack(fill="x")
@@ -1221,9 +1217,9 @@ class UploadDialog:
     def _entry(self, card, label: str, var, show: str = "") -> None:
         tk.Label(card, text=label, bg=theme.PANEL, fg=theme.FG,
                  font=theme.FONT_UI, anchor="w").pack(anchor="w", pady=(4, 0))
-        tk.Entry(card, textvariable=var, width=48, bg="#1e1e1e", fg=theme.FG,
+        tk.Entry(card, textvariable=var, width=48, bg=theme.BG, fg=theme.FG,
                  insertbackground=theme.FG, relief="flat", highlightthickness=1,
-                 highlightbackground="#3e3e42", show=show).pack(anchor="w")
+                 highlightbackground=theme.BORDER, show=show).pack(anchor="w")
 
     def _fit_window(self) -> None:
         """按表单实际高度收紧窗口，消除底部留白。

@@ -442,22 +442,22 @@ class TrendChart:
         tk.Label(header, text="▼ 趋势分析", bg=gc, fg=theme.FG,
                  font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
         from .views import ui_icon
-        seg = tk.Frame(header, bg="#333333", padx=2, pady=2)
+        seg = tk.Frame(header, bg=theme.CONTROL_BG, padx=2, pady=2)
         seg.pack(side="left", padx=(10, 0))
         self._mode_pills: dict[str, tk.Frame] = {}
         for label, val in (("趋势图", "trend"), ("散点图", "scatter"),
                            ("仪表板", "dashboard"), ("时段", "heatmap")):
-            pill = tk.Frame(seg, bg="#333333")
+            pill = tk.Frame(seg, bg=theme.CONTROL_BG)
             pill.pack(side="left", padx=1)
             click = lambda e, v=val: self._set_mode(v)
             members: list = []
             icon = ui_icon(seg, val)
             if icon is not None:
-                il = tk.Label(pill, image=icon, bg="#333333", cursor="hand2")
+                il = tk.Label(pill, image=icon, bg=theme.CONTROL_BG, cursor="hand2")
                 il.pack(side="left", padx=(4, 0))
                 il.bind("<Button-1>", click)
                 members.append(il)
-            lbl = tk.Label(pill, text=label, bg="#333333", fg=theme.MUTED,
+            lbl = tk.Label(pill, text=label, bg=theme.CONTROL_BG, fg=theme.MUTED,
                            cursor="hand2", font=theme.FONT_UI_SMALL, padx=3)
             lbl.pack(side="left")
             lbl.bind("<Button-1>", click)
@@ -480,8 +480,8 @@ class TrendChart:
         cur = self._mode.get()
         for val, pill in self._mode_pills.items():
             on = val == cur
-            bg = theme.ACCENT if on else "#333333"
-            fg = "#ffffff" if on else theme.MUTED
+            bg = theme.ACCENT if on else theme.CONTROL_BG
+            fg = theme.FG_WHITE if on else theme.MUTED
             pill.config(bg=bg)
             for w in getattr(pill, "_members", ()):
                 try:
@@ -500,7 +500,7 @@ class TrendChart:
         self._selector = MetricTrendSelector(left, on_change=self._on_selection_change)
 
         # Separator
-        sep = tk.Frame(self._content, bg="#3e3e42", width=2)
+        sep = tk.Frame(self._content, bg=theme.BORDER, width=2)
         sep.pack(side="left", fill="y")
 
         # Right: header + canvas + stats
@@ -574,7 +574,7 @@ class TrendChart:
         # Mode buttons in group header (same as trend)
         self._add_mode_buttons(right)
 
-        self._heatmap_chart = HeatmapChart(right)
+        self._heatmap_chart = HeatmapChart(right, controller=self._controller)
         self._heatmap_chart.update(self._reports)
 
     def _switch_mode(self) -> None:
@@ -922,7 +922,7 @@ class TrendChart:
             for tv in ticks:
                 ty = yv(tv)
                 c.create_line(pad_l, ty, pad_l + plot_w, ty,
-                              fill="#333333", dash=(2, 4))
+                              fill=theme.CONTROL_BG, dash=(2, 4))
                 c.create_text(pad_l - 6, ty, text=_fmt_num(tv), anchor="e",
                               fill=theme.MUTED, font=theme.FONT_UI_SMALL)
 
@@ -933,9 +933,9 @@ class TrendChart:
                 c.create_text(pad_l + plot_w - 2, by, text="基准", anchor="e",
                               fill=theme.WARNING, font=theme.FONT_UI_SMALL)
 
-            c.create_line(pad_l, pad_t, pad_l, pad_t + plot_h, fill="#3e3e42")
+            c.create_line(pad_l, pad_t, pad_l, pad_t + plot_h, fill=theme.BORDER)
             c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h,
-                          fill="#3e3e42")
+                          fill=theme.BORDER)
 
             self._draw_x_axis(c, ol.timestamps, pad_l, plot_w, pad_t, plot_h,
                               len(ol.values))
@@ -1010,7 +1010,7 @@ class TrendChart:
             px = pad_l + (plot_w * i / (n_pts - 1)) if n_pts > 1 else pad_l + plot_w / 2
             # Tick mark
             c.create_line(px, pad_t + plot_h, px, pad_t + plot_h + 4,
-                          fill="#3e3e42")
+                          fill=theme.BORDER)
             label = fmt_dt(ts, dt_fmt)
             if label == "-":
                 continue
@@ -1114,7 +1114,7 @@ class TrendChart:
                               fill=theme.ACCENT, dash=(4, 3), width=1,
                               tags="sel_overlay")
                 # 选中环 + 内点：_aa_layer 抗锯齿，白色（比 ACCENT 蓝更醒目、不混数据色）
-                ring = "#ffffff"
+                ring = theme.FG_WHITE
                 _aa_layer(c, [
                     ("dot", px, py, 10, (0, 0, 0, 0), ring, 2),   # 外环：透明填充 + 白边
                     ("dot", px, py, 3, ring, ring),               # 内点
@@ -1199,9 +1199,9 @@ class TrendChart:
             self._draw_overlay_line(c, ol, xv, yv)
 
         # Axes
-        c.create_line(pad_l, pad_t, pad_l, pad_t + plot_h, fill="#3e3e42")
+        c.create_line(pad_l, pad_t, pad_l, pad_t + plot_h, fill=theme.BORDER)
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h,
-                      fill="#3e3e42")
+                      fill=theme.BORDER)
         c.create_text(pad_l - 6, pad_t, text="1.0", anchor="e",
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL)
         c.create_text(pad_l - 6, pad_t + plot_h, text="0.0", anchor="e",
@@ -1264,9 +1264,9 @@ class TrendChart:
                           fill=ol_r.color, font=theme.FONT_UI_SMALL)
 
         # Axes
-        c.create_line(pad_l, pad_t, pad_l, pad_t + plot_h, fill="#3e3e42")
+        c.create_line(pad_l, pad_t, pad_l, pad_t + plot_h, fill=theme.BORDER)
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h,
-                      fill="#3e3e42")
+                      fill=theme.BORDER)
         c.create_line(pad_l + plot_w, pad_t, pad_l + plot_w, pad_t + plot_h,
                       fill=ol_r.color, dash=(3, 3))
 
@@ -1530,8 +1530,8 @@ class ScatterChart:
                           fill=theme.MUTED, font=theme.FONT_UI_SMALL)
 
         # Axes
-        c.create_line(pad, pad, pad, pad + plot_h, fill="#3e3e42")
-        c.create_line(pad, pad + plot_h, pad + plot_w, pad + plot_h, fill="#3e3e42")
+        c.create_line(pad, pad, pad, pad + plot_h, fill=theme.BORDER)
+        c.create_line(pad, pad + plot_h, pad + plot_w, pad + plot_h, fill=theme.BORDER)
 
         # Dots（PIL 超采样抗锯齿）
         self._aa_imgs = []
@@ -1674,7 +1674,7 @@ class DashboardChart:
 
             # Cell background
             c.create_rectangle(x0, y0, x0 + cell_w, y0 + cell_h,
-                               fill=theme.PANEL_2, outline="#333333")
+                               fill=theme.PANEL_2, outline=theme.CONTROL_BG)
 
             # Header bar
             c.create_rectangle(x0, y0, x0 + cell_w, y0 + 20,
@@ -1768,15 +1768,19 @@ class DashboardChart:
 
 
 # ============================================================
-# 时段效率分析 — 星期 × 小时热力图（趋势页第 4 模式）
+# 时段效率分析 — 日历热力图（周×星期）/ 周×小时热力图（趋势页第 4 模式）
 # ============================================================
 
 class HeatmapChart:
-    """按会话开始时间（本地时区）聚合的 7×24 热力图。
+    """按会话开始时间（本地时区）聚合的时段热力图，两种视图可切换：
 
-    单元格取所选指标在该时段全部会话上的均值（会话数模式取计数），
-    颜色为线性色阶；悬停显示时段、会话数与均值。指标取值走 metric_defs
-    ``raw_value``（SSOT），与趋势/散点图完全一致。
+    - 日历（GitHub 风）：列=周，行=星期，按天聚合；
+    - 周×小时：列=0–23 时，行=星期，回答「一天中几点效率高」。
+
+    单元格取所选指标在该时段全部会话上的均值（会话数=计数、成本/Token=合计），
+    四分位分档取色；坏方向指标（sentiment="down"）走橙阶。悬停显示时段与数值，
+    **点击格子下钻**该时段会话列表（FlatMenu → 跳转会话详情）。指标取值走
+    metric_defs ``raw_value``（SSOT），与趋势/散点图完全一致。
     """
 
     _WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -1787,12 +1791,16 @@ class HeatmapChart:
     _SUM_KEYS = {"cost", "total_tokens"}  # 合计而非均值
     _PAD_L = 46
     _PAD_T = 26
-    _PAD_B = 44
+    _PAD_B = 78          # 月份/小时标签 + 底部边际条
     _PAD_R = 14
+    _MARGIN_R = 96       # 右侧星期边际条预留宽
+    _MARGIN_B = 30       # 底部边际条高
 
-    def __init__(self, parent) -> None:
+    def __init__(self, parent, controller=None) -> None:
         self._reports: list = []
+        self._controller = controller
         self._resize_after: str | None = None
+        self._view = "calendar"          # "calendar" | "hours"
 
         bar = tk.Frame(parent, bg=theme.BG)
         bar.pack(fill="x", pady=(2, 0))
@@ -1803,17 +1811,37 @@ class HeatmapChart:
                           values=[label for label, _ in self._MODES], width=16)
         cb.pack(side="left")
         cb.bind("<<ComboboxSelected>>", lambda _e: self._draw())
-        # 图例（固定在工具栏右侧，不随画布滚动）
+
+        # 视图切换（日历 / 周×小时）——§11 深色 pill 分段样式
+        seg = tk.Frame(bar, bg=theme.CONTROL_BG, padx=2, pady=2)
+        seg.pack(side="left", padx=(10, 0))
+        self._view_pills: dict[str, tk.Label] = {}
+        for label, val in (("日历", "calendar"), ("周×小时", "hours")):
+            holder = tk.Frame(seg, bg=theme.CONTROL_BG)
+            holder.pack(side="left", padx=1)
+            lbl = tk.Label(holder, text=label, bg=theme.CONTROL_BG, fg=theme.MUTED,
+                           cursor="hand2", font=theme.FONT_UI_SMALL, padx=6)
+            lbl.pack()
+            lbl.bind("<Button-1>", lambda _e, v=val: self._set_view(v))
+            self._view_pills[val] = lbl
+        self._update_view_pills()
+
+        # 图例（固定工具栏右侧）：低→高色块 + 动态档位边界
         leg = tk.Frame(bar, bg=theme.BG)
         leg.pack(side="right", padx=(0, 10))
-        tk.Label(leg, text="少", bg=theme.BG, fg=theme.MUTED,
+        tk.Label(leg, text="低", bg=theme.BG, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL).pack(side="left")
-        for lvl in ("#161b22", "#0e4429", "#006d32", "#26a641", "#39d353"):
+        self._legend_swatches: list[tk.Frame] = []
+        for lvl in (theme.HEATMAP_EMPTY, *theme.HEATMAP_RAMP):
             sw = tk.Frame(leg, bg=lvl, width=11, height=11, bd=0)
             sw.pack(side="left", padx=1)
             sw.pack_propagate(False)
-        tk.Label(leg, text="多", bg=theme.BG, fg=theme.MUTED,
+            self._legend_swatches.append(sw)
+        tk.Label(leg, text="高", bg=theme.BG, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL).pack(side="left")
+        self._legend_var = tk.StringVar(value="")
+        tk.Label(leg, textvariable=self._legend_var, bg=theme.BG, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL).pack(side="left", padx=(6, 0))
 
         self.canvas = tk.Canvas(parent, bg=theme.PANEL, highlightthickness=0)
         self.canvas.pack(side="top", fill="both", expand=True)
@@ -1824,15 +1852,31 @@ class HeatmapChart:
         self._tooltip = _ChartTooltip(self.canvas)
         self.canvas.bind("<Configure>", self._on_configure)
         self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<Leave>", lambda e: self._tooltip.hide())
         self.canvas.bind("<Destroy>", lambda e: self._tooltip.hide())
         self._cells: dict = {}
+        self._start = None
 
     def update(self, reports) -> None:
         self._reports = list(reports)
         self._draw()
 
-    # -- internals --------------------------------------------------------
+    # -- view toggle --------------------------------------------------------
+    def _set_view(self, val: str) -> None:
+        if self._view == val:
+            return
+        self._view = val
+        self._update_view_pills()
+        self._draw()
+
+    def _update_view_pills(self) -> None:
+        for val, lbl in self._view_pills.items():
+            sel = val == self._view
+            lbl.config(bg=theme.ACCENT if sel else theme.CONTROL_BG,
+                       fg=theme.FG_WHITE if sel else theme.MUTED)
+
+    # -- data ---------------------------------------------------------------
     def _on_configure(self, _event=None) -> None:
         if self._resize_after is not None:
             self.canvas.after_cancel(self._resize_after)
@@ -1845,131 +1889,284 @@ class HeatmapChart:
                 return key
         return None
 
-    def _bucketize(self) -> dict:
-        """date(年月日) → (会话数, 指标聚合值 or None)。GitHub 风格按天聚合。"""
+    def _ramp(self):
+        """当前指标的色阶：down 型（越低越好，如返工率）→ 橙阶，其余蓝阶。"""
+        key = self._metric_key()
+        m = _metric_by_key.get(key) if key else None
+        if m is not None and m.sentiment == "down":
+            return theme.HEATMAP_RAMP_BAD
+        return theme.HEATMAP_RAMP
+
+    def _iter_sessions(self):
+        """yield (report, local datetime)——所有带时间戳的会话。"""
         from datetime import datetime
+        for r in self._reports:
+            ts = r.usage.started_at
+            if ts:
+                yield r, datetime.fromtimestamp(ts / 1000)
+
+    def _aggregate(self, bucket_of) -> dict:
+        """通用聚合：bucket_of(dt)→桶键；返回 桶键→(会话数, 聚合值 or None)。"""
         key = self._metric_key()
         counts: dict = {}
         sums: dict = {}
         nvals: dict = {}
-        for r in self._reports:
-            ts = r.usage.started_at
-            if not ts:
-                continue
-            d = datetime.fromtimestamp(ts / 1000).date()  # 本地时区
-            counts[d] = counts.get(d, 0) + 1
+        for r, dt in self._iter_sessions():
+            b = bucket_of(dt)
+            counts[b] = counts.get(b, 0) + 1
             if key is not None:
                 v = raw_value(r, key)
                 if v is not None:
-                    sums[d] = sums.get(d, 0.0) + v
-                    nvals[d] = nvals.get(d, 0) + 1
+                    sums[b] = sums.get(b, 0.0) + v
+                    nvals[b] = nvals.get(b, 0) + 1
         out: dict = {}
-        for d, n in counts.items():
+        for b, n in counts.items():
             if key is None:
-                out[d] = (n, float(n))
-            elif nvals.get(d):
-                agg = sums[d]
+                out[b] = (n, float(n))
+            elif nvals.get(b):
+                agg = sums[b]
                 if key not in self._SUM_KEYS:
-                    agg /= nvals[d]
-                out[d] = (n, agg)
+                    agg /= nvals[b]
+                out[b] = (n, agg)
             else:
-                out[d] = (n, None)
+                out[b] = (n, None)
         return out
 
     def _date_range(self):
-        """(start_monday, n_weeks)：从最早数据所在周一到最晚，覆盖所有有数据的周。"""
         from datetime import timedelta
-        if not self._cells:
-            return None, 0
         dates = [d for d, (n, _v) in self._cells.items() if n > 0]
         if not dates:
             return None, 0
         dmin, dmax = min(dates), max(dates)
-        start = dmin - timedelta(days=dmin.weekday())  # 回到该周周一
+        start = dmin - timedelta(days=dmin.weekday())
         return start, (dmax - start).days // 7 + 1
 
-    @staticmethod
-    def _lerp_color(t: float) -> str:
-        """有数据值 t∈[0,1] → GitHub 绿 4 档（浅→深）；无数据另填背景色。"""
-        if t <= 0.25:
-            return "#0e4429"
-        if t <= 0.5:
-            return "#006d32"
-        if t <= 0.75:
-            return "#26a641"
-        return "#39d353"
+    def _set_quartiles(self, vals: list) -> None:
+        """四分位分档 + 同步图例（档位边界 + 色阶换色）。"""
+        vals = sorted(vals)
+        if vals:
+            n = len(vals)
+            self._q = tuple(vals[min(n - 1, int(q * n))] for q in (0.25, 0.5, 0.75))
+        else:
+            self._q = (0.0, 0.0, 0.0)
+        ramp = self._ramp()
+        for sw, color in zip(self._legend_swatches, (theme.HEATMAP_EMPTY, *ramp)):
+            sw.config(bg=color)
+        if vals and self._q[0] != self._q[2]:
+            a, b, cc = (_fmt_num(x) for x in self._q)
+            self._legend_var.set(f"≤{a} · ≤{b} · ≤{cc} · >{cc}")
+        else:
+            self._legend_var.set("")
 
+    def _bin_color(self, v: float) -> str:
+        ramp = self._ramp()
+        q1, q2, q3 = self._q
+        if q1 == q3:                 # 全部同值：取次亮档保证可见
+            return ramp[2]
+        if v <= q1:
+            return ramp[0]
+        if v <= q2:
+            return ramp[1]
+        if v <= q3:
+            return ramp[2]
+        return ramp[3]
+
+    # -- draw ---------------------------------------------------------------
     def _draw(self) -> None:
-        from datetime import timedelta
         c = self.canvas
         if not c.winfo_exists():
             return
         c.delete("all")
+        self._tooltip.hide()
         w, h = c.winfo_width(), c.winfo_height()
         if w < 10 or h < 10:
             return
-        self._cells = self._bucketize()
+        if self._view == "hours":
+            self._draw_hours(w, h)
+        else:
+            self._draw_calendar(w, h)
+
+    def _no_data(self, w, h) -> None:
+        self.canvas.create_text(w / 2, h / 2, text="无带时间戳的会话数据",
+                                fill=theme.MUTED, font=theme.FONT_UI)
+
+    def _weekday_rows(self, ox, oy, step, gap, grid_w) -> None:
+        """星期标签 + 周末分隔线（周五/周六之间一条细线，工作日/周末节奏）。"""
+        c = self.canvas
+        for d in range(7):
+            c.create_text(ox - 6, oy + (d + 0.5) * step - gap / 2,
+                          text=self._WEEKDAYS[d], fill=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="e")
+        y_sep = oy + 5 * step - gap / 2
+        c.create_line(ox, y_sep, ox + grid_w, y_sep, fill=theme.BORDER)
+
+    def _margin_bars_right(self, per_row: dict, ox, oy, step, grid_w) -> None:
+        """右侧星期边际条：一眼看出「周几最高」。"""
+        c = self.canvas
+        vals = [v for v in per_row.values() if v is not None]
+        if not vals:
+            return
+        vmax = max(vals) or 1.0
+        bar_color = self._ramp()[2]
+        x0 = ox + grid_w + 12
+        for d in range(7):
+            v = per_row.get(d)
+            if v is None:
+                continue
+            bw = max(2, (v / vmax) * (self._MARGIN_R - 40))
+            yc = oy + (d + 0.5) * step
+            c.create_rectangle(x0, yc - 4, x0 + bw, yc + 4,
+                               fill=bar_color, outline="")
+            c.create_text(x0 + bw + 4, yc, text=_fmt_num(v), fill=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="w")
+
+    def _margin_bars_bottom(self, per_col: dict, n_cols, ox, y_top, step) -> None:
+        """底部边际条：日历视图=每周合计，小时视图=每小时合计。"""
+        c = self.canvas
+        vals = [v for v in per_col.values() if v is not None]
+        if not vals:
+            return
+        vmax = max(vals) or 1.0
+        bar_color = self._ramp()[1]
+        hmax = self._MARGIN_B - 6
+        for col in range(n_cols):
+            v = per_col.get(col)
+            if v is None:
+                continue
+            bh = max(2, (v / vmax) * hmax)
+            x0 = ox + col * step
+            c.create_rectangle(x0, y_top + hmax - bh,
+                               x0 + max(4, step - 8), y_top + hmax,
+                               fill=bar_color, outline="")
+
+    def _draw_calendar(self, w, h) -> None:
+        from datetime import date, timedelta
+        c = self.canvas
+        self._cells = self._aggregate(lambda dt: dt.date())
         start, n_weeks = self._date_range()
         self._start = start
         if start is None or n_weeks == 0:
-            c.create_text(w / 2, h / 2, text="无带时间戳的会话数据",
-                          fill=theme.MUTED, font=theme.FONT_UI)
+            self._no_data(w, h)
             return
-        cell, gap = 22, 3                      # 固定方格（GitHub 风格，不再自适应画布）
+        gap = 3
+        avail_w = w - self._PAD_L - self._PAD_R - self._MARGIN_R
+        avail_h0 = h - self._PAD_T - self._PAD_B
+        fit = min((avail_w + gap) / max(n_weeks, 1), (avail_h0 + gap) / 7) - gap
+        cell = int(max(22, min(44, fit)))
         step = cell + gap
         grid_w = step * n_weeks - gap
-        avail_w = w - self._PAD_L - self._PAD_R
         need_scroll = grid_w > avail_w
         self._toggle_hbar(need_scroll)
         c.update_idletasks()
-        h2 = c.winfo_height()                  # hbar 显隐后重取画布高度
+        h2 = c.winfo_height()
         avail_h = h2 - self._PAD_T - self._PAD_B
         oy = self._PAD_T + max(0, (avail_h - (step * 7 - gap)) / 2)
-        ox = self._PAD_L + max(0, avail_w - grid_w) / 2   # 不滚动居中；超宽左对齐
+        ox = self._PAD_L + max(0, avail_w - grid_w) / 2
         self._cell, self._step, self._ox, self._oy = cell, step, ox, oy
-        total_w = self._PAD_L + grid_w + self._PAD_R if need_scroll else w
+        total_w = (self._PAD_L + grid_w + self._MARGIN_R + self._PAD_R
+                   if need_scroll else w)
         c.configure(scrollregion=(0, 0, total_w, h2))
-        vals = [v for _n, v in self._cells.values() if v is not None]
-        lo, hi = (min(vals), max(vals)) if vals else (0, 0)
-        span = (hi - lo) or 1.0
-        EMPTY = "#161b22"
 
-        # Y 轴：星期标签（周一—周日 全标）
-        for d in range(7):
-            c.create_text(self._PAD_L - 4, oy + (d + 0.5) * step - gap / 2,
-                          text=self._WEEKDAYS[d], fill=theme.MUTED,
-                          font=theme.FONT_UI_SMALL, anchor="e")
-        # 月份标签：每周列首，进入新月则标出
+        self._set_quartiles([v for _n, v in self._cells.values() if v is not None])
+        self._weekday_rows(ox, oy, step, gap, grid_w)
+
+        # 月份标签：碰撞时删「前一个」（月末部分月），年份信息随删则转移给新标签
         last_ym = None
+        prev = None
         for col in range(n_weeks):
             d0 = start + timedelta(weeks=col)
             ym = d0.year * 12 + d0.month
             if ym != last_ym:
-                # 同年只显「7月」；跨年首个带年份「26年7月」，避免两个7月分不清
-                if last_ym is None or last_ym // 12 != d0.year:
-                    label = f"{d0.year % 100:02d}年{d0.month}月"
-                else:
-                    label = f"{d0.month}月"
-                c.create_text(ox + col * step, oy + 7 * step + 2,
-                              text=label, fill=theme.MUTED,
-                              font=theme.FONT_UI_SMALL, anchor="w")
+                with_year = last_ym is None or last_ym // 12 != d0.year
+                label = (f"{d0.year % 100:02d}年{d0.month}月" if with_year
+                         else f"{d0.month}月")
+                tid = c.create_text(ox + col * step, oy + 7 * step + 2,
+                                    text=label, fill=theme.MUTED,
+                                    font=theme.FONT_UI_SMALL, anchor="w")
+                bbox = c.bbox(tid)
+                if prev and bbox and bbox[0] < prev[1][2] + 8:
+                    c.delete(prev[0])
+                    if prev[2] and not with_year:
+                        c.itemconfigure(
+                            tid, text=f"{d0.year % 100:02d}年{d0.month}月")
+                        bbox = c.bbox(tid)
+                        with_year = True
+                prev = (tid, bbox, with_year) if bbox else prev
                 last_ym = ym
-        # 格子：列=周，行=星期，正方形
+
+        today = date.today()
         for col in range(n_weeks):
             for d in range(7):
                 day = start + timedelta(weeks=col, days=d)
                 cell_v = self._cells.get(day)
                 if cell_v is None or cell_v[0] == 0 or cell_v[1] is None:
-                    fill = EMPTY
+                    fill = theme.HEATMAP_EMPTY
                 else:
-                    fill = self._lerp_color((cell_v[1] - lo) / span)
+                    fill = self._bin_color(cell_v[1])
                 x0 = ox + col * step
+                y0 = oy + d * step
+                if day == today:      # 今日格白描边定位「现在」
+                    c.create_rectangle(x0, y0, x0 + cell, y0 + cell, fill=fill,
+                                       outline=theme.FG_WHITE, width=1)
+                else:
+                    c.create_rectangle(x0, y0, x0 + cell, y0 + cell,
+                                       fill=fill, outline="")
+
+        # 边际汇总：右=星期几合计，底=每周合计
+        per_row = self._aggregate(lambda dt: dt.weekday())
+        self._margin_bars_right({d: v for d, (_n, v) in per_row.items()},
+                                ox, oy, step, grid_w)
+        per_week = self._aggregate(
+            lambda dt: (dt.date() - timedelta(days=dt.weekday()) - start).days // 7)
+        self._margin_bars_bottom({col: v for col, (_n, v) in per_week.items()},
+                                 n_weeks, ox, oy + 7 * step + 16, step)
+
+    def _draw_hours(self, w, h) -> None:
+        c = self.canvas
+        self._start = None
+        self._cells = self._aggregate(lambda dt: (dt.weekday(), dt.hour))
+        if not self._cells:
+            self._no_data(w, h)
+            return
+        self._toggle_hbar(False)
+        gap = 3
+        avail_w = w - self._PAD_L - self._PAD_R - self._MARGIN_R
+        avail_h = h - self._PAD_T - self._PAD_B
+        fit = min((avail_w + gap) / 24, (avail_h + gap) / 7) - gap
+        cell = int(max(10, min(44, fit)))
+        step = cell + gap
+        grid_w = step * 24 - gap
+        oy = self._PAD_T + max(0, (avail_h - (step * 7 - gap)) / 2)
+        ox = self._PAD_L + max(0, avail_w - grid_w) / 2
+        self._cell, self._step, self._ox, self._oy = cell, step, ox, oy
+        c.configure(scrollregion=(0, 0, w, h))
+
+        self._set_quartiles([v for _n, v in self._cells.values() if v is not None])
+        self._weekday_rows(ox, oy, step, gap, grid_w)
+        for hr in range(0, 24, 3):    # X 轴：每 3 小时标一次
+            c.create_text(ox + hr * step + cell / 2, oy + 7 * step + 2,
+                          text=f"{hr:02d}", fill=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="n")
+        for d in range(7):
+            for hr in range(24):
+                cell_v = self._cells.get((d, hr))
+                if cell_v is None or cell_v[0] == 0 or cell_v[1] is None:
+                    fill = theme.HEATMAP_EMPTY
+                else:
+                    fill = self._bin_color(cell_v[1])
+                x0 = ox + hr * step
                 y0 = oy + d * step
                 c.create_rectangle(x0, y0, x0 + cell, y0 + cell,
                                    fill=fill, outline="")
 
+        per_row = self._aggregate(lambda dt: dt.weekday())
+        self._margin_bars_right({d: v for d, (_n, v) in per_row.items()},
+                                ox, oy, step, grid_w)
+        per_hour = self._aggregate(lambda dt: dt.hour)
+        self._margin_bars_bottom({hr: v for hr, (_n, v) in per_hour.items()},
+                                 24, ox, oy + 7 * step + 18, step)
+
     def _toggle_hbar(self, show: bool) -> None:
-        """横向滚动条按需显示/隐藏（仅多周超宽时出现）。"""
         if show and not self._hbar_visible:
             self._hbar.pack(side="bottom", fill="x")
             self._hbar_visible = True
@@ -1977,20 +2174,33 @@ class HeatmapChart:
             self._hbar.pack_forget()
             self._hbar_visible = False
 
-    def _on_motion(self, event) -> None:
+    # -- interaction --------------------------------------------------------
+    def _hit_bucket(self, event):
+        """事件坐标 → 桶键（日历=date，小时=(weekday,hour)）；未命中 None。"""
         from datetime import timedelta
-        if not getattr(self, "_start", None):
-            self._tooltip.hide()
-            return
-        x = self.canvas.canvasx(event.x)       # 转换滚动偏移后的画布坐标
+        if not self._cells:
+            return None
+        x = self.canvas.canvasx(event.x)
         step, ox, oy = self._step, self._ox, self._oy
         col = int((x - ox) // step)
         d = int((event.y - oy) // step)
         if not (0 <= d < 7) or col < 0:
-            self._tooltip.hide()
-            return
-        day = self._start + timedelta(weeks=col, days=d)
-        cell_v = self._cells.get(day)
+            return None
+        if self._view == "hours":
+            return (d, col) if col < 24 else None
+        if self._start is None:
+            return None
+        return self._start + timedelta(weeks=col, days=d)
+
+    def _bucket_label(self, bucket) -> str:
+        if self._view == "hours":
+            d, hr = bucket
+            return f"{self._WEEKDAYS[d]} {hr:02d}:00–{hr + 1:02d}:00"
+        return f"{bucket.strftime('%Y-%m-%d')} · {self._WEEKDAYS[bucket.weekday()]}"
+
+    def _on_motion(self, event) -> None:
+        bucket = self._hit_bucket(event)
+        cell_v = self._cells.get(bucket) if bucket is not None else None
         if cell_v is None:
             self._tooltip.hide()
             return
@@ -1999,9 +2209,43 @@ class HeatmapChart:
         if key is None or v is None:
             detail = f"{n} 个会话"
         else:
-            label = self._mode_var.get()
-            detail = f"{n} 个会话 · {label} {format_plot(key, v, _metric_by_key.get(key))}"
+            detail = (f"{n} 个会话 · {self._mode_var.get()} "
+                      f"{format_plot(key, v, _metric_by_key.get(key))}")
         self._tooltip.show(event.x, event.y,
-                           [f"{day.strftime('%Y-%m-%d')} · {self._WEEKDAYS[day.weekday()]}", detail])
+                           [self._bucket_label(bucket), detail, "点击查看会话"])
 
+    def _sessions_in(self, bucket) -> list:
+        out = []
+        for r, dt in self._iter_sessions():
+            if self._view == "hours":
+                hit = (dt.weekday(), dt.hour) == bucket
+            else:
+                hit = dt.date() == bucket
+            if hit:
+                out.append(r)
+        return out
 
+    def _on_click(self, event) -> None:
+        """点击格子下钻：FlatMenu 列出该时段会话，选中跳转会话详情。"""
+        bucket = self._hit_bucket(event)
+        if bucket is None or self._controller is None:
+            return
+        sessions = self._sessions_in(bucket)
+        if not sessions:
+            return
+        self._tooltip.hide()
+        menu = FlatMenu(self.canvas)
+        menu.add_command(label=self._bucket_label(bucket), state="disabled")
+        menu.add_separator()
+        MAX = 15
+        for r in sessions[:MAX]:
+            sid = r.meta.session_id or r.meta.path.stem
+            title = r.meta.title or sid
+            if len(title) > 36:
+                title = title[:36] + "…"
+            menu.add_command(
+                label=title,
+                command=lambda s=sid: self._controller.on_select_session(s))
+        if len(sessions) > MAX:
+            menu.add_command(label=f"…共 {len(sessions)} 个会话", state="disabled")
+        menu.tk_popup(event.x_root, event.y_root)
