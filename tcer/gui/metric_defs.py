@@ -655,7 +655,11 @@ def format_plot(key: str, raw: float, m: "Metric | None") -> str:
         return f"${raw:.4f}"
     if m and m.unit in ("行", "个"):
         return f"{raw:,.0f}"
-    return f"{raw:,.0f}" if abs(raw) >= 1000 else f"{raw:g}"
+    if abs(raw) >= 1000:
+        return f"{raw:,.0f}"
+    # 定点 + 去尾零：不用 :g —— 它对 |v|<1e-4 输出 1.2e-05（科学计数法，
+    # tooltip 里既丑又难读，style.md §8）。与 charts._fmt_num 小数路径一致。
+    return f"{raw:.4f}".rstrip("0").rstrip(".") or "0"
 
 
 # All keys referenced by GROUPS — used by tests to guard against drift
