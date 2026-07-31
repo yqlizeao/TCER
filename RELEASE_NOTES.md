@@ -1,31 +1,26 @@
-# TCER v1.0.10
+# TCER v1.0.11
 
-本次更新完整重做产出文件分类，新增对 Godot 游戏开发的支持，并修复图表数值的科学计数法显示。
+本次更新细化代码产出指标：新增「代码行」指标，并让「涉及文件」按类别染色。
 
 ## 新功能
 
-### 产出文件识别全面适配
-代码产出与质量（G4）指标依赖「什么是代码、什么是文档」的准确判定，本次大幅扩展：
+### 新增「代码行」指标
+G4 代码产出与质量新增**代码行**指标，与既有「文档行」对偶：
 
-- **代码后缀 28 → 80+**：补齐 Lua、Dart、R、Julia、Elixir、Haskell、Kotlin Script、PowerShell、zsh/fish、scss/sass/less、Astro、Jinja/Handlebars/ERB 模板、hlsl/glsl/wgsl 着色器、cmake/gradle/bazel 构建脚本、.proto、.ipynb 等。
-- **无后缀知名文件**：Makefile、Dockerfile、Jenkinsfile、Justfile、CMakeLists.txt 等此前全部漏计，现已识别为产出。
-- **文档判定修正**：`CMakeLists.txt` / `requirements.txt` / `robots.txt` 等「后缀像文档、实为工程文件」不再被误判为文档行；文档类型补齐 `.mdx` / `.markdown` / `.asciidoc` 及 CHANGELOG / LICENSE / CONTRIBUTING。
+- **公式**：净增行 − 文档行 − 测试行，即纯代码源文件（`.py`/`.gd`/`.tscn` 等产出）的净增行。
+- 位于「涉及文件」与「测试行」之间，与「文档行」形成代码/文档的产出拆分。
+- 派生自现有 LOC 数据，口径闭合（代码 + 文档 + 测试 = 净增行），支持负值（重构会话）与缺数据（显示「-」）。
 
-### Godot 游戏开发支持
-针对使用 Godot 开发小游戏的场景，完整适配 16 种 Godot 文件类型，策划的产出效率现可被 TCER 衡量：
+### 「涉及文件」按类别染色
+涉及文件子窗口的文件列表此前统一蓝色，现按产出类别三色区分（标记方块 + 进度条同色，顶部带图例）：
 
-- **脚本/着色器**（计为代码）：`.gd`（GDScript）、`.gdshader`、`.gdshaderinc`。
-- **场景/资源/工程**（计为配置产出）：`.tscn`（场景）、`.tres`（资源）、`.escn`、`project.godot`、`.import`、`.uid`（4.4+ sidecar）、`.theme`、`.gdextension`。
-- **老版本与 C#**：Godot 3 的 `.gdns`/`.gdnlib`，Mono 工程的 `.csproj`/`.sln`。
-- Godot 二进制格式（`.scn`/`.res`/`.pck`/`.translation`）刻意不计——文本行模型无法对二进制产生行增量。
-- 策划案（`.md` GDD）仍归为文档行，场景/资源归为配置产出，代码/文档分野对 Godot 项目语义正确。
+- **代码 = 蓝**、**测试 = 紫**、**文档 = 青**，非产出文件（只读图片/二进制）灰色。
+- 分类与指标口径完全一致（复用 `_is_test_file` / `_is_doc_file` / `_is_code`），Godot 场景/资源正确归为代码。
 
 ## 改进
 
-- **图表数值禁科学计数法**：修复图表 tooltip 兜底格式对极小值（如 |v|<1e-4 的成本/返工率）输出 `1.2e-05` 的问题，统一定点显示。
-- **测试文件识别**：补齐 `test_foo.py` 前缀式命名（pytest 主流惯例），此前仅识别 `foo_test.py` 后缀式。
-- 新增文件分类契约测试（约 50 条），覆盖代码/非产出/Godot/文档/测试五组，防分类回归。
+- **「净增行」说明澄清**：措辞改为强调「会话内 Write/Edit/MultiEdit 工具调用逐条统计的真实产出行数」，消除「写入−删除」的口径歧义。
 
 ---
 
-**完整变更**：`v1.0.9...v1.0.10`
+**完整变更**：`v1.0.10...v1.0.11`

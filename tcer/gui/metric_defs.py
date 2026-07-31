@@ -170,11 +170,17 @@ GROUPS: list[Group] = [
             Metric("net_loc", "净增行", "",
                    "公式：写入行 − 删除行\n"
                    "推荐：视任务而定（正值=增长，负值=重构/精简）\n"
-                   "说明：来自会话内 Write/Edit/MultiEdit 逐条统计，不依赖 git。", "basic"),
+                   "说明：会话内 Write/Edit/MultiEdit 工具调用逐条统计的真实产出行数，"
+                   "不依赖 git。", "basic"),
             Metric("added", "写入行", "", "工具调用写入的总行数（代码/文档/配置，含重写/覆盖）。", "basic"),
             Metric("deleted", "删除行", "", "工具调用删除的总行数（代码/文档/配置）。", "basic"),
             Metric("files_touched", "涉及文件", "",
                    "会话中读取、写入或编辑过的独立文件数，点击查看列表。", "basic"),
+            Metric("code_loc", "代码行", "",
+                   "公式：净增行 − 文档行 − 测试行\n"
+                   "推荐：视任务而定（正值=增长，负值=重构/精简）\n"
+                   "说明：纯代码源文件的净增行（.py/.gd/.tscn 等产出，扣除文档与测试）；"
+                   "与「文档行」对偶。", "basic"),
             Metric("test_loc", "测试行", "",
                    "测试文件（*test*.py、*/tests/ 等）的净增行，反映测试投入。", "basic"),
             Metric("doc_loc", "文档行", "",
@@ -413,7 +419,7 @@ _SESSION_FMT: dict[str, str] = {
     "cache_efficiency": "float:0.00", "cache_write_ratio": "pct",
     "non_cached_input_ratio": "pct",
     # G4
-    "net_loc": "int", "added": "int", "deleted": "int", "churn": "pct",
+    "net_loc": "int", "code_loc": "int", "added": "int", "deleted": "int", "churn": "pct",
     "bash_ratio": "pct", "first_edit_turn": "int", "edit_verify_ratio": "pct",
     "test_loc": "int", "doc_loc": "int", "read_write_ratio": "float:0.0",
     "edit_ratio": "pct", "exploration_ratio": "pct", "thinking_count": "int",
@@ -517,9 +523,24 @@ def format_value(key: str, native) -> str:
     return _format_native(m.fmt if m else "", native)
 
 
+def _code_loc_native(report):
+    """代码净增行 = 净增行 − 文档行 − 测试行（口径闭合：三者之和=净增行）。
+    net_loc 为 None（无 LOC 数据）时返回 None。"""
+    net = report.net_loc
+    if net is None:
+        return None
+    return net - (report.doc_net_loc or 0) - (report.test_net_loc or 0)
+
+
+def _code_loc_display(report) -> str:
+    v = _code_loc_native(report)
+    return fmt.fmt_int(v) if v is not None else "-"
+
+
 # Metrics whose display string is genuinely custom (not just fmt(native)).
 _DISPLAY_EXTRACTORS = {
     "subagent": lambda r: str(r.subagent_count or 0),
+    "code_loc": lambda r: _code_loc_display(r),
     "turns": lambda r: _turns_display(r.usage),
     "started": lambda r: fmt.fmt_dt(r.usage.started_at),
     "last_time": lambda r: fmt.fmt_dt(r.usage.ended_at),
@@ -638,6 +659,9 @@ def raw_value(report, key: str) -> float | None:
             return float(u.assistant_msgs)
         if key == "subagent":
             return float(report.subagent_count)
+        if key == "code_loc":
+            v = _code_loc_native(report)
+            return float(v) if v is not None else None
         attr = _RAW_ATTR.get(key, key)
         v = getattr(report, attr, None)
         if v is None:
