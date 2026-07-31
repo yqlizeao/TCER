@@ -74,6 +74,9 @@ class TcerGui:
         # 「启动时自动检查更新」默认值随运行形态:发布版默认开、源码默认关;
         # 联网仅查公开 Release 信息、后台静默、不发送任何用户数据。
         self._ui_prefs.setdefault("check_update_on_start", _DEFAULT_AUTO_CHECK)
+        # 会话级用户标记（置顶 / 红旗）：复合 key 列表，跨重启保留、按项目隔离。
+        self._pinned_keys = self._ui_prefs.setdefault("pinned_sessions", [])
+        self._flagged_keys = self._ui_prefs.setdefault("flagged_sessions", [])
         self._restore_project_uid = self._ui_prefs.get("last_project")
         if ui_prefs.valid_geometry(self._ui_prefs.get("geometry")):
             root.geometry(self._ui_prefs["geometry"])
@@ -186,6 +189,8 @@ class TcerGui:
                 "until": params.get("until"),
                 "last_project": views.ref_uid(proj) if proj else None,
                 "check_update_on_start": self._ui_prefs.get("check_update_on_start", False),
+                "pinned_sessions": self._pinned_keys,
+                "flagged_sessions": self._flagged_keys,
             })
         except tk.TclError:
             pass
@@ -408,7 +413,8 @@ class TcerGui:
         self._current = a
         prev_sid = self._selected_session_id
         self._selected_session_id = None
-        self.session_col.update(a.reports)
+        _pinned, _flagged = self._marks_for_current_project()
+        self.session_col.update(a.reports, pinned=_pinned, flagged=_flagged)
         # Preserve the prior selection across the refresh when it survived
         # (e.g. a reanalyze triggered indirectly by a date-filter FocusOut
         # firing as a popup closes); otherwise default to the most recent.
@@ -449,6 +455,57 @@ class TcerGui:
             self.trend_chart.select_session_by_sid(sid)
         self._update_tab_names()
 
+    # --------------------------------------------------------------- session marks
+    def _session_mark_key(self, sid):
+        proj = self._selected_project()
+        if proj is None:
+            return None
+        return f"{views.ref_uid(proj)}::{sid}"
+
+    def _marks_for_current_project(self):
+        """当前项目下被置顶 / 标红的 sid 集合（剥掉复合 key 的项目前缀）。"""
+        proj = self._selected_project()
+        if proj is None:
+            return set(), set()
+        prefix = views.ref_uid(proj) + "::"
+        pinned = {k[len(prefix):] for k in self._pinned_keys if k.startswith(prefix)}
+        flagged = {k[len(prefix):] for k in self._flagged_keys if k.startswith(prefix)}
+        return pinned, flagged
+
+    def _save_marks(self) -> None:
+        ui_prefs.save(self._ui_prefs)
+
+    def _toggle_session_mark(self, sid, keys: list, *, reset=False) -> None:
+        key = self._session_mark_key(sid)
+        if key is None:
+            return
+        if key in keys:
+            keys.remove(key)
+        else:
+            keys.append(key)
+        self._save_marks()
+        pinned, flagged = self._marks_for_current_project()
+        # 恢复原先选中的会话（不抢选中）；置顶 reset 滚到顶看效果。
+        self.session_col._apply_marks(pinned, flagged,
+                                      keep_sid=self._selected_session_id, reset=reset)
+
+    def toggle_session_pin(self, sid) -> None:
+        self._toggle_session_mark(sid, self._pinned_keys, reset=True)
+
+    def toggle_session_flag(self, sid) -> None:
+        self._toggle_session_mark(sid, self._flagged_keys, reset=False)
+
+    def _remove_session_marks(self, sid) -> None:
+        """删除会话后清理其标记 key，防残留。"""
+        key = self._session_mark_key(sid)
+        if key is None:
+            return
+        if key in self._pinned_keys:
+            self._pinned_keys.remove(key)
+        if key in self._flagged_keys:
+            self._flagged_keys.remove(key)
+        self._save_marks()
+
     def delete_session(self, report) -> None:
         """彻底删除一个会话（主文件 + subagent/tool-results 目录），随后刷新视图。
 
@@ -459,8 +516,8 @@ class TcerGui:
         from tcer.core import reader
 
         sid = report.meta.session_id or report.meta.path.stem
-        if report.meta.source in ("codex", "opencode", "grok", "omp"):
-            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi"}.get(report.meta.source, report.meta.source)
+        if report.meta.source in ("codex", "opencode", "grok", "omp", "pi"):
+            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi", "pi": "Pi"}.get(report.meta.source, report.meta.source)
             messagebox.showinfo("删除会话", f"{label} 会话当前仅支持只读分析，暂不删除本地会话数据。")
             return
         try:
@@ -468,6 +525,7 @@ class TcerGui:
         except OSError as e:
             messagebox.showerror("删除失败", f"无法删除会话 {sid[:16]}…\n{e}")
             return
+        self._remove_session_marks(sid)
 
         if self._selected_session_id == sid:
             self._selected_session_id = None
@@ -654,6 +712,14 @@ class TcerGui:
             else:
                 msgs = omp_reader.read_user_messages(report.meta.path)
             label = "Oh My Pi"
+        elif source == "pi":
+            from tcer.core import pi_reader
+            if is_agg:
+                for r in reports:
+                    msgs.extend(pi_reader.read_user_messages(r.meta.path))
+            else:
+                msgs = pi_reader.read_user_messages(report.meta.path)
+            label = "Pi"
         else:
             # Claude: prefer cached texts (legacy), else lazy-read main + subagent files.
             if report.usage.user_message_texts:

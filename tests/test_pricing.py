@@ -72,6 +72,27 @@ def test_gpt_dash_version_collapses():
     assert pricing.resolve("gpt-5-6-sol") != pricing.resolve("gpt-5")
 
 
+def test_grok_dash_version_with_thinking_suffix():
+    """omp emits ``grok-4-5-thinking`` — dash-spelled ``grok-4.5`` plus a
+    ``-thinking`` mode suffix. The raw id forward-prefixes onto the shorter
+    ``grok-4`` key (wrong label AND wrong price); the suffix-stripped candidate
+    must normalize onto ``grok-4.5`` first. Covers the bare id, the bare
+    dash-spelled id, and the ``provider/modelId`` form omp writes in
+    ``model_change`` events."""
+    g45 = pricing.resolve("grok-4.5")
+    assert pricing.table_key("grok-4-5-thinking") == "grok-4.5"
+    assert pricing.normalize("grok-4-5-thinking") == "grok-4.5"
+    assert pricing.resolve("grok-4-5-thinking") == g45
+    # provider/ prefix form (omp model_change events)
+    assert pricing.normalize("granola/grok-4-5-thinking") == "grok-4.5"
+    assert pricing.resolve("granola/grok-4-5-thinking") == g45
+    # bare dash-spelled id without the thinking suffix
+    assert pricing.normalize("grok-4-5") == "grok-4.5"
+    # regression guard: must NOT bind onto the shorter grok-4 key
+    assert pricing.table_key("grok-4-5-thinking") != "grok-4"
+    assert pricing.resolve("grok-4-5-thinking") != pricing.resolve("grok-4")
+
+
 def test_table_key_distinguishes_default():
     assert pricing.table_key("glm-5.2") == "glm-5.2"
     assert pricing.table_key("glm5.2") == "glm-5.2"  # normalized, not default

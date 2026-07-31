@@ -47,8 +47,8 @@ def _short_name(project_hash: str) -> str:
 def project_label(project) -> str:
     """Display label for a source-aware project ref or legacy Path."""
     source = getattr(project, "source", "claude")
-    if source in ("codex", "opencode", "grok", "omp"):
-        default = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi"}.get(source, source)
+    if source in ("codex", "opencode", "grok", "omp", "pi"):
+        default = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi", "pi": "Pi"}.get(source, source)
         return getattr(project, "display_name", None) or getattr(project, "key", default)
     name = getattr(project, "name", None) or getattr(project, "key", str(project))
     return _short_name(name)
@@ -64,6 +64,8 @@ def project_source_label(project) -> str:
         return "Grok"
     if source == "omp":
         return "Oh My Pi"
+    if source == "pi":
+        return "Pi"
     return "Claude"
 
 
@@ -163,6 +165,9 @@ def project_open_path(project) -> str:
     if source == "omp":
         from tcer.core.paths import omp_sessions_dir
         return str(omp_sessions_dir())
+    if source == "pi":
+        from tcer.core.paths import pi_sessions_dir
+        return str(pi_sessions_dir())
     path = getattr(project, "path", None)
     cwd = getattr(project, "cwd", None)
     return str(path or cwd or project)
@@ -233,13 +238,14 @@ class FilterBar:
             "opencode": "OpenCode",
             "grok": "Grok",
             "omp": "Oh My Pi",
+            "pi": "Pi",
         }
         self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
         source_cb = ttk.Combobox(bar, textvariable=self.source_var, width=8,
                                  values=list(self._source_display_names.values()), state="readonly")
         source_cb.pack(side="left", padx=(4, 12))
         source_cb.bind("<<ComboboxSelected>>", self._on_source_change)
-        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex / OpenCode / Grok / Oh My Pi")
+        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex / OpenCode / Grok / Oh My Pi / Pi")
 
         tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left")
         from datetime import datetime as _dt
@@ -713,34 +719,93 @@ class SessionColumn:
         self.count_label = tk.Label(header, text="会话", bg=theme.PANEL, fg=theme.FG,
                                     font=theme.FONT_HEADING, anchor="w")
         self.count_label.pack(side="left", padx=(theme.PAD_S, 0))
-        # 搜索框：按标题 / 会话 ID 过滤卡片
+        # 搜索框：放大镜置于框内左侧（Frame 包裹，视觉一体），点放大镜聚焦输入。
         self._filter_var = tk.StringVar(value="")
-        search = tk.Entry(header, textvariable=self._filter_var, width=12,
+        search_wrap = tk.Frame(header, bg=theme.PANEL_2, highlightthickness=1,
+                               highlightbackground="#3e3e42")
+        search_wrap.pack(side="right")  # 先 pack → 占最右
+        _si = ui_icon(search_wrap, "search")
+        if _si is not None:
+            _s_lbl = tk.Label(search_wrap, image=_si, bg=theme.PANEL_2, cursor="hand2")
+            _s_lbl.pack(side="left", padx=(3, 0), pady=1)
+            _s_lbl.bind("<Button-1>", lambda _e: search.focus_set())
+        search = tk.Entry(search_wrap, textvariable=self._filter_var, width=10,
                           bg=theme.PANEL_2, fg=theme.FG, insertbackground=theme.FG,
-                          relief="flat", highlightthickness=1,
-                          highlightbackground="#3e3e42", font=theme.FONT_UI_SMALL)
-        search.pack(side="right", padx=(4, 0))
-        _si = ui_icon(header, "search")
-        tk.Label(header, text="" if _si else "🔍", image=_si, compound="left",
-                 bg=theme.PANEL, fg=theme.MUTED,
-                 font=theme.FONT_UI_SMALL).pack(side="right")
+                          relief="flat", borderwidth=0, highlightthickness=0,
+                          font=theme.FONT_UI_SMALL)
+        search.pack(side="left", padx=(2, 5), pady=1)
         Tooltip(search, "按标题 / 会话 ID 过滤（实时）")
+        # 红旗快速过滤：点击只看打了红旗的会话（与搜索词叠加）。
+        self._flag_only = tk.BooleanVar(value=False)
+        self._ff_img = {"off": ui_icon(header, "flag"), "on": ui_icon(header, "flag-on")}
+        _ff0 = self._ff_img["off"]
+        if _ff0 is not None:
+            self._flag_filter = tk.Label(header, image=_ff0, bg=theme.PANEL, cursor="hand2")
+            self._flag_filter.image = _ff0
+        else:
+            self._flag_filter = tk.Label(header, text="旗", bg=theme.PANEL,
+                                         fg=theme.MUTED, font=theme.FONT_UI_SMALL, cursor="hand2")
+        self._flag_filter.pack(side="right", padx=(6, 2))  # 后 pack → 搜索框左边
+        self._flag_filter.bind("<Button-1>", lambda _e: self._toggle_flag_only())
+        self._flag_filter.bind("<Enter>", lambda _e: self._flag_filter.configure(bg=theme.HOVER_BG))
+        self._flag_filter.bind("<Leave>", lambda _e: self._flag_filter.configure(bg=theme.PANEL))
+        Tooltip(self._flag_filter, "只看红旗会话")
         self._filter_var.trace_add("write", lambda *_a: self._render())
         self._all_reports: list = []
+        # 当前项目下被置顶 / 标红的 sid 集合（由 controller 下发，排序与卡片图标用）。
+        self._pinned: set[str] = set()
+        self._flagged: set[str] = set()
 
         sf = ScrollFrame(col, bg=theme.PANEL)
         sf.canvas.pack(fill="both", expand=True, padx=6, pady=4)
         self.scroll = sf
         self.container = sf.inner
 
-    def update(self, reports) -> None:
-        self._all_reports = sorted(reports,
-                                   key=lambda r: r.usage.ended_at or r.usage.started_at or 0,
-                                   reverse=True)
-        self._render(reset=True)
+    def update(self, reports, pinned=None, flagged=None, reset=True) -> None:
+        if pinned is not None:
+            self._pinned = set(pinned)
+        if flagged is not None:
+            self._flagged = set(flagged)
+        self._all_reports = self._sorted(reports)
+        self._render(reset=reset)
+
+    def _sorted(self, reports):
+        """置顶段排前，段内及非置顶段均按结束时间倒序。"""
+        return sorted(reports,
+                      key=lambda r: (
+                          1 if (r.meta.session_id or r.meta.path.stem) in self._pinned else 0,
+                          r.usage.ended_at or r.usage.started_at or 0,
+                      ),
+                      reverse=True)
+
+    def _apply_marks(self, pinned, flagged, keep_sid=None, reset=False) -> None:
+        """toggle 后局部刷新：更新 marks → 重排 → 重绘 → 恢复选中。
+
+        reset=True 滚到顶（置顶后看效果），False 保留滚动位置（红旗不改顺序）。
+        """
+        self._pinned = set(pinned)
+        self._flagged = set(flagged)
+        self._all_reports = self._sorted(self._all_reports)
+        self._render(reset=reset)
+        if keep_sid is not None:
+            self.select_by_sid(keep_sid, notify=False)
+
+    def _toggle_flag_only(self) -> None:
+        """切换「只看红旗」过滤，更新按钮图标并重绘。"""
+        new = not self._flag_only.get()
+        self._flag_only.set(new)
+        img = self._ff_img["on"] if new else self._ff_img["off"]
+        if img is not None:
+            self._flag_filter.configure(image=img, text="")
+            self._flag_filter.image = img
+        else:
+            self._flag_filter.configure(image="", text="旗",
+                                        fg=theme.ERROR if new else theme.MUTED)
+        self._render()
 
     def _render(self, reset: bool = False) -> None:
         needle = self._filter_var.get().strip().casefold()
+        flag_only = self._flag_only.get()
         for card in self._cards:
             card.frame.destroy()
         self._cards.clear()
@@ -753,13 +818,19 @@ class SessionColumn:
             ]
         else:
             self._reports = list(self._all_reports)
+        if flag_only:
+            self._reports = [
+                r for r in self._reports
+                if (r.meta.session_id or r.meta.path.stem) in self._flagged
+            ]
         for r in self._reports:
             self._cards.append(self._make_card(r))
         if getattr(self, "_empty_hint", None) is not None:
             self._empty_hint.destroy()
             self._empty_hint = None
         if not self._reports:
-            hint = ("无匹配会话，试试清空搜索框" if needle
+            hint = ("无匹配会话，试试清空搜索框 / 关闭红旗过滤"
+                    if (needle or flag_only)
                     else "该项目暂无会话\n（或尚未完成分析）")
             self._empty_hint = tk.Label(self.container, text=hint,
                                         bg=theme.PANEL, fg=theme.MUTED,
@@ -767,7 +838,7 @@ class SessionColumn:
                                         pady=theme.PAD_L * 2)
             self._empty_hint.pack(padx=theme.PAD_M)
         n_all = len(self._all_reports)
-        label = (f"会话（{len(self._reports)}/{n_all}）" if needle
+        label = (f"会话（{len(self._reports)}/{n_all}）" if (needle or flag_only)
                  else f"会话（{n_all}）")
         self.count_label.config(text=label)
         self.scroll.update_scroll(reset=reset)
@@ -779,9 +850,18 @@ class SessionColumn:
                     on_click=lambda c, s=sid: self._select(c, s),
                     on_right_click=lambda e, _r=r, _s=sid: self._on_right_click(e, _r, _s))
         time_ms = r.usage.ended_at or r.usage.started_at
-        t_lbl = tk.Label(card.frame, text=fmt_dt(time_ms, FMT_SHORT_MINUTE) if time_ms else "-",
+        # 时间行：左时间，右置顶/红旗可点击图标（左键 toggle，不触发卡片选中）。
+        top_row = tk.Frame(card.frame, bg=theme.PANEL_2)
+        top_row.pack(fill="x", padx=6, pady=(4, 1))
+        t_lbl = tk.Label(top_row, text=fmt_dt(time_ms, FMT_SHORT_MINUTE) if time_ms else "-",
                          bg=theme.PANEL_2, fg="#888888", font=theme.FONT_MONO, anchor="w")
-        t_lbl.pack(fill="x", padx=6, pady=(4, 1))
+        t_lbl.pack(side="left")
+        marks_row = tk.Frame(top_row, bg=theme.PANEL_2)
+        marks_row.pack(side="right")
+        self._mark_icon(marks_row, card, sid, "pin",
+                        is_on=sid in self._pinned, tip="置顶 / 取消置顶")
+        self._mark_icon(marks_row, card, sid, "flag",
+                        is_on=sid in self._flagged, tip="红旗 / 取消红旗")
         title_disp = title[:35] + "..." if len(title) > 35 else title
         ti_lbl = tk.Label(card.frame, text=title_disp, bg=theme.PANEL_2, fg=theme.FG,
                           font=theme.FONT_UI_SMALL, anchor="w")
@@ -790,10 +870,41 @@ class SessionColumn:
         sid_lbl = tk.Label(card.frame, text=sid_disp, bg=theme.PANEL_2, fg="#6B7077",
                            font=theme.FONT_MONO, cursor="hand2", anchor="w")
         sid_lbl.pack(fill="x", padx=6, pady=(1, 4))
-        for w in (t_lbl, ti_lbl, sid_lbl):
+        # top_row/marks_row/时间标签随卡片选中；标记图标自行绑事件（见 _mark_icon）。
+        for w in (top_row, t_lbl, marks_row, ti_lbl, sid_lbl):
             card.bind_to(w)
             w.bind("<Double-Button-1>", lambda e, s=sid: self.controller.show_session_detail(s))
         return card
+
+    def _mark_icon(self, parent, card, sid, kind, *, is_on, tip):
+        """卡片右上角可点击标记图标：左键 toggle（不选中卡片），右键复用卡片菜单。
+
+        kind 为 "pin"（置顶）/ "flag"（红旗）。激活态用彩色 ``<kind>-on`` 图标，
+        未激活用灰色 ``<kind>`` 图标；缺资源回退到着色字符（置顶 ▾ / 红旗 ◆）。
+        """
+        img = ui_icon(self.container, f"{kind}-on" if is_on else kind)
+        if img is not None:
+            lbl = tk.Label(parent, image=img, bg=theme.PANEL_2, cursor="hand2")
+            lbl.image = img  # 防 GC（ui_icon 已模块级缓存，双保险）
+        else:
+            ch = "▾" if kind == "pin" else "◆"
+            fg = (theme.ACCENT if kind == "pin" else theme.ERROR) if is_on else theme.MUTED
+            lbl = tk.Label(parent, text=ch, bg=theme.PANEL_2, fg=fg,
+                           font=theme.FONT_UI_SMALL, cursor="hand2")
+        lbl.pack(side="left", padx=(2, 0))
+
+        def toggle(_e):
+            if kind == "pin":
+                self.controller.toggle_session_pin(sid)
+            else:
+                self.controller.toggle_session_flag(sid)
+
+        lbl.bind("<Button-1>", toggle)
+        lbl.bind("<Button-3>", card._on_right_click)   # 右键仍走卡片菜单
+        lbl.bind("<Enter>", lambda _e: lbl.configure(bg=theme.HOVER_BG))
+        lbl.bind("<Leave>", lambda _e: lbl.configure(bg=theme.PANEL_2))
+        Tooltip(lbl, tip)
+        return lbl
 
     def _select(self, card, sid, *, notify=True):
         if self._selected is not None:
@@ -899,8 +1010,22 @@ class SessionColumn:
 
         menu.add_separator()
 
+        # 标记操作（与删除同属卡片管理组）。
+        menu.add_command(
+            label="取消置顶" if sid in self._pinned else "置顶",
+            command=lambda: self.controller.toggle_session_pin(sid),
+            image=ui_icon(self.container, "pin-on"), compound="left",
+        )
+        menu.add_command(
+            label="取消红旗" if sid in self._flagged else "加红旗",
+            command=lambda: self.controller.toggle_session_flag(sid),
+            image=ui_icon(self.container, "flag-on"), compound="left",
+        )
+
+        menu.add_separator()
+
         # Destructive action — last item, gated behind a二次确认对话框.
-        readonly = report.meta.source in ("codex", "opencode", "grok", "omp")
+        readonly = report.meta.source in ("codex", "opencode", "grok", "omp", "pi")
         delete_state = "disabled" if readonly else "normal"
         delete_label = "删除会话…" if not readonly else f"删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(
