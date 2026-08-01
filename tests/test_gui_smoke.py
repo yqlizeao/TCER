@@ -393,6 +393,38 @@ def test_user_msgs_popup_grouped(root):
     assert found_bar["one"] and found_bar["two"], "来源标识条未渲染"
 
 
+def test_session_label_date_title_sid():
+    """会话来源标识 = 日期 · 标题(限长) · sessionid(限长)。"""
+    from types import SimpleNamespace
+    from tcer.gui.app import TcerGui
+    from tcer.core import format as fmt_mod
+
+    # 2026-07-30 local
+    ms = int(__import__("datetime").datetime(2026, 7, 30, 9, 0).timestamp() * 1000)
+    long_title = "扩展项目来源图标方案与配色统一收口整理并补充说明文档细节"  # > 24 字符
+    assert len(long_title) > 24
+    meta = SimpleNamespace(title=long_title,
+                           session_id="2162e1ca-0c5b-4d9e-abcd-ffff")
+    report = SimpleNamespace(meta=meta, usage=SimpleNamespace(started_at=ms))
+    label = TcerGui._session_label(report)
+    assert label.startswith("2026-07-30 · ")
+    # 标题截断到 24 字符 + 省略号
+    assert long_title[:24] + "…" in label
+    # sessionid 截断到 12 字符 + 省略号
+    assert "2162e1ca-0c5…" in label
+
+
+def test_session_label_no_timestamp_omits_date():
+    """无 started_at 时省略日期段，仅标题(+sid)。"""
+    from types import SimpleNamespace
+    from tcer.gui.app import TcerGui
+
+    meta = SimpleNamespace(title="短标题", session_id="abc123")
+    report = SimpleNamespace(meta=meta, usage=SimpleNamespace(started_at=None))
+    label = TcerGui._session_label(report)
+    assert label == "短标题 · abc123"
+
+
 def test_claude_user_messages_excludes_subagent_prompts(tmp_path):
     """子代理文件的 user 消息(Task 派发 prompt)不并入用户消息弹窗。
 
