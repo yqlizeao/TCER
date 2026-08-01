@@ -12,7 +12,11 @@ from datetime import datetime
 from pathlib import Path
 
 from tcer.core.models import SessionMeta, ToolOp, TokenUsage
-from tcer.core.parse_util import as_int as _as_int
+from tcer.core.parse_util import (
+    as_int as _as_int,
+    is_correction as _is_correction,
+    is_slash_command as _is_slash_command,
+)
 from tcer.core.paths import claude_config_dirs
 from tcer.core import pricing
 
@@ -40,13 +44,7 @@ TITLE_MAX_CHARS = 80
 
 _TAG_RE = re.compile(r'<[^>]+>')
 
-# 纠正措辞（保守清单）：用户对上一轮输出不满意的显式信号。只在消息前 200 字符
-# 内匹配，避免长引用文本误报；命中即计入 correction_msg_count。
-_CORRECTION_RE = re.compile(
-    r"不对|错了|不是这样|重来|重新来|重新做|撤销|回退|回滚|别这么|别这样"
-    r"|\bundo\b|\brevert\b|\bwrong\b|\bredo\b",
-    re.IGNORECASE,
-)
+# 纠正措辞正则与 slash/纠正判定移至 parse_util（跨源 SSOT，Claude/omp/pi 共用）。
 
 
 def _strip_tags(txt: str) -> str:
@@ -480,9 +478,9 @@ def _scan_session_uncached(
             if is_real_user and not is_sub:
                 # prompt 行为信号：只计数，不存正文（隐私边界与懒加载一致）。
                 txt = extract_text(content).strip()
-                if txt.startswith("/") or txt.startswith("<command-name>"):
+                if _is_slash_command(txt):
                     u.slash_command_count += 1
-                elif _CORRECTION_RE.search(txt[:200]):
+                elif _is_correction(txt):
                     u.correction_msg_count += 1
                 # user_msgs 只计真实用户消息：排除 Claude Code 注入（task-
                 # notification / 命令输出 / IDE 选区等有 text 块但非真人输入）。

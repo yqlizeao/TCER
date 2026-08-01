@@ -426,10 +426,16 @@ def analyze_project(
     # Project-level memory files (read from disk once for the aggregate).
     mem_dir = proj / "memory"
     if mem_dir.is_dir():
-        agg.memory_files = sorted(
+        memory_files = sorted(
             str(f) for f in mem_dir.iterdir() if f.is_file()
         )
-        agg.memory_dir = str(mem_dir)
+        memory_dir = str(mem_dir)
+        # memory/ 是项目级事实（不随会话变化）。同时挂到聚合与每个会话报告，
+        # 使指标网格在「项目汇总」与「会话」两种视角下都显示计数——此前只挂
+        # 聚合，会话视角显示「-」被折叠，但点击弹窗仍读聚合列出文件，观感矛盾。
+        for rep in (agg, *reports):
+            rep.memory_files = memory_files
+            rep.memory_dir = memory_dir
 
     return ProjectAnalysis(
         project_hash=proj.name, reports=reports, aggregate=agg,

@@ -115,6 +115,38 @@ def test_analyze_claude_folds_subagent_and_aggregate_ctei_valid(tmp_path, monkey
     assert r.ntcer is not None
 
 
+def test_memory_files_on_every_report(tmp_path, monkeypatch):
+    """项目级 memory/ 计数须挂到聚合与每个会话报告，两种视图一致——
+    此前只挂聚合，会话视图显示「-」被折叠，但点击弹窗读聚合仍列文件（观感矛盾）。"""
+    proj, h = _seed_claude_project(tmp_path, monkeypatch)
+    _write_jsonl(proj / "s1.jsonl", [_assistant(_usage(), msg_id="a1")])
+    _write_jsonl(proj / "s2.jsonl", [_assistant(_usage(), msg_id="a2")])
+    mem = proj / "memory"
+    mem.mkdir()
+    (mem / "MEMORY.md").write_text("x", encoding="utf-8")
+    (mem / "note.md").write_text("y", encoding="utf-8")
+
+    result = analyze.analyze_project(project=h, no_loc=True)
+    assert result.aggregate.memory_files is not None
+    assert len(result.aggregate.memory_files) == 2
+    assert result.aggregate.memory_dir == str(mem)
+    # 关键回归：每个会话报告都带同一项目级计数（网格会话视图不再显示「-」）。
+    assert len(result.reports) == 2
+    for r in result.reports:
+        assert r.memory_files == result.aggregate.memory_files
+        assert r.memory_dir == str(mem)
+
+
+def test_memory_files_absent_when_no_dir(tmp_path, monkeypatch):
+    """无 memory/ 目录时聚合与会话报告都保持 None（网格显示「-」，不误报）。"""
+    proj, h = _seed_claude_project(tmp_path, monkeypatch)
+    _write_jsonl(proj / "s1.jsonl", [_assistant(_usage(), msg_id="a1")])
+    result = analyze.analyze_project(project=h, no_loc=True)
+    assert result.aggregate.memory_files is None
+    for r in result.reports:
+        assert r.memory_files is None
+
+
 def test_analyze_claude_date_filter(tmp_path, monkeypatch):
     proj, h = _seed_claude_project(tmp_path, monkeypatch)
     early = proj / "early.jsonl"
