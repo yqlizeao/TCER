@@ -33,7 +33,12 @@ from pathlib import Path
 
 from tcer.core import pricing
 from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
-from tcer.core.parse_util import as_int as _as_int, first_str as _first_str
+from tcer.core.parse_util import (
+    as_int as _as_int,
+    first_str as _first_str,
+    is_correction as _is_correction,
+    is_slash_command as _is_slash_command,
+)
 from tcer.core.paths import encode_hash, omp_sessions_dir
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
@@ -250,12 +255,17 @@ def aggregate_usage(path: Path) -> TokenUsage:
     """
     u = _aggregate_single(Path(path))
     for sub in _subagent_files(Path(path)):
-        u = u.merge(_aggregate_single(sub))
+        u = u.merge(_aggregate_single(sub, is_subagent=True))
     return u
 
 
-def _aggregate_single(path: Path) -> TokenUsage:
-    """Aggregate omp token/tool usage from ONE session JSONL (no subagent merge)."""
+def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
+    """Aggregate omp token/tool usage from ONE session JSONL (no subagent merge).
+
+    ``is_subagent`` gates prompt-behaviour signals (slash / correction /
+    first_prompt_chars): a subagent's user messages are Task-dispatch prompts,
+    not real human input — mirrors the Claude reader's ``is_sub`` guard.
+    """
     u = TokenUsage()
     current_model = ""
     turn_idx = 0
@@ -289,6 +299,15 @@ def _aggregate_single(path: Path) -> TokenUsage:
             text = _message_text(mm.get("content")).strip()
             if text:
                 u.user_msgs += 1
+                # prompt 行为信号：只计数，不存正文（隐私边界与懒加载一致）。
+                # 子代理的 user 消息是 Task 派发 prompt，非真人输入 → 不计。
+                if not is_subagent:
+                    if _is_slash_command(text):
+                        u.slash_command_count += 1
+                    elif _is_correction(text):
+                        u.correction_msg_count += 1
+                    if u.first_prompt_chars == 0:
+                        u.first_prompt_chars = len(text)
             # Inline base64 image blocks ({type:"image", mimeType, data}) are
             # multimodal user inputs — counted like Codex/OpenCode image inputs.
             u.image_count += _count_image_blocks(mm.get("content"))

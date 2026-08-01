@@ -216,6 +216,39 @@ def test_image_inputs(tmp_path):
     assert u.user_msgs == 2
 
 
+def test_prompt_behavior_signals(tmp_path):
+    """slash 命令 / 纠正措辞 / 首条消息长度——与 Claude 同构，只计数不存正文。"""
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        _user("帮我实现一个解析器,要求如下:支持 JSONL"),   # 首条真实消息
+        _user("/compact"),                                  # slash
+        _user("<command-name>/model</command-name>"),        # 命令面板
+        _user("不对,重来,应该用差分"),                       # 纠正
+        _user("好的继续"),                                   # 普通
+        _assistant([_text("done")], _usage(10, 5)),
+    ])
+    u = omp_reader.aggregate_usage(p)
+    assert u.slash_command_count == 2
+    assert u.correction_msg_count == 1
+    assert u.first_prompt_chars == len("帮我实现一个解析器,要求如下:支持 JSONL")
+    assert u.user_msgs == 5
+
+
+def test_prompt_signals_skip_subagent(tmp_path):
+    """子代理的 user 消息是 Task 派发 prompt，非真人输入 → prompt 信号不计。"""
+    p = _write_omp(tmp_path / "sub.jsonl", [
+        _session(),
+        _user("/deploy"),
+        _user("不对重来"),
+        _assistant([_text("x")], _usage(1, 1)),
+    ])
+    u = omp_reader._aggregate_single(p, is_subagent=True)
+    assert u.slash_command_count == 0
+    assert u.correction_msg_count == 0
+    assert u.first_prompt_chars == 0
+    assert u.user_msgs == 2  # 成本计数仍保留
+
+
 def test_aborted_turns(tmp_path):
     """stopReason == 'aborted' turns feed aborted_task_count + abort_reasons
     (analogous to Codex turn_aborted); errorMessage keys the reason."""

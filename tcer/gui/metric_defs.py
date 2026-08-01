@@ -76,8 +76,8 @@ GROUPS: list[Group] = [
         Metric("entrypoint", "启动方式", "",
                "会话启动入口：claude-vscode（VS Code 扩展）、claude-cli（命令行）等。", "basic"),
         Metric("memory_files", "项目记忆文件", "个",
-               "当前项目 memory/ 目录下的文件数量（项目级指标，仅在项目汇总视图显示计数，"
-               "会话视图为 -）。点击查看文件列表并可跳转到目录。", "basic"),
+               "当前项目 memory/ 目录下的文件数量（项目级指标，项目汇总与会话"
+               "视图均显示同一计数）。点击查看文件列表并可跳转到目录。", "basic"),
         Metric("cli_version", "客户端版本", "",
                "本地代理会话记录中的 CLI / App 版本。Claude 会话或旧记录无此字段时显示 -。", "basic"),
         Metric("model_provider", "模型供应商", "",
@@ -739,9 +739,9 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "revert_events": frozenset({"opencode", "grok"}),
     "hook_overhead": frozenset({"claude"}),
     "queued_inputs": frozenset({"claude"}),
-    "slash_commands": frozenset({"claude"}),
-    "correction_msgs": frozenset({"claude"}),
-    "first_prompt_chars": frozenset({"claude"}),
+    "slash_commands": frozenset({"claude", "omp", "pi"}),
+    "correction_msgs": frozenset({"claude", "omp", "pi"}),
+    "first_prompt_chars": frozenset({"claude", "omp", "pi"}),
     "plan_modes": frozenset({"claude"}),
     "read_truncations": frozenset({"claude"}),
     "reasoning_time": frozenset({"opencode"}),
