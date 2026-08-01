@@ -650,12 +650,20 @@ class AdvancedPopup:
 
 
 class UserMsgsPopup:
-    """用户消息 — all user messages in this session, card-style layout."""
+    """用户消息 — 卡片式列表。
+
+    ``messages`` 支持两种形态：
+      * ``list[str]``：单会话视图，扁平消息列表。
+      * ``list[tuple[str, list[str]]]``：聚合视图，``(会话标识, 该会话消息)``
+        分组；每组前渲染一条来源标识条（标题 + sessionid，均已限长）。
+    """
 
     _ACCENT = theme.CHART_PALETTE[0]  # blue accent for badges
 
-    def __init__(self, parent, messages: list[str]) -> None:
-        total_chars = sum(len(m) for m in messages)
+    def __init__(self, parent, messages) -> None:
+        groups = self._normalize(messages)
+        total = sum(len(msgs) for _, msgs in groups)
+        total_chars = sum(len(m) for _, msgs in groups for m in msgs)
         win = _new_window(parent, "用户消息", "620x500")
         tk.Label(win, text="用户消息", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
@@ -664,34 +672,57 @@ class UserMsgsPopup:
         sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
         inner = sf.inner
 
-        if not messages:
+        if not total:
             tk.Label(inner, text="未记录到用户消息", bg=theme.PANEL, fg=theme.MUTED,
                      font=theme.FONT_UI, pady=40).pack()
-        else:
-            # Summary header
-            head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-            head.pack(fill="x", pady=10)
-            tk.Label(head, text=f"共 {len(messages)} 条消息 · {total_chars:,} 字符",
-                     bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+            return
 
-            for idx, txt in enumerate(messages, 1):
-                # Card frame
-                card = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-                card.pack(fill="x", pady=4)
+        # Summary header
+        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
+        head.pack(fill="x", pady=10)
+        summary = f"共 {total} 条消息 · {total_chars:,} 字符"
+        grouped = len(groups) > 1 or (len(groups) == 1 and groups[0][0] is not None)
+        if grouped:
+            summary += f" · {len(groups)} 个会话"
+        tk.Label(head, text=summary, bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS,
+                 font=theme.FONT_UI_BOLD).pack()
 
-                # Header row: badge + char count
-                hdr = tk.Frame(card, bg=theme.CARD_HEADER_BG)
-                hdr.pack(fill="x")
-                badge = tk.Label(hdr, text=f"#{idx}", bg=self._ACCENT, fg=theme.FG_WHITE,
-                                 font=(theme.FONT_MONO_NAME, 8, "bold"), padx=6, pady=1)
-                badge.pack(side="left")
-                tk.Label(hdr, text=f"{len(txt)} 字符", bg=theme.CARD_HEADER_BG, fg=theme.MUTED,
-                         font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
+        idx = 0
+        for label, msgs in groups:
+            if label is not None:
+                self._session_bar(inner, label, len(msgs))
+            for txt in msgs:
+                idx += 1
+                self._msg_card(inner, idx, txt)
 
-                # Message text
-                SelectableLabel(card, text=txt, bg=theme.CARD_HEADER_BG, fg=theme.FG,
-                                font=theme.FONT_UI, justify="left",
-                                width=60).pack(fill="x", pady=(4, 0))
+    @staticmethod
+    def _normalize(messages) -> "list[tuple[str | None, list[str]]]":
+        """Coerce either input shape into ``[(label|None, [msg, ...]), ...]``."""
+        if messages and isinstance(messages[0], tuple):
+            return [(lbl, list(msgs)) for lbl, msgs in messages]
+        return [(None, list(messages))]
+
+    def _session_bar(self, parent, label: str, count: int) -> None:
+        bar = tk.Frame(parent, bg=theme.BG, padx=10, pady=5)
+        bar.pack(fill="x", pady=(10, 2))
+        tk.Label(bar, text=label, bg=theme.BG, fg=self._ACCENT,
+                 font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
+        tk.Label(bar, text=f"{count} 条", bg=theme.BG, fg=theme.MUTED,
+                 font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
+
+    def _msg_card(self, parent, idx: int, txt: str) -> None:
+        card = tk.Frame(parent, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
+        card.pack(fill="x", pady=4)
+        hdr = tk.Frame(card, bg=theme.CARD_HEADER_BG)
+        hdr.pack(fill="x")
+        badge = tk.Label(hdr, text=f"#{idx}", bg=self._ACCENT, fg=theme.FG_WHITE,
+                         font=(theme.FONT_MONO_NAME, 8, "bold"), padx=6, pady=1)
+        badge.pack(side="left")
+        tk.Label(hdr, text=f"{len(txt)} 字符", bg=theme.CARD_HEADER_BG, fg=theme.MUTED,
+                 font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
+        SelectableLabel(card, text=txt, bg=theme.CARD_HEADER_BG, fg=theme.FG,
+                        font=theme.FONT_UI, justify="left",
+                        width=60).pack(fill="x", pady=(4, 0))
 
 
 class FilesTouchedPopup:
