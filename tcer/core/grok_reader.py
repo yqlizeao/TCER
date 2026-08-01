@@ -365,6 +365,10 @@ def _apply_signals(u: TokenUsage, session_dir: Path) -> None:
     u.git_commit_count += _as_int(sig.get("gitCommitCount"))
     u.pr_created_count += _as_int(sig.get("prCreatedCount"))
     u.pr_merged_count += _as_int(sig.get("prMergedCount"))
+    # Grok records context compactions in the session signals snapshot (the
+    # updates.jsonl auto_compact_* events are noisier start/checkpoint/fail
+    # markers); the signals count is the authoritative per-session total.
+    u.compaction_count += _as_int(sig.get("compactionCount"))
     u.reverted_lines += (_as_int(sig.get("agentLinesAddedReverted"))
                          + _as_int(sig.get("agentLinesRemovedReverted")))
     if sig.get("hasReverted") is True:

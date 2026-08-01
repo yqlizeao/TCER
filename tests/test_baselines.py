@@ -59,3 +59,27 @@ def test_save_baselines_writes_and_refreshes_globals(tmp_path):
         metrics._COMPOSITE_CONFIG_PATH = real_path
         metrics._load_composite_config.cache_clear()
         metrics._refresh_composite_globals()
+
+
+def test_ctei_tracks_refreshed_baseline(tmp_path):
+    """After a personal-baseline save rebinds the module globals, ctei()/compute()
+    with default args must use the NEW baseline — not the import-time value.
+    Regression guard: default args (tcer_baseline=TCER_BASELINE) froze the old
+    value, so CTEI stayed stale until process restart."""
+    real_path = metrics._COMPOSITE_CONFIG_PATH
+    tmp = tmp_path / "composite_baselines.json"
+    tmp.write_text(real_path.read_text(encoding="utf-8"), encoding="utf-8")
+    metrics._COMPOSITE_CONFIG_PATH = tmp
+    try:
+        metrics._load_composite_config.cache_clear()
+        before = metrics.ctei(80.0, 9.0, 0.9)
+        metrics.save_baselines({"tcer": 123.45, "cpe": 9.9})
+        after = metrics.ctei(80.0, 9.0, 0.9)
+        # default-arg ctei must now reflect the refreshed globals
+        assert after == metrics.ctei(80.0, 9.0, 0.9,
+                                     tcer_baseline=123.45, cpe_baseline=9.9)
+        assert abs(after - before) > 1e-9, "ctei ignored the refreshed baseline"
+    finally:
+        metrics._COMPOSITE_CONFIG_PATH = real_path
+        metrics._load_composite_config.cache_clear()
+        metrics._refresh_composite_globals()

@@ -234,7 +234,8 @@ GROUPS: list[Group] = [
             Metric("web_searches", "网页搜索", "",
                    "本地代理记录中的网页搜索数量；旧格式仅有结束事件时用结束事件兜底。", "basic"),
             Metric("image_inputs", "图片输入", "",
-                   "用户消息中携带的远程图片和本地图片数量合计。", "basic"),
+                   "用户消息中携带的远程图片和本地图片数量合计。\n"
+                   "Codex 来自 images/local_images；OpenCode 来自 image file part；omp/pi 来自内联 image 内容块。", "basic"),
         ]),
         Subgroup("质量", [
             Metric("churn", "返工率", "",
@@ -276,7 +277,8 @@ GROUPS: list[Group] = [
                    "公式：patch_apply_end.success ÷ patch_apply_end 总数\n"
                    "说明：本地代理补丁应用事件的成功率，能解释 Edit 失败或工具错误率。", "basic", "up"),
             Metric("aborted_tasks", "中断任务", "",
-                   "本地代理任务中断次数。用户中断、取消或运行中止时会增加。", "basic", "down"),
+                   "本地代理任务中断次数。用户中断、取消或运行中止时会增加。\n"
+                   "Codex 来自 turn_aborted 事件；omp/pi 来自 stopReason=='aborted' 的回合。", "basic", "down"),
             Metric("rate_limit_hits", "限流命中", "",
                    "限流命中次数：Claude 为 429 API 错误行，Codex 为限流快照记录。", "basic", "down"),
             Metric("cancellations", "用户取消", "",
@@ -616,18 +618,6 @@ def raw_value(report, key: str) -> float | None:
     scatter / dashboard / radar value extraction.
     """
     u = report.usage
-    # key → attribute name on SessionReport, for the numeric/chart path. Note this
-    # is intentionally NARROWER than _REPORT_ATTR (no high_churn_files / latency):
-    # it reproduces the former views.metric_raw_value exactly.
-    _RAW_ATTR = {
-        "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
-        "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
-        # These have a numeric grid value but their attr name differs from the key,
-        # so the generic getattr(report, key) fallthrough returned None and the
-        # chart drew no point. Map them so trend/scatter/radar can plot them.
-        "high_churn_files": "high_churn_file_count",
-        "first_pass_ratio": "first_pass_file_ratio",
-    }
     if not is_supported(report, key):
         return None  # 该源不提供此字段，图表不画点（避免把「不支持」画成 0）
     try:
@@ -657,6 +647,9 @@ def raw_value(report, key: str) -> float | None:
         if key == "reasoning_time":
             return (u.reasoning_ms_total / 1000
                     if u.reasoning_ms_total else None)
+        if key in _BASELINE:
+            v = _BASELINE[key]()
+            return float(v) if v is not None else None
         if key in _USAGE_ATTR:
             v = getattr(u, _USAGE_ATTR[key])
             return float(v) if v is not None else None
@@ -667,7 +660,10 @@ def raw_value(report, key: str) -> float | None:
         if key == "code_loc":
             v = _code_loc_native(report)
             return float(v) if v is not None else None
-        attr = _RAW_ATTR.get(key, key)
+        # Fall through to the SAME key→attr map display() uses (_REPORT_ATTR),
+        # so any metric with a numeric grid value is chartable. Diverging maps
+        # silently broke context_window_used / ttft / reasoning_ratio / etc.
+        attr = _REPORT_ATTR.get(key, key)
         v = getattr(report, attr, None)
         if v is None:
             return None
@@ -734,7 +730,7 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "ttft_p95": frozenset({"codex", "omp"}),
     "rate_limit_peak": frozenset({"codex"}),
     "patch_success": frozenset({"codex"}),
-    "aborted_tasks": frozenset({"codex"}),
+    "aborted_tasks": frozenset({"codex", "omp", "pi"}),
     # Grok signals.json / events.jsonl 独有
     "cancellations": frozenset({"grok"}),
     "regenerations": frozenset({"grok"}),
@@ -758,9 +754,9 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # usage.server_tool_use，reader 已解析）
     "rate_limit_hits": frozenset({"claude", "codex"}),
     "task_completion": frozenset({"codex", "grok"}),
-    "compactions": frozenset({"claude", "codex", "opencode"}),
+    "compactions": frozenset({"claude", "codex", "opencode", "grok"}),
     "web_searches": frozenset({"claude", "codex", "grok", "omp", "pi"}),
-    "image_inputs": frozenset({"codex", "opencode"}),
+    "image_inputs": frozenset({"codex", "opencode", "omp", "pi"}),
     # Codex 不上报缓存写入 (reader 恒 0)，显示 0 会误导
     "cache_write": frozenset({"claude", "opencode", "grok", "omp", "pi"}),
     "cache_write_ratio": frozenset({"claude", "opencode", "grok", "omp", "pi"}),

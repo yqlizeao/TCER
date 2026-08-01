@@ -483,7 +483,7 @@ async function selectSession(id, el) {
 
 // ---- 逐回合会话渲染 -------------------------------------------------------
 // 后端 raw.conversation 是跨源统一的 block 列表（Claude / Codex / Grok /
-// OpenCode 都归一到同一形状）：
+// OpenCode / omp / Pi 都归一到同一形状）：
 //   {role:"user"|"assistant"|"tool", type:"text"|"thinking"|"tool_use"|"tool_result", ...}
 const ROLE_LABEL = {
   user: "用户", assistant: "助手", tool: "工具",

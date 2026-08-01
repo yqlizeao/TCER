@@ -364,6 +364,16 @@ def _append_metric_bound_checks(sa: SessionAudit, report) -> None:
             0.0 <= u.rate_limit_peak_used <= 2.0,
             detail=f"peak_used={u.rate_limit_peak_used}",
         ))
+    # abort_reasons is a per-reason breakdown of aborted_task_count; the two are
+    # incremented together (Codex turn_aborted, omp/pi stopReason=="aborted"), so
+    # their totals must agree. A drift means a reader bumped one without the other.
+    if u.aborted_task_count or u.abort_reasons:
+        sa.checks.append(_truth(
+            "abort_reasons_sum_matches_count",
+            sum(u.abort_reasons.values()) == u.aborted_task_count,
+            detail=(f"reasons_sum={sum(u.abort_reasons.values())} "
+                    f"count={u.aborted_task_count}"),
+        ))
 
 
 def _audit_file_session(

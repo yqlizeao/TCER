@@ -7,6 +7,7 @@ ordered event log; the relevant line types are:
   * ``session``        — one per file: authoritative ``cwd`` / ``id`` / ``title``
   * ``title`` / ``title_change`` — session title (auto or user)
   * ``model_change``   — active model id
+  * ``thinking_level_change`` — reasoning effort (``thinkingLevel``, e.g. "high")
   * ``message``        — the turn stream. ``message.role`` is one of
     ``user`` / ``assistant`` / ``toolResult``.
 
@@ -191,6 +192,7 @@ def read_session_meta(path: Path) -> SessionMeta:
     title: str | None = None
     cli_version: str | None = None
     model_provider: str | None = None
+    reasoning_effort: str | None = None
     started_at: int | None = None
     fallback_title: str | None = None
 
@@ -209,6 +211,10 @@ def read_session_meta(path: Path) -> SessionMeta:
                 cli_version = f"session v{ver}"
         elif typ in ("title", "title_change"):
             title = _first_str(obj.get("title")) or title
+        elif typ == "thinking_level_change":
+            level = _first_str(obj.get("thinkingLevel"))
+            if level:
+                reasoning_effort = level
         elif typ == "message":
             mm = obj.get("message")
             if not isinstance(mm, dict):
@@ -231,6 +237,7 @@ def read_session_meta(path: Path) -> SessionMeta:
         source="omp",
         cli_version=cli_version,
         model_provider=model_provider,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -282,6 +289,9 @@ def _aggregate_single(path: Path) -> TokenUsage:
             text = _message_text(mm.get("content")).strip()
             if text:
                 u.user_msgs += 1
+            # Inline base64 image blocks ({type:"image", mimeType, data}) are
+            # multimodal user inputs — counted like Codex/OpenCode image inputs.
+            u.image_count += _count_image_blocks(mm.get("content"))
             continue
 
         if role == "toolResult":
@@ -301,6 +311,15 @@ def _aggregate_single(path: Path) -> TokenUsage:
         if model:
             current_model = pricing.normalize(model)
             u.models.add(current_model)
+
+        # A turn interrupted by the user or the runtime ends with
+        # stopReason == "aborted" (analogous to Codex's turn_aborted event).
+        # errorMessage carries a clean reason ("Interrupted by user",
+        # "Operation aborted"); fall back to a generic key when absent.
+        if mm.get("stopReason") == "aborted":
+            u.aborted_task_count += 1
+            reason = _first_str(mm.get("errorMessage")) or "aborted"
+            u.abort_reasons[reason] = u.abort_reasons.get(reason, 0) + 1
 
         for block in mm.get("content", []) or []:
             if not isinstance(block, dict):
@@ -606,6 +625,20 @@ def _path_hint(arguments) -> str:
         if isinstance(val, str) and val:
             return val
     return ""
+
+
+def _count_image_blocks(content) -> int:
+    """Count inline image blocks in an omp/pi ``message.content`` list.
+
+    omp/pi carry pasted images as ``{type:"image", mimeType, data}`` blocks on
+    user messages (base64 payload). These are multimodal inputs, tallied into
+    ``image_count`` like Codex ``images`` / OpenCode image file parts.
+    """
+    if not isinstance(content, list):
+        return 0
+    return sum(1 for b in content
+               if isinstance(b, dict)
+               and b.get("type") in ("image", "image_url", "input_image"))
 
 
 def _message_text(content) -> str:

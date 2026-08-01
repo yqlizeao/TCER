@@ -32,9 +32,17 @@ def _model_change(model="claude-opus-4-8") -> dict:
             "timestamp": _ISO, "model": model}
 
 
-def _user(text="hi", ts=_ISO) -> dict:
+def _thinking_level(level="high") -> dict:
+    return {"type": "thinking_level_change", "id": "tl1", "parentId": None,
+            "timestamp": _ISO, "thinkingLevel": level, "configured": None}
+
+
+def _user(text="hi", ts=_ISO, imgs=0) -> dict:
+    content = [{"type": "text", "text": text}]
+    for _ in range(imgs):
+        content.append({"type": "image", "mimeType": "image/png", "data": "iVBORw0="})
     return {"type": "message", "id": "u1", "parentId": None, "timestamp": ts,
-            "message": {"role": "user", "content": [{"type": "text", "text": text}],
+            "message": {"role": "user", "content": content,
                         "attribution": "user", "timestamp": ts}}
 
 
@@ -52,10 +60,12 @@ def _tool_call(name: str, cid: str, args: dict) -> dict:
 
 def _assistant(content, usage, *, model="claude-opus-4-8", provider="granola",
                stop="toolUse", ts=_ISO, snap=None, duration=None, ttft=None,
-               resp_id="r1") -> dict:
+               resp_id="r1", err=None) -> dict:
     msg = {"role": "assistant", "content": content, "api": "anthropic-messages",
            "provider": provider, "model": model, "usage": usage,
            "stopReason": stop, "timestamp": ts, "responseId": resp_id}
+    if err is not None:
+        msg["errorMessage"] = err
     if duration is not None:
         msg["duration"] = duration
     if ttft is not None:
@@ -192,6 +202,37 @@ def test_tool_errors_by_tool(tmp_path):
     assert u.tool_errors_by_tool == {"Bash": 1}
 
 
+def test_image_inputs(tmp_path):
+    """Inline base64 image blocks on user messages count as image inputs."""
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        _user("look at these", imgs=2),
+        _assistant([_text("ok")], _usage(10, 5)),
+        _user("and this one", imgs=1),
+        _assistant([_text("done")], _usage(8, 3), stop="stop"),
+    ])
+    u = omp_reader.aggregate_usage(p)
+    assert u.image_count == 3
+    assert u.user_msgs == 2
+
+
+def test_aborted_turns(tmp_path):
+    """stopReason == 'aborted' turns feed aborted_task_count + abort_reasons
+    (analogous to Codex turn_aborted); errorMessage keys the reason."""
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        _user("do a thing"),
+        _assistant([_text("working")], _usage(10, 5), stop="aborted",
+                   err="Interrupted by user"),
+        _user("try again"),
+        _assistant([_text("done")], _usage(8, 3), stop="stop"),
+        _assistant([_text("nope")], _usage(0, 0), stop="aborted"),  # no errorMessage
+    ])
+    u = omp_reader.aggregate_usage(p)
+    assert u.aborted_task_count == 2
+    assert u.abort_reasons == {"Interrupted by user": 1, "aborted": 1}
+
+
 def test_loc_write_unseen(tmp_path):
     p = _write_omp(tmp_path / "s.jsonl", [
         _session(),
@@ -270,6 +311,7 @@ def test_read_session_meta(tmp_path):
         _session(cwd=r"C:\repo\app", sid="sid-xyz", title="my title"),
         _model_change(),
         _user("first message here"),
+        _thinking_level("high"),
         _assistant([_text("ok")], _usage(5, 2), provider="granola"),
     ])
     meta = omp_reader.read_session_meta(p)
@@ -280,9 +322,22 @@ def test_read_session_meta(tmp_path):
     assert meta.entrypoint == "omp"
     assert meta.cli_version == "session v3"
     assert meta.model_provider == "granola"
+    assert meta.reasoning_effort == "high"
     # omp writes ISO-8601 timestamps (not epoch ms); they must parse to ~1e12 ms.
     u = omp_reader.aggregate_usage(p)
     assert u.started_at is not None and u.started_at >= 1_000_000_000_000
+
+
+def test_reasoning_effort_last_wins(tmp_path):
+    """Multiple thinking_level_change events: the last non-empty level wins."""
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        _thinking_level("low"),
+        _user("x"),
+        _thinking_level("high"),
+        _assistant([_text("ok")], _usage(5, 2)),
+    ])
+    assert omp_reader.read_session_meta(p).reasoning_effort == "high"
 
 
 def test_read_conversation(tmp_path):

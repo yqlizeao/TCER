@@ -908,8 +908,8 @@ def ctei(
     cpe: float | None,
     chr_: float | None,
     *,
-    tcer_baseline: float = TCER_BASELINE,
-    cpe_baseline: float = CPE_BASELINE,
+    tcer_baseline: float | None = None,
+    cpe_baseline: float | None = None,
 ) -> float | None:
     """Composite Token Efficiency Index（三因子）。
 
@@ -921,6 +921,12 @@ def ctei(
     """
     if tcer is None or not cpe:
         return None
+    # Read the live globals when unset: they are rebound after a personal-baseline
+    # save, and a frozen default arg would pin the import-time value (stale CTEI).
+    if tcer_baseline is None:
+        tcer_baseline = TCER_BASELINE
+    if cpe_baseline is None:
+        cpe_baseline = CPE_BASELINE
     return (tcer / tcer_baseline) * (cpe_baseline / cpe) * chr_factor(chr_)
 
 
@@ -962,8 +968,8 @@ def compute(
     high_churn_files: int = 0,
     test_net_loc: int | None = None,
     doc_net_loc: int | None = None,
-    tcer_baseline: float = TCER_BASELINE,
-    cpe_baseline: float = CPE_BASELINE,
+    tcer_baseline: float | None = None,
+    cpe_baseline: float | None = None,
 ) -> SessionReport:
     """Compute the full per-session report from accumulated usage + net LOC.
 
