@@ -678,20 +678,27 @@ class TcerGui:
             messagebox.showinfo("用户消息", f"当前 {label} 会话未记录到用户消息。")
 
     @staticmethod
-    def _session_label(meta) -> str:
-        """会话来源标识：``标题 · sessionid``，标题与 id 各自限长。
+    def _session_label(report) -> str:
+        """会话来源标识：``日期 · 标题 · sessionid``。
 
+        日期取会话开始日 (started_at，本地时区 YYYY-MM-DD)，无时间戳则省略；
         标题取会话标题（无标题回退「无标题」）截断到 24 字符；sessionid 取
-        主 id 段截断到 12 字符——两者都限长，避免聚合视图来源条过长换行。
+        主 id 段截断到 12 字符——标题与 id 都限长，避免聚合视图来源条过长换行。
         """
+        from tcer.core import format as fmt_mod
+        meta = report.meta
         title = (meta.title or "").strip() or "无标题"
         if len(title) > 24:
             title = title[:24] + "…"
+        parts: list[str] = []
+        day = fmt_mod.fmt_dt(report.usage.started_at, fmt_mod.FMT_DATE)
+        if day != "-":
+            parts.append(day)
+        parts.append(title)
         sid = (meta.session_id or "").strip()
         if sid and sid != "(aggregate)":
-            short = sid[:12] + ("…" if len(sid) > 12 else "")
-            return f"{title} · {short}"
-        return title
+            parts.append(sid[:12] + ("…" if len(sid) > 12 else ""))
+        return " · ".join(parts)
 
     @staticmethod
     def _load_user_messages(report, reports):
@@ -731,7 +738,7 @@ class TcerGui:
             for r in reports:
                 msgs = _read_one(r)
                 if msgs:
-                    groups.append((TcerGui._session_label(r.meta), msgs))
+                    groups.append((TcerGui._session_label(r), msgs))
             return groups, label
 
         # Single-session view: Claude legacy cache wins when present.
