@@ -35,9 +35,12 @@ def _model_change(model="claude-opus-4-8") -> dict:
             "timestamp": _ISO, "model": model}
 
 
-def _user(text="hi", ts=_ISO) -> dict:
+def _user(text="hi", ts=_ISO, imgs=0) -> dict:
+    content = [{"type": "text", "text": text}]
+    for _ in range(imgs):
+        content.append({"type": "image", "mimeType": "image/png", "data": "iVBORw0="})
     return {"type": "message", "id": "u1", "parentId": None, "timestamp": ts,
-            "message": {"role": "user", "content": [{"type": "text", "text": text}],
+            "message": {"role": "user", "content": content,
                         "attribution": "user", "timestamp": ts}}
 
 
@@ -49,16 +52,23 @@ def _thinking() -> dict:
     return {"type": "thinking", "thinking": "...", "thinkingSignature": "sig"}
 
 
+def _thinking_level(level="high") -> dict:
+    return {"type": "thinking_level_change", "id": "tl1", "parentId": None,
+            "timestamp": _ISO, "thinkingLevel": level, "configured": None}
+
+
 def _tool_call(name: str, cid: str, args: dict) -> dict:
     return {"type": "toolCall", "id": cid, "name": name, "arguments": args}
 
 
 def _assistant(content, usage, *, model="claude-opus-4-8", provider="anthropic",
-               ts=_ISO) -> dict:
+               ts=_ISO, stop="end_turn", err=None) -> dict:
     # No contextSnapshot / duration / ttft — those are omp-fork additions.
     msg = {"role": "assistant", "content": content, "api": "anthropic-messages",
            "provider": provider, "model": model, "usage": usage,
-           "stopReason": "end_turn", "timestamp": ts}
+           "stopReason": stop, "timestamp": ts}
+    if err is not None:
+        msg["errorMessage"] = err
     return {"type": "message", "id": "a1", "parentId": "u1", "timestamp": ts,
             "message": msg}
 
@@ -115,6 +125,7 @@ def test_first_line_session_header_no_title_slot(tmp_path):
     p = _write_pi(tmp_path / "s.jsonl", [
         _session(cwd=r"C:\repo\app", sid="sid-xyz"),
         _user("first real message"),
+        _thinking_level("high"),
         _assistant([_text("ok")], _usage(5, 2)),
     ])
     meta = pi_reader.read_session_meta(p)
@@ -125,6 +136,7 @@ def test_first_line_session_header_no_title_slot(tmp_path):
     assert meta.cli_version == "session v3"
     # No title field upstream → falls back to the first user message.
     assert meta.title == "first real message"
+    assert meta.reasoning_effort == "high"
 
 
 def test_empty_usage_skipped(tmp_path):
@@ -157,6 +169,31 @@ def test_tool_mapping_reuses_omp(tmp_path):
     u = pi_reader.aggregate_usage(p)
     assert u.tool_calls == {"Read": 1, "Grep": 1, "Bash": 1, "WebSearch": 1}
     assert u.web_search_count == 1
+
+
+def test_image_inputs_reuses_omp(tmp_path):
+    """Pi shares omp's _aggregate_single: inline image blocks count too."""
+    p = _write_pi(tmp_path / "s.jsonl", [
+        _session(),
+        _user("look", imgs=2),
+        _assistant([_text("ok")], _usage(10, 5)),
+    ])
+    u = pi_reader.aggregate_usage(p)
+    assert u.image_count == 2
+
+
+def test_aborted_turns_reuses_omp(tmp_path):
+    """Pi shares omp's _aggregate_single, so stopReason 'aborted' feeds
+    aborted_task_count + abort_reasons the same way."""
+    p = _write_pi(tmp_path / "s.jsonl", [
+        _session(),
+        _user("do a thing"),
+        _assistant([_text("working")], _usage(10, 5), stop="aborted",
+                   err="Operation aborted"),
+    ])
+    u = pi_reader.aggregate_usage(p)
+    assert u.aborted_task_count == 1
+    assert u.abort_reasons == {"Operation aborted": 1}
 
 
 def test_loc_reuses_omp_accumulator(tmp_path):

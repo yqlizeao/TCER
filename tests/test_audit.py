@@ -161,3 +161,26 @@ def test_audit_empty_claude_project_is_soft_pass(tmp_path, monkeypatch):
     assert pa.ok
     assert pa.n_sessions == 0
     assert pa.error is None
+
+
+def test_abort_reasons_sum_invariant():
+    """_append_metric_bound_checks flags abort_reasons totals that drift from
+    aborted_task_count (Codex turn_aborted / omp·pi stopReason=='aborted')."""
+    from tcer.core.audit import _append_metric_bound_checks, SessionAudit
+    from tcer.core.models import SessionMeta, TokenUsage, SessionReport
+    from pathlib import Path
+
+    def _mk(count, reasons):
+        u = TokenUsage(aborted_task_count=count, abort_reasons=dict(reasons))
+        meta = SessionMeta(session_id="s", cwd=None, title=None,
+                           path=Path("x"), is_subagent=False, source="omp")
+        rep = SessionReport(meta=meta, usage=u, chr=None, io_ratio=None,
+                            cost=0.0, cost_per_mt=None, net_loc=None,
+                            tcer=None, cpe=None)
+        sa = SessionAudit(session_id="s", source="omp", path="x")
+        _append_metric_bound_checks(sa, rep)
+        return next(c for c in sa.checks
+                   if c.name == "abort_reasons_sum_matches_count")
+
+    assert _mk(2, {"Interrupted by user": 1, "Operation aborted": 1}).ok is True
+    assert _mk(2, {"Interrupted by user": 1}).ok is False   # sum=1 != count=2

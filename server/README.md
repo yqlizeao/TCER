@@ -38,8 +38,8 @@ server/
     复用 `tcer.core.pricing`），也可手动归并。以表格呈现 TCER 等指标。
 - **会话详情**：顶部筛选（项目 / 人员 / 模型多选 + 时间范围），次级 sidebar 列出会话，
   右侧展示会话概要 + 逐回合会话明细（用户 / 助手 / 思考 / 工具调用 / 工具结果气泡）+
-  可折叠的原始上传数据。逐回合明细来自「含明细」上传时附带的 `conversation` 字段，五个
-  数据源（Claude / Codex / Grok / OpenCode / omp）的不同磁盘结构在客户端各自的
+  可折叠的原始上传数据。逐回合明细来自「含明细」上传时附带的 `conversation` 字段，六个
+  数据源（Claude / Codex / Grok / OpenCode / omp / Pi）的不同磁盘结构在客户端各自的
   `read_conversation` 里归一到同一 block 形状再上传。仅上传聚合信息、或未附带明细的记录
   在列表打「仅聚合」tag / 显示补传提示。
 - **决策实验室**：

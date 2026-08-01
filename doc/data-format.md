@@ -140,7 +140,7 @@ x.ai 的 grok build CLI 把会话持久化在 `~/.grok/sessions/`（`GROK_HOME` 
                    #   contextTokensUsed（覆盖 peak_input——turn 累计 peak 虚高 10×+）、
                    #   minTimeToFirstTokenMs / itlP50Ms / itlP99Ms、cancellation/regenerationCount、
                    #   positive/negativeRatings、gitCommit/prCreated/prMergedCount、
-                   #   agentLines*Reverted（回退行）、hasReverted（revert_events）
+                   #   agentLines*Reverted（回退行）、hasReverted（revert_events）、compactionCount（上下文压缩数）
   rewind_points.jsonl / terminal/*.log / subagents/   # 未解析
 ```
 
@@ -213,6 +213,7 @@ omp（[oh-my-pi](https://omp.sh)）把会话持久化在 `~/.omp/agent/sessions/
 |---|---|---|
 | `session` | 头（每文件一个） | `id` / `cwd` / `title` / `timestamp`(ISO-8601 字符串) / `version` |
 | `model_change` | 活动模型 | `model`（`"provider/modelId"`，计价剥前缀） |
+| `thinking_level_change` | 推理强度 | `thinkingLevel`（如 `high`）→ `reasoning_effort`；末个非空值胜出 |
 | `message` | 回合流 | `message.role` ∈ `user`/`assistant`/`toolResult` |
 | `custom` / `custom_message` / `compaction` / `mode_change` 等 | 忽略 | — |
 
@@ -230,10 +231,12 @@ omp（[oh-my-pi](https://omp.sh)）把会话持久化在 `~/.omp/agent/sessions/
 - 语义同 Anthropic：`input` 不含缓存，`cacheRead`/`cacheWrite` 分列上报；无独立 reasoning token（并入输出）。
 - 全零 usage 的 assistant 计入 `empty_usage_skipped`，不虚增回合数。
 - `cost.total` 累加为 `reported_cost_usd`。
+- `stopReason == "aborted"`（用户中断 / 运行中止）计入 `aborted_task_count`，`errorMessage`（如「Interrupted by user」）作 `abort_reasons` 键——语义同 Codex 的 `turn_aborted`。
 
 ### 内容块与工具结果
 
 assistant `content`：`thinking`（`thinking`/`thinkingSignature`）/ `text`（`text`）/ `toolCall`（`{id,name,arguments}`）。
+user `content` 里的 `{type:"image", mimeType, data}`（内联 base64 图片）计入 `image_count`（图片输入指标，同 Codex/OpenCode 口径）。
 `toolResult` 消息：`{toolCallId,toolName,content,details,isError,timestamp}`；`isError=true` → `tool_errors` + `tool_errors_by_tool`。
 
 ### 工具映射

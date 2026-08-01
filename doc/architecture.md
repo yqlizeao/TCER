@@ -95,7 +95,7 @@ OpenCode LOC：有 `summary_additions/deletions/files` 时用 summary；**live �
 
 Grok（x.ai 的 grok build CLI）会话按 `~/.grok/sessions/<URL编码cwd>/<UUIDv7>/` 发现，并按解码后的 cwd 聚合为项目。GUI 默认统一展示 Claude / Codex / OpenCode / Grok 项目，并提供来源切换器。
 
-Grok 的权威对话日志是 `updates.jsonl`——一条 ACP / JSON-RPC 通知流。Token 用量来自每个 turn 恰好一条的 `turn_completed.usage`：`cachedReadTokens` 映射为缓存命中，缓存创建记为 0，`reasoningTokens` 单独展示且按输出价计费；`modelUsage` 提供按模型分桶（混用多模型精确），`apiDurationMs` 累加为会话活动时长。**无 Claude 式多行重复携带 usage 的去重问题**——直接累加即可；错误回合的空 usage 计入 `empty_usage_skipped` 不虚增回合数。工具调用来自 `tool_call` 的 `_meta["x.ai/tool"].name`（`read_file`→Read、`search_replace`→Edit、`write`→Write、`grep_search`→Grep、`list_dir`→Glob、`bash`→Bash、`task`→Task），错误按 `tool_call_update.rawOutput.exit_code` 归因。用户消息正文从 `user_message_chunk.content.text` 按需读取。
+Grok 的权威对话日志是 `updates.jsonl`——一条 ACP / JSON-RPC 通知流。Token 用量来自每个 turn 恰好一条的 `turn_completed.usage`：`cachedReadTokens` 映射为缓存命中，缓存创建记为 0，`reasoningTokens` 单独展示且按输出价计费；`modelUsage` 提供按模型分桶（混用多模型精确），`apiDurationMs` 累加为会话活动时长；`signals.json.compactionCount` 折入 `compaction_count`（上下文压缩指标）。**无 Claude 式多行重复携带 usage 的去重问题**——直接累加即可；错误回合的空 usage 计入 `empty_usage_skipped` 不虚增回合数。工具调用来自 `tool_call` 的 `_meta["x.ai/tool"].name`（`read_file`→Read、`search_replace`→Edit、`write`→Write、`grep_search`→Grep、`list_dir`→Glob、`bash`→Bash、`task`→Task），错误按 `tool_call_update.rawOutput.exit_code` 归因。用户消息正文从 `user_message_chunk.content.text` 按需读取。
 
 LOC 只从可解析的 `search_replace` / `write` 计算，经与 Claude 相同的 `_LocAccumulator` 回放（Edit/Write 语义：净增行差 + 自返工 `rework_deleted` + high_churn）。无编辑工具的会话 net_loc=0（已知零，不污染项目聚合）。Grok 与 Codex/OpenCode 一样只读分析，不删除会话。详见 [doc/data-format.md](data-format.md#grok-数据格式grok-build-cli)。
 

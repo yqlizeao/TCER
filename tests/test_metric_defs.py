@@ -145,6 +145,51 @@ def test_numeric_grid_metrics_are_chartable():
     assert metric_defs.raw_value(r, "first_pass_ratio") == 0.5
 
 
+def test_report_attr_metrics_are_chartable():
+    """Every key whose grid value comes from a differently-named report attr
+    (_REPORT_ATTR) must be chartable: raw_value uses the SAME map as display,
+    so no metric shows a number in the grid yet silently fails to plot.
+    Regression guard for the class that hit context_window_used / ttft /
+    reasoning_ratio / task_completion / patch_success / ttft_p95."""
+    r = _report()
+    # give every _REPORT_ATTR target attr a non-None numeric value
+    numeric_attrs = {
+        "churn_ratio": 0.1, "code_added": 5, "code_deleted": 2,
+        "test_net_loc": 3, "doc_net_loc": 4, "high_churn_file_count": 1,
+        "avg_turn_latency_sec": 2.0, "first_pass_file_ratio": 0.5,
+        "context_window_used_ratio": 0.3, "reasoning_output_ratio": 0.2,
+        "task_completion_rate": 1.0, "time_to_first_token_sec": 2.5,
+        "ttft_p95_sec": 3.0, "patch_apply_success_rate": 1.0,
+    }
+    for attr, val in numeric_attrs.items():
+        if hasattr(r, attr):
+            setattr(r, attr, val)
+    for key, attr in metric_defs._REPORT_ATTR.items():
+        if attr not in numeric_attrs:
+            continue
+        if not metric_defs.is_supported(r, key):
+            continue  # source-gated: grid shows 不适用, raw None is correct
+        raw = metric_defs.raw_value(r, key)
+        disp = metric_defs.display(r, key)
+        assert raw is not None, (
+            f"{key} shows {disp!r} in grid but raw_value is None "
+            f"(raw_value/display attr maps diverged)")
+
+
+def test_baseline_metrics_are_chartable():
+    """bl_tcer / bl_cpe read from _BASELINE constants and show a number in the
+    grid — they must be chartable too (trend/scatter/radar axis). Same bug class
+    as high_churn_files: display had a value but raw_value returned None because
+    raw_value lacked a _BASELINE branch."""
+    import tcer.core.metrics as _m
+    r = _report()
+    for key, const in (("bl_tcer", _m.TCER_BASELINE), ("bl_cpe", _m.CPE_BASELINE)):
+        raw = metric_defs.raw_value(r, key)
+        disp = metric_defs.display(r, key)
+        assert raw is not None, f"{key} shows {disp!r} in grid but is not chartable"
+        assert raw == float(const)
+
+
 # --------------------------------------------------------------------------- #
 # Per-model SSOT (MODEL_GROUPS / model_display / model_raw)
 # --------------------------------------------------------------------------- #
@@ -265,6 +310,12 @@ def test_supported_keys_all_exist():
     """_SOURCE_SUPPORT 只引用真实存在的 metric key，防止拼写漂移。"""
     unknown = set(metric_defs._SOURCE_SUPPORT) - metric_defs.ALL_KEYS
     assert not unknown, f"_SOURCE_SUPPORT 引用了不存在的 key: {unknown}"
+
+
+def test_aborted_tasks_supported_for_local_agents():
+    """aborted_tasks 来自 Codex turn_aborted 与 omp/pi 的 stopReason=='aborted'。"""
+    assert metric_defs._SOURCE_SUPPORT["aborted_tasks"] == frozenset(
+        {"codex", "omp", "pi"})
 
 
 def test_support_note_appended_to_tip():

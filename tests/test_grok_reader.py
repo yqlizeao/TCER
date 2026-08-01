@@ -375,6 +375,7 @@ def test_signals_and_events_folding(tmp_path):
         "agentLinesRemovedReverted": 5,
         "itlP50Ms": 45,
         "itlP99Ms": 320,
+        "compactionCount": 3,
     }), encoding="utf-8")
     (sdir / "events.jsonl").write_text(
         json.dumps({"type": "permission_resolved", "decision": "allow", "wait_ms": 1500}) + "\n"
@@ -392,6 +393,7 @@ def test_signals_and_events_folding(tmp_path):
     assert u.pr_merged_count == 1
     assert u.reverted_lines == 35
     assert (u.itl_p50_ms, u.itl_p99_ms) == (45, 320)
+    assert u.compaction_count == 3          # from signals.json compactionCount
     assert u.permission_request_count == 2
     assert u.permission_wait_ms_total == 2000
     # 逐回合 TurnStat
