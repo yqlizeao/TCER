@@ -91,6 +91,26 @@ def _ctei_bar_scale(values: list[float]) -> float:
     return top
 
 
+def _grade_legend() -> str:
+    """Render the grade-band legend from ``GRADE_BANDS`` (SSOT), best→worst.
+
+    Derived rather than hardcoded so the export header can never drift from the
+    live rating taxonomy (top band is strictly >bound, the rest are ≥).
+    """
+    bands = metrics.GRADE_BANDS
+    parts = []
+    for i, (label, lo) in enumerate(bands):
+        if i == 0:
+            parts.append(f"{label}>{lo:g}")
+        else:
+            hi = bands[i - 1][1]
+            if i == len(bands) - 1:
+                parts.append(f"{label}<{hi:g}")
+            else:
+                parts.append(f"{label}{lo:g}–{hi:g}")
+    return "  ".join(parts)
+
+
 def text_ctei_chart(reports: list[SessionReport], width: int = 40) -> str:
     """Plain-ASCII CTEI bar chart (no ANSI) for embedding in Markdown exports."""
     ranking = ctei_ranking(reports)
@@ -104,7 +124,7 @@ def text_ctei_chart(reports: list[SessionReport], width: int = 40) -> str:
     scale = _ctei_bar_scale(scores)
     label_w = max(len(label) for label, _, _ in ranking)
     out = [
-        "CTEI per session  (优秀>2.0  良好1–2  中等0.5–1  低效0.1–0.5  极端低效<0.1)",
+        f"CTEI per session  ({_grade_legend()})",
     ]
     if scale + 1e-12 < top:
         out.append(f"  (bar scale capped at {scale:.3f}; max CTEI={top:.3f} — values unchanged)")

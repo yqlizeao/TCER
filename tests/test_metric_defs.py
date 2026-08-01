@@ -30,6 +30,21 @@ def test_groups_cover_six_groups():
     assert [g.id for g in metric_defs.GROUPS] == ["G1", "G2", "G3", "G4", "G5", "G6"]
 
 
+def test_concept_notes_are_well_formed_triples():
+    """Each CONCEPT_NOTES entry is a (name, explanation, level) 3-tuple.
+
+    Regression guard: a missing comma once fused an entry's explanation and its
+    "basic" level into a single string, collapsing it to a 2-tuple that would
+    IndexError any consumer unpacking three values.
+    """
+    for note in metric_defs.CONCEPT_NOTES:
+        assert isinstance(note, tuple) and len(note) == 3, f"malformed note: {note!r}"
+        name, explanation, level = note
+        assert isinstance(name, str) and name
+        assert isinstance(explanation, str) and explanation
+        assert level in ("basic", "compound"), f"unexpected level {level!r} in {name}"
+
+
 def test_tcer_is_the_only_english_metric_name():
     """Requirement: GUI shows full Chinese; TCER is the sole abbreviation kept."""
     english = [m.name for group in metric_defs.GROUPS for m in group.metrics
