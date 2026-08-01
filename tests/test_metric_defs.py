@@ -116,7 +116,7 @@ def test_report_values_golden_strings():
 
 
 def test_raw_value_scaling_and_none():
-    """raw_value: only chr is scaled to 0–100; text & high_churn_files → None."""
+    """raw_value: only chr is scaled to 0–100; text metrics → None."""
     r = _report()
     # chr scaled to 0–100
     assert metric_defs.raw_value(r, "chr") == r.chr * 100.0
@@ -125,8 +125,24 @@ def test_raw_value_scaling_and_none():
     # text metrics are not numeric
     assert metric_defs.raw_value(r, "models") is None
     assert metric_defs.raw_value(r, "grade") is None
-    # high_churn_files has no chart attr mapping → None (faithful to old behaviour)
-    assert metric_defs.raw_value(r, "high_churn_files") is None
+
+
+def test_numeric_grid_metrics_are_chartable():
+    """A metric with a numeric grid value must also be chartable (raw_value != None).
+
+    Regression guard: high_churn_files / first_pass_ratio had a numeric display
+    string but raw_value returned None (attr name ≠ key), so trend/scatter/radar
+    silently drew no point. raw_value and display must agree on "has a number".
+    """
+    r = _report()
+    r.high_churn_file_count = 3
+    r.first_pass_file_ratio = 0.5
+    for key in ("high_churn_files", "first_pass_ratio"):
+        raw = metric_defs.raw_value(r, key)
+        disp = metric_defs.display(r, key)
+        assert raw is not None, f"{key} shows {disp!r} in grid but is not chartable"
+    assert metric_defs.raw_value(r, "high_churn_files") == 3.0
+    assert metric_defs.raw_value(r, "first_pass_ratio") == 0.5
 
 
 # --------------------------------------------------------------------------- #

@@ -479,6 +479,29 @@ def test_files_touched_count():
     assert r.files_touched_details["/a.py"] == 2
 
 
+def test_files_touched_excludes_search_only_paths():
+    """涉及文件 = 真正读/写/改过的文件；只被 Grep/Glob 搜过的路径不计入。
+
+    Grok/omp 的 Grep 会带 path，常为目录（如 .../tcer/core），把它计成「文件」会
+    虚高「独立文件数」并污染涉及文件弹窗。Claude 的 Grep 无 path，天然不受影响。
+    只被搜索工具碰过的路径排除；若同一路径也被 Read/Write/Edit 碰过则保留。
+    """
+    u = _u(i=500_000, o=500_000)
+    u.tool_ops = [
+        ToolOp(0, "Grep", "/proj/src"),      # 目录：仅搜索 → 排除
+        ToolOp(0, "Glob", "/proj"),          # 目录：仅搜索 → 排除
+        ToolOp(0, "Grep", "/proj/a.py"),     # 文件但仅搜索 → 排除
+        ToolOp(1, "Read", "/proj/a.py"),     # a.py 也被读 → 保留
+        ToolOp(2, "Edit", "/proj/a.py"),
+        ToolOp(3, "Write", "/proj/b.py"),    # b.py 写入 → 保留
+    ]
+    r = metrics.compute(META, u, net_loc=100)
+    assert r.files_touched == 2, r.files_touched_details
+    assert set(r.files_touched_details) == {"/proj/a.py", "/proj/b.py"}
+    assert "/proj/src" not in r.files_touched_details
+    assert "/proj" not in r.files_touched_details
+
+
 def test_thinking_count_passthrough():
     u = _u(i=500_000, o=500_000)
     u.thinking_count = 7

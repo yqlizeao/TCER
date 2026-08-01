@@ -1043,11 +1043,21 @@ def compute(
         u.reasoning_output_tokens / u.output_tokens
         if u.output_tokens else None
     )
-    # Derive files_touched from tool_ops
+    # Derive files_touched from tool_ops. "涉及文件" means files the session
+    # actually read/wrote/edited — so a path that appears ONLY via a search tool
+    # (Grep/Glob and search-like aliases) is excluded: those tools' ``path`` is a
+    # search *scope*, frequently a directory (e.g. ``.../tcer/core``), not a file.
+    # Counting it inflates the count and pollutes the 涉及文件 popup with dirs.
+    # (Claude records no path for Grep/Glob; Grok/omp do — hence the filter.)
+    _search_only = {op.path for op in u.tool_ops
+                    if op.path and _is_code_search_tool(op.tool)}
+    _non_search = {op.path for op in u.tool_ops
+                   if op.path and not _is_code_search_tool(op.tool)}
+    _search_only -= _non_search  # keep paths also touched by Read/Write/Edit
     touched: set[str] = set()
     ftd: dict[str, int] = {}
     for op in u.tool_ops:
-        if op.path:
+        if op.path and op.path not in _search_only:
             touched.add(op.path)
             ftd[op.path] = ftd.get(op.path, 0) + 1
     fq = file_quality_metrics(u)
