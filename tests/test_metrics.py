@@ -500,6 +500,16 @@ def test_files_touched_excludes_search_only_paths():
     assert set(r.files_touched_details) == {"/proj/a.py", "/proj/b.py"}
     assert "/proj/src" not in r.files_touched_details
     assert "/proj" not in r.files_touched_details
+    # 搜索路径独立收集到「搜索足迹」——含目录与文件，按搜索次数计。
+    assert r.searched_paths_details == {"/proj/src": 1, "/proj": 1, "/proj/a.py": 1}
+
+
+def test_searched_paths_details_none_when_no_search():
+    """无搜索工具调用时 searched_paths_details 为 None（不显示空区块）。"""
+    u = _u(i=500_000, o=500_000)
+    u.tool_ops = [ToolOp(0, "Read", "/a.py"), ToolOp(1, "Edit", "/a.py")]
+    r = metrics.compute(META, u, net_loc=100)
+    assert r.searched_paths_details is None
 
 
 def test_thinking_count_passthrough():
