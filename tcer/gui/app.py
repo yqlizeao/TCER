@@ -678,65 +678,67 @@ class TcerGui:
             messagebox.showinfo("用户消息", f"当前 {label} 会话未记录到用户消息。")
 
     @staticmethod
-    def _load_user_messages(report, reports) -> tuple[list[str], str]:
-        """读取一个 report（会话或聚合）的全部用户消息文本（仅文件 IO，线程安全）。"""
+    def _session_label(meta) -> str:
+        """会话来源标识：``标题 · sessionid``，标题与 id 各自限长。
+
+        标题取会话标题（无标题回退「无标题」）截断到 24 字符；sessionid 取
+        主 id 段截断到 12 字符——两者都限长，避免聚合视图来源条过长换行。
+        """
+        title = (meta.title or "").strip() or "无标题"
+        if len(title) > 24:
+            title = title[:24] + "…"
+        sid = (meta.session_id or "").strip()
+        if sid and sid != "(aggregate)":
+            short = sid[:12] + ("…" if len(sid) > 12 else "")
+            return f"{title} · {short}"
+        return title
+
+    @staticmethod
+    def _load_user_messages(report, reports):
+        """读取一个 report 的全部用户消息（仅文件 IO，线程安全）。
+
+        单会话视图返回 ``list[str]``；聚合视图返回 ``list[(会话标识, [消息])]``，
+        每组带来源标识（标题 + sessionid，均限长），空消息的会话被跳过。
+        """
         source = report.meta.source or "claude"
         is_agg = report.meta.session_id == "(aggregate)"
-        msgs: list[str] = []
 
-        if source == "codex":
-            from tcer.core import codex_reader
-            if is_agg:
-                for r in reports:
-                    msgs.extend(codex_reader.read_user_messages(r.meta.path))
-            else:
-                msgs = codex_reader.read_user_messages(report.meta.path)
-            label = "Codex"
-        elif source == "opencode":
-            from tcer.core import opencode_reader
-            if is_agg:
-                for r in reports:
-                    sid = r.meta.session_id
-                    if sid:
-                        msgs.extend(opencode_reader.read_user_messages(r.meta.path, sid))
-            elif report.meta.session_id:
-                msgs = opencode_reader.read_user_messages(report.meta.path, report.meta.session_id)
-            label = "OpenCode"
-        elif source == "grok":
-            from tcer.core import grok_reader
-            if is_agg:
-                for r in reports:
-                    msgs.extend(grok_reader.read_user_messages(r.meta.path))
-            else:
-                msgs = grok_reader.read_user_messages(report.meta.path)
-            label = "Grok"
-        elif source == "omp":
-            from tcer.core import omp_reader
-            if is_agg:
-                for r in reports:
-                    msgs.extend(omp_reader.read_user_messages(r.meta.path))
-            else:
-                msgs = omp_reader.read_user_messages(report.meta.path)
-            label = "Oh My Pi"
-        elif source == "pi":
-            from tcer.core import pi_reader
-            if is_agg:
-                for r in reports:
-                    msgs.extend(pi_reader.read_user_messages(r.meta.path))
-            else:
-                msgs = pi_reader.read_user_messages(report.meta.path)
-            label = "Pi"
-        else:
-            # Claude: prefer cached texts (legacy), else lazy-read main + subagent files.
-            if report.usage.user_message_texts:
-                msgs = list(report.usage.user_message_texts)
-            elif is_agg:
-                for r in reports:
-                    msgs.extend(TcerGui._claude_user_messages(r))
-            else:
-                msgs = TcerGui._claude_user_messages(report)
-            label = "Claude"
-        return msgs, label
+        def _read_one(r) -> list[str]:
+            if source == "codex":
+                from tcer.core import codex_reader
+                return codex_reader.read_user_messages(r.meta.path)
+            if source == "opencode":
+                from tcer.core import opencode_reader
+                sid = r.meta.session_id
+                return opencode_reader.read_user_messages(r.meta.path, sid) if sid else []
+            if source == "grok":
+                from tcer.core import grok_reader
+                return grok_reader.read_user_messages(r.meta.path)
+            if source == "omp":
+                from tcer.core import omp_reader
+                return omp_reader.read_user_messages(r.meta.path)
+            if source == "pi":
+                from tcer.core import pi_reader
+                return pi_reader.read_user_messages(r.meta.path)
+            # Claude
+            return TcerGui._claude_user_messages(r)
+
+        label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
+                 "omp": "Oh My Pi", "pi": "Pi"}.get(source, "Claude")
+
+        if is_agg:
+            groups: list[tuple[str, list[str]]] = []
+            for r in reports:
+                msgs = _read_one(r)
+                if msgs:
+                    groups.append((TcerGui._session_label(r.meta), msgs))
+            return groups, label
+
+        # Single-session view: Claude legacy cache wins when present.
+        if source not in ("codex", "opencode", "grok", "omp", "pi") \
+                and report.usage.user_message_texts:
+            return list(report.usage.user_message_texts), label
+        return _read_one(report), label
 
     @staticmethod
     def _claude_user_messages(report) -> list[str]:

@@ -351,6 +351,48 @@ def test_user_msgs_popup_renders(root):
     assert int(first.cget("height")) >= 1
 
 
+def test_user_msgs_popup_grouped(root):
+    """聚合视图：``[(会话标识, [消息])]`` 形态渲染来源标识条 + 各会话消息卡片。"""
+    from tcer.gui.popups import UserMsgsPopup
+    from tcer.gui.widgets import SelectableLabel
+
+    grouped = [
+        ("会话一 · abc123def456…", ["来自会话一的消息", "会话一第二条"]),
+        ("会话二 · zzz999…", ["来自会话二的消息"]),
+    ]
+    UserMsgsPopup(root, grouped)
+    root.update_idletasks()
+
+    def _collect(w, acc):
+        for c in w.winfo_children():
+            if isinstance(c, SelectableLabel):
+                acc.append(c)
+            _collect(c, acc)
+
+    labels: list = []
+    _collect(root, labels)
+    texts = [lbl.get("1.0", "end-1c") for lbl in labels]
+    # 3 条消息全部渲染为可选中正文
+    assert any("来自会话一的消息" in t for t in texts)
+    assert any("来自会话二的消息" in t for t in texts)
+    # 来源标识条文字出现在某个普通 Label（非 SelectableLabel）里
+    found_bar = {"one": False, "two": False}
+
+    def _scan_labels(w):
+        import tkinter as tk
+        for c in w.winfo_children():
+            if isinstance(c, tk.Label):
+                t = c.cget("text")
+                if "会话一 ·" in t:
+                    found_bar["one"] = True
+                if "会话二 ·" in t:
+                    found_bar["two"] = True
+            _scan_labels(c)
+
+    _scan_labels(root)
+    assert found_bar["one"] and found_bar["two"], "来源标识条未渲染"
+
+
 def test_claude_user_messages_excludes_subagent_prompts(tmp_path):
     """子代理文件的 user 消息(Task 派发 prompt)不并入用户消息弹窗。
 
