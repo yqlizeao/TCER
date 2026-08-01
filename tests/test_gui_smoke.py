@@ -512,6 +512,24 @@ def test_filter_bar_since_routes_to_apply_time_filter(root):
     frame.destroy()
 
 
+def test_radar_popup_axes_track_live_baselines(root, reports):
+    """RadarPopup 构建不崩 + 归一化刻度从 SSOT 取（不硬编码 76.59/8.22）。
+
+    历史 bug：radar 的 tcer/cpe/ctei 轴 ref 硬编码 76.59/8.22/2.0，config 基准
+    迁移到 26.22/13.62 后刻度失真，「保存个人基准」也不生效。改为 _resolve_axes
+    从 metrics.TCER_BASELINE / CPE_BASELINE / GRADE_BANDS 实时取值。
+    """
+    from tcer.gui.popups import RadarPopup
+
+    axes = {k: ref for k, _n, ref in RadarPopup._resolve_axes()}
+    assert axes["tcer"] == metrics.TCER_BASELINE
+    assert axes["cpe"] == metrics.CPE_BASELINE
+    assert axes["ctei"] == metrics.GRADE_BANDS[0][1]
+    # 构建弹窗（无头下 canvas 渲染不崩即通过）。
+    RadarPopup(root, reports[0], reports)
+    root.update_idletasks()
+
+
 def test_session_column_pin_flag_marks(root, reports):
     """会话卡片置顶/红旗:置顶排序、标记图标构建、_apply_marks 重排不崩。"""
     from tcer.gui.views import SessionColumn

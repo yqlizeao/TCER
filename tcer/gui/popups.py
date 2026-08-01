@@ -13,7 +13,7 @@ from tkinter import ttk
 from tcer.core import format as fmt
 from tcer.core import metrics
 from . import theme
-from .metric_defs import CONCEPT_NOTES, GROUPS, METRIC_BY_KEY
+from .metric_defs import METRIC_BY_KEY
 from .widgets import CheckRow, ScrollFrame, SelectableLabel, Tooltip, flat_button, new_window
 
 
@@ -888,14 +888,33 @@ class RadarPopup:
     # (key, norm_type, ref) — axis label + value text come from the metric SSOT
     # (metric_defs) so the radar reads exactly like the 指标分类 tab. ``norm_type``
     # / ``ref`` are radar-only (how the 0–1 polygon radius is scaled).
+    #
+    # ``ref=None`` means "resolve from the live SSOT at construction time" (see
+    # ``_resolve_axes``): the CTEI top-grade bound (``GRADE_BANDS``) and the TCER /
+    # CPE baselines (``metrics.TCER_BASELINE`` / ``CPE_BASELINE``). Hardcoding them
+    # drifted stale (76.59 / 8.22) after the config moved to 26.22 / 13.62 and
+    # broke silently after "保存个人基准" — the SSOT is the only correct source.
     _AXES = [
-        ("ctei",  "grade",     2.0),
+        ("ctei",  "grade",     None),
         ("chr",   "pct100",    1.0),
-        ("cpe",   "grade_inv", 8.22),
+        ("cpe",   "grade_inv", None),
         ("churn", "pct_inv",   1.0),
         ("read_write_ratio", "ratio", 3.0),
-        ("tcer",  "grade",     76.59),
+        ("tcer",  "grade",     None),
     ]
+
+    @staticmethod
+    def _resolve_axes():
+        """Bind live baselines / grade bound into the axis refs (SSOT, not frozen)."""
+        refs = {
+            "ctei": metrics.GRADE_BANDS[0][1],  # top-grade lower bound (优秀 > 2.0)
+            "tcer": metrics.TCER_BASELINE,
+            "cpe": metrics.CPE_BASELINE,
+        }
+        return [
+            (key, ntype, refs[key] if ref is None else ref)
+            for key, ntype, ref in RadarPopup._AXES
+        ]
 
     def __init__(self, parent, report, all_reports) -> None:
         import math
@@ -923,7 +942,7 @@ class RadarPopup:
 
         # Normalize each axis to 0-1 using absolute scales; label + value from SSOT.
         axis_data = []
-        for key, ntype, ref in self._AXES:
+        for key, ntype, ref in self._resolve_axes():
             raw = metric_raw_value(report, key)
             norm = self._normalize(raw, ntype, ref)
             label = METRIC_BY_KEY[key].name
