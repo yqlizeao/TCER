@@ -717,7 +717,8 @@ class FilesTouchedPopup:
             return cls._COLOR_CODE, "代码"
         return cls._COLOR_OTHER, "其他"
 
-    def __init__(self, parent, details: dict[str, int]) -> None:
+    def __init__(self, parent, details: dict[str, int],
+                 searched: dict[str, int] | None = None) -> None:
         win = _new_window(parent, "涉及文件", "560x480")
         tk.Label(win, text=f"涉及文件（共 {len(details)} 个）", bg=theme.BG,
                  fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
@@ -764,6 +765,37 @@ class FilesTouchedPopup:
                 bar_bg.pack(side="left", fill="x", expand=True, padx=4)
                 tk.Frame(bar_bg, bg=theme.WARNING, height=6).place(
                     relx=0, rely=0, relwidth=cnt / max_dir, relheight=1.0)
+                tk.Label(row, text=str(cnt), bg=theme.PANEL, fg=theme.MUTED,
+                         font=(theme.FONT_MONO_NAME, 8), width=5,
+                         anchor="e").pack(side="right")
+            tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
+
+        # 搜索足迹：被 Grep/Glob 扫过的路径（含目录）——AI 的探索范围，与上方
+        # 「文件列表」（真实读/写/改的文件）分开，避免把搜索目录误当文件计数。
+        if searched:
+            top_searched = sorted(searched.items(), key=lambda x: -x[1])[:8]
+            sec = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=4)
+            sec.pack(fill="x")
+            tk.Label(sec, text=f"搜索足迹（{len(searched)} 处）",
+                     bg=theme.PANEL, fg=theme.SECTION_ACCENT,
+                     font=theme.FONT_UI_BOLD).pack(anchor="w")
+            tk.Label(sec, text="Grep/Glob 扫过的路径及次数，反映探索范围（不计入涉及文件）。",
+                     bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL, wraplength=500,
+                     justify="left").pack(anchor="w")
+            max_s = top_searched[0][1]
+            for p, cnt in top_searched:
+                p_disp = p.replace("\\", "/")
+                p_disp = p_disp if len(p_disp) < 50 else "…" + p_disp[-47:]
+                row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=1)
+                row.pack(fill="x")
+                tk.Label(row, text=p_disp, bg=theme.PANEL, fg=theme.MUTED,
+                         font=(theme.FONT_MONO_NAME, 8), anchor="w",
+                         width=48).pack(side="left")
+                bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=6)
+                bar_bg.pack(side="left", fill="x", expand=True, padx=4)
+                tk.Frame(bar_bg, bg=theme.SECTION_ACCENT, height=6).place(
+                    relx=0, rely=0, relwidth=cnt / max_s, relheight=1.0)
                 tk.Label(row, text=str(cnt), bg=theme.PANEL, fg=theme.MUTED,
                          font=(theme.FONT_MONO_NAME, 8), width=5,
                          anchor="e").pack(side="right")

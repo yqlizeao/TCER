@@ -512,6 +512,20 @@ def test_filter_bar_since_routes_to_apply_time_filter(root):
     frame.destroy()
 
 
+def test_files_touched_popup_with_search_footprint(root):
+    """FilesTouchedPopup 三块（文件列表 / 目录热度 / 搜索足迹）都渲染不崩；
+    搜索路径经独立参数传入，与文件列表分开。"""
+    from tcer.gui.popups import FilesTouchedPopup
+
+    details = {"/proj/a.py": 3, "/proj/sub/b.py": 2, "/proj/c.py": 1}
+    searched = {"/proj/sub": 18, "/proj": 9, "/proj/a.py": 4}
+    FilesTouchedPopup(root, details, searched)
+    root.update_idletasks()
+    # 无 searched 时（Claude 常态）也不崩
+    FilesTouchedPopup(root, details, None)
+    root.update_idletasks()
+
+
 def test_radar_popup_axes_track_live_baselines(root, reports):
     """RadarPopup 构建不崩 + 归一化刻度从 SSOT 取（不硬编码 76.59/8.22）。
 

@@ -946,7 +946,8 @@ class SessionColumn:
         menu.add_command(
             label=f"查看涉及文件（{report.files_touched} 个）",
             command=lambda: popups.FilesTouchedPopup(
-                self.controller.root, report.files_touched_details),
+                self.controller.root, report.files_touched_details,
+                report.searched_paths_details),
             state="normal" if has_files else "disabled",
             image=ui_icon(self.container, "folder"), compound="left",
         )

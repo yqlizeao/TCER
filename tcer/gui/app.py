@@ -761,7 +761,8 @@ class TcerGui:
     def show_files_touched(self) -> None:
         report = self._rendered_report
         if report and report.files_touched_details:
-            popups.FilesTouchedPopup(self.root, report.files_touched_details)
+            popups.FilesTouchedPopup(self.root, report.files_touched_details,
+                                     report.searched_paths_details)
         else:
             messagebox.showinfo("涉及文件", "当前会话未涉及任何文件操作。")
 

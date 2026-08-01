@@ -441,6 +441,10 @@ class SessionReport:
     tool_error_rate: float | None = None  # tool_errors / total_tool_calls
     files_touched: int = 0  # unique file paths across Read/Write/Edit
     files_touched_details: dict | None = None  # {path: operations} for popup
+    # 搜索足迹：被 Grep/Glob（及搜索类别名）扫过的路径 → 次数。与 files_touched
+    # 分开——那是真实读/写/改的文件，这是 AI 探索扫过的范围（常含目录）。仅供
+    # 涉及文件弹窗展示，不参与任何指标计算。
+    searched_paths_details: dict | None = None
     thinking_count: int = 0  # thinking content blocks
     search_edit_ratio: float | None = None  # edits / (searches + edits)
     read_before_write: float | None = None  # files read before being written/edited

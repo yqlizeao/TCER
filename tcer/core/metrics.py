@@ -1049,11 +1049,17 @@ def compute(
     # search *scope*, frequently a directory (e.g. ``.../tcer/core``), not a file.
     # Counting it inflates the count and pollutes the 涉及文件 popup with dirs.
     # (Claude records no path for Grep/Glob; Grok/omp do — hence the filter.)
-    _search_only = {op.path for op in u.tool_ops
-                    if op.path and _is_code_search_tool(op.tool)}
+    # 搜索足迹：搜索工具（Grep/Glob 及别名）扫过的路径 → 次数（含目录；供弹窗
+    # 展示 AI 的探索范围）。真实读/写/改的文件另计入 files_touched。
+    searched: dict[str, int] = {}
+    for op in u.tool_ops:
+        if op.path and _is_code_search_tool(op.tool):
+            searched[op.path] = searched.get(op.path, 0) + 1
     _non_search = {op.path for op in u.tool_ops
                    if op.path and not _is_code_search_tool(op.tool)}
-    _search_only -= _non_search  # keep paths also touched by Read/Write/Edit
+    # 仅被搜索碰过、从未被读/写/改的路径不算「涉及文件」；也被 Read/Write/Edit
+    # 碰过的路径仍是真实文件，保留。
+    _search_only = set(searched) - _non_search
     touched: set[str] = set()
     ftd: dict[str, int] = {}
     for op in u.tool_ops:
@@ -1109,6 +1115,7 @@ def compute(
         tool_error_rate=tool_err_rate,
         files_touched=len(touched),
         files_touched_details=ftd if ftd else None,
+        searched_paths_details=searched if searched else None,
         thinking_count=u.thinking_count,
         search_edit_ratio=fq["search_edit_ratio"],
         read_before_write=fq["read_before_write"],
