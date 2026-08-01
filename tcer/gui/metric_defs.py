@@ -622,6 +622,11 @@ def raw_value(report, key: str) -> float | None:
     _RAW_ATTR = {
         "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
         "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
+        # These have a numeric grid value but their attr name differs from the key,
+        # so the generic getattr(report, key) fallthrough returned None and the
+        # chart drew no point. Map them so trend/scatter/radar can plot them.
+        "high_churn_files": "high_churn_file_count",
+        "first_pass_ratio": "first_pass_file_ratio",
     }
     if not is_supported(report, key):
         return None  # 该源不提供此字段，图表不画点（避免把「不支持」画成 0）
