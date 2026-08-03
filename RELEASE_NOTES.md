@@ -1,22 +1,21 @@
-# TCER v1.0.17
+# TCER v1.0.18
 
-本次新增一个 G2 指标「输出吞吐（output_tps）」，衡量模型在计时回合内的输出生成速度。核心 TCER / CTEI / 成本口径不变。
+修正上个版本「输出吞吐（output_tps）」在 Claude 数据源下系统性偏低的问题。核心 TCER / CTEI / 成本口径不变。
 
-## 新增
+## 修复
 
-### 输出吞吐（字/秒）
+### 输出吞吐：Claude 改为「不适用」
 
-在「Token 用量」组新增指标，公式为 **Σ 计时回合的输出 Token ÷ Σ 回合耗时（秒）**：
+v1.0.17 对 Claude 会话把**轮级墙钟**当成生成耗时做分母，导致数值虚低 3–10 倍（实测 omp 控制台 21.3 字/秒的同类会话，Claude 侧只显示个位数）。
 
-- 仅累加带逐回合耗时（`turn_stats.duration_ms > 0`）的回合，用的是模型真实生成时间（Claude `turn_duration`、Codex `task_complete.duration_ms`、Grok/omp 逐回合），**排除用户阅读暂停**——区别于含停顿的「平均延迟」与「持续时长」。
-- ⚠️ 回合耗时含回合内工具执行（跑 Bash/读文件等），并非纯解码速率，故数值低于模型原始生成速度，宜作**跨会话相对对比**。
-- 无逐回合计时的数据源（OpenCode 多步聚合、Pi 无 duration 字段）显示「不适用」，不用会话墙钟虚低几十倍。
-- 支持数据源：**Claude / Codex / Grok / omp**。指标网格、趋势/散点图、模型对比、HTML 报告与 CSV 导出统一继承。
+- 根因：Claude 的 JSONL 只记录 `turn_duration`（一整个用户轮次的墙钟，含多次 API 补全 + 工具执行 + 用户等待，单轮 `messageCount` 可达 400+），**没有单次 API 补全的生成耗时**。业界标准（Artificial Analysis / vLLM / TGI）的输出速度定义是 `输出 Token ÷ 解码时间`，排除 TTFT 与工具/等待——Claude 离线日志无法还原该口径。
+- 处理：`output_tps` 支持数据源收窄为 **Codex / Grok / Oh My Pi**（三者各自上报单次补全生成耗时）。**Claude / OpenCode / Pi 显示「不适用」**，不再给出误导性的偏低值。
+- 同步修正指标提示文案与 `CLAUDE.md` 中对 `turn_duration` 语义的错误描述。
 
 ## 说明
 
-- 纯展示层 + 计量派生指标，不改动 reader 采集口径；闭环审计口径不变。
+- 仅指标口径修正，不涉及 reader token/LOC 采集；闭环审计口径不变。
 
 ---
 
-**完整变更**：`v1.0.16...v1.0.17`
+**完整变更**：`v1.0.17...v1.0.18`

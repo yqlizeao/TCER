@@ -460,6 +460,7 @@ class SessionReport:
     patch_apply_success_rate: float | None = None
     context_window_used_ratio: float | None = None
     reasoning_output_ratio: float | None = None
-    output_tps: float | None = None  # 输出吞吐（tokens/sec）= Σ 计时回合的 output_tokens
-                                     # ÷ Σ turn_stats.duration_ms（秒）。仅计有 duration_ms
-                                     # 的回合，排除用户暂停；无逐回合计时的源（OpenCode/Pi）留 None。
+    output_tps: float | None = None  # 输出吞吐（tokens/sec）= Σ output_tokens ÷ Σ 单次
+                                     # 补全生成耗时（秒）。仅 Codex/Grok/omp 提供逐补全
+                                     # duration；Claude 只有轮级墙钟(含工具+等待)不可用，
+                                     # OpenCode/Pi 无逐补全耗时——均留 None。见 metrics.output_tps。
