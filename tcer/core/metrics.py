@@ -755,12 +755,19 @@ def output_tps(u: TokenUsage) -> float | None:
     """Output generation throughput (tokens/sec) over timed turns.
 
     Σ output_tokens ÷ Σ duration_ms (in seconds), summed only over ``turn_stats``
-    entries that carry a real per-turn ``duration_ms``. Per-turn duration is the
-    model's actual generation time (Claude ``turn_duration``, Codex
-    ``task_complete.duration_ms``, Grok/omp per-turn), so this excludes user
-    reading pauses — unlike wall-clock ``session_duration``. Sources without
-    per-turn timing (OpenCode multi-turn, Pi) yield None rather than a wall-clock
-    figure that would understate throughput by 10–100×.
+    entries that carry a real per-turn ``duration_ms``. The duration must be a
+    single API completion's generation time — Codex ``task_complete.duration_ms``,
+    Grok per-turn ``api_ms``, omp/Pi ``duration`` — matching the industry
+    definition (output tokens ÷ decode time).
+
+    NOTE: Claude is deliberately excluded (see ``metric_defs._SOURCE_SUPPORT``).
+    Its JSONL has no per-completion duration; the only timing is ``turn_duration``,
+    a whole-user-turn wall clock that bundles multiple API calls, tool execution
+    and approval waits (messageCount up to 400+). Using it as the denominator
+    understates throughput 3–10×, so the reader does not backfill Claude
+    ``turn_stats.duration_ms`` for this metric's purpose and Claude reports
+    「不适用」. Sources without per-completion timing (OpenCode multi-turn) yield
+    None rather than a wall-clock figure.
     """
     out = 0
     ms = 0
