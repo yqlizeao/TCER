@@ -460,3 +460,6 @@ class SessionReport:
     patch_apply_success_rate: float | None = None
     context_window_used_ratio: float | None = None
     reasoning_output_ratio: float | None = None
+    output_tps: float | None = None  # 输出吞吐（tokens/sec）= Σ 计时回合的 output_tokens
+                                     # ÷ Σ turn_stats.duration_ms（秒）。仅计有 duration_ms
+                                     # 的回合，排除用户暂停；无逐回合计时的源（OpenCode/Pi）留 None。
