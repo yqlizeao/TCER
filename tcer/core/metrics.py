@@ -751,6 +751,28 @@ def cache_efficiency(u: TokenUsage) -> float | None:
     return (u.cache_read_input_tokens / cw) if cw else None
 
 
+def output_tps(u: TokenUsage) -> float | None:
+    """Output generation throughput (tokens/sec) over timed turns.
+
+    Σ output_tokens ÷ Σ duration_ms (in seconds), summed only over ``turn_stats``
+    entries that carry a real per-turn ``duration_ms``. Per-turn duration is the
+    model's actual generation time (Claude ``turn_duration``, Codex
+    ``task_complete.duration_ms``, Grok/omp per-turn), so this excludes user
+    reading pauses — unlike wall-clock ``session_duration``. Sources without
+    per-turn timing (OpenCode multi-turn, Pi) yield None rather than a wall-clock
+    figure that would understate throughput by 10–100×.
+    """
+    out = 0
+    ms = 0
+    for t in u.turn_stats:
+        if t.duration_ms and t.duration_ms > 0:
+            out += t.output_tokens
+            ms += t.duration_ms
+    if ms <= 0 or out <= 0:
+        return None
+    return out / (ms / 1000.0)
+
+
 def _is_code_search_tool(name: str) -> bool:
     """True if *name* is a code/repo search tool for search_edit_ratio.
 
@@ -1134,4 +1156,5 @@ def compute(
         patch_apply_success_rate=patch_success,
         context_window_used_ratio=context_window_ratio,
         reasoning_output_ratio=reasoning_ratio,
+        output_tps=output_tps(u),
     )

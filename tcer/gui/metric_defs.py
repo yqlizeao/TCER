@@ -141,6 +141,14 @@ GROUPS: list[Group] = [
                "公式：峰值输入 ÷ 上下文窗口\n"
                "说明：衡量「最挤的一轮」相对模型窗口的压力；≈1 表示顶满窗口，>1 偶见（上报窗口偏小或含系统开销）。"
                "不用会话累计总输入，避免多轮会话虚高到几十倍。", "basic", "down"),
+        Metric("output_tps", "输出吞吐", "字/秒",
+               "公式：Σ 计时回合的输出 Token ÷ Σ 回合耗时（秒）\n"
+               "推荐：越高越快（仅供粗略参考）\n"
+               "说明：每「活跃回合秒」产出多少输出 Token。仅计带逐回合耗时的回合，"
+               "排除用户阅读暂停（区别于含停顿的「平均延迟」）。\n"
+               "⚠️ 回合耗时含回合内工具执行（跑 Bash/读文件等），并非纯解码速度，"
+               "故数值低于模型原始生成速率，宜作跨会话相对对比。无逐回合计时的源显示「不适用」。",
+               "basic", "up"),
     ]),
     Group("G3", "缓存效率", [
         Metric("chr", "缓存命中率", "",
@@ -416,6 +424,7 @@ _SESSION_FMT: dict[str, str] = {
     "total_tokens": "int", "input": "int", "output": "int",
     "cache_write": "int", "cache_read": "int", "reasoning_tokens": "int",
     "context_window": "int", "peak_input": "int", "context_window_used": "pct",
+    "output_tps": "float:0.0",
     # G3
     "chr": "pct", "io_ratio": "float:0.1", "caf": "float:0.00",
     "cache_efficiency": "float:0.00", "cache_write_ratio": "pct",
@@ -726,6 +735,9 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Codex/Grok 运行时信号（Grok 来自 signals.json）
     "context_window": frozenset({"codex", "grok"}),
     "context_window_used": frozenset({"codex", "grok"}),
+    # 输出吞吐需逐回合生成耗时；OpenCode（多步聚合无 step 级 duration）与 Pi
+    # （无 duration 字段）不提供，显示「不适用」而非用会话墙钟虚低几十倍。
+    "output_tps": frozenset({"claude", "codex", "grok", "omp"}),
     "ttft": frozenset({"codex", "grok", "omp"}),
     "ttft_p95": frozenset({"codex", "omp"}),
     "rate_limit_peak": frozenset({"codex"}),
