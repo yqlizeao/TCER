@@ -125,6 +125,61 @@ JSONL 中时间戳可能是三种格式：
 
 ---
 
+## Codex 数据格式（OpenAI Codex CLI / Desktop）
+
+Codex 把会话持久化在 `~/.codex/sessions/`（`CODEX_HOME` 可覆盖），按日期递归分目录，文件名 `rollout-<ISO时间>-<sessionId>.jsonl`：
+
+```
+~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<sessionId>.jsonl   # ★权威会话日志
+~/.codex/sessions/session_index.jsonl                              # 会话 id→标题索引（实测常 stale，仅取标题）
+```
+
+每行一个事件 `{"timestamp", "type", "payload"}`。顶层 `type`：`session_meta`（头）/ `turn_context`（模型/窗口/审批策略）/ `response_item`（模型输出项：message / reasoning / function_call / custom_tool_call / *_output）/ `event_msg`（运行时事件：user_message / task_started / task_complete / turn_aborted / token_count / patch_apply_end / …）。
+
+### resume 去重
+
+Codex `resume` 复用同一 `session_id` 写**新 rollout 文件并重放整段历史**（`rollout-<新ts>-<同uuid>.jsonl`）——一个逻辑会话 = 多个累积快照，最新为超集。`list_project_refs` 按 `session_id` 折叠，每组只留 `mtime+size` 最大者（`_dedupe_by_session_id`）。**只去重不求和**（累积快照求和会重复计 token）。项目列表只读第 1 行 `session_meta` 头取 `cwd`/`session_id`（`_session_head_meta`，不扫全文件）。
+
+### Token 用量（`event_msg` / `token_count`）
+
+`payload.info` 内含 `last_token_usage` 与 `total_token_usage`（`input_tokens`/`cached_input_tokens`/`output_tokens`/`reasoning_output_tokens`）。Codex 会**重复投递相同的 `last_token_usage`**（实测虚增 1.5–2.5%），故对单调递增的 `total_token_usage` **做差分**累加，`last` 仅作无 total 时回退；差分为负（total 重置）时退 `last` 并重新基准。非缓存输入 = `input_tokens − cached_input_tokens`。`rate_limits.{primary,secondary}.used_percent` → 配额峰值；`task_complete.{duration_ms,time_to_first_token_ms}` → 会话时长 / TTFT。
+
+### 工具映射与错误归因
+
+`function_call` / `custom_tool_call` 的 `name` 经 `_CODEX_NAME_MAP` 映射：`apply_patch`→Edit、`shell_command`/`write_stdin`→Bash、`update_plan`→TodoWrite、`view_image`→Read。`shell_command`/`exec_command` 再按命令首 token 细分 Grep/Glob/Read/Bash（`rg`/`grep`/`select-string`→Grep，`find`/`ls`/`rg --files`→Glob，`cat`/`get-content`/`sed`→Read）。工具错误：`*_output.output` 内 `Process exited with code N` / `Exit code: N` 权威判错；无退出码时只认显式失败前缀（`execution error` / `error:` / `failed:` / traceback），禁止全文 `error` 子串匹配（误报）。
+
+### LOC
+
+从 `apply_patch` 的 `*** Begin Patch` 补丁体回放（`_patch_file_deltas`），经与 Claude 相同的自返工口径累加（本会话先写后删的行计 `rework_deleted`）。`apply_patch` 无 `file_path` 参数——路径取自补丁体的 `*** Update/Add/Delete File:` 头。
+
+### ★ Codex Desktop cli 0.146+ 格式变更（v1.0.19 适配）
+
+新版 Codex Desktop（实测 `cli_version: 0.146.0-alpha`，`originator: "Codex Desktop"`）改了两处结构，旧解析会导致该来源会话「代码产出与质量」指标**全为 0**（Token 侧不受影响）：
+
+1. **文件编辑挪位**：不再记为 `response_item` 的 `apply_patch` 调用，改为**只出现在** `event_msg` / `patch_apply_end.changes`：
+
+   ```json
+   {"type":"event_msg","payload":{"type":"patch_apply_end","success":true,
+     "changes":{
+       "D:\\...\\test.gd": {"type":"update","unified_diff":"@@ -321,3 +321,3 @@\n-old\n+new\n"},
+       "D:\\...\\new.gd":  {"type":"add","content":"line1\nline2\n"},
+       "D:\\...\\old.gd":  {"type":"delete","content":"x\ny\n"}}}}
+   ```
+
+   TCER `_loc_scan` 改**双来源**：`update`→`unified_diff` 的 +/- 行、`add`/`delete`→`content` 全行（`_patch_apply_end_deltas`）。旧 rollout 同时带 `apply_patch` response_item 与 `patch_apply_end` 结果事件，**优先 response_item，仅当无可解析 apply_patch 时才回退 `patch_apply_end`**，避免双计；`success:false` 的 patch 跳过。
+
+2. **工具调用套 JS 壳**：所有工具改走 `custom_tool_call name="exec"`，真实命令埋在 `input` 的 JS 源里：
+
+   ```
+   const r = await tools.shell_command({command:"rg -n \\"性格|标签\" .\\project"}); text(r)
+   ```
+
+   `_classify_tool` 识别 `exec` 后用正则（`_EXEC_SHELL_RE`，容忍 `command` 键无引号）抽出内层命令，再走共享的 `_classify_shell_command`（Grep/Glob/Read/Edit/Bash）。提取只做常规反转义（`\"`/`\\`/`\n`），**不用 `unicode_escape`**——否则中文命令体会 mojibake。
+
+> alpha 版格式可能未定稿；双格式兼容 + 回退对当前过渡是稳的，若 Codex 后续再改结构仍需重新适配。
+
+---
+
 ## Grok 数据格式（grok build CLI）
 
 x.ai 的 grok build CLI 把会话持久化在 `~/.grok/sessions/`（`GROK_HOME` 可覆盖），按 **URL 编码的工作目录**分目录：
