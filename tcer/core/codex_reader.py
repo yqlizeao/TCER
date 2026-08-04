@@ -631,14 +631,33 @@ def _loc_scan(path: Path):
     from tcer.core.loc import SessionLoc, _is_code, _is_test_file, _is_doc_file
 
     added = deleted = rework = 0
-    has_signal = False
     file_edit_counts: dict[str, int] = {}
     # Lines this session has authored per path (never includes pre-session code).
     session_authored: dict[str, int] = {}
     test_added = test_deleted = doc_added = doc_deleted = 0
+
+    # Two chronological delta sources; the second is the Codex Desktop
+    # (cli 0.146+) shape where file edits appear ONLY as ``event_msg`` /
+    # ``patch_apply_end.changes`` and the old ``apply_patch`` response_item is
+    # gone. Old rollouts carry BOTH the response_item patch AND a
+    # ``patch_apply_end`` result event, so counting both double-counts —
+    # prefer the response_item source and fall back to patch_apply_end only
+    # when no parseable ``apply_patch`` response_item exists.
+    ri_deltas: list[tuple[str, int, int]] = []      # response_item apply_patch
+    pae_deltas: list[tuple[str, int, int]] = []      # patch_apply_end.changes
     for obj in iter_events(path):
         payload = obj.get("payload")
-        if obj.get("type") != "response_item" or not isinstance(payload, dict):
+        if not isinstance(payload, dict):
+            continue
+        typ = obj.get("type")
+        if typ == "event_msg":
+            if payload.get("type") != "patch_apply_end":
+                continue
+            if payload.get("success") is False or payload.get("status") == "failed":
+                continue
+            pae_deltas.extend(_patch_apply_end_deltas(payload.get("changes")))
+            continue
+        if typ != "response_item":
             continue
         ptype = payload.get("type")
         name = payload.get("name")
@@ -654,23 +673,26 @@ def _loc_scan(path: Path):
             continue
         if not patch:
             continue
-        has_signal = True
-        for fp, a, d in _patch_file_deltas(patch):
-            if not _is_code(fp):
-                continue
-            added += a
-            deleted += d
-            auth_before = session_authored.get(fp, 0)
-            rework_part = min(d, auth_before)
-            rework += rework_part
-            session_authored[fp] = max(0, auth_before - rework_part + a)
-            file_edit_counts[fp] = file_edit_counts.get(fp, 0) + 1
-            if _is_test_file(fp):
-                test_added += a
-                test_deleted += d
-            elif _is_doc_file(fp):
-                doc_added += a
-                doc_deleted += d
+        ri_deltas.extend(_patch_file_deltas(patch))
+
+    deltas = ri_deltas if ri_deltas else pae_deltas
+    has_signal = bool(ri_deltas or pae_deltas)
+    for fp, a, d in deltas:
+        if not _is_code(fp):
+            continue
+        added += a
+        deleted += d
+        auth_before = session_authored.get(fp, 0)
+        rework_part = min(d, auth_before)
+        rework += rework_part
+        session_authored[fp] = max(0, auth_before - rework_part + a)
+        file_edit_counts[fp] = file_edit_counts.get(fp, 0) + 1
+        if _is_test_file(fp):
+            test_added += a
+            test_deleted += d
+        elif _is_doc_file(fp):
+            doc_added += a
+            doc_deleted += d
     sloc = SessionLoc(
         added=added,
         deleted=deleted,
@@ -787,6 +809,13 @@ def _classify_tool(name: str, arguments) -> tuple[str, str]:
             # apply_patch has no file_path arg — path lives inside the patch body.
             return mapped, _path_from_apply_patch(arguments)
         return mapped, _path_hint(arguments)
+    # Codex Desktop (cli 0.146+) routes every tool through a JS harness recorded
+    # as ``custom_tool_call name="exec"`` whose ``input`` is JS source calling
+    # ``tools.shell_command({command:"..."})``. Extract the real shell command
+    # so exploration/bash/read ratios classify like the older shell_command form.
+    if name == "exec":
+        cmd = _shell_command_from_exec(arguments)
+        return _classify_shell_command(cmd, arguments)
     if name not in ("exec_command", "shell_command"):
         return name, _path_hint(arguments)
     cmd = ""
@@ -796,6 +825,11 @@ def _classify_tool(name: str, arguments) -> tuple[str, str]:
             cmd = str(args.get("cmd") or args.get("command") or "")
     except json.JSONDecodeError:
         pass
+    return _classify_shell_command(cmd, arguments)
+
+
+def _classify_shell_command(cmd: str, arguments) -> tuple[str, str]:
+    """Map a shell command string to a TCER-canonical tool + path hint."""
     lowered = cmd.strip().lower()
     first = lowered.split(maxsplit=1)[0] if lowered else ""
     # Only a *real* apply_patch invocation classifies as Edit — the command
@@ -812,6 +846,37 @@ def _classify_tool(name: str, arguments) -> tuple[str, str]:
     if first in {"cat", "type", "get-content", "sed", "head", "tail"}:
         return "Read", _path_hint(arguments)
     return "Bash", _path_hint(arguments)
+
+
+_EXEC_SHELL_RE = re.compile(
+    r"tools\.shell_command\(\s*\{.*?[\"']?command[\"']?\s*:\s*"
+    r"([\"'])(?P<cmd>.*?)(?<!\\)\1",
+    re.DOTALL,
+)
+
+
+def _shell_command_from_exec(arguments) -> str:
+    """Extract the ``command`` string from an ``exec`` JS harness ``input``.
+
+    The ``input`` is JS source, e.g.::
+
+        const r = await tools.shell_command({command:"rg -n foo", ...}); text(r)
+
+    We pull the ``command`` value out of the ``tools.shell_command({...})`` call.
+    Returns ``""`` when no such call is present (a non-shell JS harness step).
+    """
+    if not isinstance(arguments, str) or not arguments:
+        return ""
+    m = _EXEC_SHELL_RE.search(arguments)
+    if not m:
+        return ""
+    raw = m.group("cmd")
+    # Unescape only the common JS string escapes (backslash-quote, backslash-
+    # backslash, newline/tab) so the classifier sees real tokens. NOT
+    # ``unicode_escape`` — that mangles the UTF-8 (Chinese) command bodies.
+    return (raw.replace('\\"', '"').replace("\\'", "'")
+            .replace("\\n", "\n").replace("\\t", "\t")
+            .replace("\\\\", "\\"))
 
 
 def _path_hint(arguments) -> str:
@@ -884,6 +949,47 @@ def _extract_patch(arguments) -> str:
             if isinstance(val, str) and "*** Begin Patch" in val:
                 return val
     return ""
+
+
+def _patch_apply_end_deltas(changes) -> list[tuple[str, int, int]]:
+    """Per-file ``(path, added, deleted)`` from a ``patch_apply_end.changes`` map.
+
+    Codex Desktop (cli 0.146+) records applied edits only in the
+    ``event_msg`` / ``patch_apply_end`` result event as a
+    ``{path: {type, unified_diff|content}}`` map — the old ``apply_patch``
+    response_item no longer exists. Three change types:
+
+    - ``update`` → count +/- hunk lines from ``unified_diff``
+    - ``add``    → every line of ``content`` is added
+    - ``delete`` → every line of ``content`` is deleted
+    """
+    deltas: list[tuple[str, int, int]] = []
+    if not isinstance(changes, dict):
+        return deltas
+    for fp, d in changes.items():
+        if not isinstance(fp, str) or not isinstance(d, dict):
+            continue
+        ctype = d.get("type")
+        if ctype == "update":
+            ud = d.get("unified_diff")
+            if not isinstance(ud, str):
+                continue
+            added = deleted = 0
+            for line in ud.splitlines():
+                if line.startswith("+") and not line.startswith("+++"):
+                    added += 1
+                elif line.startswith("-") and not line.startswith("---"):
+                    deleted += 1
+            deltas.append((fp, added, deleted))
+        elif ctype == "add":
+            content = d.get("content")
+            n = len(content.splitlines()) if isinstance(content, str) and content else 0
+            deltas.append((fp, n, 0))
+        elif ctype == "delete":
+            content = d.get("content")
+            n = len(content.splitlines()) if isinstance(content, str) and content else 0
+            deltas.append((fp, 0, n))
+    return deltas
 
 
 def _patch_file_deltas(patch: str) -> list[tuple[str, int, int]]:

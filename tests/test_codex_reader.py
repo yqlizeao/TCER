@@ -618,3 +618,87 @@ def test_rate_limit_peak_ttft_samples_abort_reason(tmp_path):
     assert u.time_to_first_token_ms == 300      # 保持 min 语义
     assert sorted(u.ttft_ms_samples) == [300, 800]
     assert u.abort_reasons == {"interrupted": 1}
+
+
+# --- Codex Desktop (cli 0.146+) new format ---------------------------------
+# File edits appear ONLY as event_msg / patch_apply_end.changes (no apply_patch
+# response_item), and every tool routes through a custom_tool_call name="exec"
+# JS harness wrapping tools.shell_command({command:"..."}).
+
+def test_patch_apply_end_changes_feed_loc(tmp_path):
+    """New-format edits (patch_apply_end.changes) must populate LOC."""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"type": "event_msg", "payload": {
+            "type": "patch_apply_end", "success": True,
+            "changes": {
+                "app.py": {"type": "update",
+                           "unified_diff": "@@ -1,2 +1,3 @@\n old\n-drop\n+new\n+more\n"},
+                "new_mod.py": {"type": "add", "content": "line1\nline2\nline3\n"},
+                "gone.py": {"type": "delete", "content": "x\ny\n"},
+            },
+        }},
+    ])
+    assert codex_reader.has_loc_signal(p) is True
+    sloc = codex_reader.session_loc_full(p)
+    assert sloc.added == 5              # update +2, add +3
+    assert sloc.deleted == 3           # update -1, delete -2
+    assert sloc.file_edit_counts == {"app.py": 1, "new_mod.py": 1, "gone.py": 1}
+
+
+def test_patch_apply_end_failed_is_ignored(tmp_path):
+    """A failed patch_apply_end must not count toward LOC."""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"type": "event_msg", "payload": {
+            "type": "patch_apply_end", "success": False,
+            "changes": {"app.py": {"type": "add", "content": "a\nb\n"}},
+        }},
+    ])
+    assert codex_reader.has_loc_signal(p) is False
+    assert codex_reader.session_loc_full(p).added == 0
+
+
+def test_apply_patch_response_item_not_double_counted_with_patch_end(tmp_path):
+    """Old rollouts carry BOTH an apply_patch response_item AND a
+    patch_apply_end result event — only the response_item source counts."""
+    patch = ("*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+new\n+line\n"
+             "*** End Patch\n")
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "apply_patch", "input": patch}},
+        {"type": "event_msg", "payload": {
+            "type": "patch_apply_end", "success": True,
+            "changes": {"app.py": {"type": "update",
+                                   "unified_diff": "@@ -1 +1,2 @@\n-old\n+new\n+line\n"}}}},
+    ])
+    sloc = codex_reader.session_loc_full(p)
+    assert sloc.added == 2             # counted once (response_item), not 4
+    assert sloc.deleted == 1
+    assert sloc.file_edit_counts.get("app.py") == 1
+
+
+def test_exec_harness_classifies_shell_command(tmp_path):
+    """custom_tool_call name=exec wraps tools.shell_command — the inner command
+    drives Grep/Read/Bash classification, not a single opaque 'exec' bucket."""
+    def _exec(cmd_js: str) -> dict:
+        return {"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "exec", "input": cmd_js}}
+
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        _exec('const r = await tools.shell_command({command:"rg -n foo .\\\\src"}); text(r)'),
+        _exec('const r = await tools.shell_command({command:"Get-Content -LiteralPath a.txt"}); text(r)'),
+        _exec('const r = await tools.shell_command({command:"python build.py"}); text(r)'),
+    ])
+    u = codex_reader.aggregate_usage(p)
+    assert u.tool_calls.get("Grep") == 1
+    assert u.tool_calls.get("Read") == 1
+    assert u.tool_calls.get("Bash") == 1
+    assert "exec" not in u.tool_calls
+
+
+def test_exec_harness_utf8_command_not_mojibaked(tmp_path):
+    """UTF-8 (Chinese) command bodies must survive extraction — the classifier
+    only needs the leading token, but corruption would break future path hints."""
+    js = ('const r = await tools.shell_command({command:"rg -n \\"性格|标签\\" .\\\\project"}); text(r)')
+    cmd = codex_reader._shell_command_from_exec(js)
+    assert "性格|标签" in cmd
+    assert cmd.startswith("rg -n")
