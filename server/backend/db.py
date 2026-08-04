@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 # Reuse the desktop app's model-id resolver for canonical model grouping, and
-# its CTEI formula so an aggregate score means the same thing in both places.
+# its efficiency_score formula so an aggregate score means the same thing in both places.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS uploads (
     model         TEXT,               -- primary model label (raw, pre-normalize)
     ts            INTEGER,            -- record time (epoch s): session start or generated_at
     tcer          REAL,
-    ctei          REAL,
+    score         REAL,               -- 综合效率分 v2 (0–100)
+    tier          TEXT,               -- 综合效率分评级标签
     cost_usd      REAL,
     net_loc       INTEGER,
     total_tokens  INTEGER,
@@ -155,6 +156,8 @@ _MIGRATIONS = {
         "cpe": "REAL",
         "tool_calls_json": "TEXT",
         "tool_variants_json": "TEXT",
+        "score": "REAL",
+        "tier": "TEXT",
     },
 }
 
@@ -269,7 +272,7 @@ def _text(v) -> str | None:
 
 _INSERT_COLS = (
     "batch_id", "uploaded_at", "uploaded_by", "person", "project", "kind",
-    "session_id", "title", "model", "ts", "tcer", "ctei", "cost_usd", "net_loc",
+    "session_id", "title", "model", "ts", "tcer", "score", "tier", "cost_usd", "net_loc",
     "total_tokens", "input_tokens", "output_tokens", "cache_write_tokens",
     "cache_read_tokens", "churn_ratio", "chr", "read_before_write",
     "search_edit_ratio", "tool_error_rate",
@@ -318,7 +321,7 @@ def insert_records(
             row.get("session_id"), row.get("title"),
             _primary_model(row),
             ts,
-            row.get("tcer"), row.get("ctei"), row.get("cost_usd"),
+            row.get("tcer"), row.get("score"), row.get("tier"), row.get("cost_usd"),
             _int(row.get("net_loc")), _int(row.get("total_tokens")),
             _int(row.get("input_tokens")), _int(row.get("output_tokens")),
             _int(row.get("cache_write_tokens")), _int(row.get("cache_read_tokens")),
@@ -477,11 +480,11 @@ def model_display(canonical: str) -> str:
 # --------------------------------------------------------------------------- #
 # Querying
 # --------------------------------------------------------------------------- #
-# Metrics that survive aggregation. ``ctei`` qualifies since it went
-# three-factor (see ``_agg_metrics``) — each factor aggregates, so a curve point
+# Metrics that survive aggregation. ``score`` qualifies since it is recomputed
+# from the aggregate's own axis inputs (see ``_agg_metrics``), so a curve point
 # rolling up several sessions is meaningful.
 _METRICS = (
-    "tcer", "ctei", "cost_usd", "cpe", "net_loc", "total_tokens", "churn_ratio",
+    "tcer", "score", "cost_usd", "cpe", "net_loc", "total_tokens", "churn_ratio",
     "chr", "read_before_write", "search_edit_ratio", "tool_error_rate",
 )
 
@@ -564,10 +567,11 @@ def _agg_metrics(rows: list[dict]) -> dict:
     sees), so those fall back to the **median** across sessions — robust to the
     heavy tail, and flagged as such via ``*_stat``.
 
-    ``ctei`` is **recomputed from the aggregate's own TCER / CPE / CHR** via
-    ``tcer.core.metrics.ctei`` — the same three-factor formula and the same
-    treatment the desktop audit's ``aggregate_ctei_recompute`` check enforces.
-    Averaging per-session CTEI would be wrong for the same reason averaging any
+    ``score`` is **recomputed from the aggregate's own axis inputs** via
+    ``tcer.core.metrics.efficiency_score`` — the same treatment the desktop
+    audit's ``aggregate_score_recompute`` check enforces (no per-session task
+    type on the server, so aggregate TCER stands in for the output axis).
+    Averaging per-session score would be wrong for the same reason averaging any
     other ratio is: the sessions carry wildly different weight.
     """
     n = len(rows)
@@ -611,12 +615,17 @@ def _agg_metrics(rows: list[dict]) -> dict:
         err_rate = med("tool_error_rate")
     cpe = round(cost / (net / 1000), 4) if net > 0 else None
     chr_out = chr_ if chr_ is not None else med("chr")
-    ctei = grade = None
+    rbw = med("read_before_write")
+    # 综合效率分 v2：从聚合轴输入重算（与桌面 efficiency_score 同一函数）。
+    # 服务器无逐会话任务类型 → 无法重建 ntcer，用聚合 tcer 作产出轴代理（与旧
+    # CTEI 用 tcer 的口径一致）。质量轴用聚合 churn / tool_error_rate / rbw。
+    score = tier = None
     if tcer_metrics is not None:
-        ctei = tcer_metrics.ctei(tcer, cpe, chr_out)
-        if ctei is not None:
-            ctei = round(ctei, 4)
-            grade = tcer_metrics.grade(ctei)
+        score = tcer_metrics.efficiency_score(
+            tcer, cpe, churn, err_rate, rbw, net_loc=net)
+        if score is not None:
+            score = round(score, 2)
+            tier = tcer_metrics.tier(score)
     return {
         "sessions": n,
         "total_tokens": tok, "input_tokens": inp, "output_tokens": out,
@@ -624,15 +633,15 @@ def _agg_metrics(rows: list[dict]) -> dict:
         "net_loc": net, "code_added": added, "cost_usd": round(cost, 4),
         "cpe": cpe,
         "tcer": tcer, "chr": chr_out,
-        "ctei": ctei, "grade": grade,
+        "score": score, "tier": tier,
         "churn_ratio": churn,
-        "read_before_write": med("read_before_write"),
+        "read_before_write": rbw,
         "search_edit_ratio": med("search_edit_ratio"),
         "tool_error_rate": err_rate,
         # Which statistic each ratio used, so the UI never implies "mean".
         "_stat": {
             "chr": "ratio_of_sums", "tcer": "ratio_of_sums",
-            "ctei": "recomputed",
+            "score": "recomputed (tcer-proxy)",
             "churn_ratio": "weighted" if added else "median",
             "tool_error_rate": "ratio_of_sums" if tool_calls else "median",
             "read_before_write": "median", "search_edit_ratio": "median",
@@ -808,7 +817,8 @@ def sessions_list(persons: list[str] | None = None,
             "model": model_display(r["c_model"]),
             "ts": r["ts"],
             "tcer": r["tcer"],
-            "ctei": r["ctei"],
+            "score": r["score"],
+            "tier": r["tier"],
             "net_loc": r["net_loc"],
             "total_tokens": r["total_tokens"],
             "cost_usd": r["cost_usd"],

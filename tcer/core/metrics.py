@@ -1,14 +1,14 @@
 """TCER core metric formulas and pricing.
 
 Basic formulas follow CLAUDE.md. The 综合评分 group (G6) — TTAF / NTCER /
-CAF / CTEI — follows the metric framework (§6.2–6.5), which is the
-authoritative original framework.
+CAF / 综合效率分 v2 (three orthogonal axes) — follows the metric framework
+(§6.2–6.5) plus the v2 scoring model (see efficiency_score).
 
 Costs are priced per model via ``pricing`` (each model's tokens at its own
 $/MTok rate), falling back to the Anthropic list-price ``default`` for unknown
 or mixed-model usage; see ``cost_usd``.
 
-Composite-layer constants (TTAF, CTEI baselines, CHR weight)
+Composite-layer constants (TTAF, TCER/CPE baselines, score weights)
 are loaded from ``config/composite_baselines.json`` — a hand-editable config so
 you can override the framework's reference-dataset defaults with your own
 accumulated data.
@@ -60,22 +60,41 @@ def _get_ttaf() -> dict[str, float]:
 
 
 def _get_baselines() -> dict[str, float]:
-    return _load_composite_config()["ctei_baselines"]
+    return _load_composite_config()["baselines"]
 
 
 def _get_chr_weight() -> float:
     return _load_composite_config()["chr_weight"]
 
 
+def _get_score_model() -> dict:
+    """综合效率分 v2 配置块（基准/权重/收缩常数）。SSOT: composite_baselines.json。"""
+    return _load_composite_config()["score_model"]
+
+
+def _get_score_tier_bands() -> list[tuple[str, float]]:
+    """评级带 (名称, 下界)，best→worst，从 config 派生。"""
+    return [(name, float(lo)) for name, lo in _load_composite_config()["score_tiers"]["bands"]]
+
+
 def _refresh_composite_globals() -> None:
     """Reload module-level constants from config (after cache clear / save)."""
     global TASK_CATEGORIES, TTAF, TCER_BASELINE, CPE_BASELINE, CHR_WEIGHT
+    global SCORE_OUTPUT_BASELINE, SCORE_COST_BASELINE, SCORE_WEIGHTS
+    global SCORE_SHRINK_K, SCORE_QUALITY_WEIGHTS
     TASK_CATEGORIES = _get_task_categories()
     TTAF = _get_ttaf()
     b = _get_baselines()
     TCER_BASELINE = b["tcer"]
     CPE_BASELINE = b["cpe"]
     CHR_WEIGHT = _get_chr_weight()
+    sm = _get_score_model()
+    # 两轴基准共用 baselines 块（TCER/CPE），个人基准一改即生效。
+    SCORE_OUTPUT_BASELINE = TCER_BASELINE
+    SCORE_COST_BASELINE = CPE_BASELINE
+    SCORE_WEIGHTS = {k: float(v) for k, v in sm["weights"].items()}
+    SCORE_SHRINK_K = float(sm["shrink_k"])
+    SCORE_QUALITY_WEIGHTS = {k: float(v) for k, v in sm["quality_weights"].items()}
 
 
 # Module-level views (backward compat). Always rebuild after cache clear via
@@ -86,6 +105,12 @@ TTAF: dict[str, float] = {}
 TCER_BASELINE = 0.0
 CPE_BASELINE = 0.0
 CHR_WEIGHT = 0.0
+# 综合效率分 v2 全局（随 config 重载；save_baselines 后重绑，勿用默认参数冻结）。
+SCORE_OUTPUT_BASELINE = 0.0
+SCORE_COST_BASELINE = 0.0
+SCORE_WEIGHTS: dict[str, float] = {}
+SCORE_SHRINK_K = 0.0
+SCORE_QUALITY_WEIGHTS: dict[str, float] = {}
 _refresh_composite_globals()
 
 # Default task type for analysis when none / unknown is supplied.
@@ -94,7 +119,7 @@ DEFAULT_TASK_TYPE = "code_creation"
 # Sentinel: analyze infers a category per session from tool / LOC signals.
 AUTO_TASK_TYPE = "auto"
 
-# Personal CTEI baselines need enough complete sessions to be stable.
+# Personal baselines need enough complete sessions to be stable.
 MIN_BASELINE_SESSIONS = 10
 
 # Pre-v2 task type names still seen in tests / old callers → current keys.
@@ -361,7 +386,7 @@ def compute_baselines(
     *,
     min_sessions: int | None = None,
 ) -> dict | None:
-    """Derive personal CTEI baselines (TCER/CPE median) from sessions.
+    """Derive personal baselines (TCER/CPE median) from sessions.
 
     Returns None if fewer than ``min_sessions`` (default
     :data:`MIN_BASELINE_SESSIONS`) sessions have complete TCER/CPE data.
@@ -382,9 +407,9 @@ def compute_baselines(
 
 
 def save_baselines(values: dict) -> None:
-    """Write personal CTEI baselines into ``composite_baselines.json`` and refresh.
+    """Write personal baselines into ``composite_baselines.json`` and refresh.
 
-    Merges into the existing ``ctei_baselines`` block, clears the config cache,
+    Merges into the existing ``baselines`` block, clears the config cache,
     and updates the module-level ``*_BASELINE`` constants so the next analysis
     picks them up. The caller (GUI) confirms before invoking.
 
@@ -394,7 +419,7 @@ def save_baselines(values: dict) -> None:
     """
     # Shallow-copy the cached config so we don't mutate the lru_cache's dict.
     cfg = {**_load_composite_config()}
-    cfg["ctei_baselines"] = {**cfg.get("ctei_baselines", {}), **values}
+    cfg["baselines"] = {**cfg.get("baselines", {}), **values}
     # Atomic write: write to a sibling temp file, then replace.
     fd, tmp = tempfile.mkstemp(dir=_COMPOSITE_CONFIG_PATH.parent, suffix=".tmp")
     try:
@@ -908,11 +933,6 @@ def normalized_tcer(tcer: float | None, task_type: str | None) -> float | None:
     return tcer / float(factor)
 
 
-def chr_factor(chr_: float | None) -> float:
-    """CHR reward factor = 1 + CHR*weight (framework §6.3): +10% CHR → +5% CTEI (default weight)."""
-    return 1.0 + (chr_ or 0.0) * CHR_WEIGHT
-
-
 def churn_ratio(added: int | None, reworked: int | None) -> float | None:
     """G4 self-rework rate = reworked / added.
 
@@ -932,57 +952,154 @@ def churn_ratio(added: int | None, reworked: int | None) -> float | None:
     return reworked / added
 
 
-def ctei(
-    tcer: float | None,
+# ============================================================
+# 综合效率分 v2 — three orthogonal axes, half-saturation, evidence shrinkage.
+#
+# 设计动机（替代 CTEI 的统计缺陷）：
+#   • CTEI = (TCER/Bt)×(Bc/CPE)×(1+CHR·w) 把两个共线比率（都由 loc/tok 驱动）
+#     相乘 ≈ 对 loc/tok 平方 → 方差放大、重尾（故 HTML 报告要 P90 截尾），
+#     且缓存被数 2–3 次，还完全忽略质量。
+#   • v2 用三条正交轴：产出(ntcer) · 成本(cpe，已含缓存收益，故不再单列缓存) ·
+#     质量(返工/工具错误/先读后写)。每轴经半饱和变换 Φ(x)=x/(x+b)∈[0,1)——
+#     baseline b 处恰 =0.5，单调、有界、自动饱和重尾（无需截尾）。
+#   • 小会话按证据量(net_loc)向 0.5 收缩，噪声无法登顶。
+#   • 加权算术平均合成 0–100：有界、可分解展示、单轴缺失可重分权优雅降级。
+# ============================================================
+
+def _half_sat(x: float | None, baseline: float) -> float | None:
+    """半饱和变换 Φ(x)=x/(x+b)∈[0,1)。x=b→0.5（与基准持平），单调递增、有界。
+
+    None / 负基准 → None。x<0 夹到 0（净删代码等病态输入不给正分）。
+    """
+    if x is None or baseline <= 0:
+        return None
+    x = max(0.0, x)
+    return x / (x + baseline)
+
+
+def output_axis(ntcer: float | None, baseline: float | None = None) -> float | None:
+    """产出轴 ∈[0,1)：每百万 token 的任务归一净产出，半饱和到基准。
+
+    baseline 未给时读实时全局（个人基准 save 后重绑，勿用默认参数冻结）。
+    """
+    return _half_sat(ntcer, SCORE_OUTPUT_BASELINE if baseline is None else baseline)
+
+
+def cost_axis(cpe: float | None, baseline: float | None = None) -> float | None:
+    """成本轴 ∈(0,1]：每千行成本越低越好，故对 CPE 取反向半饱和 b/(x+b)。
+
+    CPE 的 cost 已按缓存读低价计入，缓存收益天然体现在这里——不再单列缓存因子
+    （消除 CTEI 的双重计数）。CPE=基准→0.5；CPE→0（极省）→1；CPE→∞→0。
+    baseline 未给时读实时全局。
+    """
+    b = SCORE_COST_BASELINE if baseline is None else baseline
+    if cpe is None or cpe < 0 or b <= 0:
+        return None
+    return b / (cpe + b)
+
+
+def quality_axis(
+    churn_ratio_: float | None,
+    tool_error_rate: float | None,
+    read_before_write: float | None,
+) -> float | None:
+    """质量轴 ∈[0,1]：返工率↓、工具错误率↓、先读后写↑ 的加权合成，与体量无关。
+
+    每个子信号折算到「越大越好」的 [0,1]：低返工=1−churn、低错误=1−err、
+    先读后写直接用其比率。缺失的子信号把权重重分配给其余项（优雅降级）；
+    三者全缺 → None（该会话无质量信号，合成时把质量权重转给产出/成本轴）。
+    """
+    parts: list[tuple[float, float]] = []  # (weight, value)
+    w = SCORE_QUALITY_WEIGHTS
+    if churn_ratio_ is not None:
+        parts.append((w["low_rework"], 1.0 - min(1.0, max(0.0, churn_ratio_))))
+    if tool_error_rate is not None:
+        parts.append((w["low_tool_error"], 1.0 - min(1.0, max(0.0, tool_error_rate))))
+    if read_before_write is not None:
+        parts.append((w["read_before_write"], min(1.0, max(0.0, read_before_write))))
+    if not parts:
+        return None
+    wsum = sum(wt for wt, _ in parts)
+    return sum(wt * v for wt, v in parts) / wsum if wsum else None
+
+
+def _shrink(axis: float | None, evidence: float | None) -> float | None:
+    """按证据量向中性 0.5 收缩：w=m/(m+k)，ẽ=0.5+w·(e−0.5)。
+
+    m=证据量(net_loc)，k=SCORE_SHRINK_K。小会话被拉回中位，无法靠噪声冲顶。
+    """
+    if axis is None:
+        return None
+    m = max(0.0, evidence or 0.0)
+    w = m / (m + SCORE_SHRINK_K) if (m + SCORE_SHRINK_K) > 0 else 0.0
+    return 0.5 + w * (axis - 0.5)
+
+
+def efficiency_score(
+    ntcer: float | None,
     cpe: float | None,
-    chr_: float | None,
+    churn_ratio_: float | None,
+    tool_error_rate: float | None,
+    read_before_write: float | None,
     *,
+    net_loc: int | None,
     tcer_baseline: float | None = None,
     cpe_baseline: float | None = None,
 ) -> float | None:
-    """Composite Token Efficiency Index（三因子）。
+    """综合效率分 ∈[0,100]：三正交轴半饱和 → 证据收缩 → 加权合成。
 
-    CTEI = (TCER/基准) × (CPE基准/CPE) × (1+CHR×0.5)
-
-    历史上还有第四个「产出密度」因子（NCPI/基准）——其分母是真实代码库总行数，
-    需要扫描本地仓库，与「纯离线、仅分析会话数据」的产品定位冲突，已移除。
-    三个因子都可聚合，项目聚合视图同样有效（聚合层不再禁用 CTEI/评级）。
+    产出轴缺失（无 ntcer/loc）→ None（无从评效率）。成本或质量轴缺失时，把其
+    权重重分配给可用轴（优雅降级）。返回 None 表示该会话不参与效率排名。
+    tcer_baseline/cpe_baseline 未给时读实时全局（个人基准 save 后即生效）。
     """
-    if tcer is None or not cpe:
+    a = score_axes(ntcer, cpe, churn_ratio_, tool_error_rate, read_before_write,
+                   net_loc=net_loc, tcer_baseline=tcer_baseline,
+                   cpe_baseline=cpe_baseline)
+    avail = {k: v for k, v in a.items() if v is not None}
+    if "output" not in avail:
+        return None  # 产出轴是效率分的必要条件
+    wsum = sum(SCORE_WEIGHTS[k] for k in avail)
+    if wsum <= 0:
         return None
-    # Read the live globals when unset: they are rebound after a personal-baseline
-    # save, and a frozen default arg would pin the import-time value (stale CTEI).
-    if tcer_baseline is None:
-        tcer_baseline = TCER_BASELINE
-    if cpe_baseline is None:
-        cpe_baseline = CPE_BASELINE
-    return (tcer / tcer_baseline) * (cpe_baseline / cpe) * chr_factor(chr_)
+    blended = sum(SCORE_WEIGHTS[k] * v for k, v in avail.items()) / wsum
+    return round(100.0 * blended, 2)
 
 
-# CTEI rating bands (framework §6.3), best → worst: ``(label, lower_bound)``.
-# The top band is strictly greater-than its bound; the rest are ≥. Single source
-# for the rating taxonomy — ``grade()`` and the GUI's ranking bar / trend bands
-# all derive their names + thresholds from here.
-GRADE_BANDS: list[tuple[str, float]] = [
-    ("优秀", 2.0),
-    ("良好", 1.0),
-    ("中等", 0.5),
-    ("低效", 0.1),
-    ("极端低效", 0.0),
-]
+def score_axes(
+    ntcer: float | None,
+    cpe: float | None,
+    churn_ratio_: float | None,
+    tool_error_rate: float | None,
+    read_before_write: float | None,
+    *,
+    net_loc: int | None,
+    tcer_baseline: float | None = None,
+    cpe_baseline: float | None = None,
+) -> dict[str, float | None]:
+    """三轴收缩后的分值（0–1），供 GUI 分解展示 / audit 重算校验。"""
+    return {
+        "output": _shrink(output_axis(ntcer, tcer_baseline), net_loc),
+        "cost": _shrink(cost_axis(cpe, cpe_baseline), net_loc),
+        "quality": _shrink(quality_axis(churn_ratio_, tool_error_rate, read_before_write), net_loc),
+    }
 
 
-def grade(ctei_: float | None) -> str | None:
-    """CTEI rating (framework §6.3 thresholds), derived from GRADE_BANDS."""
-    if ctei_ is None:
+# 综合效率分评级带（0–100），best→worst：(名称, 下界)，从 config 派生（SSOT）。
+# 顶档严格大于其下界，其余 ≥。tier() 与 GUI 排名条/趋势带均从此取。
+SCORE_TIER_BANDS: list[tuple[str, float]] = _get_score_tier_bands()
+
+
+def tier(score: float | None) -> str | None:
+    """综合效率分评级标签，从 SCORE_TIER_BANDS 派生。"""
+    if score is None:
         return None
-    top_label, top_lo = GRADE_BANDS[0]
-    if ctei_ > top_lo:
+    top_label, top_lo = SCORE_TIER_BANDS[0]
+    if score > top_lo:
         return top_label
-    for label, lo in GRADE_BANDS[1:]:
-        if ctei_ >= lo:
+    for label, lo in SCORE_TIER_BANDS[1:]:
+        if score >= lo:
             return label
-    return GRADE_BANDS[-1][0]
+    return SCORE_TIER_BANDS[-1][0]
 
 
 def compute(
@@ -1002,8 +1119,8 @@ def compute(
 ) -> SessionReport:
     """Compute the full per-session report from accumulated usage + net LOC.
 
-    Composite fields (CAF / NTCER / CTEI / grade) and the churn ratio are
-    filled in opportunistically: each is None unless its inputs are available.
+    Composite fields (CAF / NTCER / 综合效率分 + tier + axes) and the churn ratio
+    are filled in opportunistically: each is None unless its inputs are available.
     """
     total_input = u.total_input
     total = u.total
@@ -1028,8 +1145,6 @@ def compute(
     # --- composite layer ---
     caf_ = caf(u)
     ta = normalized_tcer(tcer, task_type)
-    ctei_ = ctei(tcer, cpe, chr_, tcer_baseline=tcer_baseline,
-                 cpe_baseline=cpe_baseline)
 
     # --- timing metrics ---
     avg_turn_lat = avg_turn_latency_sec(u)
@@ -1103,6 +1218,18 @@ def compute(
             ftd[op.path] = ftd.get(op.path, 0) + 1
     fq = file_quality_metrics(u)
 
+    # --- 综合效率分 v2：三正交轴半饱和 + 证据收缩 + 加权（见 efficiency_score）---
+    churn_ = churn_ratio(
+        code_added,
+        code_reworked if code_reworked is not None else code_deleted,
+    )
+    _axes = score_axes(ta, cpe, churn_, tool_err_rate, fq["read_before_write"],
+                       net_loc=net_loc, tcer_baseline=tcer_baseline,
+                       cpe_baseline=cpe_baseline)
+    score_ = efficiency_score(ta, cpe, churn_, tool_err_rate, fq["read_before_write"],
+                              net_loc=net_loc, tcer_baseline=tcer_baseline,
+                              cpe_baseline=cpe_baseline)
+
     return SessionReport(
         meta=meta,
         usage=u,
@@ -1119,15 +1246,15 @@ def compute(
         ttaf=ttaf_value,
         ntcer=ta,
         ta_tcer=ta,  # backward compat
-        ctei=ctei_,
-        grade=grade(ctei_),
+        score=score_,
+        tier=tier(score_),
+        score_output_axis=_axes["output"],
+        score_cost_axis=_axes["cost"],
+        score_quality_axis=_axes["quality"],
         code_added=code_added,
         code_deleted=code_deleted,
         code_reworked=code_reworked,
-        churn_ratio=churn_ratio(
-            code_added,
-            code_reworked if code_reworked is not None else code_deleted,
-        ),
+        churn_ratio=churn_,
         # --- timing ---
         avg_turn_latency_sec=avg_turn_lat,
         session_duration_minutes=session_dur_min,

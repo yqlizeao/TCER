@@ -157,15 +157,21 @@ def main() -> int:
                 tool_variants = {f"Skill:{s}": random.randint(1, 3) for s in skills}
                 n_tools = sum(tool_calls.values())
                 err_rate = _rng(0.0, 0.12)
+                _rbw = _rng(0.4, 0.95)
                 session = {
                     "session_id": f"{person}-{project}-{days_ago}-{random.randint(1000,9999)}",
                     "title": f"{project} · {label} 会话",
                     "tcer": tcer,
-                    # Derived, never drawn independently — a per-session ctei
-                    # that disagrees with its own tcer/cpe/chr would contradict
-                    # the aggregate ctei the server recomputes from the sums.
-                    "ctei": round(metrics.ctei(tcer, cpe, chr_), 4),
-                    "grade": metrics.grade(metrics.ctei(tcer, cpe, chr_)),
+                    # Derived, never drawn independently — a per-session score
+                    # that disagrees with its own tcer/cpe/quality would contradict
+                    # the aggregate score the server recomputes from the sums.
+                    # 用 tcer 作产出轴代理（与服务端聚合口径一致，无逐会话 ntcer）。
+                    "score": metrics.efficiency_score(
+                        tcer, cpe, round(min(churn, 0.9), 4), err_rate,
+                        _rbw, net_loc=net_loc),
+                    "tier": metrics.tier(metrics.efficiency_score(
+                        tcer, cpe, round(min(churn, 0.9), 4), err_rate,
+                        _rbw, net_loc=net_loc)),
                     "cost_usd": round(cost, 4),
                     "cpe": round(cpe, 4),
                     "net_loc": net_loc,
@@ -177,7 +183,7 @@ def main() -> int:
                     "cache_read_tokens": cache_read,
                     "churn_ratio": round(min(churn, 0.9), 4),
                     "chr": chr_,
-                    "read_before_write": _rng(0.4, 0.95),
+                    "read_before_write": _rbw,
                     "search_edit_ratio": _rng(0.2, 0.8),
                     "tool_error_rate": err_rate,
                     "tool_error_count": int(round(err_rate * n_tools)),

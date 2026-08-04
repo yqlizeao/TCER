@@ -1,4 +1,4 @@
-"""Tests for metrics.compute_baselines / save_baselines (personal CTEI baselines)."""
+"""Tests for metrics.compute_baselines / save_baselines (personal baselines)."""
 from __future__ import annotations
 
 import json
@@ -52,7 +52,7 @@ def test_save_baselines_writes_and_refreshes_globals(tmp_path):
         metrics._load_composite_config.cache_clear()
         metrics.save_baselines({"tcer": 123.45, "cpe": 9.9})
         cfg = json.loads(tmp.read_text(encoding="utf-8"))
-        assert cfg["ctei_baselines"]["tcer"] == 123.45
+        assert cfg["baselines"]["tcer"] == 123.45
         assert metrics.TCER_BASELINE == 123.45
         assert metrics.CPE_BASELINE == 9.9
     finally:
@@ -61,24 +61,25 @@ def test_save_baselines_writes_and_refreshes_globals(tmp_path):
         metrics._refresh_composite_globals()
 
 
-def test_ctei_tracks_refreshed_baseline(tmp_path):
-    """After a personal-baseline save rebinds the module globals, ctei()/compute()
+def test_score_tracks_refreshed_baseline(tmp_path):
+    """After a personal-baseline save rebinds the module globals, efficiency_score()
     with default args must use the NEW baseline — not the import-time value.
-    Regression guard: default args (tcer_baseline=TCER_BASELINE) froze the old
-    value, so CTEI stayed stale until process restart."""
+    Regression guard: frozen default args froze the old value, so the score stayed
+    stale until process restart."""
     real_path = metrics._COMPOSITE_CONFIG_PATH
     tmp = tmp_path / "composite_baselines.json"
     tmp.write_text(real_path.read_text(encoding="utf-8"), encoding="utf-8")
     metrics._COMPOSITE_CONFIG_PATH = tmp
     try:
         metrics._load_composite_config.cache_clear()
-        before = metrics.ctei(80.0, 9.0, 0.9)
+        before = metrics.efficiency_score(80.0, 9.0, 0.1, 0.0, 0.8, net_loc=500)
         metrics.save_baselines({"tcer": 123.45, "cpe": 9.9})
-        after = metrics.ctei(80.0, 9.0, 0.9)
-        # default-arg ctei must now reflect the refreshed globals
-        assert after == metrics.ctei(80.0, 9.0, 0.9,
-                                     tcer_baseline=123.45, cpe_baseline=9.9)
-        assert abs(after - before) > 1e-9, "ctei ignored the refreshed baseline"
+        after = metrics.efficiency_score(80.0, 9.0, 0.1, 0.0, 0.8, net_loc=500)
+        # default-arg score must now reflect the refreshed globals
+        assert after == metrics.efficiency_score(
+            80.0, 9.0, 0.1, 0.0, 0.8, net_loc=500,
+            tcer_baseline=123.45, cpe_baseline=9.9)
+        assert abs(after - before) > 1e-9, "score ignored the refreshed baseline"
     finally:
         metrics._COMPOSITE_CONFIG_PATH = real_path
         metrics._load_composite_config.cache_clear()

@@ -24,11 +24,11 @@ async function api(path, opts = {}) {
 }
 
 // ---- 指标定义（前端唯一展示源，与后端字段名对齐）-------------------------
-// CTEI 三因子化后聚合有效（服务端按 metrics.ctei 从聚合 TCER/CPE/CHR 重算，
+// 综合效率分聚合有效（服务端按 metrics.efficiency_score 从聚合轴输入重算，
 // 不是对各会话取平均），故保留在曲线指标里。
 const METRICS = [
   { key: "tcer", name: "TCER 效率", unit: "行/百万Token", fmt: "float2" },
-  { key: "ctei", name: "CTEI 综合分", unit: "", fmt: "float3" },
+  { key: "score", name: "综合效率分", unit: "", fmt: "float2" },
   { key: "net_loc", name: "净增行", unit: "行", fmt: "int" },
   { key: "total_tokens", name: "总 Token", unit: "", fmt: "tok" },
   { key: "cost_usd", name: "成本", unit: "USD", fmt: "money" },
@@ -277,7 +277,7 @@ const DETAIL_COLS = [
   { key: "cost_usd", name: "成本", fmt: "money" },
   { key: "tcer", name: "TCER", fmt: "float2" },
   { key: "cpe", name: "成本/千行", fmt: "money" },
-  { key: "ctei", name: "CTEI", fmt: "float3" },
+  { key: "score", name: "综合效率分", fmt: "float2" },
   { key: "chr", name: "缓存命中", fmt: "pct" },
   { key: "churn_ratio", name: "返工率", fmt: "pct" },
   { key: "read_before_write", name: "先读后写", fmt: "pct" },
@@ -549,8 +549,8 @@ function renderKvGrid(raw) {
   if (!raw || typeof raw !== "object") return "";
   const items = [
     ["TCER", fmtVal("float2", raw.tcer)],
-    ["CTEI", fmtVal("float3", raw.ctei)],
-    ["评级", raw.grade || "—"],
+    ["综合效率分", fmtVal("float2", raw.score)],
+    ["评级", raw.tier || "—"],
     ["净增行", fmtVal("int", raw.net_loc)],
     ["总 Token", fmtVal("tok", raw.total_tokens)],
     ["成本", fmtVal("money", raw.cost_usd)],

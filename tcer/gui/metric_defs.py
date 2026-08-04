@@ -6,7 +6,7 @@ explanation, semantic color level, and how to extract+format its value from a
 popup render from ``GROUPS``, so adding or renaming a metric is a one-line change
 here. No Tkinter dependency.
 
-Code keys stay abbreviated (``chr`` / ``ctei`` / ``ntcer`` …); only the ``name``
+Code keys stay abbreviated (``chr`` / ``score`` / ``ntcer`` …); only the ``name``
 shown to users is full Chinese (TCER is the sole English abbreviation kept).
 """
 from __future__ import annotations
@@ -321,14 +321,14 @@ GROUPS: list[Group] = [
                "核心指标：每烧 100 万 Token，AI 写出了多少行净代码——衡量「划不划算」。\n"
                "怎么看：越高越省；新功能通常 >50，参考中位数约 76.6；调试/重构天然偏低，正常。\n"
                "想提高：提高缓存命中率、少返工、别让 AI 反复重写整文件。", "basic", "up"),
-        Metric("ctei", "综合效率分", "",
-               "把 3 件事打包成一个总分：产出效率(TCER) × 每行省不省钱(成本) × 缓存用得好不好，再跟参考线比。\n"
-               "怎么看：>2 优秀 · 1–2 良好 · 0.5–1 中等 · 0.1–0.5 低效 · <0.1 极端低效。\n"
-               "⚠️ 它是 3 个比率相乘，别纠结绝对值——主要看排名页的相对高低和趋势。"
-               "要看「这次到底干得好不好」，直接看 TCER、返工率、每千行成本更直观。\n"
-               "全部来自会话数据，单会话与项目聚合均有效。", "compound", "up"),
-        Metric("grade", "评级", "",
-               "上面「综合效率分」对应的等级标签：优秀/良好/中等/低效/极端低效，"
+        Metric("score", "综合效率分", "",
+               "0–100 的总分：把「产出效率 · 成本 · 质量」三件正交的事各自和参考线比、\n"
+               "按会话规模收缩后加权平均得来。分越高越好。\n"
+               "怎么看：>75 优秀 · 60–75 良好 · 45–60 中等 · 25–45 待改进 · <25 低效。\n"
+               "三条轴：产出效率(每百万 token 的任务归一产出) · 成本(每千行花费，已含缓存省的钱) · 质量(少返工/少工具报错/先读后写)。\n"
+               "小会话会被拉向中间分，避免「写 5 行就登顶」；全部来自会话数据，单会话与项目聚合均有效。", "compound", "up"),
+        Metric("tier", "评级", "",
+               "上面「综合效率分」对应的等级标签：优秀/良好/中等/待改进/低效，"
                "颜色和排名页的条形图一致。", "basic"),
         Metric("task_type", "任务类型", "",
                "你这次主要在干啥：写新代码(创作)、改老代码(维护)、还是不写代码(调研/审查)。\n"
@@ -361,7 +361,7 @@ CONCEPT_NOTES: list[tuple[str, str, str]] = [
      "added 会高估、deleted 会遗漏（Claude 的 originalFile 到达后会回溯修正）。"
      "Edit 不受影响（只看增量）。「盲写文件」计数是潜在高估的上界。", "basic"),
     ("如何提高效率",
-     "想提升 TCER/CTEI？几个实用建议：①保持提示词稳定（提高缓存命中率）；"
+     "想提升 TCER/综合效率分？几个实用建议：①保持提示词稳定（提高缓存命中率）；"
      "②用 Edit 而非 Write 修改已有文件（更精确，返工率低）；"
      "③让 AI 先 Grep/Glob 搜索再动手（提高读写比）；"
      "④选对任务类型（调试的 TCER 天然低于新功能，这很正常）。", "basic"),
@@ -415,7 +415,7 @@ _SESSION_FMT: dict[str, str] = {
     # G1 — text / custom display (see _DISPLAY_EXTRACTORS), grade is plain text
     "subagent": "text", "turns": "text", "started": "text", "last_time": "text",
     "duration": "text", "models": "text", "tools": "text", "entrypoint": "text",
-    "task_type": "text", "grade": "text", "cli_version": "text",
+    "task_type": "text", "tier": "text", "cli_version": "text",
     "model_provider": "text", "thread_source": "text", "approval_policy": "text",
     "sandbox_policy": "text", "reasoning_effort": "text", "git_branch": "text",
     "git_commit": "text",
@@ -453,8 +453,10 @@ _SESSION_FMT: dict[str, str] = {
     # G5
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
     # G6
-    "tcer": "float:0.0", "ctei": "float:0.000", "ttaf": "float:0.00",
+    "tcer": "float:0.0", "score": "float:0.0", "ttaf": "float:0.00",
     "ntcer": "float:0.00",
+    "score_output_axis": "float:0.00", "score_cost_axis": "float:0.00",
+    "score_quality_axis": "float:0.00",
     "bl_tcer": "float:0.00", "bl_cpe": "float:0.00",
 }
 
@@ -532,6 +534,18 @@ def format_value(key: str, native) -> str:
     """Native value → display string, using the metric's declared fmt."""
     m = METRIC_BY_KEY.get(key)
     return _format_native(m.fmt if m else "", native)
+
+
+def metric_name(key: str) -> str:
+    """Display name for a session metric key (SSOT). Falls back to the key."""
+    m = METRIC_BY_KEY.get(key)
+    return m.name if m else key
+
+
+def metric_tip(key: str) -> str | None:
+    """Full tooltip (name + explanation) for a session metric key (SSOT)."""
+    m = METRIC_BY_KEY.get(key)
+    return f"{m.name}\n{m.tip}" if m and m.tip else None
 
 
 def _code_loc_native(report):
@@ -935,35 +949,36 @@ def model_tip(key: str) -> str | None:
 
 
 # ============================================================
-# CTEI factor decomposition (综合效率分排名 → CTEI 因子分解).
-# The four multiplicative factors of CTEI. Keys match export.ctei_decompose.
-# Labels / formula text / formatting / 好坏阈值 live here (SSOT), so the ranking
-# tab no longer defines its own.
+# 综合效率分 v2 · 三正交轴分解（排名页 → 得分构成）.
+# Keys match export.score_decompose. Labels / formula / tip / 中性阈值 live here
+# (SSOT), so the ranking tab no longer defines its own. Each axis ∈[0,1]，
+# 0.5 = 与参考线持平（半饱和变换的中性点）。
 # ============================================================
 
 @dataclass(frozen=True)
-class CteiFactor:
-    key: str        # matches a key from export.ctei_decompose
-    name: str       # display label (效率因子 / 产出密度 / …)
+class ScoreAxis:
+    key: str        # matches a key from export.score_decompose (output/cost/quality)
+    name: str       # display label (产出效率 / 成本 / 质量)
     formula: str    # short formula shown beside the bar
+    tip: str = ""   # plain-language explanation (hover), SSOT for the ranking tab
 
 
-def _chr_weight_label() -> str:
-    """Render the live CHR weight so the formula text tracks config overrides."""
-    w = _metrics.CHR_WEIGHT
-    return f"{w:g}"
-
-
-CTEI_FACTORS: list[CteiFactor] = [
-    CteiFactor("eff_factor", "效率因子", "TCER÷基准"),
-    CteiFactor("cost_factor", "成本效率", "基准÷CPE"),
-    CteiFactor("cache_factor", "缓存因子", f"1+CHR×{_chr_weight_label()}"),
+SCORE_AXES: list[ScoreAxis] = [
+    ScoreAxis("output", "产出效率", "每百万token净产出",
+              "任务归一后，每百万 Token 写出的净代码行数，经半饱和映射到 0–1。\n"
+              "0.5 = 与参考线持平；越接近 1 越高产。是综合效率分权重最大的一轴。"),
+    ScoreAxis("cost", "成本", "每千行花费",
+              "每千行代码的花费（已含缓存省下的钱），越省成本轴越高。\n"
+              "0.5 = 与参考线持平；越接近 1 越省钱。缓存收益已计入这里，不再单列。"),
+    ScoreAxis("quality", "质量", "少返工/少报错/先读后写",
+              "与代码量无关的产出质量：少返工、少工具报错、先读后写。\n"
+              "0.5 附近为中性；越接近 1 说明写得越稳。无质量信号的会话按中性计。"),
 ]
 
-# A factor ≥ this sits at/above baseline (good); below it drags CTEI down.
-CTEI_FACTOR_GOOD_THRESHOLD = 1.0
+# An axis ≥ this sits at/above the neutral baseline (good); below it drags the score down.
+SCORE_AXIS_NEUTRAL = 0.5
 
 
-def format_factor(val: float) -> str:
-    """Format a CTEI factor value (2 dp), matching the ranking tab."""
+def format_axis(val: float) -> str:
+    """Format a score-axis value (2 dp), matching the ranking tab."""
     return f"{val:.2f}"

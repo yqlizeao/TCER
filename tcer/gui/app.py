@@ -25,7 +25,7 @@ from tcer.core.paths import (
 )
 from tcer.core.reader import discover_jsonl
 from . import html_report, popups, theme, views
-from .views import CteiRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
+from .views import ScoreRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
 
 
 # 发布版(PyInstaller 打包,sys.frozen=True)默认开启「启动时自动检查更新」;
@@ -225,7 +225,7 @@ class TcerGui:
         nb.add(tab_t, text="趋势", image=views.ui_icon(nb, "trend"), compound="left")
 
         self.metric_panel = MetricPanel(tab_m, self)
-        self.ranking_view = CteiRankingView(tab_b, controller=self)
+        self.ranking_view = ScoreRankingView(tab_b, controller=self)
         self.trend_chart = TrendChart(tab_t, controller=self)
         self.model_compare = ModelCompareView(tab_c, controller=self)
 

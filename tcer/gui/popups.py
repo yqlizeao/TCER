@@ -634,7 +634,7 @@ class AdvancedPopup:
         card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=10)
         card.pack(fill="x")
         no_loc_var = tk.BooleanVar(value=no_loc)
-        CheckRow(card, "跳过 LOC（仅 Token 指标，不算 TCER/CPE/CTEI）", no_loc_var)
+        CheckRow(card, "跳过 LOC（仅 Token 指标，不算 TCER/CPE/综合效率分）", no_loc_var)
         tk.Label(card,
                  text="全部指标均来自会话数据回放；TCER 不读取真实仓库、不依赖 git。",
                  bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
@@ -953,12 +953,12 @@ class RadarPopup:
     # / ``ref`` are radar-only (how the 0–1 polygon radius is scaled).
     #
     # ``ref=None`` means "resolve from the live SSOT at construction time" (see
-    # ``_resolve_axes``): the CTEI top-grade bound (``GRADE_BANDS``) and the TCER /
-    # CPE baselines (``metrics.TCER_BASELINE`` / ``CPE_BASELINE``). Hardcoding them
-    # drifted stale (76.59 / 8.22) after the config moved to 26.22 / 13.62 and
+    # ``_resolve_axes``): TCER / CPE baselines (``metrics.TCER_BASELINE`` /
+    # ``CPE_BASELINE``). Hardcoding them drifted stale after the config moved and
     # broke silently after "保存个人基准" — the SSOT is the only correct source.
+    # 综合效率分本身有界 0–100，用 "score" 归一（÷100），无需参照基准。
     _AXES = [
-        ("ctei",  "grade",     None),
+        ("score", "score",     100.0),
         ("chr",   "pct100",    1.0),
         ("cpe",   "grade_inv", None),
         ("churn", "pct_inv",   1.0),
@@ -968,9 +968,8 @@ class RadarPopup:
 
     @staticmethod
     def _resolve_axes():
-        """Bind live baselines / grade bound into the axis refs (SSOT, not frozen)."""
+        """Bind live baselines into the axis refs (SSOT, not frozen)."""
         refs = {
-            "ctei": metrics.GRADE_BANDS[0][1],  # top-grade lower bound (优秀 > 2.0)
             "tcer": metrics.TCER_BASELINE,
             "cpe": metrics.CPE_BASELINE,
         }
@@ -990,12 +989,12 @@ class RadarPopup:
         tk.Label(win, text="六维效率雷达", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=8).pack()
 
-        # Summary header — CTEI string straight from the SSOT (matches 指标分类).
+        # Summary header — 综合效率分 string straight from the SSOT (matches 指标分类).
         head = tk.Frame(win, bg=theme.CARD_HEADER_BG, padx=10, pady=6)
         head.pack(fill="x", padx=10, pady=(0, 4))
-        grade = report.grade or "-"
-        ctei_val = metric_display(report, "ctei")
-        tk.Label(head, text=f"{report.meta.title or sid}  CTEI {ctei_val}  评级 {grade}",
+        tier_ = report.tier or "-"
+        score_val = metric_display(report, "score")
+        tk.Label(head, text=f"{report.meta.title or sid}  效率分 {score_val}  评级 {tier_}",
                  bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI).pack()
 
         # Radar canvas
@@ -1066,6 +1065,8 @@ class RadarPopup:
         """Normalize raw value to 0-1 using absolute scale."""
         if raw is None:
             return 0.0
+        if ntype == "score":
+            return max(0.0, min(1.0, raw / ref))  # 综合效率分 0–100 → 0–1
         if ntype == "grade":
             return max(0.0, min(1.0, raw / ref))
         if ntype == "grade_inv":

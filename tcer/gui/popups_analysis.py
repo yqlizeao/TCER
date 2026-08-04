@@ -340,8 +340,8 @@ class SessionTimelinePopup:
 class ProjectOverviewPopup:
     """项目总览 — 全部项目并排对比（点击表头排序）。
 
-    聚合口径与主界面一致（同一 analyze_project 结果）；CTEI/评级为单会话
-    指标不在此显示（见 CLAUDE.md 聚合层限制）。
+    聚合口径与主界面一致（同一 analyze_project 结果）。综合效率分/评级为三正交轴
+    加权，按聚合口径重算后有效（见 AGENTS.md 评分模型）。
     """
 
     _COLS = [

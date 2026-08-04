@@ -2,8 +2,8 @@
 
 One place for every color / font / grade mapping, so views stay free of magic
 numbers. ``LEVEL_COLORS`` maps the semantic ``level`` tag carried by each metric
-definition (in ``metric_defs``) to a hex color; ``GRADE_HEX`` colors CTEI bars
-by rating. No business logic lives here.
+definition (in ``metric_defs``) to a hex color; ``GRADE_HEX`` colors 综合效率分
+bars by tier. No business logic lives here.
 """
 from __future__ import annotations
 
@@ -64,13 +64,14 @@ VALUE_NEUTRAL = "#e0e0e0"  # default gray
 # Metrics with no good/bad direction get no marker.
 VALUE_BEST = "#e0b341"   # 金色 — 该行最优值
 
-# CTEI grade → bar/cell fill color (used by the Canvas CTEI chart).
+# 综合效率分 tier → bar/cell fill color (used by the ranking bar + trend dots).
+# 键名与 metrics.SCORE_TIER_BANDS 的评级名一致（优秀/良好/中等/待改进/低效）。
 GRADE_HEX = {
     "优秀": "#2e7d32",
     "良好": "#0277bd",
     "中等": "#f9a825",
-    "低效": "#d84315",
-    "极端低效": "#b71c1c",
+    "待改进": "#d84315",
+    "低效": "#b71c1c",
 }
 
 # Six-group framework — header background per group.

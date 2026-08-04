@@ -112,7 +112,7 @@ def test_report_values_golden_strings():
     assert v["task_type"] == "代码创作"
     assert v["edit_ratio"] == "100.0%"       # Edit / (Edit+Write) = 5/5
     assert v["read_write_ratio"] == "2.0"     # Read/(Write+Edit)=10/5; a ratio, not %
-    assert v["grade"] in ("优秀", "良好", "中等", "低效", "极端低效")
+    assert v["tier"] in ("优秀", "良好", "中等", "待改进", "低效")
 
 
 def test_raw_value_scaling_and_none():
@@ -124,7 +124,7 @@ def test_raw_value_scaling_and_none():
     assert metric_defs.raw_value(r, "churn") == r.churn_ratio
     # text metrics are not numeric
     assert metric_defs.raw_value(r, "models") is None
-    assert metric_defs.raw_value(r, "grade") is None
+    assert metric_defs.raw_value(r, "tier") is None
 
 
 def test_numeric_grid_metrics_are_chartable():

@@ -281,20 +281,20 @@ def test_project_column_empty_state_and_preferred(root):
 
 
 def test_ranking_falls_back_to_tcer(root, reports):
-    from tcer.gui.views import CteiRankingView
+    from tcer.gui.views import ScoreRankingView
 
     frame = tk.Frame(root)
     frame.pack()
-    view = CteiRankingView(frame)
-    # 合成 reports 有净增行与成本 → 有 CTEI:正常模式
+    view = ScoreRankingView(frame)
+    # 合成 reports 有净增行与成本 → 有综合效率分:正常模式
     view.update(reports)
     assert not view._fallback_tcer
-    # 去掉 CTEI → 回退按 TCER 排名,提示条出现
+    # 去掉综合效率分 → 回退按 TCER 排名,提示条出现
     import copy
     stripped = [copy.copy(r) for r in reports]
     for r in stripped:
-        r.ctei = None
-        r.grade = None
+        r.score = None
+        r.tier = None
     view.update(stripped)
     assert view._fallback_tcer
     assert view._ranking and view._ranking[0][1] == max(r.tcer for r in stripped)
@@ -302,6 +302,95 @@ def test_ranking_falls_back_to_tcer(root, reports):
     # 回到正常模式提示条隐藏
     view.update(reports)
     assert not view._fallback_tcer
+    frame.destroy()
+
+
+def _walk_labels(w, out):
+    for c in w.winfo_children():
+        if isinstance(c, tk.Label):
+            try:
+                out.append(c.cget("text"))
+            except tk.TclError:
+                pass
+        _walk_labels(c, out)
+
+
+def test_ranking_decompose_uses_ssot_labels(root, reports):
+    """选中会话后三轴分解面板渲染，标签取自指标 SSOT（综合效率分全称 +
+    产出效率/成本/质量三轴中文名）。"""
+    from tcer.gui.views import ScoreRankingView, _SCORE_NAME
+    from tcer.gui.metric_defs import SCORE_AXES
+
+    frame = tk.Frame(root)
+    frame.pack()
+    view = ScoreRankingView(frame)
+    view.update(reports)
+    kids = view._tree.get_children()
+    assert kids, "排名表应有数据行"
+    view._tree.selection_set(kids[0])
+    view._on_tree_select()
+    root.update_idletasks()
+
+    texts = []
+    _walk_labels(view._decomp_inner, texts)
+    blob = "\n".join(texts)
+    # 全称出现，三轴中文名出现（SSOT 驱动）
+    assert _SCORE_NAME in blob
+    for a in SCORE_AXES:
+        assert a.name in blob, f"轴名缺失: {a.name}"
+    # 概览区一句话解释可见（去术语门槛）
+    assert any("产出效率" in t and "成本"in t and "质量" in t for t in texts)
+    frame.destroy()
+
+
+def test_ranking_insights_section_renders(root, reports):
+    """洞察与意见区块渲染：至少一条带标记(勾/箭头)的可执行洞察出现在分解面板。"""
+    from tcer.gui.views import ScoreRankingView
+
+    frame = tk.Frame(root)
+    frame.pack()
+    view = ScoreRankingView(frame)
+    view.update(reports)
+    kids = view._tree.get_children()
+    assert kids
+    view._tree.selection_set(kids[0])
+    view._on_tree_select()
+    root.update_idletasks()
+
+    texts = []
+    _walk_labels(view._decomp_inner, texts)
+    # 章节标题出现（CollapsibleSection 头部可能带 ▼ 前缀，故用 in）
+    assert any("洞察与意见" in t for t in texts)
+    # 至少一条洞察带行首标记（\u2713 亮点 / ! 拖累 / \u2192 改进）
+    assert any(t[:1] in ("\u2713", "!", "\u2192") for t in texts)
+    frame.destroy()
+
+
+def test_ranking_empty_state_shows_project_insights(root):
+    """空态（未选会话）展示项目级跨会话洞察：多会话反复出现的系统性短板。"""
+    import copy
+    from tcer.gui.views import ScoreRankingView
+
+    base = _report("p0", 300)
+    # 造 3 个高返工会话（系统性 churn drag）。
+    reps = []
+    for i in range(3):
+        r = copy.copy(base)
+        r.meta = copy.copy(base.meta)
+        r.meta.session_id = f"p{i}"
+        r.churn_ratio = 0.5
+        reps.append(r)
+
+    frame = tk.Frame(root)
+    frame.pack()
+    view = ScoreRankingView(frame)
+    view.update(reps)  # no selection -> empty state renders project insights
+    root.update_idletasks()
+
+    texts = []
+    _walk_labels(view._decomp_inner, texts)
+    assert any("项目洞察" in t for t in texts), "empty state should show 项目洞察"
+    assert any("系统性" in t for t in texts), "systemic drag should surface"
     frame.destroy()
 
 
@@ -603,16 +692,16 @@ def test_files_touched_popup_with_search_footprint(root):
 def test_radar_popup_axes_track_live_baselines(root, reports):
     """RadarPopup 构建不崩 + 归一化刻度从 SSOT 取（不硬编码 76.59/8.22）。
 
-    历史 bug：radar 的 tcer/cpe/ctei 轴 ref 硬编码 76.59/8.22/2.0，config 基准
-    迁移到 26.22/13.62 后刻度失真，「保存个人基准」也不生效。改为 _resolve_axes
-    从 metrics.TCER_BASELINE / CPE_BASELINE / GRADE_BANDS 实时取值。
+    历史 bug：radar 的 tcer/cpe 轴 ref 硬编码，config 基准迁移后刻度失真。改为
+    _resolve_axes 从 metrics.TCER_BASELINE / CPE_BASELINE 实时取值；综合效率分轴
+    有界 0–100，ref 固定 100（÷100 归一），不依赖基准。
     """
     from tcer.gui.popups import RadarPopup
 
     axes = {k: ref for k, _n, ref in RadarPopup._resolve_axes()}
     assert axes["tcer"] == metrics.TCER_BASELINE
     assert axes["cpe"] == metrics.CPE_BASELINE
-    assert axes["ctei"] == metrics.GRADE_BANDS[0][1]
+    assert axes["score"] == 100.0
     # 构建弹窗（无头下 canvas 渲染不崩即通过）。
     RadarPopup(root, reports[0], reports)
     root.update_idletasks()

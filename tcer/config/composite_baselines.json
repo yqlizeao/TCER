@@ -40,13 +40,23 @@
       ]
     }
   },
-  "ctei_baselines": {
+  "baselines": {
     "tcer": 26.220163629311674,
     "cpe": 13.619017038539553,
-    "_note": "Medians (TCER, CPE) and mean (NCPI) from the framework's reference dataset. Override these once you have your own accumulated data."
+    "_note": "参照线：TCER（产出轴）与 CPE（成本轴）的中位数（框架 16 会话参照集）。综合效率分的产出/成本两轴半饱和都以此为中性点(0.5)。用本项目数据生成个人基准可覆盖。"
   },
   "chr_weight": 0.5,
-  "_chr_note": "CHR reward factor = 1 + CHR * chr_weight (framework §6.3). A 10% CHR increase yields a 5% CTEI boost.",
+  "_chr_note": "CHR reward factor = 1 + CHR * chr_weight（旧 CTEI 遗留；综合效率分 v2 不再单列缓存因子）。",
+  "score_model": {
+    "_note": "综合效率分 v2：三条正交轴各经半饱和变换 x/(x+b)∈[0,1)（b 处=0.5=与基准持平），按证据量(net_loc)向 0.5 收缩，加权合成 0–100。产出轴用 ntcer(任务归一)、以 baselines.tcer 为中性点；成本轴用 cpe(已含缓存收益，不再单列缓存因子——消除双重计数)、以 baselines.cpe 为中性点；质量轴由返工率/工具错误率/先读后写合成，与体量无关。权重/收缩常数在此显式可调；两轴基准共用 baselines 块，故个人基准一改即生效。",
+    "weights": {"output": 0.5, "cost": 0.3, "quality": 0.2},
+    "shrink_k": 200.0,
+    "quality_weights": {"low_rework": 0.4, "low_tool_error": 0.35, "read_before_write": 0.25}
+  },
+  "score_tiers": {
+    "_note": "综合效率分(0–100)评级带，best→worst：(名称, 下界)。顶档为严格大于，其余为≥。tier() 与 GUI 排名条/趋势带均从此派生。",
+    "bands": [["优秀", 75.0], ["良好", 60.0], ["中等", 45.0], ["待改进", 25.0], ["低效", 0.0]]
+  },
   "task_inference": {
     "_note": "Optional thresholds for metrics.infer_task_type (GUI「自动」). Omit a key to keep the code default.",
     "tcer_low": 20.0,

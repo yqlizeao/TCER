@@ -2,8 +2,8 @@
 
 Each view is built from ``metric_defs`` / ``theme`` / ``widgets`` and calls back
 into the controller (passed in) — views hold no analysis state of their own.
-Chart classes draw on a ``tk.Canvas``; ``CteiRankingView`` consumes the shared
-``export.ctei_ranking`` / ``export.ctei_decompose`` helpers.
+Chart classes draw on a ``tk.Canvas``; ``ScoreRankingView`` consumes the shared
+``export.score_ranking`` / ``export.score_decompose`` helpers.
 """
 from __future__ import annotations
 
@@ -13,15 +13,21 @@ from dataclasses import dataclass
 from tkinter import ttk
 
 from tcer.core import metrics
-from tcer.core.export import ctei_decompose, ctei_decompose_avg
+from tcer.core.export import score_decompose, score_decompose_avg
+from tcer.core.insights import session_insights, project_insights
 from tcer.core.format import FMT_SHORT_MINUTE, fmt_dt
 from . import theme
 from .metric_defs import (
     GROUPS, MODEL_GROUPS, UNSUPPORTED_LABEL,
-    CTEI_FACTORS, CTEI_FACTOR_GOOD_THRESHOLD, format_factor,
-    report_values, format_value,
+    SCORE_AXES, SCORE_AXIS_NEUTRAL, format_axis,
+    report_values, format_value, metric_name, metric_tip,
     model_display, model_raw, model_tip,
 )
+
+# 排名页对用户展示的「综合效率分」名称与简称（取自指标 SSOT）。
+_SCORE_NAME = metric_name("score")        # 综合效率分
+_SCORE_SHORT = "效率分"                    # 窄列/徽标用简称
+_SCORE_TIP = metric_tip("score")          # 悬停完整解释
 from .widgets import (CalendarPopup, Card, CollapsibleSection, FlatMenu,
                       MetricCell, ScrollFrame, Tooltip, flat_button)
 
@@ -961,12 +967,12 @@ class SessionColumn:
         menu.add_separator()
 
         # Analysis sub-items
-        has_ctei = report.ctei is not None
+        has_score = report.score is not None
         menu.add_command(
             label="查看效率雷达",
             command=lambda: popups.RadarPopup(
                 self.controller.root, report, self._reports),
-            state="normal" if has_ctei else "disabled",
+            state="normal" if has_score else "disabled",
             image=ui_icon(self.container, "target"), compound="left",
         )
         menu.add_command(
@@ -1003,12 +1009,12 @@ class SessionColumn:
         )
         cost_str = format_value("cost", report.cost)
         tcer_str = format_value("tcer", report.tcer)
-        ctei_str = format_value("ctei", report.ctei)
+        score_str = format_value("score", report.score)
         menu.add_command(
-            label=f"复制摘要（TCER={tcer_str} · CTEI={ctei_str} · {cost_str}）",
+            label=f"复制摘要（TCER={tcer_str} · 效率分={score_str} · {cost_str}）",
             command=lambda: self._copy_text(
                 f"会话: {sid}\n标题: {title}\n"
-                f"TCER: {tcer_str} · CTEI: {ctei_str} · 成本: {cost_str}"),
+                f"TCER: {tcer_str} · 综合效率分: {score_str} · 成本: {cost_str}"),
             image=ui_icon(self.container, "copy"), compound="left",
         )
 
@@ -1277,30 +1283,30 @@ class MetricPanel:
 # --------------------------------------------------------------------------- #
 # Charts (Canvas)
 # --------------------------------------------------------------------------- #
-class CteiRankingView:
-    """Tab 2: interactive CTEI ranking dashboard.
+class ScoreRankingView:
+    """Tab 2: interactive 综合效率分 ranking dashboard.
 
     Layout:
-      [Grade summary bar — clickable filter chips]
+      [Tier summary bar — clickable filter chips]
       [Treeview table (left) | Decompose panel (right)]
 
-    Treeview columns: #, 会话, CTEI, 等级. Click header to sort.
-    Decompose panel: summary card + 4-factor waterfall bars + project avg comparison.
+    Treeview columns: #, 会话, 效率分, 等级. Click header to sort.
+    Decompose panel: summary card + 3-axis bars + project avg comparison.
     """
 
-    # CTEI factor metadata (names / formulas / 好坏阈值) comes from the metric SSOT
-    # (metric_defs.CTEI_FACTORS); colours are the shared theme value colours.
+    # Axis metadata (names / formulas / 中性阈值) comes from the metric SSOT
+    # (metric_defs.SCORE_AXES); colours are the shared theme value colours.
 
     def __init__(self, parent, controller=None) -> None:
         self._controller = controller
-        self._ranking: list[tuple] = []  # (label, ctei, grade, report)
+        self._ranking: list[tuple] = []  # (label, score, tier, report)
         self._avg_factors: dict[str, float] | None = None
         self._current_report = None
-        self._grade_filter: str | None = None
-        self._sort_col: str = "ctei"
+        self._grade_filter: str | None = None   # 选中的评级过滤（tier 名）
+        self._sort_col: str = "score"
         self._sort_reverse: bool = True
 
-        # -- Grade summary bar (top, 可折叠) --
+        # -- Tier summary bar (top, 可折叠) --
         grade_sec = CollapsibleSection(parent, "评级分布",
                                        theme.GROUP_COLORS["G_NEUTRAL"], expand=False)
         self._grade_canvas = tk.Canvas(grade_sec.content, bg=theme.PANEL, height=38,
@@ -1327,21 +1333,21 @@ class CteiRankingView:
 
         # -- Treeview with 可折叠标题 --
         tree_sec = CollapsibleSection(table_frame, "会话排名", theme.GROUP_COLORS["G2"])
-        cols = ("rank", "session", "ctei_val", "grade")
+        cols = ("rank", "session", "score_val", "tier")
         self._tree = ttk.Treeview(tree_sec.content, columns=cols, show="headings",
                                   selectmode="browse", height=20)
         self._tree.heading("rank",    text="#",    anchor="center",
                            command=lambda: self._sort_by("rank"))
         self._tree.heading("session", text="标题", anchor="w",
                            command=lambda: self._sort_by("session"))
-        self._tree.heading("ctei_val", text="CTEI", anchor="e",
-                           command=lambda: self._sort_by("ctei"))
-        self._tree.heading("grade",   text="等级", anchor="center",
-                           command=lambda: self._sort_by("grade"))
+        self._tree.heading("score_val", text=_SCORE_SHORT, anchor="e",
+                           command=lambda: self._sort_by("score"))
+        self._tree.heading("tier",   text="等级", anchor="center",
+                           command=lambda: self._sort_by("tier"))
         self._tree.column("rank",     width=40,  minwidth=30,  stretch=False, anchor="center")
         self._tree.column("session",  width=140, minwidth=80,  stretch=True,  anchor="w")
-        self._tree.column("ctei_val", width=70,  minwidth=50,  stretch=False, anchor="e")
-        self._tree.column("grade",    width=70,  minwidth=50,  stretch=False, anchor="center")
+        self._tree.column("score_val", width=70,  minwidth=50,  stretch=False, anchor="e")
+        self._tree.column("tier",    width=70,  minwidth=50,  stretch=False, anchor="center")
 
         sb = ttk.Scrollbar(tree_sec.content, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
@@ -1353,12 +1359,9 @@ class CteiRankingView:
         self._tree.bind("<Enter>", self._on_tree_enter)
         self._tree.bind("<Leave>", self._on_tree_leave)
 
-        # Grade → tag color
-        self._tree.tag_configure("grade_优秀",     foreground="#4ec9b0")
-        self._tree.tag_configure("grade_良好",     foreground="#42a5f5")
-        self._tree.tag_configure("grade_中等",     foreground="#f9a825")
-        self._tree.tag_configure("grade_低效",     foreground="#ef6c00")
-        self._tree.tag_configure("grade_极端低效", foreground="#e53935")
+        # Tier → tag color（键名 tier_<名>，与 theme.GRADE_HEX 同源色）
+        for _tname, _thex in theme.GRADE_HEX.items():
+            self._tree.tag_configure(f"tier_{_tname}", foreground=_thex)
 
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
@@ -1371,9 +1374,9 @@ class CteiRankingView:
     # -- public API -----------------------------------------------------------
 
     def update(self, reports) -> None:
-        scored = [r for r in reports if r.ctei is not None]
-        scored.sort(key=lambda r: r.ctei, reverse=True)
-        # 无 CTEI（如 no_loc 或会话无净增行/成本）时回退按 TCER 排名。
+        scored = [r for r in reports if r.score is not None]
+        scored.sort(key=lambda r: r.score, reverse=True)
+        # 无综合效率分（如 no_loc 或会话无净增行/成本）时回退按 TCER 排名。
         self._fallback_tcer = False
         if not scored:
             by_tcer = [r for r in reports if r.tcer is not None]
@@ -1388,9 +1391,9 @@ class CteiRankingView:
         if self._fallback_tcer:
             self._ranking = [(_label(r), r.tcer, "", r) for r in scored]
         else:
-            self._ranking = [(_label(r), r.ctei, r.grade or "", r) for r in scored]
-        self._tree.heading("ctei_val",
-                           text="TCER" if self._fallback_tcer else "CTEI")
+            self._ranking = [(_label(r), r.score, r.tier or "", r) for r in scored]
+        self._tree.heading("score_val",
+                           text="TCER" if self._fallback_tcer else _SCORE_SHORT)
         if getattr(self, "_fallback_note", None) is None:
             self._fallback_note = tk.Label(
                 self._note_parent,
@@ -1401,7 +1404,11 @@ class CteiRankingView:
             self._fallback_note.pack(fill="x", before=self._paned_ref)
         else:
             self._fallback_note.pack_forget()
-        self._avg_factors = ctei_decompose_avg(reports)
+        self._avg_factors = score_decompose_avg(reports)
+        # 参与均值的已评分会话数：仅 1 个时「与项目均值对比」退化为自我对比
+        # （均值==自身），无信息量 → 该区块自动隐藏（见 _build_avg_section）。
+        self._scored_count = sum(1 for r in reports if r.score is not None)
+        self._reports = list(reports)  # 供空态渲染项目级（跨会话）洞察
         self._current_report = None
         self._grade_filter = None
         self._rebuild_tree()
@@ -1418,7 +1425,7 @@ class CteiRankingView:
         if w < 10:
             return
 
-        grades_in_order = [label for label, _ in metrics.GRADE_BANDS]
+        grades_in_order = [label for label, _ in metrics.SCORE_TIER_BANDS]
         counts = {g: 0 for g in grades_in_order}
         for _, _, g, _ in self._ranking:
             if g in counts:
@@ -1462,15 +1469,17 @@ class CteiRankingView:
         self._tree.delete(*self._tree.get_children())
         items = [(l, c, g, r) for l, c, g, r in self._ranking
                  if not self._grade_filter or g == self._grade_filter]
-        # Apply sort. Index into (label, ctei, grade, report) tuple.
-        col_map = {"rank": 1, "session": 0, "ctei": 1, "grade": 2}
+        # Apply sort. Index into (label, score, tier, report) tuple.
+        col_map = {"rank": 1, "session": 0, "score": 1, "tier": 2}
         if self._sort_col in col_map:
             idx = col_map[self._sort_col]
             items.sort(key=lambda t: t[idx], reverse=self._sort_reverse)
-        for rank, (label, ctei, grade, report) in enumerate(items, 1):
-            tag = f"grade_{grade}" if grade else ""
+        # 回退到 TCER 排名时值列用 TCER 格式，否则用综合效率分格式。
+        val_key = "tcer" if self._fallback_tcer else "score"
+        for rank, (label, val, tier, report) in enumerate(items, 1):
+            tag = f"tier_{tier}" if tier else ""
             self._tree.insert("", "end",
-                              values=(rank, label, format_value("ctei", ctei), grade),
+                              values=(rank, label, format_value(val_key, val), tier),
                               tags=(tag,),
                               iid=str(id(report)))
         # Restore selection if report still visible
@@ -1485,7 +1494,7 @@ class CteiRankingView:
         if not sel:
             return
         iid = int(sel[0])
-        for label, ctei, grade, report in self._ranking:
+        for label, val, tier, report in self._ranking:
             if id(report) == iid:
                 self._current_report = report
                 self._draw_decompose()
@@ -1509,18 +1518,28 @@ class CteiRankingView:
             self._sort_reverse = not self._sort_reverse
         else:
             self._sort_col = col
-            self._sort_reverse = (col == "ctei")  # CTEI desc by default
+            self._sort_reverse = (col == "score")  # 综合效率分 desc by default
         self._rebuild_tree()
 
     # -- Decompose panel (ScrollFrame with group headers) ----------------------
 
     def _build_decompose_empty(self) -> None:
+        """\u7a7a\u6001\uff08\u672a\u9009\u4f1a\u8bdd\uff09\uff1a\u5c55\u793a\u9879\u76ee\u7ea7\u8de8\u4f1a\u8bdd\u6d1e\u5bdf\uff0c\u518d\u63d0\u793a\u70b9\u9009\u5355\u4f1a\u8bdd\u770b\u7ec6\u8282\u3002"""
         for w in self._decomp_inner.winfo_children():
             w.destroy()
-        tk.Label(self._decomp_inner, text="← 点击左侧排名表中的会话\n查看 CTEI 因子分解",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
-                 justify="center", pady=40).pack()
-
+        reports = getattr(self, "_reports", None) or []
+        proj = project_insights(reports)
+        if proj:
+            sec = CollapsibleSection(self._decomp_inner,
+                                     "\u9879\u76ee\u6d1e\u5bdf\uff08\u8de8\u4f1a\u8bdd\uff09",
+                                     theme.GROUP_COLORS["G6"], expand=True)
+            wrap = tk.Frame(sec.content, bg=theme.PANEL, padx=6, pady=4)
+            wrap.pack(fill="x", pady=(0, 1))
+            self._render_insight_items(wrap, proj)
+        tk.Label(self._decomp_inner,
+                 text=f"\u2190 \u70b9\u9009\u5de6\u4fa7\u4f1a\u8bdd\uff0c\u770b\u5355\u6b21{_SCORE_NAME}\u7684\u6784\u6210\u4e0e\u5efa\u8bae",
+                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                 justify="left", anchor="w", wraplength=320, padx=8, pady=10).pack(fill="x")
     def _draw_decompose(self) -> None:
         for w in self._decomp_inner.winfo_children():
             w.destroy()
@@ -1530,20 +1549,21 @@ class CteiRankingView:
             self._build_decompose_empty()
             return
 
-        factors = ctei_decompose(report)
-        if factors is None:
-            tk.Label(self._decomp_inner, text="该会话无 CTEI 数据",
+        axes = score_decompose(report)
+        if axes is None:
+            tk.Label(self._decomp_inner, text=f"该会话无{_SCORE_NAME}数据",
                      bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
                      pady=40).pack()
             return
 
         self._build_summary_card(report)
-        self._build_factor_section(factors, report)
-        self._build_avg_section(factors)
+        self._build_factor_section(axes, report)
+        self._build_avg_section(axes)
+        self._build_insights_section(report)
 
     def _build_summary_card(self, report) -> None:
-        """Summary card: CTEI + grade + rank, matching group header style."""
-        sec = CollapsibleSection(self._decomp_inner, "CTEI 概览",
+        """Summary card: 综合效率分 + tier + rank, matching group header style."""
+        sec = CollapsibleSection(self._decomp_inner, f"{_SCORE_NAME}概览",
                                  theme.GROUP_COLORS["G6"], expand=False)
         card = tk.Frame(sec.content, bg=theme.PANEL, padx=10, pady=8)
         card.pack(fill="x", pady=(0, 1))
@@ -1552,20 +1572,26 @@ class CteiRankingView:
         tk.Label(card, text=sid[:40], bg=theme.PANEL, fg=theme.ACCENT,
                  font=theme.FONT_MONO, anchor="w").pack(anchor="w")
 
-        # CTEI + grade + rank row
+        # 综合效率分 + grade + rank row
         row = tk.Frame(card, bg=theme.PANEL)
         row.pack(fill="x", pady=(4, 0))
 
-        ctei_val = report.ctei
-        grade = report.grade or ""
-        tk.Label(row, text="CTEI", bg=theme.PANEL, fg=theme.MUTED,
-                 font=theme.FONT_UI_SMALL).pack(side="left")
-        tk.Label(row, text=format_value("ctei", ctei_val), bg=theme.PANEL,
-                 fg=theme.GRADE_HEX.get(grade, theme.FG),
-                 font=("Consolas", 16, "bold")).pack(side="left", padx=(4, 8))
+        score_val = report.score
+        tier_ = report.tier or ""
+        name_lbl = tk.Label(row, text=_SCORE_NAME, bg=theme.PANEL, fg=theme.MUTED,
+                            font=theme.FONT_UI_SMALL, cursor="hand2")
+        name_lbl.pack(side="left")
+        if _SCORE_TIP:
+            Tooltip(name_lbl, _SCORE_TIP)
+        val_lbl = tk.Label(row, text=format_value("score", score_val), bg=theme.PANEL,
+                           fg=theme.GRADE_HEX.get(tier_, theme.FG),
+                           font=("Consolas", 16, "bold"))
+        val_lbl.pack(side="left", padx=(4, 8))
+        if _SCORE_TIP:
+            Tooltip(val_lbl, _SCORE_TIP)
 
-        if grade:
-            badge = tk.Label(row, text=grade, bg=theme.GRADE_HEX.get(grade, theme.MUTED),
+        if tier_:
+            badge = tk.Label(row, text=tier_, bg=theme.GRADE_HEX.get(tier_, theme.MUTED),
                              fg=theme.FG_WHITE, font=theme.FONT_UI_SMALL_BOLD, padx=6, pady=1)
             badge.pack(side="left", padx=(0, 8))
 
@@ -1577,61 +1603,95 @@ class CteiRankingView:
                          fg=theme.MUTED, font=theme.FONT_UI).pack(side="right")
                 break
 
+        # 一句话解释：0–100 分怎么来的（三条正交轴加权，去术语门槛）。
+        tk.Label(card, text="＝ 产出效率 · 成本 · 质量 三轴各比参考线，按会话规模收缩后加权",
+                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                 anchor="w").pack(anchor="w", pady=(2, 0))
+
         # TCER
         if report.tcer is not None:
             tk.Label(card, text=f"TCER {report.tcer:.1f} 行/百万", bg=theme.PANEL,
                      fg=theme.FG, font=theme.FONT_UI_SMALL, anchor="e").pack(anchor="e")
 
-    def _build_factor_section(self, factors, report) -> None:
-        """Factor bars: 4 CTEI factors with visual bars."""
-        sec = CollapsibleSection(self._decomp_inner, "CTEI 因子分解",
+    def _build_factor_section(self, axes, report) -> None:
+        """Axis bars: the 3 orthogonal axes that make up 综合效率分.
+
+        名称/公式/解释全部取自指标 SSOT（metric_defs.SCORE_AXES）。每轴 ∈[0,1]，
+        0.5 = 与参考线持平（半饱和中性点）；悬停每行显示白话解释。
+        """
+        sec = CollapsibleSection(self._decomp_inner, "得分构成（三轴加权）",
                                  theme.GROUP_COLORS["G2"], expand=False)
         grid = tk.Frame(sec.content, bg=theme.PANEL, padx=4, pady=4)
         grid.pack(fill="x", pady=(0, 1))
 
-        # Factor rows
-        for i, factor in enumerate(CTEI_FACTORS):
-            val = factors.get(factor.key, 0.0)
-            name, desc = factor.name, factor.formula
+        weights = metrics.SCORE_WEIGHTS
+        # Axis rows
+        for axis in SCORE_AXES:
+            val = axes.get(axis.key, 0.0)
+            name, desc = axis.name, axis.formula
+            wt = weights.get(axis.key)
+            wt_txt = f"权重{wt:.0%}" if wt is not None else ""
 
             row = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=4)
             row.pack(fill="x")
 
-            # Label + value
-            tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG,
-                     font=theme.FONT_UI_SMALL, width=10, anchor="w").pack(side="left")
-            color = theme.VALUE_GOOD if val >= CTEI_FACTOR_GOOD_THRESHOLD else theme.VALUE_BAD
-            tk.Label(row, text=format_factor(val), bg=theme.PANEL, fg=color,
-                     font=theme.FONT_VALUE, width=6, anchor="e").pack(side="left", padx=4)
+            # Label + value（悬停名称/数值即见白话解释）
+            axis_tip = f"{name}（{desc}）\n{axis.tip}" if axis.tip else None
+            name_lbl = tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG,
+                                font=theme.FONT_UI_SMALL, width=8, anchor="w",
+                                cursor="hand2")
+            name_lbl.pack(side="left")
+            color = theme.VALUE_GOOD if val >= SCORE_AXIS_NEUTRAL else theme.VALUE_BAD
+            val_lbl = tk.Label(row, text=format_axis(val), bg=theme.PANEL, fg=color,
+                               font=theme.FONT_VALUE, width=5, anchor="e")
+            val_lbl.pack(side="left", padx=4)
+            if axis_tip:
+                Tooltip(name_lbl, axis_tip)
+                Tooltip(val_lbl, axis_tip)
 
-            # Bar
+            # Bar（0–1 满刻度；中点 0.5 = 与参考线持平）
             bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=8)
             bar_bg.pack(side="left", fill="x", expand=True, padx=4)
-            bar_w = min(1.0, val / 2.0)  # normalize to 0-1 (max ~2.0)
+            bar_w = min(1.0, max(0.0, val))
             if bar_w > 0:
                 tk.Frame(bar_bg, bg=color, height=8).place(
                     relx=0, rely=0, relwidth=bar_w, relheight=1.0)
-            # 1.0 reference line
+            # 参考线 0.5（与基准持平）
             tk.Frame(bar_bg, bg="#555555", width=1, height=8).place(
                     relx=0.5, rely=0, relheight=1.0)
 
-            # Description
-            tk.Label(row, text=desc, bg=theme.PANEL, fg=theme.MUTED,
-                     font=(theme.FONT_MONO_NAME, 7)).pack(side="left", padx=4)
+            # Weight (short, muted)
+            wt_lbl = tk.Label(row, text=wt_txt, bg=theme.PANEL, fg=theme.MUTED,
+                              font=(theme.FONT_MONO_NAME, 7))
+            wt_lbl.pack(side="left", padx=4)
+            if axis_tip:
+                Tooltip(wt_lbl, axis_tip)
 
-        # Product line
+        # Weighted-sum line — three axes blend into the final 综合效率分 (0–100).
         prod_frame = tk.Frame(sec.content, bg=theme.PANEL, padx=10, pady=6)
         prod_frame.pack(fill="x", pady=(0, 1))
-        tk.Label(prod_frame, text="乘积 =", bg=theme.PANEL, fg=theme.MUTED,
+        tk.Label(prod_frame, text="加权合成 =", bg=theme.PANEL, fg=theme.MUTED,
                  font=theme.FONT_UI).pack(side="left")
-        tk.Label(prod_frame, text=f"CTEI  {format_value('ctei', report.ctei)}", bg=theme.PANEL,
-                 fg=theme.GRADE_HEX.get(report.grade or "", theme.FG),
+        tk.Label(prod_frame, text=f"{_SCORE_NAME}  {format_value('score', report.score)}",
+                 bg=theme.PANEL,
+                 fg=theme.GRADE_HEX.get(report.tier or "", theme.FG),
                  font=theme.FONT_VALUE).pack(side="left", padx=4)
 
-    def _build_avg_section(self, factors) -> None:
-        """Factor bars vs project average."""
+    def _build_avg_section(self, axes) -> None:
+        """本会话三轴 vs 项目均值：显示「均值」与带符号差值 Δ（本会话 − 均值）。
+
+        只在有 ≥2 个已评分会话时才有意义——单会话时均值==自身，三个数会与
+        「得分构成」完全重复，故该区块隐藏（改提示一行）。
+        """
         avg = self._avg_factors
         if avg is None:
+            return
+        if getattr(self, "_scored_count", 0) < 2:
+            sec = CollapsibleSection(self._decomp_inner, "与项目均值对比",
+                                     theme.GROUP_COLORS["G2"], expand=False)
+            tk.Label(sec.content, text="仅 1 个已评分会话，暂无可对比的项目均值。",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                     anchor="w", padx=10, pady=6).pack(fill="x", pady=(0, 1))
             return
 
         sec = CollapsibleSection(self._decomp_inner, "与项目均值对比",
@@ -1639,25 +1699,119 @@ class CteiRankingView:
         grid = tk.Frame(sec.content, bg=theme.PANEL, padx=4, pady=4)
         grid.pack(fill="x", pady=(0, 1))
 
-        for i, factor in enumerate(CTEI_FACTORS):
-            name = factor.name
-            sel_val = factors.get(factor.key, 0.0)
-            avg_val = avg.get(factor.key, 0.0)
+        for axis in SCORE_AXES:
+            name = axis.name
+            sel_val = axes.get(axis.key, 0.0)
+            avg_val = avg.get(axis.key, 0.0)
+            delta = sel_val - avg_val
 
             row = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=3)
             row.pack(fill="x")
 
             tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG,
-                     font=theme.FONT_UI_SMALL, width=10, anchor="w").pack(side="left")
+                     font=theme.FONT_UI_SMALL, width=8, anchor="w").pack(side="left")
 
-            # Selected value
-            sel_color = theme.VALUE_GOOD if sel_val >= avg_val else theme.VALUE_BAD
-            tk.Label(row, text=format_factor(sel_val), bg=theme.PANEL, fg=sel_color,
-                     font=theme.FONT_VALUE, width=6, anchor="e").pack(side="left", padx=2)
+            # 项目均值（基准列，muted）
+            tk.Label(row, text=f"均值 {format_axis(avg_val)}", bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL, width=10, anchor="w").pack(side="left", padx=2)
 
-            # Average value
-            tk.Label(row, text=f"均值 {format_factor(avg_val)}", bg=theme.PANEL, fg=theme.MUTED,
-                     font=theme.FONT_UI_SMALL).pack(side="left", padx=4)
+            # 带符号差值 Δ = 本会话 − 均值（高于均值=绿↑，低于=红↓，持平=灰）
+            if abs(delta) < 5e-3:
+                arrow, dcolor = "≈", theme.MUTED
+            elif delta > 0:
+                arrow, dcolor = "▲", theme.VALUE_GOOD
+            else:
+                arrow, dcolor = "▼", theme.VALUE_BAD
+            tk.Label(row, text=f"{arrow} {delta:+.2f}", bg=theme.PANEL, fg=dcolor,
+                     font=theme.FONT_VALUE, width=8, anchor="e").pack(side="right")
+
+    # -- 洞察与意见（可执行诊断，仿 Claude Code /insights + /doctor）------------
+    _INSIGHT_STYLE = {
+        # kind -> (章节标题, 前景色, 行首标记)
+        "good": ("亮点", theme.VALUE_GOOD, "\u2713"),
+        "drag": ("拖累项", theme.VALUE_BAD, "!"),
+        "tip": ("快速改进", theme.ACCENT, "\u2192"),
+    }
+    _INSIGHT_ORDER = ("good", "drag", "tip")
+
+    def _render_insight_items(self, parent, items) -> None:
+        """\u628a\u4e00\u7ec4 Insight \u6309 \u4eae\u70b9/\u62d6\u7d2f\u9879/\u5feb\u901f\u6539\u8fdb \u5206\u7ec4\u6e32\u67d3\u5230 parent\u3002
+
+        \u6bcf\u7ec4\u4e00\u4e2a\u53ef\u70b9\u51fb\u6298\u53e0\u7684\u5c0f\u6807\u9898\uff08\u25bc/\u25b6 + \u540d\u79f0 + \u8ba1\u6570\uff09\uff1b\u4eae\u70b9\uff08good\uff09
+        \u9ed8\u8ba4\u6298\u53e0\uff08\u5148\u770b\u95ee\u9898\u3001\u518d\u770b\u8868\u626c\uff09\u3002\u6298\u53e0\u6001\u5b58 self._insight_collapsed\uff0c\u8de8\u9009\u4e2d\u4fdd\u6301\u3002
+        good/drag/tip \u5171\u7528\u540c\u4e00\u6e32\u67d3\uff08\u5355\u4f1a\u8bdd\u4e0e\u9879\u76ee\u7ea7\u90fd\u8d70\u8fd9\u91cc\uff09\u3002
+        """
+        collapsed = getattr(self, "_insight_collapsed", None)
+        if collapsed is None:
+            collapsed = self._insight_collapsed = {"good": True}  # \u4eae\u70b9\u9ed8\u8ba4\u6298\u53e0
+        by_kind = {"good": [], "drag": [], "tip": []}
+        for it in items:
+            by_kind.get(it.kind, by_kind["tip"]).append(it)
+        rendered = False
+        for kind in self._INSIGHT_ORDER:
+            group = by_kind.get(kind) or []
+            if not group:
+                continue
+            rendered = True
+            head_txt, color, mark = self._INSIGHT_STYLE[kind]
+            is_collapsed = collapsed.get(kind, False)
+
+            # \u5206\u7ec4\u6807\u9898\uff08\u53ef\u70b9\u51fb\u6298\u53e0\uff09\uff1a\u25bc/\u25b6 + \u540d\u79f0\uff08N\uff09
+            header = tk.Frame(parent, bg=theme.PANEL, cursor="hand2")
+            header.pack(fill="x", pady=(8, 2))
+            arrow = "\u25b6" if is_collapsed else "\u25bc"
+            head_lbl = tk.Label(header, text=f"{arrow} {head_txt}\uff08{len(group)}\uff09",
+                                bg=theme.PANEL, fg=color, font=theme.FONT_UI_BOLD,
+                                anchor="w")
+            head_lbl.pack(side="left", fill="x", expand=True)
+
+            # \u6b63\u6587\u5bb9\u5668\uff08\u6298\u53e0\u65f6 pack_forget\uff09\uff1b\u5de6\u4fa7\u8272\u6761 + \u7f29\u8fdb
+            body = tk.Frame(parent, bg=theme.PANEL)
+            for it in group:
+                row = tk.Frame(body, bg=theme.PANEL)
+                row.pack(fill="x", pady=(2, 3))
+                # \u5de6\u4fa7\u5f69\u8272\u7ad6\u6761\uff08\u6309 kind \u4e0a\u8272\uff09
+                tk.Frame(row, bg=color, width=3).pack(side="left", fill="y")
+                body_col = tk.Frame(row, bg=theme.PANEL)
+                body_col.pack(side="left", fill="x", expand=True, padx=(8, 0))
+                # \u6807\u9898\u884c\uff1a\u6807\u8bb0 + \u7ed3\u8bba
+                tk.Label(body_col, text=f"{mark} {it.title}", bg=theme.PANEL, fg=color,
+                         font=theme.FONT_UI, anchor="w", justify="left",
+                         wraplength=300).pack(fill="x")
+                if it.evidence:
+                    tk.Label(body_col, text=it.evidence, bg=theme.PANEL,
+                             fg=theme.MUTED, font=theme.FONT_UI, anchor="w",
+                             justify="left", wraplength=300).pack(fill="x", padx=(14, 0))
+                if it.action:
+                    tk.Label(body_col, text=f"\u2192 {it.action}", bg=theme.PANEL,
+                             fg=theme.FG, font=theme.FONT_UI, anchor="w",
+                             justify="left", wraplength=290).pack(fill="x", padx=(14, 0))
+            if not is_collapsed:
+                body.pack(fill="x")
+
+            def _toggle(_e=None, k=kind, b=body, hl=head_lbl, ht=head_txt, n=len(group), col=color):
+                now = not self._insight_collapsed.get(k, False)
+                self._insight_collapsed[k] = now
+                arr = "\u25b6" if now else "\u25bc"
+                hl.config(text=f"{arr} {ht}\uff08{n}\uff09")
+                if now:
+                    b.pack_forget()
+                else:
+                    b.pack(fill="x")
+            header.bind("<Button-1>", _toggle)
+            head_lbl.bind("<Button-1>", _toggle)
+        if not rendered:
+            tk.Label(parent, text="\u6682\u65e0\u53ef\u6267\u884c\u6d1e\u5bdf\u3002",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
+                     anchor="w").pack(fill="x")
+
+    def _build_insights_section(self, report) -> None:
+        """单会话「洞察与意见」：把 core.insights 的诊断分组渲染，让用户知道具体改什么。"""
+        sec = CollapsibleSection(self._decomp_inner, "\u6d1e\u5bdf\u4e0e\u610f\u89c1",
+                                 theme.GROUP_COLORS["G6"], expand=True)
+        wrap = tk.Frame(sec.content, bg=theme.PANEL, padx=6, pady=4)
+        wrap.pack(fill="x", pady=(0, 1))
+        self._render_insight_items(wrap, session_insights(report))
 
 
 # 图表组件已拆分至 charts.py；从这里 re-export 保持既有 import 路径可用。

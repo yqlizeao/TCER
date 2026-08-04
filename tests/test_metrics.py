@@ -170,35 +170,54 @@ def test_merge_user_message_texts():
 
 
 # --------------------------------------------------------------------------- #
-# Composite (G6): CTEI / TTAF / TA-TCER / CAF / grade
+# Composite (G6): 综合效率分 v2 (三正交轴) / TTAF / TA-TCER / CAF / tier
 # --------------------------------------------------------------------------- #
-# Framework reference baselines (§6.3, 16-session dataset). Hardcoded here so the
-# formula-reproduction tests stay valid even when a user has overwritten
-# composite_baselines.json with their own personal baselines.
+# Framework reference baselines (§6.3). Hardcoded here so axis tests stay valid
+# even when a user has overwritten composite_baselines.json with personal ones.
 _FW = {"tcer_baseline": 76.59, "cpe_baseline": 8.22}
 
 
-def test_ctei_three_factor_formula():
-    # 三因子：CTEI = (TCER/基准) × (CPE基准/CPE) × (1+CHR×0.5)。
-    c = metrics.ctei(111.04, 4.45, 0.0, **_FW)
-    assert c == pytest_approx((111.04 / 76.59) * (8.22 / 4.45), rel=1e-6)
-    c_low = metrics.ctei(28.62, 28.40, 0.0, **_FW)
-    assert c_low == pytest_approx((28.62 / 76.59) * (8.22 / 28.40), rel=1e-6)
-    assert metrics.grade(c_low) == "低效"
+def test_half_sat_axes_neutral_at_baseline():
+    # 半饱和：x=基准 → 0.5（中性）；越高产出轴越高，越省成本轴越高。
+    assert metrics.output_axis(76.59, 76.59) == pytest_approx(0.5)
+    assert metrics.cost_axis(8.22, 8.22) == pytest_approx(0.5)
+    assert metrics.output_axis(76.59 * 3, 76.59) > 0.5   # 高产 → >0.5
+    assert metrics.cost_axis(8.22 / 3, 8.22) > 0.5        # 更省 → >0.5
+    assert metrics.output_axis(None, 76.59) is None
 
 
-def test_ctei_chr_factor_rewards_cache():
-    # CHR factor = 1 + CHR*0.5: 40% CHR → +20% CTEI vs CHR=0.
-    base = metrics.ctei(76.59, 8.22, 0.0, **_FW)
-    with_chr = metrics.ctei(76.59, 8.22, 0.40, **_FW)
-    assert base == pytest_approx(1.0, rel=0.01)  # all-baseline session scores ~1.0
-    assert with_chr == pytest_approx(base * 1.20, rel=0.01)
+def test_quality_axis_weighted_and_degrades():
+    # 三子信号全在：低返工/低错误/高先读后写 → 高质量分。
+    full = metrics.quality_axis(0.0, 0.0, 1.0)
+    assert full == pytest_approx(1.0)
+    # 全缺 → None（无质量信号）。
+    assert metrics.quality_axis(None, None, None) is None
+    # 部分缺失 → 权重重分配到可用子信号（不为 None）。
+    assert metrics.quality_axis(0.2, None, None) is not None
 
 
-def test_ctei_none_when_inputs_missing():
-    assert metrics.ctei(None, 8.0, 0.0) is None
-    assert metrics.ctei(80.0, 0, 0.0) is None  # CPE=0 → undefined
-    assert metrics.ctei(80.0, None, 0.0) is None
+def test_efficiency_score_bounded_and_needs_output():
+    s = metrics.efficiency_score(80.0, 8.0, 0.05, 0.02, 0.8, net_loc=600, **_FW)
+    assert s is not None and 0.0 <= s <= 100.0
+    # 无产出轴（ntcer=None）→ 不评分。
+    assert metrics.efficiency_score(None, 8.0, 0.05, 0.02, 0.8, net_loc=600) is None
+
+
+def test_score_shrinks_small_sessions_toward_center():
+    # 相同轴值，小会话被拉向中性 50，大会话保留高分。
+    big = metrics.efficiency_score(300.0, 3.0, 0.0, 0.0, 0.9, net_loc=100_000, **_FW)
+    tiny = metrics.efficiency_score(300.0, 3.0, 0.0, 0.0, 0.9, net_loc=5, **_FW)
+    assert big > tiny
+    assert abs(tiny - 50.0) < abs(big - 50.0)
+
+
+def test_tier_thresholds():
+    assert metrics.tier(80.0) == "优秀"
+    assert metrics.tier(65.0) == "良好"
+    assert metrics.tier(50.0) == "中等"
+    assert metrics.tier(30.0) == "待改进"
+    assert metrics.tier(10.0) == "低效"
+    assert metrics.tier(None) is None
 
 
 def test_ttaf_table_matches_report():
@@ -347,35 +366,27 @@ def test_caf_formula():
     assert metrics.caf(_u(o=10)) is None  # no input/cache_write → undefined
 
 
-def test_grade_thresholds():
-    assert metrics.grade(2.718) == "优秀"
-    assert metrics.grade(1.490) == "良好"
-    assert metrics.grade(0.925) == "中等"
-    assert metrics.grade(0.426) == "低效"
-    assert metrics.grade(0.044) == "极端低效"
-    assert metrics.grade(None) is None
-
-
 def test_compute_populates_composite_fields():
-    # End-to-end: compute() fills CAF / TA-TCER / CTEI（三因子，无需仓库扫描）。
+    # End-to-end: compute() fills CAF / TA-TCER / 综合效率分（三轴，无需仓库扫描）。
     u = _u(i=400_000, cw=100_000, o=500_000)  # total 1,000,000
     r = metrics.compute(META, u, net_loc=500, task_type="code_maintenance")
     assert r.tcer == pytest_approx(500.0)
     assert r.ntcer == pytest_approx(500.0 / 0.45)
     assert r.ta_tcer == pytest_approx(500.0 / 0.45)  # backward compat
     assert r.caf == pytest_approx(500_000 / 500_000)  # total_input / (input+cacheW)
-    assert r.ctei is not None and r.grade is not None
+    assert r.score is not None and r.tier is not None
+    assert r.score_output_axis is not None and r.score_cost_axis is not None
     assert r.task_type == "code_maintenance"
     assert r.task_category == "code_maintenance"
     assert r.ttaf == 0.45
 
 
 def test_compute_composite_none_without_net_loc():
-    # net_loc=None → TCER/CPE/CTEI 皆 None，但 CAF（纯 token）仍有值。
+    # net_loc=None → TCER/CPE/综合效率分 皆 None，但 CAF（纯 token）仍有值。
     u = _u(i=400_000, cw=100_000, o=500_000)
     r = metrics.compute(META, u, net_loc=None, task_type="code_creation")
     assert r.tcer is None
-    assert r.ctei is None
+    assert r.score is None
     assert r.caf is not None  # CAF needs only token usage
     assert r.task_type == "code_creation"
     assert r.task_category == "code_creation"
