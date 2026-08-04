@@ -1408,7 +1408,7 @@ class ScoreRankingView:
         # 参与均值的已评分会话数：仅 1 个时「与项目均值对比」退化为自我对比
         # （均值==自身），无信息量 → 该区块自动隐藏（见 _build_avg_section）。
         self._scored_count = sum(1 for r in reports if r.score is not None)
-        self._reports = list(reports)  # 供空态渲染项目级（跨会话）洞察
+        self._reports = list(reports)  # 供空态渲染项目视角洞察
         self._current_report = None
         self._grade_filter = None
         self._rebuild_tree()
@@ -1524,14 +1524,14 @@ class ScoreRankingView:
     # -- Decompose panel (ScrollFrame with group headers) ----------------------
 
     def _build_decompose_empty(self) -> None:
-        """\u7a7a\u6001\uff08\u672a\u9009\u4f1a\u8bdd\uff09\uff1a\u5c55\u793a\u9879\u76ee\u7ea7\u8de8\u4f1a\u8bdd\u6d1e\u5bdf\uff0c\u518d\u63d0\u793a\u70b9\u9009\u5355\u4f1a\u8bdd\u770b\u7ec6\u8282\u3002"""
+        """空态（未选会话）：展示项目视角的洞察与意见，再提示点选单会话切到会话视角。"""
         for w in self._decomp_inner.winfo_children():
             w.destroy()
         reports = getattr(self, "_reports", None) or []
         proj = project_insights(reports)
         if proj:
             sec = CollapsibleSection(self._decomp_inner,
-                                     "\u9879\u76ee\u6d1e\u5bdf\uff08\u8de8\u4f1a\u8bdd\uff09",
+                                     "\u6d1e\u5bdf\u4e0e\u610f\u89c1 (\u9879\u76ee)",
                                      theme.GROUP_COLORS["G6"], expand=True)
             wrap = tk.Frame(sec.content, bg=theme.PANEL, padx=6, pady=4)
             wrap.pack(fill="x", pady=(0, 1))
@@ -1806,8 +1806,8 @@ class ScoreRankingView:
                      anchor="w").pack(fill="x")
 
     def _build_insights_section(self, report) -> None:
-        """单会话「洞察与意见」：把 core.insights 的诊断分组渲染，让用户知道具体改什么。"""
-        sec = CollapsibleSection(self._decomp_inner, "\u6d1e\u5bdf\u4e0e\u610f\u89c1",
+        """会话视角「洞察与意见」：把 core.insights 的诊断分组渲染，让用户知道具体改什么。"""
+        sec = CollapsibleSection(self._decomp_inner, "\u6d1e\u5bdf\u4e0e\u610f\u89c1 (\u4f1a\u8bdd)",
                                  theme.GROUP_COLORS["G6"], expand=True)
         wrap = tk.Frame(sec.content, bg=theme.PANEL, padx=6, pady=4)
         wrap.pack(fill="x", pady=(0, 1))

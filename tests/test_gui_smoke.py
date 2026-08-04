@@ -389,7 +389,7 @@ def test_ranking_empty_state_shows_project_insights(root):
 
     texts = []
     _walk_labels(view._decomp_inner, texts)
-    assert any("项目洞察" in t for t in texts), "empty state should show 项目洞察"
+    assert any("洞察与意见 (项目)" in t for t in texts), "empty state should show 项目视角洞察"
     assert any("系统性" in t for t in texts), "systemic drag should surface"
     frame.destroy()
 
