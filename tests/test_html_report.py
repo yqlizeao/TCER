@@ -82,7 +82,7 @@ def test_session_html_structure():
     assert out.startswith("<!DOCTYPE html>")
     assert "TCER 会话报告" in out
     assert "全部指标" in out
-    assert metric_defs.display(r, "ctei") in out
+    assert metric_defs.display(r, "score") in out
     # 每个指标名都应出现
     for g in metric_defs.GROUPS:
         for m in g.metrics:

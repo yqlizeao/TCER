@@ -124,7 +124,7 @@ Body 直接复用客户端 `export.report_row_dict` 的字段；服务端只提�
 - `persons` / `projects` / `models`：逗号分隔多选过滤（**项目/模型按归一后的标准名匹配**）
 - `start` / `end`：epoch 秒时间范围
 - `/api/overview` 另有 `metric`（曲线指标）；`/api/detail` 另有 `dimension`（`project|person|model`）
-- 可选指标 `metric`：`tcer`（默认）| `ctei` | `cost_usd` | `cpe` | `net_loc` | `total_tokens` |
+- 可选指标 `metric`：`tcer`（默认）| `score` | `cost_usd` | `cpe` | `net_loc` | `total_tokens` |
   `churn_ratio` | `chr` | `read_before_write` | `search_edit_ratio` | `tool_error_rate`
 
 ### 聚合与去重规则
@@ -136,9 +136,10 @@ Body 直接复用客户端 `export.report_row_dict` 的字段；服务端只提�
   对 per-session 比率取算术平均会让 5k token 的会话与 2M token 的会话等权，触发 Simpson 悖论。
   `read_before_write` / `search_edit_ratio` 的分母不在库里（来自工具时序），退化为**中位数**，
   由返回体的 `_stat` 字段标明每个比率实际用了哪种统计量。
-- **聚合 CTEI 重算不取平均**：CTEI 三因子化后可聚合（`CLAUDE.md` 规则 9），
-  服务端按 `tcer.core.metrics.ctei(聚合TCER, 聚合CPE, 聚合CHR)` 重算并附 `grade`，
-  与桌面端 audit 的 `aggregate_ctei_recompute` 同一口径；**不**对各会话 CTEI 取算术平均。
+- **聚合综合效率分重算不取平均**：综合效率分三正交轴均可聚合，服务端按
+  `tcer.core.metrics.efficiency_score(聚合TCER, 聚合CPE, 聚合churn/错误率/先读后写)`
+  重算并附 `tier`（无逐会话任务类型 → 用聚合 TCER 作产出轴代理），与桌面端 audit 的
+  `aggregate_score_recompute` 同一口径；**不**对各会话综合效率分取算术平均。
 - **项目归一**：`project_aliases` 手动 `raw→canonical`；未命中则原样。
 - **模型归一**：先查 `model_aliases`；否则复用 `tcer.core.pricing`（含 `.`↔`-` 变体尝试，
   故 `claude-opus-4-8` 与 `claude-opus-4.8` 自动合并），落到价表规范 key。

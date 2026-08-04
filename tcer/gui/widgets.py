@@ -122,7 +122,7 @@ class CollapsibleSection:
     """可折叠区：彩色标题(header,可点击)+ 内容容器(content frame)。
 
     调用方把实际控件 pack 进 ``content``；点标题 toggle content 显隐。
-    用于把排名页/CTEI 分解等「▼ 装饰标题」统一赋予折叠能力（与指标分类、
+    用于把排名页/得分构成等「▼ 装饰标题」统一赋予折叠能力（与指标分类、
     模型对比的分组折叠一致）。``expand`` 控制 content 是否占满剩余空间。
     """
 

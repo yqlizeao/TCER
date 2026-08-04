@@ -406,8 +406,12 @@ class SessionReport:
     ttaf: float | None = None  # task type adjustment factor
     ntcer: float | None = None  # normalized TCER = tcer / TTAF
     ta_tcer: float | None = None  # backward compat alias for ntcer
-    ctei: float | None = None  # composite token efficiency index（三因子，见 metrics.ctei）
-    grade: str | None = None  # CTEI rating label
+    # --- 综合效率分 v2 (0–100, 三正交轴半饱和+证据收缩+加权；见 metrics.efficiency_score) ---
+    score: float | None = None          # 综合效率分 ∈[0,100]
+    tier: str | None = None             # 评级标签（优秀/良好/中等/待改进/低效）
+    score_output_axis: float | None = None   # 产出轴分值 ∈[0,1]（收缩后）
+    score_cost_axis: float | None = None     # 成本轴分值 ∈[0,1]（收缩后）
+    score_quality_axis: float | None = None  # 质量轴分值 ∈[0,1]（收缩后；无质量信号→None）
     # --- 代码产出与质量 (G4) ---
     code_added: int | None = None  # gross code lines added (from tool calls)
     code_deleted: int | None = None  # gross code lines deleted (from tool calls)

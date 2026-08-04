@@ -636,14 +636,18 @@ def audit_ref(
 
     # Aggregate invariants
     pa.checks.append(_eq("n_sessions", len(result.reports), result.n_sessions))
-    # CTEI 三因子化后聚合有效:校验聚合 CTEI 与公式重算一致。
     agg = result.aggregate
-    if agg.ctei is not None:
-        recomputed = metrics.ctei(agg.tcer, agg.cpe, agg.chr)
+    # 综合效率分 v2 聚合有效：校验聚合 score 与 efficiency_score 从聚合轴输入重算一致
+    # （同 compute() 的口径：ntcer/cpe/churn/tool_error_rate/read_before_write + net_loc）。
+    if agg.score is not None:
+        recomputed_score = metrics.efficiency_score(
+            agg.ntcer, agg.cpe, agg.churn_ratio, agg.tool_error_rate,
+            agg.read_before_write, net_loc=agg.net_loc,
+        )
         pa.checks.append(_eq(
-            "aggregate_ctei_recompute",
-            round(recomputed, 9) if recomputed is not None else None,
-            round(agg.ctei, 9),
+            "aggregate_score_recompute",
+            round(recomputed_score, 6) if recomputed_score is not None else None,
+            round(agg.score, 6),
         ))
     sum_tok = sum(r.usage.total for r in result.reports)
     pa.checks.append(_eq("aggregate_tokens_sum", sum_tok, result.aggregate.usage.total))

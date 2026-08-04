@@ -1,24 +1,58 @@
-# TCER v1.0.19
+# TCER v1.1.0
 
-适配 Codex Desktop（cli 0.146+）新会话格式：修正该版本会话导入后「代码产出与质量」指标全为 0 的问题。核心 TCER / CTEI / 成本口径不变。
+综合效率分排名重做 + 全新「洞察与意见」面板。把旧 CTEI（统计上有缺陷的三比率相乘）
+换成三正交轴的 0–100 分，并在排名页给出「具体该改什么」的可执行诊断。次版本号跃升
+（1.0.x → 1.1.0）反映这是模型级重构，非补丁。
 
-## 修复
+## 重点
 
-### Codex Desktop cli 0.146+：LOC 与工具占比归零
+### 1. 综合效率分 v2（替代 CTEI）
 
-新版 Codex Desktop 改了 JSONL 结构，`codex_reader` 两处解析失配，导致该来源会话的净增行/写入/删除/涉及文件/测试行/文档行、探索占比、Bash 占比全部显示 0（Token 侧指标不受影响）。
+旧 `CTEI = (TCER/基准)×(基准/CPE)×(1+CHR×0.5)` 把两个共线比率相乘 ≈ 对 loc/tok 平方，
+方差放大、重尾（报告须 P90 截尾）、缓存被重复计数、且完全忽略质量。新模型：
 
-- **LOC 归零**：文件编辑不再记为 `response_item` 的 `apply_patch` 调用，改为只出现在 `event_msg → patch_apply_end.changes[path]`（`update`→`unified_diff`、`add`/`delete`→`content`）。旧 `_loc_scan` 只认  `apply_patch` response_item → 无 LOC 信号。
-  - 处理：`_loc_scan` 改双来源。旧 rollout 同时带 `apply_patch` response_item 与 `patch_apply_end` 结果事件，**优先 response_item，仅当无可解析 apply_patch 时回退 `patch_apply_end`**，避免双计；失败的 patch（`success:False`）跳过。
-- **工具占比归零**：所有工具改走 JS 壳 `custom_tool_call name="exec"`，真实命令埋在 `input` 的 `tools.shell_command({command:"..."})` 里 → 全部塌进单一 `exec` 桶，探索/Bash 占比失真。
-  - 处理：`_classify_tool` 识别 `exec`，抽出内层 shell 命令后走共享的 `_classify_shell_command`（Grep/Glob/Read/Edit/Bash）。提取只做常规反转义，**不用 `unicode_escape`**，避免中文命令体 mojibake。
+- **三条正交轴**，各经半饱和变换 `Φ(x)=x/(x+b)∈[0,1)`（基准 b 处=0.5 中性，天然有界、
+  自动饱和重尾，无需截尾）：①**产出效率** = ntcer（任务归一）；②**成本** = cpe（cost 已含
+  缓存读低价，缓存收益只计一次）；③**质量** = 返工率↓/工具错误率↓/先读后写↑ 加权（与体量无关）。
+- 各轴按证据量 net_loc 向 0.5 **收缩**（小会话拉回中位，防「写 5 行登顶」），加权算术
+  平均合成 **0–100 分**。评级带：优秀/良好/中等/待改进/低效。
+- 全链路可聚合，audit 校验 `aggregate_score_recompute`；权重/基准/收缩常数集中在
+  `config/composite_baselines.json` 的 `score_model` + `score_tiers`，两轴基准共用 `baselines`
+  块（个人基准一改即生效）。
 
-## 说明
+### 2. 排名页「洞察与意见」面板（仿 Claude Code /insights + /doctor）
 
-- 仅新增/修正 Codex reader 的格式解析，不改 TCER/CTEI/成本公式；旧版 Codex 会话行为不变（回归套件验证）。
-- 真实文件验证：原先全 0 的会话现正确显示写入/删除 77/49、净增 28、涉及文件 3、测试行 46、工具 Grep 15 / Bash 21 / Read 4。
-- 新增 5 个回归测试覆盖新格式 LOC、失败 patch 忽略、新旧格式不双计、exec 分类、UTF-8 命令不损坏。
+分数告诉「好不好」，洞察引擎告诉「具体改什么」。**纯离线、确定性规则引擎**（不调 LLM）：
+
+- 每条洞察带 **结论 + 可核对证据（实际数值，如「返工率 46%」）+ 可执行下一步**，按
+  亮点 / 拖累项 / 快速改进 三段分组（对应 What's Working / Hindering / Quick Wins）。
+- **跨会话（项目级）洞察**：排名页空态先展「项目洞察」——在多数会话反复出现的系统性短板
+  （drag ≥40% 会话）、稳定优势（good ≥60% 会话），evidence 为「N/M 会话出现」；再钻取单会话。
+- UI：三段可折叠小标题（亮点默认折叠）、左侧彩色竖条、9pt 字体。
+
+### 3. 得分构成与均值对比
+
+- 得分构成展示三轴（半饱和值 0–1，中点 0.5=与基准持平）+ 加权合成，标签取自指标 SSOT。
+- 「与项目均值对比」改为显示 **均值 + 带符号差值 Δ**（不再重复轴值）；单会话时自动隐藏。
+
+## 其它
+
+- 排名视图类更名 `CteiRankingView` → `ScoreRankingView`；导出/HTML 报告/趋势/雷达/服务端
+  聚合全部迁移到 score/tier（clean cutover，移除 CTEI 及其 magic 阈值）。
+- 服务端 schema 用 `score`/`tier`，聚合按同一公式重算（无逐会话任务类型时以聚合 TCER 作产出轴代理）。
+- 新增调研文档 `doc/insights-research.md`（/insights·/doctor·/optimize 拆解，洞察面板设计依据）。
+
+## 兼容性
+
+- 综合效率分默认即可计算，排名页默认有数据；no_loc 或无净产出的会话回退按 TCER 排名。
+- 旧 CTEI 列在服务端 schema 废弃（新列 `score`/`tier` 增量迁移，历史上传不受影响）。
+- 全部指标仍来自会话数据回放，纯离线、不读真实仓库、不依赖 git。
+
+## 验证
+
+- 全套 **462 passed, 1 skipped**（含新增 `test_insights.py`、score 轴/收缩/tier、聚合重算不变量、
+  洞察面板与项级空态渲染的护栏测试）。
 
 ---
 
-**完整变更**：`v1.0.18...v1.0.19`
+**完整变更**：`v1.0.19...v1.1.0`

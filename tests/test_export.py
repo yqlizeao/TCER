@@ -1,4 +1,4 @@
-"""Tests for export.py (JSON/CSV/Markdown + CTEI ranking) and format.py."""
+"""Tests for export.py (JSON/CSV/Markdown + 综合效率分 ranking) and format.py."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -38,53 +38,37 @@ def test_fmt_dt_none_and_non_positive():
 
 
 # --------------------------------------------------------------------------- #
-# export.ctei_ranking / text_ctei_chart
+# export.score_ranking / text_score_chart
 # --------------------------------------------------------------------------- #
-def test_ctei_ranking_sorted_desc():
+def test_score_ranking_sorted_desc():
     lo, hi = _report(50, sid="low"), _report(5000, sid="high")
-    ranking = export.ctei_ranking([lo, hi])
-    assert [label for label, _, _ in ranking] == ["high", "low"]
-    # grades carried through
-    assert all(isinstance(grade, str) for _, _, grade in ranking)
+    ranking = export.score_ranking([lo, hi])
+    labels = [label for label, _, _ in ranking]
+    assert labels[0] == "high"          # higher net_loc → higher score
+    # tiers carried through as strings
+    assert all(isinstance(tier, str) for _, _, tier in ranking)
+    # scores bounded 0–100
+    assert all(0.0 <= s <= 100.0 for _, s, _ in ranking)
 
 
-def test_ctei_ranking_empty_when_no_ctei():
+def test_score_ranking_empty_when_no_score():
     meta = SessionMeta(session_id="s", cwd=None, title=None,
                        path=Path("/tmp/s.jsonl"), is_subagent=False)
     r = metrics.compute(meta, TokenUsage(input_tokens=10, output_tokens=5), net_loc=None)
-    assert export.ctei_ranking([r]) == []
+    assert export.score_ranking([r]) == []
 
 
-def test_text_ctei_chart_renders_bars():
-    out = export.text_ctei_chart([_report(50, sid="low"), _report(5000, sid="high")])
-    lines = out.splitlines()
-    assert "high" in lines[2] and "low" in lines[3]  # sorted desc
+def test_text_score_chart_renders_bars():
+    out = export.text_score_chart([_report(50, sid="low"), _report(5000, sid="high")])
     assert "█" in out
     assert "\033[" not in out  # no ANSI in the text chart
 
 
-def test_text_ctei_chart_empty_message():
+def test_text_score_chart_empty_message():
     meta = SessionMeta(session_id="s", cwd=None, title=None,
                        path=Path("/tmp/s.jsonl"), is_subagent=False)
     r = metrics.compute(meta, TokenUsage(input_tokens=10, output_tokens=5), net_loc=None)
-    assert "no per-session score" in export.text_ctei_chart([r])
-
-
-def test_text_ctei_chart_caps_scale_on_extreme_outlier():
-    """One CTEI≈1000 must not collapse peer bars to a single block (live TCER)."""
-    # Five bulk sessions ~1–2 plus one explosion (cost_factor blow-up).
-    reports = [
-        _report(1000, sid=f"b{i}") for i in range(5)
-    ] + [_report(1_000_000, sid="boom")]  # net_loc huge → extreme CTEI
-    out = export.text_ctei_chart(reports, width=40)
-    assert "bar scale capped" in out
-    assert "boom" in out
-    # Peer session should get more than a single block (scale ~ bulk, not max).
-    bulk_line = next(ln for ln in out.splitlines() if ln.startswith("b0"))
-    bar = bulk_line.split()[1] if "█" in bulk_line else ""
-    # Find continuous bar segment
-    n_blocks = bulk_line.count("█")
-    assert n_blocks >= 5, bulk_line
+    assert "no per-session score" in export.text_score_chart([r])
 
 
 # --------------------------------------------------------------------------- #
@@ -116,7 +100,7 @@ def test_to_markdown_contains_key_sections():
     assert "# TCER Report" in md
     assert "## Summary" in md
     assert "## Sessions" in md
-    assert "## CTEI Distribution" in md
+    assert "## 综合效率分 Distribution" in md
     assert "abc12345"[:12] in md
 
 

@@ -25,7 +25,7 @@ _metric_by_key = METRIC_BY_KEY
 # Metrics that cannot be plotted (metadata / categorical / constant).
 _NON_PLOTTABLE = frozenset({
     "models", "tools", "started", "last_time", "entrypoint",
-    "task_type", "grade", "bl_tcer", "bl_cpe",
+    "task_type", "tier", "bl_tcer", "bl_cpe",
 })
 
 # Baseline reference lines (key → metrics module constant name).
@@ -37,12 +37,12 @@ _METRIC_BASELINE: dict[str, str] = {
 # Fixed palette for multi-metric overlay (up to 4 lines).
 _OVERLAY_COLORS = ["#007acc", "#4ec9b0", "#ce9178", "#c586c0"]
 
-# CTEI grade background bands (lo, hi, fill_color, label) — names + thresholds
-# derived from the metric SSOT (metrics.GRADE_BANDS); only the dark trend-fill
+# 综合效率分 tier background bands (lo, hi, fill_color, label) — names + thresholds
+# derived from the metric SSOT (metrics.SCORE_TIER_BANDS); only the dark trend-fill
 # colours are presentation-local here.
 _BAND_FILL = {
     "优秀": "#142814", "良好": "#14202e", "中等": "#2e2a14",
-    "低效": "#2e1e14", "极端低效": "#2e1414",
+    "待改进": "#2e1e14", "低效": "#2e1414",
 }
 
 # 仪表盘折线色 = theme.GROUP_COLORS 各分类的「提亮同色相版」（展示局部色）。
@@ -59,11 +59,11 @@ _DASHBOARD_LINE_COLORS = {
 }
 
 
-def _build_ctei_bands() -> list[tuple[float, float, str, str]]:
-    gb = metrics.GRADE_BANDS  # [(label, lower_bound)] best→worst
+def _build_score_bands() -> list[tuple[float, float, str, str]]:
+    gb = metrics.SCORE_TIER_BANDS  # [(label, lower_bound)] best→worst，0–100
     bands = []
     for i, (label, lo) in enumerate(gb):
-        hi = gb[i - 1][1] if i > 0 else 999
+        hi = gb[i - 1][1] if i > 0 else 100.0
         if i == 0:
             rng = f">{lo:g}"
         elif i == len(gb) - 1:
@@ -74,7 +74,7 @@ def _build_ctei_bands() -> list[tuple[float, float, str, str]]:
     return bands
 
 
-_CTEI_BANDS: list[tuple[float, float, str, str]] = _build_ctei_bands()
+_SCORE_BANDS: list[tuple[float, float, str, str]] = _build_score_bands()
 
 
 def _units_compatible(overlays: list[_OverlayLine]) -> bool:
@@ -915,8 +915,8 @@ class TrendChart:
             def yv(v):
                 return pad_t + plot_h * (1 - (v - lo) / (hi - lo))
 
-            if ol.key == "ctei":
-                self._draw_ctei_bands(c, yv, pad_l, plot_w, lo, hi)
+            if ol.key == "score":
+                self._draw_score_bands(c, yv, pad_l, plot_w, lo, hi)
 
             ticks = _nice_ticks(lo, hi, 5)
             for tv in ticks:
@@ -1019,9 +1019,9 @@ class TrendChart:
             c.create_text(px, pad_t + plot_h + y_off, text=label,
                           fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="n")
 
-    def _draw_ctei_bands(self, c, yv, pad_l, plot_w, lo, hi) -> None:
-        """Draw grade background bands when CTEI is selected."""
-        for lo_b, hi_b, color_b, _label in _CTEI_BANDS:
+    def _draw_score_bands(self, c, yv, pad_l, plot_w, lo, hi) -> None:
+        """Draw tier background bands when 综合效率分 is selected."""
+        for lo_b, hi_b, color_b, _label in _SCORE_BANDS:
             if hi_b < lo or lo_b > hi:
                 continue
             y_top = yv(min(hi_b, hi))
@@ -1539,9 +1539,9 @@ class ScatterChart:
         for xi, yi, ri in zip(xs, ys, ris):
             px, py = xv(xi), yv(yi)
             color = theme.ACCENT
-            grade = self._reports[ri].grade
-            if grade:
-                color = theme.GRADE_HEX.get(grade, theme.ACCENT)
+            tier_ = self._reports[ri].tier
+            if tier_:
+                color = theme.GRADE_HEX.get(tier_, theme.ACCENT)
             _items.append(("dot", px, py, 4, color, theme.FG))
             self._point_coords.append((int(px), int(py), ri))
         _aa_layer(c, _items, self._aa_imgs)
@@ -1599,7 +1599,7 @@ class DashboardChart:
         ("G3", "chr"),
         ("G4", "net_loc"),
         ("G5", "cost"),
-        ("G6", "ctei"),
+        ("G6", "score"),
     ]
 
     # 按日聚合时可直接求和的代表指标；其余按日取均值。
@@ -1785,7 +1785,7 @@ class HeatmapChart:
 
     _WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     # (下拉标签, metric key or None=会话数)
-    _MODES = [("会话数", None), ("TCER 均值", "tcer"), ("综合效率分均值", "ctei"),
+    _MODES = [("会话数", None), ("TCER 均值", "tcer"), ("综合效率分均值", "score"),
               ("成本合计", "cost"), ("总 Token 合计", "total_tokens"),
               ("返工率均值", "churn")]
     _SUM_KEYS = {"cost", "total_tokens"}  # 合计而非均值

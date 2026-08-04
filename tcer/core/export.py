@@ -1,8 +1,8 @@
 """Report serialization: per-session row dict + JSON / CSV / Markdown export.
 
 Split out of the former ``report.py`` (whose terminal table / aggregate block /
-ANSI CTEI chart were CLI-only and are gone). The shared ranking helper
-``ctei_ranking`` feeds both the Markdown ASCII chart and the GUI's Canvas bar
+ANSI chart were CLI-only and are gone). The shared ranking helper
+``score_ranking`` feeds both the Markdown ASCII chart and the GUI's Canvas bar
 chart, so data prep stays separate from presentation.
 """
 from __future__ import annotations
@@ -25,115 +25,77 @@ def _chart_label(r: SessionReport) -> str:
     return ("↳" + base[:11]) if r.meta.is_subagent else base
 
 
-def ctei_ranking(reports: list[SessionReport]) -> list[tuple[str, float, str]]:
-    """``(label, ctei, grade)`` per scored session, sorted by CTEI descending."""
-    scored = [r for r in reports if r.ctei is not None]
-    scored.sort(key=lambda r: r.ctei, reverse=True)
-    return [(_chart_label(r), r.ctei, r.grade or "") for r in scored]
+# --------------------------------------------------------------------------- #
+# 综合效率分 v2 ranking (bounded 0–100 → no P90 truncation needed)
+# --------------------------------------------------------------------------- #
+_SCORE_AXIS_KEYS = ("output", "cost", "quality")
 
 
-def ctei_decompose(report: SessionReport) -> dict[str, float] | None:
-    """Return CTEI's 3 multiplicative factors for one session.
+def score_ranking(reports: list[SessionReport]) -> list[tuple[str, float, str]]:
+    """``(label, score, tier)`` per scored session, sorted by 综合效率分 descending."""
+    scored = [r for r in reports if r.score is not None]
+    scored.sort(key=lambda r: r.score, reverse=True)
+    return [(_chart_label(r), r.score, r.tier or "") for r in scored]
 
-    Each factor is normalized so 1.0 = the neutral/baseline point.
-    Returns None when the session has no CTEI score.
+
+def score_decompose(report: SessionReport) -> dict[str, float] | None:
+    """三条正交轴的收缩后分值（0–1）：产出/成本/质量。None 当会话未评分。
+
+    质量轴可能为 None（无质量信号）——此时以 0.5（中性）填充展示，避免分解面板
+    出现空洞；效率分本身在 efficiency_score 里已按可用轴重分权，不受影响。
     """
-    if report.ctei is None:
+    if report.score is None:
         return None
-    tcer = report.tcer
-    cpe = report.cpe
-    chr_ = report.chr
-    bl_t = metrics.TCER_BASELINE
-    bl_c = metrics.CPE_BASELINE
-    eff = (tcer / bl_t) if (tcer is not None and bl_t) else 0.0
-    cost = (bl_c / cpe) if cpe else 0.0
-    cache = metrics.chr_factor(chr_)
     return {
-        "eff_factor": eff,
-        "cost_factor": cost,
-        "cache_factor": cache,
+        "output": report.score_output_axis if report.score_output_axis is not None else 0.0,
+        "cost": report.score_cost_axis if report.score_cost_axis is not None else 0.0,
+        "quality": report.score_quality_axis if report.score_quality_axis is not None else 0.5,
     }
 
 
-def ctei_decompose_avg(reports: list[SessionReport]) -> dict[str, float] | None:
-    """Return the average of each CTEI factor across all scored sessions."""
-    all_factors: list[dict[str, float]] = []
+def score_decompose_avg(reports: list[SessionReport]) -> dict[str, float] | None:
+    """Average of each axis across scored sessions (for the 与项目均值对比 panel)."""
+    all_axes: list[dict[str, float]] = []
     for r in reports:
-        f = ctei_decompose(r)
+        f = score_decompose(r)
         if f is not None:
-            all_factors.append(f)
-    if not all_factors:
+            all_axes.append(f)
+    if not all_axes:
         return None
-    keys = ("eff_factor", "cost_factor", "cache_factor")
-    n = len(all_factors)
-    return {k: sum(d[k] for d in all_factors) / n for k in keys}
+    n = len(all_axes)
+    return {k: sum(d[k] for d in all_axes) / n for k in _SCORE_AXIS_KEYS}
 
 
-def _ctei_bar_scale(values: list[float]) -> float:
-    """Bar-length scale that resists a single extreme CTEI collapsing peers.
-
-    Live projects can have one session with CTEI ≫ 100 (very low CPE) while
-    the rest sit near 0–20. Scaling bars to max makes every peer a single
-    block. When the max is far above the bulk (P90), use P90 as the scale;
-    outliers still print their true CTEI and fill the bar width.
-    """
-    if not values:
-        return 1.0
-    top = max(values)
-    if top <= 0:
-        return 1.0
-    if len(values) < 5:
-        return top
-    ordered = sorted(values)
-    p90 = ordered[max(0, min(len(ordered) - 1, int(0.90 * (len(ordered) - 1))))]
-    if top > max(5.0, p90 * 4):
-        return max(p90, 1.0)
-    return top
-
-
-def _grade_legend() -> str:
-    """Render the grade-band legend from ``GRADE_BANDS`` (SSOT), best→worst.
-
-    Derived rather than hardcoded so the export header can never drift from the
-    live rating taxonomy (top band is strictly >bound, the rest are ≥).
-    """
-    bands = metrics.GRADE_BANDS
+def _score_tier_legend() -> str:
+    """Tier-band legend from ``SCORE_TIER_BANDS`` (SSOT), best→worst."""
+    bands = metrics.SCORE_TIER_BANDS
     parts = []
     for i, (label, lo) in enumerate(bands):
         if i == 0:
             parts.append(f"{label}>{lo:g}")
+        elif i == len(bands) - 1:
+            parts.append(f"{label}<{bands[i - 1][1]:g}")
         else:
-            hi = bands[i - 1][1]
-            if i == len(bands) - 1:
-                parts.append(f"{label}<{hi:g}")
-            else:
-                parts.append(f"{label}{lo:g}–{hi:g}")
+            parts.append(f"{label}{lo:g}–{bands[i - 1][1]:g}")
     return "  ".join(parts)
 
 
-def text_ctei_chart(reports: list[SessionReport], width: int = 40) -> str:
-    """Plain-ASCII CTEI bar chart (no ANSI) for embedding in Markdown exports."""
-    ranking = ctei_ranking(reports)
+def text_score_chart(reports: list[SessionReport], width: int = 40) -> str:
+    """Plain-ASCII 综合效率分 bar chart (0–100, no truncation) for Markdown."""
+    ranking = score_ranking(reports)
     if not ranking:
         return (
-            "CTEI chart: no per-session score available\n"
+            "综合效率分 chart: no per-session score available\n"
             "  (sessions produced no measurable net code, or LOC is disabled)"
         )
-    scores = [c for _, c, _ in ranking]
-    top = max(scores)
-    scale = _ctei_bar_scale(scores)
     label_w = max(len(label) for label, _, _ in ranking)
-    out = [
-        f"CTEI per session  ({_grade_legend()})",
-    ]
-    if scale + 1e-12 < top:
-        out.append(f"  (bar scale capped at {scale:.3f}; max CTEI={top:.3f} — values unchanged)")
-    out.append("-" * (label_w + width + 20))
-    for label, ctei, grade in ranking:
-        n = max(1, min(width, round(ctei / scale * width))) if scale else 1
+    out = [f"综合效率分 per session  ({_score_tier_legend()})",
+           "-" * (label_w + width + 20)]
+    for label, score, tier in ranking:
+        n = max(1, min(width, round(score / 100.0 * width)))
         bar = "█" * n
         pad = " " * (width - n)
-        out.append(f"{label.ljust(label_w)}  {bar}{pad}  {ctei:6.3f}  {grade}")
+        out.append(f"{label.ljust(label_w)}  {bar}{pad}  {score:6.2f}  {tier}")
     return "\n".join(out)
 
 
@@ -167,8 +129,11 @@ def report_row_dict(r: SessionReport) -> dict:
         "caf": r.caf,
         "task_type": r.task_type,
         "ta_tcer": r.ta_tcer,
-        "ctei": r.ctei,
-        "grade": r.grade,
+        "score": r.score,
+        "tier": r.tier,
+        "score_output_axis": r.score_output_axis,
+        "score_cost_axis": r.score_cost_axis,
+        "score_quality_axis": r.score_quality_axis,
         "code_added": r.code_added,
         "code_deleted": r.code_deleted,
         "churn_ratio": r.churn_ratio,
@@ -300,7 +265,8 @@ _CSV_FIELDS = [
     "cache_write_tokens", "cache_read_tokens", "output_tokens",
     "total_tokens", "chr", "io_ratio", "cost_usd", "cost_per_mt",
     "tcer", "cpe", "net_loc", "caf",
-    "task_type", "ta_tcer", "ctei", "grade",
+    "task_type", "ta_tcer",
+    "score", "tier", "score_output_axis", "score_cost_axis", "score_quality_axis",
     "code_added", "code_deleted", "churn_ratio", "unseen_writes",
     "avg_turn_latency_sec", "session_duration_minutes",
     "read_write_ratio", "edit_ratio", "exploration_ratio",
@@ -359,7 +325,7 @@ def to_csv(reports: list[SessionReport]) -> str:
 
 def to_markdown(reports: list[SessionReport], agg: SessionReport, n_sessions: int,
                 project_name: str = "Project") -> str:
-    """Lightweight Markdown report (summary + per-session table + ASCII CTEI chart).
+    """Lightweight Markdown report (summary + per-session table + ASCII 综合效率分 chart).
 
     Designed for embedding in PRs, docs, or wiki pages.
     """
@@ -380,8 +346,8 @@ def to_markdown(reports: list[SessionReport], agg: SessionReport, n_sessions: in
         f"| **CPE** | {fmt.fmt_money(agg.cpe)}/kLOC | Cost per 1000 lines |",
         f"| **CHR** | {fmt.fmt_pct(agg.chr)} | Cache hit ratio (lower cost) |",
         f"| **Churn** | {fmt.fmt_pct(agg.churn_ratio)} | Self-rework fraction (reworked/added) |",
-        f"| **CTEI** | {fmt.fmt_float(agg.ctei, '0.000')} | Composite efficiency index |",
-        f"| **Grade** | {agg.grade or '-'} | CTEI rating |",
+        f"| **综合效率分** | {fmt.fmt_float(agg.score, '0.0')} | Composite efficiency score (0–100) |",
+        f"| **Tier** | {agg.tier or '-'} | Efficiency-score rating |",
         "",
     ]
     if agg.unseen_writes:
@@ -397,7 +363,7 @@ def to_markdown(reports: list[SessionReport], agg: SessionReport, n_sessions: in
     lines += [
         "## Sessions",
         "",
-        "| Session | Tokens | CHR | Net LOC | TCER | CTEI | Grade |",
+        "| Session | Tokens | CHR | Net LOC | TCER | 效率分 | Tier |",
         "|---------|--------|-----|---------|------|------|-------|",
     ]
     for r in reports:
@@ -405,12 +371,12 @@ def to_markdown(reports: list[SessionReport], agg: SessionReport, n_sessions: in
         lines.append(
             f"| `{sid}` | {fmt.fmt_int(r.usage.total)} | {fmt.fmt_pct(r.chr)} | "
             f"{fmt.fmt_int(r.net_loc)} | {fmt.fmt_float(r.tcer, '0.0')} | "
-            f"{fmt.fmt_float(r.ctei, '0.00')} | {r.grade or '-'} |"
+            f"{fmt.fmt_float(r.score, '0.0')} | {r.tier or '-'} |"
         )
 
-    chart_ascii = text_ctei_chart(reports)
+    chart_ascii = text_score_chart(reports)
     if chart_ascii:
-        lines += ["", "## CTEI Distribution", "", "```", chart_ascii.strip(), "```"]
+        lines += ["", "## 综合效率分 Distribution", "", "```", chart_ascii.strip(), "```"]
 
     lines += [
         "",

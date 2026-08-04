@@ -12,7 +12,7 @@ from datetime import datetime
 
 from tcer.core import format as fmt
 from tcer.core import metrics
-from tcer.core.export import _ctei_bar_scale, ctei_ranking
+from tcer.core.export import score_ranking
 from tcer.core.models import SessionReport
 from tcer.gui import metric_defs, theme
 
@@ -127,10 +127,10 @@ def _kpi_section(rep: SessionReport, n_sessions: int | None) -> str:
         _kpi("TCER（行/百万）", d("tcer"), theme.SUCCESS),
         _kpi("缓存命中率", d("chr")),
     ]
-    if rep.ctei is not None:
-        color = theme.GRADE_HEX.get(rep.grade or "", "")
-        cards.append(_kpi("综合效率分", d("ctei"), color))
-        cards.append(_kpi("评级", d("grade"), color))
+    if rep.score is not None:
+        color = theme.GRADE_HEX.get(rep.tier or "", "")
+        cards.append(_kpi("综合效率分", d("score"), color))
+        cards.append(_kpi("评级", d("tier"), color))
     else:
         cards.append(_kpi("千行代码成本", d("cpe")))
     return f'<div class="kpis">{"".join(cards)}</div>'
@@ -162,34 +162,28 @@ def _groups_section(rep: SessionReport) -> str:
     return f'<div class="groups">{"".join(_group_card(rep, g) for g in metric_defs.GROUPS)}</div>'
 
 
-def _ctei_section(reports: list[SessionReport]) -> str:
-    ranking = ctei_ranking(reports)
+def _score_section(reports: list[SessionReport]) -> str:
+    ranking = score_ranking(reports)
     if not ranking:
         return ('<p class="note">无可评分会话（会话未产出可计量净代码，或已禁用 LOC 统计）。</p>')
-    scores = [c for _, c, _ in ranking]
-    scale = _ctei_bar_scale(scores)
-    top = max(scores)
+    # 综合效率分天然有界 0–100，条形直接按满刻度，无需 P90 截尾。
     rows = []
-    for label, ctei, grade in ranking:
-        w = max(1.0, min(100.0, ctei / scale * 100.0)) if scale else 1.0
-        color = theme.GRADE_HEX.get(grade, theme.ACCENT)
+    for label, score, tier in ranking:
+        w = max(1.0, min(100.0, score))
+        color = theme.GRADE_HEX.get(tier, theme.ACCENT)
         rows.append(
             f'<div class="barrow"><span class="lbl">{_esc(label)}</span>'
             f'<span class="track"><span class="fill" style="width:{w:.1f}%;'
             f'background:{color}"></span></span>'
-            f'<span class="val">{ctei:.3f}　{_esc(grade)}</span></div>')
-    cap = ""
-    if scale + 1e-12 < top:
-        cap = (f'<p class="note">条形按 P90={scale:.3f} 截尾缩放（最大 CTEI={top:.3f}，'
-               f'数值未变），避免单个极端值压扁其余条形。</p>')
-    return "".join(rows) + cap
+            f'<span class="val">{score:.1f}　{_esc(tier)}</span></div>')
+    return "".join(rows)
 
 
-def _grade_pill(grade: str | None) -> str:
-    if not grade:
+def _grade_pill(tier: str | None) -> str:
+    if not tier:
         return "-"
-    color = theme.GRADE_HEX.get(grade, "#555")
-    return f'<span class="grade" style="background:{color}">{_esc(grade)}</span>'
+    color = theme.GRADE_HEX.get(tier, "#555")
+    return f'<span class="grade" style="background:{color}">{_esc(tier)}</span>'
 
 
 def _num_td(raw: float | None, text: str) -> str:
@@ -216,8 +210,8 @@ def _sessions_table(reports: list[SessionReport]) -> str:
             + _num_td(r.cost, metric_defs.display(r, "cost"))
             + _num_td(r.net_loc, metric_defs.display(r, "net_loc"))
             + _num_td(r.tcer, metric_defs.display(r, "tcer"))
-            + _num_td(r.ctei, metric_defs.display(r, "ctei"))
-            + f"<td>{_grade_pill(r.grade)}</td></tr>")
+            + _num_td(r.score, metric_defs.display(r, "score"))
+            + f"<td>{_grade_pill(r.tier)}</td></tr>")
     return (f'<div class="scroll"><table class="sortable"><thead>{head}</thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>'
             '<p class="note">点击表头排序。</p>')
@@ -332,7 +326,7 @@ def render_project_html(
     n_sessions: int | None = None,
     n_subagents: int = 0,
 ) -> str:
-    """项目级自包含 HTML 报告：总览 + 聚合指标 + CTEI 排名 + 模型对比 + 会话明细。"""
+    """项目级自包含 HTML 报告：总览 + 聚合指标 + 综合效率分排名 + 模型对比 + 会话明细。"""
     n = n_sessions if n_sessions is not None else len(reports)
     extra = f"会话 <b>{n}</b>" + (f"（含 {n_subagents} 个子代理）" if n_subagents else "")
     body = [
@@ -342,10 +336,10 @@ def render_project_html(
         _unseen_warning(agg),
         "<h2>聚合指标（六组分类）</h2>",
         '<p class="note">白色 = 基准值/纯数据；黄色 = 含 magic number，仅作参考。'
-        "综合效率分 / 代码库贡献度 / 评级为单会话指标，聚合视图显示「-」。</p>",
+        "综合效率分为三正交轴加权，聚合视图按聚合口径重算后有效。</p>",
         _groups_section(agg),
         "<h2>综合效率分排名</h2>",
-        _ctei_section(reports),
+        _score_section(reports),
         "<h2>模型对比</h2>",
         _models_section(reports),
         "<h2>会话明细</h2>",
@@ -461,7 +455,7 @@ def render_overview_html(rows: list[dict]) -> str:
         f" · TCER v{_esc(_version())}</div>",
         f'<div class="scroll"><table class="sortable"><thead>{head}</thead>'
         f'<tbody>{"".join(body)}</tbody></table></div>',
-        '<p class="note">点击表头排序。综合效率分/评级为单会话指标，项目聚合不显示。</p>',
+        '<p class="note">点击表头排序。</p>',
         f"<footer>由 TCER v{_esc(_version())} 生成 · 聚合口径与桌面端项目总览一致。</footer>",
     ]
     return _shell("TCER 项目总览", "\n".join(body_html))
