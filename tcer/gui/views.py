@@ -14,7 +14,9 @@ from tkinter import ttk
 
 from tcer.core import metrics
 from tcer.core.export import score_decompose, score_decompose_avg
-from tcer.core.insights import session_insights, project_insights
+from tcer.core.insights import (session_insights, project_insights,
+                                 activity_overview, claude_md_suggestions,
+                                 feature_suggestions, horizon_suggestions)
 from tcer.core.format import FMT_SHORT_MINUTE, fmt_dt
 from . import theme
 from .metric_defs import (
@@ -1314,7 +1316,9 @@ class ScoreRankingView:
         self._suppress_select = False
 
         # -- Tier summary bar (top, 可折叠) --
-        grade_sec = CollapsibleSection(parent, "评级分布",
+        # 评级分布是「会话排名」的配套总览——排名表仅会话视角可见，故此条也
+        # 只在会话视角显示（项目视角隐藏，见 _apply_layout）。
+        self._grade_sec = grade_sec = CollapsibleSection(parent, "评级分布",
                                        theme.GROUP_COLORS["G_NEUTRAL"], expand=False)
         self._grade_canvas = tk.Canvas(grade_sec.content, bg=theme.PANEL, height=38,
                                        highlightthickness=0)
@@ -1332,11 +1336,17 @@ class ScoreRankingView:
         self._fallback_note = None
         self._fallback_tcer = False
 
+        # 左栏（排名表）：会话视角收窄、项目视角保持较宽——minsize 取较小值，
+        # 具体宽度由 _apply_sash 按视角设置。
         table_frame = tk.Frame(paned, bg=theme.BG)
-        paned.add(table_frame, minsize=280)
+        paned.add(table_frame, minsize=180)
+        self._table_frame = table_frame
 
         decomp_frame = tk.Frame(paned, bg=theme.BG)
         paned.add(decomp_frame, minsize=340)
+        # 左栏目标宽度（像素）：会话视角更窄（表只作定位），项目视角略宽。
+        self._sash_session = 210
+        self._sash_project = 300
 
         # -- Treeview with 可折叠标题 --
         self._tree_sec = tree_sec = CollapsibleSection(table_frame, "会话排名",
@@ -1429,20 +1439,16 @@ class ScoreRankingView:
         self._current_report = None
         self._grade_filter = None
         self._apply_displaycolumns()
+        self._apply_layout()
         self._rebuild_tree()
         self._draw_grade_bar()
         self._draw_decompose()
 
     def _apply_displaycolumns(self) -> None:
-        """按视角切换 Treeview 列集：项目视角=贡献归因榜（含贡献Δ列），
-        会话视角=名次榜（隐藏Δ列，聚焦定位当前会话）。"""
-        if self._view_mode == "project" and not self._fallback_tcer:
-            cols = ("rank", "session", "score_val", "delta", "tier")
-            self._tree_sec.set_title("贡献归因榜（谁拉高/拉低项目分）")
-        else:
-            cols = ("rank", "session", "score_val", "tier")
-            self._tree_sec.set_title("会话排名")
-        self._tree.configure(displaycolumns=cols)
+        """Treeview 列集：两视角都用名次榜（#/标题/效率分/等级），不再显示贡献Δ列。
+        （贡献归因榜已按产品要求移除。）"""
+        self._tree.configure(displaycolumns=("rank", "session", "score_val", "tier"))
+        self._tree_sec.set_title("会话排名")
 
     def set_view_mode(self, mode: str, report=None) -> None:
         """由控制器按视角切换驱动（对齐指标分类/模型模型对比）。
@@ -1470,10 +1476,43 @@ class ScoreRankingView:
                 self._tree.selection_remove(*self._tree.selection())
             finally:
                 self._suppress_select = False
-        # 视角变了 → 列集与排序默认值都要跟着换（贡献榜默认按Δ拖累排前）。
+        # 视角变了 → 刷新列集 + 按视角调左栏显隐/宽度。
         self._apply_displaycolumns()
+        self._apply_layout()
         self._rebuild_tree()
         self._draw_decompose()
+
+    def _apply_layout(self) -> None:
+        """按视角控制左栏（排名表）显隐：
+        - 项目视角：整栏隐藏，右侧项目画像独占全宽（排名表在此无意义）。
+        - 会话视角：显示排名表并收窄（仅作会话定位导航）。
+        """
+        session = self._view_mode == "session"
+        try:
+            self._paned_ref.paneconfigure(self._table_frame, hide=not session)
+        except tk.TclError:
+            pass
+        # 评级分布随排名表一起显隐（项目视角隐藏排名表 → 评级分布也无意义）。
+        try:
+            if session:
+                self._grade_sec.frame.pack(fill="x", before=self._paned_ref)
+            else:
+                self._grade_sec.frame.pack_forget()
+        except tk.TclError:
+            pass
+        if not session:
+            return
+
+        # 会话视角：布局就绪后把左栏设窄。
+        target = self._sash_session
+
+        def _place():
+            try:
+                if self._paned_ref.winfo_width() > target + 40:
+                    self._paned_ref.sash_place(0, target, 1)
+            except tk.TclError:
+                pass
+        self._paned_ref.after_idle(_place)
 
     # -- grade bar ------------------------------------------------------------
 
@@ -1657,11 +1696,112 @@ class ScoreRankingView:
         wrap = tk.Frame(sec.content, bg=theme.PANEL, padx=6, pady=4)
         wrap.pack(fill="x", pady=(0, 1))
         self._render_insight_items(wrap, project_insights(reports))
-        # 引导：点会话行钻取单会话构成。
-        tk.Label(self._decomp_inner,
-                 text=f"\u2190 \u70b9\u9009\u5de6\u4fa7\u4f1a\u8bdd\u884c\uff0c\u94bb\u53d6\u5355\u6b21{_SCORE_NAME}\u7684\u6784\u6210\u4e0e\u5efa\u8bae",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                 justify="left", anchor="w", wraplength=320, padx=8, pady=8).pack(fill="x")
+        # 可复制的 CLAUDE.md 规则建议（仅当有系统性短板时出现）。
+        self._build_claude_md_section(reports)
+        # 值得一试的功能实践 + 前瞻工作流（仿 /insights Features to Try·On the Horizon）。
+        self._build_feature_section(reports)
+        self._build_horizon_section(reports)
+        # 活动概览放最下方（确定性会话画像，参考性质，非主答案）。
+        self._build_activity_overview(reports)
+
+    def _build_activity_overview(self, reports) -> None:
+        """活动概览：确定性会话画像（任务类型/工具/时段/规模/总量）。
+        对标 /insights 的 What You Wanted·Top Tools·Session Types 等可量化部分。"""
+        if not reports:
+            return
+        ov = activity_overview(reports)
+        sec = CollapsibleSection(self._decomp_inner, "活动概览",
+                                 theme.GROUP_COLORS["G2"], expand=False)
+        box = tk.Frame(sec.content, bg=theme.PANEL, padx=10, pady=6)
+        box.pack(fill="x", pady=(0, 1))
+
+        # 总量一行
+        tk.Label(box, text=f"{ov.n_sessions} 个会话 · 净增 {ov.total_net_loc:,} 行 · "
+                           f"{ov.total_tool_calls:,} 次工具调用",
+                 bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI_SMALL,
+                 anchor="w", wraplength=430, justify="left").pack(fill="x", pady=(0, 4))
+
+        def _dist_row(label, pairs, fmt=lambda k, v: f"{k} {v}"):
+            if not pairs:
+                return
+            tk.Label(box, text=label, bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL, anchor="w").pack(fill="x", pady=(4, 0))
+            tk.Label(box, text="  ·  ".join(fmt(k, v) for k, v in pairs),
+                     bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI_SMALL,
+                     anchor="w", wraplength=430, justify="left").pack(fill="x")
+
+        _dist_row("任务类型", ov.task_type_dist)
+        _dist_row("最常用工具", ov.top_tools)
+        _dist_row("活跃时段", ov.time_of_day)
+        _dist_row("会话规模", ov.size_dist)
+
+    def _build_claude_md_section(self, reports) -> None:
+        """可复制的 CLAUDE.md 规则建议：把系统性短板转成可粘贴规则 + 复制按钮。
+        对标 /insights 的 Suggested CLAUDE.md Additions。无系统性短板则不显示。"""
+        suggestions = claude_md_suggestions(reports)
+        if not suggestions:
+            return
+        sec = CollapsibleSection(self._decomp_inner, "建议加进 CLAUDE.md",
+                                 theme.GROUP_COLORS["G6"], expand=False)
+        for s in suggestions:
+            card = tk.Frame(sec.content, bg=theme.PANEL, padx=8, pady=6)
+            card.pack(fill="x", pady=(0, 1))
+            # 证据行（为什么建议）
+            ev = tk.Label(card, text=s.evidence, bg=theme.PANEL, fg=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="w", justify="left")
+            ev.pack(fill="x")
+            self._wrap_to_width(ev, indent=0)
+            # 规则文本（可复制）
+            rule = tk.Label(card, text=s.rule, bg=theme.CONTROL_BG, fg=theme.FG,
+                            font=theme.FONT_UI_SMALL, anchor="w", justify="left",
+                            padx=6, pady=4)
+            rule.pack(fill="x", pady=(2, 2))
+            self._wrap_to_width(rule, indent=12)
+            btn = flat_button(card, "复制规则",
+                              lambda t=s.rule: self._copy_rule(t), padx=theme.PAD_M)
+            btn.pack(anchor="e")
+
+    def _copy_rule(self, text: str) -> None:
+        if self._controller is not None:
+            self._controller.root.clipboard_clear()
+            self._controller.root.clipboard_append(text)
+            self._controller.filter.set_status("已复制到剪贴板")
+
+    def _build_reco_section(self, title: str, recos) -> None:
+        """渲染一组 Recommendation（Features/Horizon 共用）：标题 + 为什么 +
+        可粘贴 prompt + 复制按钮。无内容则不显示。"""
+        if not recos:
+            return
+        sec = CollapsibleSection(self._decomp_inner, title,
+                                 theme.GROUP_COLORS["G2"], expand=False)
+        for rc in recos:
+            card = tk.Frame(sec.content, bg=theme.PANEL, padx=8, pady=6)
+            card.pack(fill="x", pady=(0, 1))
+            tl = tk.Label(card, text=f"\u25b8 {rc.title}", bg=theme.PANEL, fg=theme.FG,
+                          font=theme.FONT_UI_BOLD, anchor="w", justify="left")
+            tl.pack(fill="x")
+            self._wrap_to_width(tl, indent=0)
+            wl = tk.Label(card, text=rc.why, bg=theme.PANEL, fg=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="w", justify="left")
+            wl.pack(fill="x")
+            self._wrap_to_width(wl, indent=0)
+            if rc.prompt:
+                pl = tk.Label(card, text=rc.prompt, bg=theme.CONTROL_BG, fg=theme.FG,
+                              font=theme.FONT_UI_SMALL, anchor="w", justify="left",
+                              padx=6, pady=4)
+                pl.pack(fill="x", pady=(2, 2))
+                self._wrap_to_width(pl, indent=12)
+                flat_button(card, "复制指令",
+                            lambda t=rc.prompt: self._copy_rule(t),
+                            padx=theme.PAD_M).pack(anchor="e")
+
+    def _build_feature_section(self, reports) -> None:
+        """值得一试：针对检测到的摩擦推荐可上手实践 + 可粘贴 prompt。"""
+        self._build_reco_section("值得一试的用法", feature_suggestions(reports))
+
+    def _build_horizon_section(self, reports) -> None:
+        """前瞻工作流：把当前用法升级为更自动/并行的形态。"""
+        self._build_reco_section("进阶工作流（前瞻）", horizon_suggestions(reports))
 
     def _build_project_summary_card(self) -> None:
         """项目主体卡：项目聚合分 + 等级 + 评分覆盖率 + 会话数。项目视角缺失已久的主答案。"""
@@ -1749,17 +1889,18 @@ class ScoreRankingView:
                 Tooltip(val_lbl, axis_tip)
 
             # Bar 底 + min–max 须线 + 聚合值标记 + 中性参考线 0.5。
-            bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=8)
+            # pack_propagate(False)：固定高度，防止只含 .place 子件的帧被压扁。
+            bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=10, width=120)
             bar_bg.pack(side="left", fill="x", expand=True, padx=4)
+            bar_bg.pack_propagate(False)
             if vals:
-                lo, hi = vals[0], vals[-1]
-                tk.Frame(bar_bg, bg=theme.AXIS_SPREAD, height=8).place(
-                    relx=min(1.0, max(0.0, lo)), rely=0,
-                    relwidth=min(1.0, max(0.0, hi)) - min(1.0, max(0.0, lo)),
-                    relheight=1.0)
-            tk.Frame(bar_bg, bg=color, width=2, height=8).place(
-                relx=min(1.0, max(0.0, val)), rely=0, relheight=1.0)
-            tk.Frame(bar_bg, bg="#555555", width=1, height=8).place(
+                lo, hi = min(1.0, max(0.0, vals[0])), min(1.0, max(0.0, vals[-1]))
+                if hi > lo:
+                    tk.Frame(bar_bg, bg=theme.AXIS_SPREAD).place(
+                        relx=lo, rely=0, relwidth=hi - lo, relheight=1.0)
+            tk.Frame(bar_bg, bg=color, width=3).place(
+                relx=min(1.0, max(0.0, val)), rely=0, relheight=1.0, anchor="n")
+            tk.Frame(bar_bg, bg="#555555", width=1).place(
                 relx=0.5, rely=0, relheight=1.0)
 
             # 离散度文字：min–median–max（会话间分化提示）
@@ -1769,7 +1910,7 @@ class ScoreRankingView:
             else:
                 spread = wt_txt
             tk.Label(row, text=spread, bg=theme.PANEL, fg=theme.MUTED,
-                     font=(theme.FONT_MONO_NAME, 7)).pack(side="left", padx=4)
+                     font=theme.FONT_UI_SMALL).pack(side="left", padx=4)
 
         prod_frame = tk.Frame(sec.content, bg=theme.PANEL, padx=10, pady=6)
         prod_frame.pack(fill="x", pady=(0, 1))
@@ -1871,19 +2012,21 @@ class ScoreRankingView:
                 Tooltip(val_lbl, axis_tip)
 
             # Bar（0–1 满刻度；中点 0.5 = 与参考线持平）
-            bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=8)
+            # pack_propagate(False)：固定高度，防止只含 .place 子件的帧被压扁。
+            bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=10, width=120)
             bar_bg.pack(side="left", fill="x", expand=True, padx=4)
+            bar_bg.pack_propagate(False)
             bar_w = min(1.0, max(0.0, val))
             if bar_w > 0:
-                tk.Frame(bar_bg, bg=color, height=8).place(
+                tk.Frame(bar_bg, bg=color).place(
                     relx=0, rely=0, relwidth=bar_w, relheight=1.0)
             # 参考线 0.5（与基准持平）
-            tk.Frame(bar_bg, bg="#555555", width=1, height=8).place(
+            tk.Frame(bar_bg, bg="#555555", width=1).place(
                     relx=0.5, rely=0, relheight=1.0)
 
             # Weight (short, muted)
             wt_lbl = tk.Label(row, text=wt_txt, bg=theme.PANEL, fg=theme.MUTED,
-                              font=(theme.FONT_MONO_NAME, 7))
+                              font=theme.FONT_UI_SMALL)
             wt_lbl.pack(side="left", padx=4)
             if axis_tip:
                 Tooltip(wt_lbl, axis_tip)

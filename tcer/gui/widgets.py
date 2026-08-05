@@ -130,12 +130,17 @@ class CollapsibleSection:
         self._title = title
         self._expand = expand
         self._collapsed = False
-        self.header = tk.Frame(parent, bg=color, padx=6, pady=3)
+        # header 与 content 都放进一个容器 frame（对齐 MetricPanel 的 gframe 做法）：
+        # 折叠只在容器内 pack_forget/pack content，位置永远正确——不会像「header 与
+        # content 直接做 parent 的兄弟」那样，重新 pack 时被追加到父容器末尾而错位。
+        self.frame = tk.Frame(parent, bg=theme.BG)
+        self.frame.pack(fill="both" if expand else "x", expand=expand)
+        self.header = tk.Frame(self.frame, bg=color, padx=6, pady=3)
         self.header.pack(fill="x", pady=(1, 0))
         self._arrow = tk.Label(self.header, text=f"▼ {title}", bg=color, fg=theme.FG,
                                font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor="hand2")
         self._arrow.pack(side="left")
-        self.content = tk.Frame(parent, bg=theme.BG)
+        self.content = tk.Frame(self.frame, bg=theme.BG)
         self.content.pack(fill="both", expand=expand)
         for w in (self.header, self._arrow):
             w.bind("<Button-1>", lambda e: self.toggle(), add="+")
@@ -151,7 +156,9 @@ class CollapsibleSection:
         if self._collapsed:
             self.content.pack_forget()
         else:
-            self.content.pack(fill="both", expand=self._expand)
+            # content 始终紧跟 header（after=）：即使父容器里有其它后续控件，
+            # 重新展开也不会跑到末尾。
+            self.content.pack(fill="both", expand=self._expand, after=self.header)
 
 
 class ScrollFrame:
