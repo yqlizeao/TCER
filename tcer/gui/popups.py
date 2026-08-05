@@ -550,74 +550,278 @@ class CostBreakdownPopup:
 
 
 class BaselinesPopup:
-    """计算出的个人基准 + 应用按钮，统一卡片风格。"""
+    """个人基准校准 —— 上下布局、先开窗后校准、可选全部会话 / 逐项目。
+
+    交互：开窗即在（不预先计算）→ 用户选模式 + 是否过滤离群 → 点「开始校准」→
+    后台计算完成回填结果 → 「应用为基准」写入。无「取消」按钮（标题栏 × / Esc 关闭）。
+
+    回调契约（均由控制器提供，弹窗不碰数据）：
+      on_compute(mode, filter_outliers, callback) —— 后台按模式汇总会话（忽略时间
+        范围），完成后在主线程调 callback(result)。result:
+          mode=="all"      → {"values": {...}, "n": int, "note": str}
+          mode=="per_proj" → {"per_project": {uid: {"values":{...}, "n":int, "label":str}},
+                              "note": str}
+        任一模式 values 为 None 表示样本不足（result 带 "msg" 说明）。
+      on_apply(mode, payload) —— mode=="all": payload={tcer,cpe} 写全局；
+        mode=="per_proj": payload={uid: {tcer,cpe}} 写逐项目。
+    """
 
     _COLOR = theme.BASELINE_ACCENT
 
-    def __init__(self, parent, values: dict, n_sessions: int, on_apply) -> None:
-        win = _new_window(parent, "计算个人基准", "440x360")
+    def __init__(self, parent, *, on_compute, on_apply,
+                 current_project_label: str | None = None) -> None:
+        self._on_compute = on_compute
+        self._on_apply = on_apply
+        self._result = None  # 最近一次计算结果（用于应用）
+
+        win = _new_window(parent, "计算个人基准", "480x640")
+        self._win = win
         tk.Label(win, text="计算个人基准", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
+                 font=theme.FONT_HEADING).pack(pady=(8, 4))
+
+        # -- 操作按钮：紧跟标题下方（上下排列）--
+        btn_bar = tk.Frame(win, bg=theme.BG)
+        btn_bar.pack(fill="x", padx=10, pady=(0, 6))
+        self._calc_btn = flat_button(btn_bar, "开始校准", self._do_compute,
+                                     primary=True, padx=theme.PAD_L)
+        self._calc_btn.pack(fill="x", pady=(0, 4))
+        self._apply_btn = flat_button(btn_bar, "应用为基准", self._do_apply,
+                                      padx=theme.PAD_L)
+        self._apply_btn.pack(fill="x")
+        self._set_apply_enabled(False)
 
         sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         inner = sf.inner
+        self._inner = inner
 
-        # Summary header
-        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        head.pack(fill="x", pady=10)
-        tk.Label(head, text=f"基于 {n_sessions} 个会话计算",
-                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
+        # -- 模式选择（醒目分区标题 + 上下堆叠可点行）--
+        self._section_header(inner, "计算范围")
+        self._mode = tk.StringVar(value="all")
+        self._mode_rows: dict[str, CheckRow] = {}
+        for val, text, hint in [
+            ("all", "基于全部会话", "跨所有项目汇总一个统一基准"),
+            ("per_proj", "逐项目分别校准", "为每个项目单独生成基准"),
+        ]:
+            var = tk.BooleanVar(value=(val == "all"))
+            row = CheckRow(inner, text, var, on_toggle=lambda v=val: self._pick_mode(v),
+                           hint=hint)
+            self._mode_rows[val] = row
 
-        # Baseline cards（含与当前生效基准的对比）
-        current = {"tcer": metrics.TCER_BASELINE, "cpe": metrics.CPE_BASELINE}
-        for key, method in [("tcer", "中位数"), ("cpe", "中位数")]:
-            val = values[key]
-            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-            card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=8)
-            card.pack(fill="x")
+        # -- 计算选项（醒目分区标题）--
+        self._section_header(inner, "计算选项")
+        self._filter_outliers = tk.BooleanVar(value=True)
+        CheckRow(inner, "忽略近零产出的离群会话", self._filter_outliers,
+                 hint=f"净增行 < {metrics.MIN_BASELINE_NET_LOC} 的会话会失真",
+                 tooltip="例如「10 行改动花 $17」这类会话，每千行成本被放大到失真，"
+                         "计入会拉偏成本基准。默认忽略。")
 
-            hdr = tk.Frame(card, bg=theme.PANEL)
-            hdr.pack(fill="x")
-            name = {"tcer": "TCER（行/百万Token）",
-                    "cpe": "CPE（千行成本·美元）"}[key]
-            tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG,
-                     anchor="w", font=theme.FONT_VALUE).pack(side="left")
-            tk.Label(hdr, text=f"{val:.3f}", bg=theme.PANEL, fg=self._COLOR,
-                     anchor="e", font=theme.FONT_MONO).pack(side="right")
+        # 计算方法：中位数（抗离群）/ 平均数（对全体敏感），单选
+        self._method = tk.StringVar(value="median")
+        self._method_rows: dict[str, CheckRow] = {}
+        for val, text, hint in [
+            ("median", "用中位数", "取中间值，不受个别极端会话影响（推荐）"),
+            ("mean", "用平均数", "全体会话的算术平均，对高/低值都敏感"),
+        ]:
+            var = tk.BooleanVar(value=(val == "median"))
+            row = CheckRow(inner, text, var, on_toggle=lambda v=val: self._pick_method(v),
+                           hint=hint)
+            self._method_rows[val] = row
 
-            cur = current.get(key)
-            if cur:
-                diff_pct = (val - cur) / cur * 100
-                # CPE 越低越好，其余越高越好——按方向给差异着色。
-                better = diff_pct < 0 if key == "cpe" else diff_pct > 0
-                diff_fg = theme.SUCCESS if better else theme.ERROR
-                cmp_row = tk.Frame(card, bg=theme.PANEL)
-                cmp_row.pack(fill="x")
-                tk.Label(cmp_row, text=f"计算方式: {method} · 当前基准 {cur:.3f}",
-                         bg=theme.PANEL, fg=theme.MUTED,
-                         font=(theme.FONT_MONO_NAME, 8)).pack(side="left")
-                tk.Label(cmp_row, text=f"{diff_pct:+.1f}%",
-                         bg=theme.PANEL, fg=diff_fg,
-                         font=(theme.FONT_MONO_NAME, 8, "bold")).pack(side="right")
-            else:
-                tk.Label(card, text=f"计算方式: {method}", bg=theme.PANEL,
-                         fg=theme.MUTED, font=(theme.FONT_MONO_NAME, 8)).pack(anchor="w")
+        tk.Label(inner, text="基准与筛选时间范围无关，始终基于全部历史会话。",
+                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                 anchor="w", justify="left", wraplength=440).pack(fill="x", padx=10, pady=(8, 2))
 
-        # Note
-        tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
-        tk.Label(inner, text="应用后将写入配置并立即重算综合效率分刻度。",
+        # -- 结果区（校准后填充）--
+        self._section_header(inner, "校准结果")
+        self._result_frame = tk.Frame(inner, bg=theme.PANEL)
+        self._result_frame.pack(fill="x", pady=(2, 0))
+        tk.Label(self._result_frame, text="点上方「开始校准」计算基准。",
                  bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
-                 wraplength=380, justify="left").pack(padx=10, pady=4)
+                 anchor="w").pack(anchor="w", padx=10, pady=6)
 
-        # Buttons
-        btn_bar = tk.Frame(win, bg=theme.BG)
-        btn_bar.pack(pady=8)
-        flat_button(btn_bar, "应用为基准",
-                    lambda: (on_apply(values), win.destroy()), primary=True,
-                    padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
-        flat_button(btn_bar, "取消", win.destroy,
-                    padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
+        self._pick_mode("all")
+
+    @staticmethod
+    def _metric_label(key: str) -> str:
+        """SSOT 指标名 + 单位（如「TCER（行/百万）」「千行代码成本（美元/千行）」）。
+        取自 metric_defs.METRIC_BY_KEY——遵守中心指标守则，不自造相似名。"""
+        m = METRIC_BY_KEY.get(key)
+        if not m:
+            return key
+        return f"{m.name}（{m.unit}）" if m.unit else m.name
+
+    @staticmethod
+    def _metric_short(key: str) -> str:
+        """SSOT 指标名（紧凑，逐项目一行两列用）。"""
+        m = METRIC_BY_KEY.get(key)
+        return m.name if m else key
+
+    @staticmethod
+    def _section_header(parent, text: str) -> None:
+        """醒目分区标题：色条 + 加粗白字（区别于淡灰说明文字）。"""
+        bar = tk.Frame(parent, bg=theme.PANEL)
+        bar.pack(fill="x", padx=8, pady=(10, 3))
+        tk.Frame(bar, bg=theme.BASELINE_ACCENT, width=3).pack(side="left", fill="y")
+        tk.Label(bar, text=text, bg=theme.PANEL, fg=theme.FG_WHITE,
+                 font=theme.FONT_UI_BOLD, anchor="w").pack(side="left", padx=(8, 0))
+
+    def _pick_method(self, method: str) -> None:
+        self._method.set(method)
+        for val, row in self._method_rows.items():
+            row.var.set(val == method)
+            row._draw()
+        # 换方法后旧结果失效
+        self._result = None
+        self._set_apply_enabled(False)
+
+    # -- mode radio (single-select via CheckRow rows) --
+    def _pick_mode(self, mode: str) -> None:
+        self._mode.set(mode)
+        for val, row in self._mode_rows.items():
+            row.var.set(val == mode)
+            row._draw()
+        # 换模式后旧结果失效
+        self._result = None
+        self._set_apply_enabled(False)
+        self._clear_results()
+
+    def _set_apply_enabled(self, on: bool) -> None:
+        try:
+            self._apply_btn.config(state="normal" if on else "disabled")
+        except tk.TclError:
+            pass
+
+    def _clear_results(self) -> None:
+        for w in self._result_frame.winfo_children():
+            w.destroy()
+
+    # -- compute (delegates to controller; async) --
+    def _do_compute(self) -> None:
+        self._clear_results()
+        self._result = None
+        self._set_apply_enabled(False)
+        tk.Label(self._result_frame, text="校准中…", bg=theme.PANEL,
+                 fg=theme.MUTED, font=theme.FONT_UI).pack(anchor="w", padx=10, pady=8)
+        try:
+            self._calc_btn.config(state="disabled")
+        except tk.TclError:
+            pass
+        self._on_compute(self._mode.get(), bool(self._filter_outliers.get()),
+                         self._method.get(), self._on_computed)
+
+    def _on_computed(self, result: dict) -> None:
+        """主线程回调：渲染结果。"""
+        try:
+            self._calc_btn.config(state="normal")
+        except tk.TclError:
+            return  # 窗口已关
+        self._clear_results()
+        self._result = result
+        mode = self._mode.get()
+        if mode == "all":
+            self._render_all(result)
+        else:
+            self._render_per_project(result)
+
+    def _render_all(self, result: dict) -> None:
+        note = result.get("note") or ""
+        values = result.get("values")
+        if values is None:
+            tk.Label(self._result_frame, text=result.get("msg", "样本不足，无法计算基准。"),
+                     bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
+                     wraplength=420, justify="left").pack(anchor="w", padx=10, pady=8)
+            return
+        head = tk.Frame(self._result_frame, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
+        head.pack(fill="x", pady=(6, 0))
+        tk.Label(head, text=f"基于 {result.get('n', 0)} 个会话计算 · {note}".rstrip(" ·"),
+                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD,
+                 wraplength=420, justify="left").pack(anchor="w")
+        current = {"tcer": metrics.TCER_BASELINE, "cpe": metrics.CPE_BASELINE}
+        for key in ("tcer", "cpe"):
+            self._value_card(self._result_frame, key, values[key], current.get(key))
+        self._set_apply_enabled(True)
+
+    def _render_per_project(self, result: dict) -> None:
+        note = result.get("note") or ""
+        # per_project 现为**有序列表**，含全部项目（样本不足者 values=None）。
+        per = result.get("per_project") or []
+        if not per:
+            tk.Label(self._result_frame, text=result.get("msg", "没有可用于计算的项目。"),
+                     bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
+                     wraplength=440, justify="left").pack(anchor="w", padx=10, pady=8)
+            return
+        n_ok = sum(1 for it in per if it.get("values"))
+        head = tk.Frame(self._result_frame, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
+        head.pack(fill="x", pady=(2, 0))
+        tk.Label(head, text=f"共 {len(per)} 个项目 · {n_ok} 个可校准 · {note}".rstrip(" ·"),
+                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD,
+                 wraplength=440, justify="left").pack(anchor="w")
+        for info in per:
+            vals = info.get("values")
+            ok = bool(vals)
+            tk.Frame(self._result_frame, bg=theme.PANEL, height=6).pack(fill="x")
+            title = tk.Frame(self._result_frame, bg=theme.PANEL)
+            title.pack(fill="x", padx=10)
+            tk.Label(title, text=info.get("label", info.get("uid", "")),
+                     bg=theme.PANEL, fg=theme.FG if ok else theme.MUTED,
+                     font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
+            tk.Label(title, text=f"{info.get('n', 0)} 会话", bg=theme.PANEL,
+                     fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e").pack(side="right")
+            if ok:
+                line = tk.Frame(self._result_frame, bg=theme.PANEL)
+                line.pack(fill="x", padx=10)
+                tk.Label(line, text=f"{self._metric_short('tcer')} {vals.get('tcer', 0):.2f}",
+                         bg=theme.PANEL, fg=self._COLOR, font=theme.FONT_MONO,
+                         anchor="w").pack(side="left")
+                tk.Label(line, text=f"{self._metric_short('cpe')} {vals.get('cpe', 0):.2f}",
+                         bg=theme.PANEL, fg=self._COLOR, font=theme.FONT_MONO,
+                         anchor="e").pack(side="right")
+            else:
+                tk.Label(self._result_frame,
+                         text=info.get("reason", "样本不足，跳过"),
+                         bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL,
+                         anchor="w").pack(fill="x", padx=10)
+        if n_ok:
+            self._set_apply_enabled(True)
+
+    def _value_card(self, parent, key, val, cur) -> None:
+        tk.Frame(parent, bg=theme.PANEL, height=6).pack(fill="x")
+        card = tk.Frame(parent, bg=theme.PANEL, padx=10, pady=8)
+        card.pack(fill="x")
+        hdr = tk.Frame(card, bg=theme.PANEL)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=self._metric_label(key), bg=theme.PANEL, fg=theme.FG,
+                 anchor="w", font=theme.FONT_VALUE).pack(side="left")
+        tk.Label(hdr, text=f"{val:.3f}", bg=theme.PANEL, fg=self._COLOR,
+                 anchor="e", font=theme.FONT_MONO).pack(side="right")
+        if cur:
+            diff_pct = (val - cur) / cur * 100
+            better = diff_pct < 0 if key == "cpe" else diff_pct > 0
+            diff_fg = theme.SUCCESS if better else theme.ERROR
+            cmp_row = tk.Frame(card, bg=theme.PANEL)
+            cmp_row.pack(fill="x")
+            tk.Label(cmp_row, text=f"中位数 · 当前基准 {cur:.3f}", bg=theme.PANEL,
+                     fg=theme.MUTED, font=(theme.FONT_MONO_NAME, 8)).pack(side="left")
+            tk.Label(cmp_row, text=f"{diff_pct:+.1f}%", bg=theme.PANEL, fg=diff_fg,
+                     font=(theme.FONT_MONO_NAME, 8, "bold")).pack(side="right")
+
+    def _do_apply(self) -> None:
+        if not self._result:
+            return
+        mode = self._mode.get()
+        if mode == "all":
+            values = self._result.get("values")
+            if not values:
+                return
+            self._on_apply("all", values)
+        else:
+            per = self._result.get("per_project") or []
+            payload = {info["uid"]: info["values"] for info in per if info.get("values")}
+            if not payload:
+                return
+            self._on_apply("per_proj", payload)
+        self._win.destroy()
 
 
 class AdvancedPopup:

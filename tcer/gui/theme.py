@@ -32,6 +32,9 @@ BORDER_HOVER = "#5a5a60"  # Card 等可点卡片 hover 边框提亮（灰、非�
 SCROLL_THUMB = "#3a3a3a"
 SCROLL_THUMB_HOVER = "#555555"
 
+# 效率榜项目视角三轴离散度须线（min–max 区间条）：冷灰蓝，弱于聚合值标记。
+AXIS_SPREAD = "#4a5a6a"
+
 # Base palette (dark, VS Code-ish).
 BG = "#1e1e1e"
 FG = "#e0e0e0"

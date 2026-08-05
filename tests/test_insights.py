@@ -70,10 +70,67 @@ def test_unseen_writes_flagged():
     assert unseen and unseen[0].kind == "drag" and unseen[0].action
 
 
+def test_high_churn_files_flagged():
+    r = _report(600, code_added=620, code_reworked=20)
+    r.high_churn_file_count = 3
+    hits = [i for i in session_insights(r) if i.metric == "high_churn_file_count"]
+    assert hits and hits[0].kind == "drag" and hits[0].action
+    assert "3" in hits[0].evidence
+
+
+def test_edit_verify_low_and_high():
+    r = _report(600, code_added=620, code_reworked=20)
+    r.edit_verify_ratio = 0.05
+    low = [i for i in session_insights(r) if i.metric == "edit_verify_ratio"]
+    assert low and low[0].kind == "drag" and low[0].action
+    r.edit_verify_ratio = 0.9
+    high = [i for i in session_insights(r) if i.metric == "edit_verify_ratio"]
+    assert high and high[0].kind == "good" and high[0].action == ""
+
+
+def test_test_coverage_needs_scale():
+    # below NET_LOC_MIN_FOR_TEST -> no test insight even if ratio is 0
+    small = _report(50, code_added=60, code_reworked=5)
+    small.test_loc_ratio = 0.0
+    assert not [i for i in session_insights(small) if i.metric == "test_loc_ratio"]
+    # at scale, near-zero test ratio -> tip
+    big = _report(600, code_added=620, code_reworked=20)
+    big.test_loc_ratio = 0.0
+    low = [i for i in session_insights(big) if i.metric == "test_loc_ratio"]
+    assert low and low[0].kind == "tip"
+    # healthy test ratio -> good
+    big.test_loc_ratio = 0.25
+    good = [i for i in session_insights(big) if i.metric == "test_loc_ratio"]
+    assert good and good[0].kind == "good"
+
+
+def test_context_window_high_flagged():
+    r = _report(600, code_added=620, code_reworked=20)
+    r.context_window_used_ratio = 0.9
+    hits = [i for i in session_insights(r) if i.metric == "context_window_used_ratio"]
+    assert hits and hits[0].kind == "tip" and hits[0].action
+
+
+def test_cache_ineffective_flagged():
+    r = _report(600, code_added=620, code_reworked=20)
+    r.cache_efficiency = 0.5  # reads < writes
+    r.usage.cache_creation_input_tokens = 100_000
+    hits = [i for i in session_insights(r) if i.metric == "cache_efficiency"]
+    assert hits and hits[0].kind == "tip" and hits[0].action
+
+
+def test_repeated_corrections_flagged():
+    r = _report(600, code_added=620, code_reworked=20)
+    r.usage.correction_msg_count = 4
+    hits = [i for i in session_insights(r) if i.metric == "correction_msg_count"]
+    assert hits and hits[0].kind == "tip" and hits[0].action
+    assert "4" in hits[0].evidence
+
+
 def test_ordering_good_then_drag_then_tip():
     r = _report(600, code_added=650, code_reworked=300)
     kinds = [i.kind for i in session_insights(r)]
-    order = {"good": 0, "drag": 1, "tip": 2}
+    order = {"good": 0, "drag": 1, "cost": 2, "tip": 3}
     ranks = [order[k] for k in kinds]
     assert ranks == sorted(ranks), kinds
 
@@ -82,10 +139,40 @@ def test_all_insights_are_wellformed():
     r = _report(600, code_added=650, code_reworked=300)
     for i in session_insights(r):
         assert isinstance(i, Insight)
-        assert i.kind in ("good", "drag", "tip")
+        assert i.kind in ("good", "drag", "cost", "tip")
         assert i.title and i.evidence
-        if i.kind == "drag":
-            assert i.action  # every drag must be actionable
+        if i.kind in ("drag", "cost"):
+            assert i.action  # 拖累项与金额项都必须给可执行下一步
+
+
+def test_cost_high_absolute_spend():
+    r = _report(600, code_added=620, code_reworked=20)
+    r.cost = 9.0
+    hits = [i for i in session_insights(r) if i.kind == "cost" and i.metric == "cost"]
+    assert hits and hits[0].action
+    assert "9" in hits[0].evidence
+
+
+def test_cost_cpe_above_baseline():
+    from tcer.core import metrics
+    r = _report(600, code_added=620, code_reworked=20)
+    r.cpe = metrics.CPE_BASELINE * 2.0  # 2× 基准 -> 触发
+    hits = [i for i in session_insights(r) if i.metric == "cpe"]
+    assert hits and hits[0].kind == "cost" and hits[0].action
+
+
+def test_cost_churn_waste():
+    r = _report(600, code_added=650, code_reworked=300)  # churn ~46%
+    hits = [i for i in session_insights(r) if i.metric == "cost_churn"]
+    assert hits and hits[0].kind == "cost" and hits[0].action
+    assert "%" in hits[0].evidence
+
+
+def test_low_cost_session_has_no_cost_insights():
+    r = _report(600, code_added=650, code_reworked=5)  # low churn
+    r.cost = 0.5  # cheap
+    # cpe below baseline (default fixture), no churn waste, no high spend
+    assert not [i for i in session_insights(r) if i.kind == "cost"]
 
 # --- cross-session (project-level) insights ---------------------------------
 from tcer.core.insights import project_insights

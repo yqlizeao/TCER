@@ -327,8 +327,8 @@ def test_ranking_decompose_uses_ssot_labels(root, reports):
     view.update(reports)
     kids = view._tree.get_children()
     assert kids, "排名表应有数据行"
-    view._tree.selection_set(kids[0])
-    view._on_tree_select()
+    # 会话视角由 set_view_mode 进入（点行只选中、不翻转视角）。
+    view.set_view_mode("session", reports[0])
     root.update_idletasks()
 
     texts = []
@@ -343,6 +343,36 @@ def test_ranking_decompose_uses_ssot_labels(root, reports):
     frame.destroy()
 
 
+def test_ranking_row_click_keeps_project_view(root, reports):
+    """点排名行不翻转视角：项目视角下点行 → 仍是项目视角（右栏保持项目洞察），
+    只把选中的 sid 通知控制器。视角切换单一入口 = 左上角分段控件。"""
+    from tcer.gui.views import ScoreRankingView
+
+    calls = []
+
+    class _Ctl:
+        def on_select_session(self, sid):
+            calls.append(sid)
+
+    frame = tk.Frame(root)
+    frame.pack()
+    view = ScoreRankingView(frame, controller=_Ctl())
+    view.update(reports)
+    assert view._view_mode == "project"
+
+    kids = view._tree.get_children()
+    view._tree.selection_set(kids[0])
+    view._on_tree_select()
+    root.update_idletasks()
+
+    assert view._view_mode == "project", "点排名行不得翻转到会话视角"
+    assert calls, "点行应通知控制器选中 sid"
+    texts = []
+    _walk_labels(view._decomp_inner, texts)
+    assert any("洞察与意见 (项目)" in t for t in texts), "右栏应保持项目视角"
+    frame.destroy()
+
+
 def test_ranking_insights_section_renders(root, reports):
     """洞察与意见区块渲染：至少一条带标记(勾/箭头)的可执行洞察出现在分解面板。"""
     from tcer.gui.views import ScoreRankingView
@@ -353,8 +383,8 @@ def test_ranking_insights_section_renders(root, reports):
     view.update(reports)
     kids = view._tree.get_children()
     assert kids
-    view._tree.selection_set(kids[0])
-    view._on_tree_select()
+    # 会话视角由 set_view_mode 进入（点行只选中、不翻转视角）。
+    view.set_view_mode("session", reports[0])
     root.update_idletasks()
 
     texts = []
@@ -391,6 +421,54 @@ def test_ranking_empty_state_shows_project_insights(root):
     _walk_labels(view._decomp_inner, texts)
     assert any("洞察与意见 (项目)" in t for t in texts), "empty state should show 项目视角洞察"
     assert any("系统性" in t for t in texts), "systemic drag should surface"
+    frame.destroy()
+
+
+def test_ranking_dual_view_switch(root, reports):
+    """排名页项目/会话双视角：视角只由 set_view_mode（左上角分段控件）切换。
+    点排名行只选中会话（触发 on_select_session），绝不翻转视角；程序化选中不触发回调。"""
+    from tcer.gui.views import ScoreRankingView
+
+    calls = []
+
+    class _Ctl:
+        def on_select_session(self, sid):
+            calls.append(("sess", sid))
+
+    frame = tk.Frame(root)
+    frame.pack()
+    view = ScoreRankingView(frame, controller=_Ctl())
+    view.update(reports)
+
+    def texts():
+        out = []
+        _walk_labels(view._decomp_inner, out)
+        return out
+
+    # 项目视角（默认）
+    assert any("洞察与意见 (项目)" in t for t in texts())
+    # 控制器驱动会话视角
+    view.set_view_mode("session", reports[0])
+    root.update_idletasks()
+    assert any("洞察与意见 (会话)" in t for t in texts())
+    assert view._tree.selection()  # 会话行高亮
+    # 回到项目视角，清空选中
+    view.set_view_mode("project")
+    root.update_idletasks()
+    assert any("洞察与意见 (项目)" in t for t in texts())
+    assert not view._tree.selection()
+    # 用户点排名行 → on_select_session 一次；视角保持项目（不翻转）。
+    calls.clear()
+    kids = view._tree.get_children()
+    view._tree.selection_set(kids[1])
+    view._on_tree_select()
+    assert calls and calls[0][0] == "sess"
+    assert view._view_mode == "project", "点排名行不得翻转视角"
+    assert any("洞察与意见 (项目)" in t for t in texts()), "点行后右栏仍是项目视角"
+    # 程序化选中不触发回调
+    calls.clear()
+    view.set_view_mode("session", reports[2])
+    assert calls == []
     frame.destroy()
 
 

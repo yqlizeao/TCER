@@ -221,7 +221,7 @@ class TcerGui:
         tab_c = tk.Frame(nb, bg=theme.PANEL)
         nb.add(tab_m, text="指标分类", image=views.ui_icon(nb, "grid"), compound="left")
         nb.add(tab_c, text="模型对比", image=views.ui_icon(nb, "compare"), compound="left")
-        nb.add(tab_b, text="综合效率分排名", image=views.ui_icon(nb, "rank"), compound="left")
+        nb.add(tab_b, text="效率榜", image=views.ui_icon(nb, "rank"), compound="left")
         nb.add(tab_t, text="趋势", image=views.ui_icon(nb, "trend"), compound="left")
 
         self.metric_panel = MetricPanel(tab_m, self)
@@ -340,11 +340,15 @@ class TcerGui:
         self._analysis_generation += 1
         generation = self._analysis_generation
         params = self.filter.get_params()
+        # 逐项目基准（若已为该项目单独校准）在打分时生效；否则回退全局基准。
+        pb = metrics.resolve_baselines(views.ref_uid(proj))
         args = dict(
             project=proj.key,
             source=proj.source,
             project_ref=proj,
             task_type=params["task_type"],
+            baseline_tcer=pb["tcer"],
+            baseline_cpe=pb["cpe"],
             since=params["since"],
             until=params["until"],
             no_loc=self._no_loc,
@@ -389,6 +393,9 @@ class TcerGui:
                     note = f"（{errors} 个项目分析失败）" if errors else ""
                     self.filter.set_status(f"项目总览完成{note}")
                     popups.ProjectOverviewPopup(self.root, rows)
+                elif kind == "baselines":
+                    _, mode, min_loc, method, per_project, errors, callback = item
+                    self._on_baselines_computed(mode, min_loc, method, per_project, errors, callback)
                 elif kind == "upload":
                     _, dialog, ok, message = item
                     if ok:
@@ -424,7 +431,7 @@ class TcerGui:
             self._selected_session_id = prev_sid
         elif a.reports:
             self._selected_session_id = self.session_col.select_first(notify=False)
-        self.ranking_view.update(a.reports)
+        self.ranking_view.update(a.reports, aggregate=a.aggregate)
         # Trend + 模型对比 must respect the current view mode (project vs
         # session). _render_session_views handles both, plus the trend highlight.
         self._render_session_views()
@@ -447,12 +454,18 @@ class TcerGui:
 
     # --------------------------------------------------------------- sessions / view
     def on_select_session(self, sid: str) -> None:
+        """选中某会话（中栏卡片 / 效率榜排名行触发）。
+
+        不翻转视角——视角切换只由左上角分段控件负责。会话视角下刷新会话相关面板；
+        项目视角下仅记录选中。
+        """
         self._selected_session_id = sid
         if self.view_mode.get() == "session":
             self._render_metrics()
             self._update_model_compare()
             # Highlight in trend without rebuilding the chart (preserves zoom).
             self.trend_chart.select_session_by_sid(sid)
+            self._update_ranking_view()
         self._update_tab_names()
 
     # --------------------------------------------------------------- session marks
@@ -547,7 +560,23 @@ class TcerGui:
     def _on_view_change(self) -> None:
         self._render_metrics()
         self._update_model_compare()
+        self._update_ranking_view()
         self._update_tab_names()
+
+    def _update_ranking_view(self) -> None:
+        """按视角驱动综合效率分排名右栏（对齐指标分类/模型对比的项目/会话切换）。
+
+        会话视角且有选中 → 展示该会话构成拆解 + 会话洞察；否则 → 项目视角排名概览
+        + 项目洞察。排名表本身（左栏）在两种视角都在，作导航用。
+        """
+        if not self._current:
+            return
+        mode = self.view_mode.get()
+        if mode == "session" and self._selected_session_id:
+            report = self._session_report(self._selected_session_id)
+            self.ranking_view.set_view_mode("session", report)
+        else:
+            self.ranking_view.set_view_mode("project")
 
     def _update_model_compare(self) -> None:
         """Update model compare based on view mode. Does not touch TrendChart."""
@@ -570,6 +599,7 @@ class TcerGui:
         if self._selected_session_id:
             self.trend_chart.select_session_by_sid(self._selected_session_id)
         self._update_model_compare()
+        self._update_ranking_view()
 
     def _update_tab_names(self) -> None:
         """页签名加 (项目)/(会话) 后缀 + 彩色视角图标。
@@ -583,7 +613,7 @@ class TcerGui:
         view_icon = views.ui_icon(self._nb, "view-session" if is_session else "view-project")
         self._nb.tab(0, text=f"指标分类 {suffix}", image=view_icon, compound="left")
         self._nb.tab(1, text=f"模型对比 {suffix}", image=view_icon, compound="left")
-        self._nb.tab(2, text="综合效率分排名")
+        self._nb.tab(2, text=f"效率榜 {suffix}", image=view_icon, compound="left")
         self._nb.tab(3, text="趋势")
 
     def _session_report(self, sid: str):
@@ -786,29 +816,91 @@ class TcerGui:
 
     # --------------------------------------------------------------- tools
     def compute_baselines(self) -> None:
-        if not self._current:
-            messagebox.showinfo("计算基准", "请先分析一个项目。")
+        """打开个人基准校准弹窗。先开窗，由弹窗按需触发后台校准（不预先计算）。
+
+        弹窗提供：全部会话 / 逐项目 两种模式、离群过滤开关（默认开）。基准始终
+        基于**全部历史会话**，不受顶栏时间范���影响。
+        """
+        if not self._projects:
+            messagebox.showinfo("计算基准", "无项目可用于计算。")
             return
-        eligible = metrics.baseline_eligible_reports(self._current.reports)
+        proj = self._selected_project()
+        popups.BaselinesPopup(
+            self.root,
+            on_compute=self._baseline_compute,
+            on_apply=self._baseline_apply,
+            current_project_label=views.project_label(proj) if proj else None,
+        )
+
+    def _baseline_compute(self, mode: str, filter_outliers: bool, method: str, callback) -> None:
+        """后台按模式汇总会话并算基准，完成后在主线程调 callback(result)。
+
+        基准与时间范围无关——**不传 since/until**，始终全量历史会话。method 为
+        中位数/平均数。task_type 用当前筛选值（只影响 TCER 归一，不影响 eligible）。
+        """
+        params = self.filter.get_params()
+        projects = list(self._projects)
+        min_loc = None if filter_outliers else 0
+        self.filter.set_status(f"个人基准校准中…（{mode} · {len(projects)} 个项目）")
+
+        def _work() -> None:
+            per_project = []  # (uid, label, reports)
+            errors = 0
+            for p in projects:
+                try:
+                    a = analyze.analyze_project(
+                        p.key, source=getattr(p, "source", "claude"),
+                        project_ref=p if hasattr(p, "session_paths") else None,
+                        task_type=params["task_type"],
+                        no_loc=self._no_loc,   # 注意：不传 since/until —— 基准不受时间范围影响
+                    )
+                except Exception:  # noqa: BLE001 — 单项目失败不拦汇总
+                    errors += 1
+                    continue
+                per_project.append((views.ref_uid(p), views.project_label(p), a.reports))
+            self._q.put(("baselines", mode, min_loc, method, per_project, errors, callback))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_baselines_computed(self, mode, min_loc, method, per_project, errors, callback) -> None:
+        """主线程：后台汇总的会话按模式算成基准结结果，回调给弹窗渲染。"""
+        note = f"{errors} 个项目分析失败已跳过" if errors else ""
         need = metrics.MIN_BASELINE_SESSIONS
-        values = metrics.compute_baselines(self._current.reports)
-        if values is None:
-            if len(eligible) == 0:
-                msg = "没有可参与计算的会话（需同时具备 TCER 与 CPE，即有效净增行与成本）。"
-            else:
-                msg = (
-                    f"有效会话不足：需要至少 {need} 个完整会话，"
-                    f"当前仅 {len(eligible)} 个。\n"
-                    "样本过少时中位数波动很大，暂不建议写入个人基准。"
-                )
-            messagebox.showinfo("计算基准", msg)
-            return
+        if mode == "all":
+            all_reports = [r for _, _, reps in per_project for r in reps]
+            eligible = metrics.baseline_eligible_reports(all_reports, min_net_loc=min_loc)
+            values = metrics.compute_baselines(all_reports, min_net_loc=min_loc, method=method)
+            msg = ""
+            if values is None:
+                msg = (f"有效会话不足：需至少 {need} 个完整会话，当前跨项目共 "
+                       f"{len(eligible)} 个。样本过少时波动大，暂不建议写入。")
+            self.filter.set_status("个人基准校准完成" if values else "个人基准：样本不足")
+            callback({"values": values, "n": len(eligible), "note": note, "msg": msg})
+        else:    # per_proj —— 列出**全部项目**，样本不足者也显示（values=None）
+            out = []
+            for uid, label, reps in per_project:
+                n = len(metrics.baseline_eligible_reports(reps, min_net_loc=min_loc))
+                vals = metrics.compute_baselines(reps, min_net_loc=min_loc, method=method)
+                item = {"uid": uid, "label": label, "n": n, "values": vals}
+                if vals is None:
+                    item["reason"] = f"有效会话 {n} 个 < 所需 {need}，跳过"
+                out.append(item)
+            # 有会话的项目排前、可校准的更靠前，便于查看
+            out.sort(key=lambda it: (it["values"] is None, -it["n"]))
+            n_ok = sum(1 for it in out if it["values"])
+            self.filter.set_status(
+                f"逐项目校准完成 · {n_ok}/{len(out)} 可校准" if n_ok else "逐项目校准：无项目达标")
+            callback({"per_project": out, "note": note,
+                      "msg": "" if out else "没有可用于计算的项目。"})
 
-        def _apply(v):
-            metrics.save_baselines(v)
-            self.reanalyze()
-
-        popups.BaselinesPopup(self.root, values, len(eligible), _apply)
+    def _baseline_apply(self, mode: str, payload) -> None:
+        """应用基准：全局 或 逐项目写入 config，然后重算当前项目。"""
+        if mode == "all":
+            metrics.save_baselines(payload)  # 写全局
+        else:
+            for uid, vals in payload.items():
+                metrics.save_baselines(vals, project_uid=uid)  # 逐项目写入
+        self.reanalyze()
 
     def show_tool_sequence(self) -> None:
         report = self._rendered_report

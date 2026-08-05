@@ -140,6 +140,11 @@ class CollapsibleSection:
         for w in (self.header, self._arrow):
             w.bind("<Button-1>", lambda e: self.toggle(), add="+")
 
+    def set_title(self, title: str) -> None:
+        """更新标题文字（保留当前折叠状态）。用于随视角切换重命名区块。"""
+        self._title = title
+        self._arrow.config(text=f"{'▶' if self._collapsed else '▼'} {title}")
+
     def toggle(self) -> None:
         self._collapsed = not self._collapsed
         self._arrow.config(text=f"{'▶' if self._collapsed else '▼'} {self._title}")
