@@ -63,6 +63,30 @@ def _get_baselines() -> dict[str, float]:
     return _load_composite_config()["baselines"]
 
 
+def _get_baselines_per_project() -> dict[str, dict]:
+    """逐项目个人基准（可选）。键为项目 uid（views.ref_uid），值 {tcer,cpe}。
+    缺失时返回空 dict——回退到全局 baselines。"""
+    return _load_composite_config().get("baselines_per_project", {}) or {}
+
+
+def resolve_baselines(project_uid: str | None = None) -> dict[str, float]:
+    """解析某项目实际生效的 TCER/CPE 基准：优先逐项目基准，否则回退全局。
+
+    project_uid=None 或该项目无逐项目基准 → 全局 baselines。供 GUI reanalyze
+    按当前项目取 override，让「逐项目基准」在打分时真正生效。
+    """
+    glob = _get_baselines()
+    out = {"tcer": glob["tcer"], "cpe": glob["cpe"]}
+    if project_uid:
+        pp = _get_baselines_per_project().get(project_uid)
+        if isinstance(pp, dict):
+            if pp.get("tcer") is not None:
+                out["tcer"] = float(pp["tcer"])
+            if pp.get("cpe") is not None:
+                out["cpe"] = float(pp["cpe"])
+    return out
+
+
 def _get_chr_weight() -> float:
     return _load_composite_config()["chr_weight"]
 
@@ -120,7 +144,12 @@ DEFAULT_TASK_TYPE = "code_creation"
 AUTO_TASK_TYPE = "auto"
 
 # Personal baselines need enough complete sessions to be stable.
-MIN_BASELINE_SESSIONS = 10
+MIN_BASELINE_SESSIONS = 5
+
+# 基准离群过滤：净增行过少的会话，CPE = cost/net_loc*1000 会被放大到失真
+# （实测 10 行改动 $17.6 → CPE 1763，正常区间 3–50）。这类近零产出会话不代表
+# 「典型水平」，参与基准会污染成本轴中性点。低于此行数的会话不计入基准样本。
+MIN_BASELINE_NET_LOC = 20
 
 # Pre-v2 task type names still seen in tests / old callers → current keys.
 _TASK_TYPE_ALIASES = {
@@ -372,54 +401,76 @@ def majority_task_type(types: list[str | None]) -> str:
     return counts.most_common(1)[0][0]
 
 
-def baseline_eligible_reports(reports) -> list:
-    """Sessions with complete TCER / CPE (required for personal baselines)."""
-    return [
-        r for r in reports
-        if getattr(r, "tcer", None) is not None
-        and getattr(r, "cpe", None) is not None
-    ]
+def baseline_eligible_reports(reports, *, min_net_loc: int | None = None) -> list:
+    """Sessions with complete TCER / CPE (required for personal baselines).
+
+    ``min_net_loc`` 过滤近零产出会话——那些 net_loc 极小、CPE 被放大到失真的
+    会话（见 MIN_BASELINE_NET_LOC）。None 时用默认下限；传 0 可关闭过滤（单元
+    测试核对纯算术时用）。
+    """
+    floor = MIN_BASELINE_NET_LOC if min_net_loc is None else max(0, int(min_net_loc))
+    out = []
+    for r in reports:
+        if getattr(r, "tcer", None) is None or getattr(r, "cpe", None) is None:
+            continue
+        if (getattr(r, "net_loc", None) or 0) < floor:
+            continue
+        out.append(r)
+    return out
 
 
 def compute_baselines(
     reports,
     *,
     min_sessions: int | None = None,
+    min_net_loc: int | None = None,
+    method: str = "median",
 ) -> dict | None:
-    """Derive personal baselines (TCER/CPE median) from sessions.
+    """Derive personal baselines (TCER/CPE) from sessions.
 
     Returns None if fewer than ``min_sessions`` (default
     :data:`MIN_BASELINE_SESSIONS`) sessions have complete TCER/CPE data.
     Small samples make median/mean jump wildly; Framework §8.3 expects a real
     reference set. Pass ``min_sessions=1`` in unit tests that only check the
     arithmetic.
+
+    ``min_net_loc`` 剔除近零产出的 CPE 失真会话（默认 MIN_BASELINE_NET_LOC）；
+    传 0 关闭过滤。个人基准应基于**跨所有项目**的会话汇总——调用方（GUI）负责
+    把多项目的 reports 合并后传入，本函数只做过滤 + 聚合。
+
+    ``method``：``"median"``（默认，抗离群）或 ``"mean"``（对全体样本敏感）。
     """
     import statistics
 
     need = MIN_BASELINE_SESSIONS if min_sessions is None else max(0, int(min_sessions))
-    valid = baseline_eligible_reports(reports)
+    valid = baseline_eligible_reports(reports, min_net_loc=min_net_loc)
     if len(valid) < need:
         return None
+    agg = statistics.mean if method == "mean" else statistics.median
     return {
-        "tcer": statistics.median(r.tcer for r in valid),
-        "cpe": statistics.median(r.cpe for r in valid),
+        "tcer": agg([r.tcer for r in valid]),
+        "cpe": agg([r.cpe for r in valid]),
     }
 
 
-def save_baselines(values: dict) -> None:
+def save_baselines(values: dict, *, project_uid: str | None = None) -> None:
     """Write personal baselines into ``composite_baselines.json`` and refresh.
 
-    Merges into the existing ``baselines`` block, clears the config cache,
-    and updates the module-level ``*_BASELINE`` constants so the next analysis
-    picks them up. The caller (GUI) confirms before invoking.
+    project_uid=None → 写全局 ``baselines`` 块（影响所有无逐项目基准的项目）。
+    project_uid 给定 → 写 ``baselines_per_project[uid]``（只影响该项目，全局不变）。
 
-    Writes atomically via a temp file + ``os.replace`` to avoid corruption on
-    crash. Works on a shallow copy so the in-memory ``lru_cache`` is never
-    mutated in-place.
+    Merges into the target block, clears the config cache, and refreshes the
+    module-level constants. Writes atomically (temp file + ``os.replace``) on a
+    shallow copy so the lru_cache dict is never mutated in place.
     """
     # Shallow-copy the cached config so we don't mutate the lru_cache's dict.
     cfg = {**_load_composite_config()}
-    cfg["baselines"] = {**cfg.get("baselines", {}), **values}
+    if project_uid:
+        pp = {**cfg.get("baselines_per_project", {})}
+        pp[project_uid] = {**pp.get(project_uid, {}), **values}
+        cfg["baselines_per_project"] = pp
+    else:
+        cfg["baselines"] = {**cfg.get("baselines", {}), **values}
     # Atomic write: write to a sibling temp file, then replace.
     fd, tmp = tempfile.mkstemp(dir=_COMPOSITE_CONFIG_PATH.parent, suffix=".tmp")
     try:

@@ -1305,6 +1305,13 @@ class ScoreRankingView:
         self._grade_filter: str | None = None   # 选中的评级过滤（tier 名）
         self._sort_col: str = "score"
         self._sort_reverse: bool = True
+        # 项目聚合报告（项目视角主体卡 + 贡献归因榜的基准分）。由 update() 传入。
+        self._aggregate = None
+        # 当前视角：project=贡献归因榜+项目概览，session=名次榜+会话构成。
+        self._view_mode: str = "project"
+        # 程序化设置 treeview 选中会触发 <<TreeviewSelect>>；置位时忽略回调，
+        # 只让「用户真实点击」翻转视角，避免排序/视角同步造成的重入循环。
+        self._suppress_select = False
 
         # -- Tier summary bar (top, 可折叠) --
         grade_sec = CollapsibleSection(parent, "评级分布",
@@ -1332,8 +1339,11 @@ class ScoreRankingView:
         paned.add(decomp_frame, minsize=340)
 
         # -- Treeview with 可折叠标题 --
-        tree_sec = CollapsibleSection(table_frame, "会话排名", theme.GROUP_COLORS["G2"])
-        cols = ("rank", "session", "score_val", "tier")
+        self._tree_sec = tree_sec = CollapsibleSection(table_frame, "会话排名",
+                                                       theme.GROUP_COLORS["G2"])
+        # delta 列（贡献Δ = 会话分 − 项目聚合分）只在项目视角显示，用
+        # displaycolumns 切换列集，无需重建 Treeview。
+        cols = ("rank", "session", "score_val", "delta", "tier")
         self._tree = ttk.Treeview(tree_sec.content, columns=cols, show="headings",
                                   selectmode="browse", height=20)
         self._tree.heading("rank",    text="#",    anchor="center",
@@ -1342,11 +1352,14 @@ class ScoreRankingView:
                            command=lambda: self._sort_by("session"))
         self._tree.heading("score_val", text=_SCORE_SHORT, anchor="e",
                            command=lambda: self._sort_by("score"))
+        self._tree.heading("delta", text="贡献Δ", anchor="e",
+                           command=lambda: self._sort_by("delta"))
         self._tree.heading("tier",   text="等级", anchor="center",
                            command=lambda: self._sort_by("tier"))
         self._tree.column("rank",     width=40,  minwidth=30,  stretch=False, anchor="center")
         self._tree.column("session",  width=140, minwidth=80,  stretch=True,  anchor="w")
         self._tree.column("score_val", width=70,  minwidth=50,  stretch=False, anchor="e")
+        self._tree.column("delta",    width=64,  minwidth=48,  stretch=False, anchor="e")
         self._tree.column("tier",    width=70,  minwidth=50,  stretch=False, anchor="center")
 
         sb = ttk.Scrollbar(tree_sec.content, orient="vertical", command=self._tree.yview)
@@ -1363,17 +1376,21 @@ class ScoreRankingView:
         for _tname, _thex in theme.GRADE_HEX.items():
             self._tree.tag_configure(f"tier_{_tname}", foreground=_thex)
 
+        # 默认（项目视角）显示贡献Δ列；会话视角切到名次榜时隐藏。
+        self._apply_displaycolumns()
+
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         # -- Decompose panel (ScrollFrame with group headers) --
         decomp_sf = ScrollFrame(decomp_frame, bg=theme.BG)
         decomp_sf.canvas.pack(fill="both", expand=True)
         self._decomp_inner = decomp_sf.inner
-        self._build_decompose_empty()
+        self._draw_decompose()
 
     # -- public API -----------------------------------------------------------
 
-    def update(self, reports) -> None:
+    def update(self, reports, aggregate=None) -> None:
+        self._aggregate = aggregate
         scored = [r for r in reports if r.score is not None]
         scored.sort(key=lambda r: r.score, reverse=True)
         # 无综合效率分（如 no_loc 或会话无净增行/成本）时回退按 TCER 排名。
@@ -1408,11 +1425,54 @@ class ScoreRankingView:
         # 参与均值的已评分会话数：仅 1 个时「与项目均值对比」退化为自我对比
         # （均值==自身），无信息量 → 该区块自动隐藏（见 _build_avg_section）。
         self._scored_count = sum(1 for r in reports if r.score is not None)
-        self._reports = list(reports)  # 供空态渲染项目视角洞察
+        self._reports = list(reports)  # 供项目视角渲染
         self._current_report = None
         self._grade_filter = None
+        self._apply_displaycolumns()
         self._rebuild_tree()
         self._draw_grade_bar()
+        self._draw_decompose()
+
+    def _apply_displaycolumns(self) -> None:
+        """按视角切换 Treeview 列集：项目视角=贡献归因榜（含贡献Δ列），
+        会话视角=名次榜（隐藏Δ列，聚焦定位当前会话）。"""
+        if self._view_mode == "project" and not self._fallback_tcer:
+            cols = ("rank", "session", "score_val", "delta", "tier")
+            self._tree_sec.set_title("贡献归因榜（谁拉高/拉低项目分）")
+        else:
+            cols = ("rank", "session", "score_val", "tier")
+            self._tree_sec.set_title("会话排名")
+        self._tree.configure(displaycolumns=cols)
+
+    def set_view_mode(self, mode: str, report=None) -> None:
+        """由控制器按视角切换驱动（对齐指标分类/模型模型对比）。
+
+        视角 = 分析单元的切换，不是「选没选行」：
+        - session 视角：左表为名次榜（定位当前会话），右栏 = 该会话构成拆解 + 会话洞察。
+        - project 视角：左表为贡献归因榜（每行标注该会话把项目分拉高↑/拉低↓多少，
+          按贡献Δ排序），右栏 = 项目聚合分/等级/三轴/离散度 + 项目级系统性洞察。
+        """
+        self._view_mode = "session" if (mode == "session" and report is not None) else "project"
+        if self._view_mode == "session":
+            self._current_report = report
+            iid = str(id(report))
+            self._suppress_select = True
+            try:
+                if self._tree.exists(iid):
+                    self._tree.selection_set(iid)
+                    self._tree.see(iid)
+            finally:
+                self._suppress_select = False
+        else:
+            self._current_report = None
+            self._suppress_select = True
+            try:
+                self._tree.selection_remove(*self._tree.selection())
+            finally:
+                self._suppress_select = False
+        # 视角变了 → 列集与排序默认值都要跟着换（贡献榜默认按Δ拖累排前）。
+        self._apply_displaycolumns()
+        self._rebuild_tree()
         self._draw_decompose()
 
     # -- grade bar ------------------------------------------------------------
@@ -1469,36 +1529,68 @@ class ScoreRankingView:
         self._tree.delete(*self._tree.get_children())
         items = [(l, c, g, r) for l, c, g, r in self._ranking
                  if not self._grade_filter or g == self._grade_filter]
+        # 贡献Δ = 会话分 − 项目聚合分（仅项目视角、非 TCER 回退时可算）。
+        agg_score = getattr(self._aggregate, "score", None)
+        show_delta = (self._view_mode == "project" and not self._fallback_tcer
+                      and agg_score is not None)
+
+        def _delta(r):
+            return (r.score - agg_score) if (show_delta and r.score is not None) else None
+
         # Apply sort. Index into (label, score, tier, report) tuple.
         col_map = {"rank": 1, "session": 0, "score": 1, "tier": 2}
-        if self._sort_col in col_map:
+        if self._sort_col == "delta":
+            # 贡献榜默认排序：最拖累（Δ 最负）排最前；无 Δ 的沉底。
+            items.sort(key=lambda t: (_delta(t[3]) is None,
+                                      _delta(t[3]) if _delta(t[3]) is not None else 0.0),
+                       reverse=self._sort_reverse)
+        elif self._sort_col in col_map:
             idx = col_map[self._sort_col]
             items.sort(key=lambda t: t[idx], reverse=self._sort_reverse)
         # 回退到 TCER 排名时值列用 TCER 格式，否则用综合效率分格式。
         val_key = "tcer" if self._fallback_tcer else "score"
         for rank, (label, val, tier, report) in enumerate(items, 1):
             tag = f"tier_{tier}" if tier else ""
+            d = _delta(report)
+            d_txt = "—" if d is None else f"{d:+.1f}"
             self._tree.insert("", "end",
-                              values=(rank, label, format_value(val_key, val), tier),
+                              values=(rank, label, format_value(val_key, val), d_txt, tier),
                               tags=(tag,),
                               iid=str(id(report)))
-        # Restore selection if report still visible
+        # Restore selection if report still visible（程序化选中，勿触发翻转回调）
         if self._current_report:
             iid = str(id(self._current_report))
             if self._tree.exists(iid):
-                self._tree.selection_set(iid)
-                self._tree.see(iid)
+                self._suppress_select = True
+                try:
+                    self._tree.selection_set(iid)
+                    self._tree.see(iid)
+                finally:
+                    self._suppress_select = False
 
     def _on_tree_select(self, _event=None) -> None:
+        if self._suppress_select:
+            return  # 程序化选中（排序重建/视角同步），非用户点击，不翻转视角
         sel = self._tree.selection()
         if not sel:
             return
         iid = int(sel[0])
         for label, val, tier, report in self._ranking:
             if id(report) == iid:
+                # 选中未变（Tk 的 <<TreeviewSelect>> 是 idle 队列异步投递，程序化
+                # selection_set 后 _suppress_select 已在 finally 复位，延迟到达的
+                # 事件会漏过守卫）→ 直接返回，避免重复 _draw_decompose 的 destroy 递归。
+                if report is self._current_report:
+                    return
+                # 点行 = 仅选中该会话，不翻转视角（视角只由左上角分段控件切）。
+                # 会话视角下 → 右栏刷新为该会话构成；项目视角下 → 纯导航高亮，
+                # 右栏保持项目概览不变。
                 self._current_report = report
-                self._draw_decompose()
-                if self._controller:
+                if self._view_mode == "session":
+                    self._draw_decompose()
+                # 通知控制器同步选中的 sid（on_select_session 按当前 view_mode
+                # 决定是否刷新会话相关面板；不会强行翻转视角）。
+                if self._controller is not None:
                     sid = report.meta.session_id or report.meta.path.stem
                     self._controller.on_select_session(sid)
                 return
@@ -1518,35 +1610,21 @@ class ScoreRankingView:
             self._sort_reverse = not self._sort_reverse
         else:
             self._sort_col = col
-            self._sort_reverse = (col == "score")  # 综合效率分 desc by default
+            # 综合效率分默认降序；贡献Δ 默认升序（最拖累/最负排最前）。
+            self._sort_reverse = (col == "score")
         self._rebuild_tree()
 
     # -- Decompose panel (ScrollFrame with group headers) ----------------------
 
-    def _build_decompose_empty(self) -> None:
-        """空态（未选会话）：展示项目视角的洞察与意见，再提示点选单会话切到会话视角。"""
-        for w in self._decomp_inner.winfo_children():
-            w.destroy()
-        reports = getattr(self, "_reports", None) or []
-        proj = project_insights(reports)
-        if proj:
-            sec = CollapsibleSection(self._decomp_inner,
-                                     "\u6d1e\u5bdf\u4e0e\u610f\u89c1 (\u9879\u76ee)",
-                                     theme.GROUP_COLORS["G6"], expand=True)
-            wrap = tk.Frame(sec.content, bg=theme.PANEL, padx=6, pady=4)
-            wrap.pack(fill="x", pady=(0, 1))
-            self._render_insight_items(wrap, proj)
-        tk.Label(self._decomp_inner,
-                 text=f"\u2190 \u70b9\u9009\u5de6\u4fa7\u4f1a\u8bdd\uff0c\u770b\u5355\u6b21{_SCORE_NAME}\u7684\u6784\u6210\u4e0e\u5efa\u8bae",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                 justify="left", anchor="w", wraplength=320, padx=8, pady=10).pack(fill="x")
     def _draw_decompose(self) -> None:
         for w in self._decomp_inner.winfo_children():
             w.destroy()
 
+        # 项目视角：右栏是项目这个实体的画像（聚合分/等级/三轴+离散度 + 系统性洞察），
+        # 而不是「会话视角的空态」。会话视角：选中会话的构成拆解 + 会话洞察。
         report = self._current_report
-        if report is None:
-            self._build_decompose_empty()
+        if self._view_mode == "project" or report is None:
+            self._draw_project_overview()
             return
 
         axes = score_decompose(report)
@@ -1560,6 +1638,149 @@ class ScoreRankingView:
         self._build_factor_section(axes, report)
         self._build_avg_section(axes)
         self._build_insights_section(report)
+
+    # -- 项目视角右栏：项目实体画像 -------------------------------------------
+    def _draw_project_overview(self) -> None:
+        """项目视角右栏：项目聚合分/等级 + 三轴（含跨会话离散度）+ 项目级系统性洞察。
+
+        这是「项目视角」的主答案——项目整体处在什么水平、是什么把分数拉高/拉低，
+        对齐会话视角的「会话构成」结构（概览 → 构成 → 洞察）。
+        """
+        reports = getattr(self, "_reports", None) or []
+        self._build_project_summary_card()
+        agg_axes = score_decompose(self._aggregate) if self._aggregate is not None else None
+        if agg_axes is not None:
+            self._build_project_factor_section(agg_axes, reports)
+        # 项目级系统性洞察（≥40% 会话复现的 drag / ≥60% 的 good）。
+        sec = CollapsibleSection(self._decomp_inner, "洞察与意见 (项目)",
+                                 theme.GROUP_COLORS["G6"], expand=True)
+        wrap = tk.Frame(sec.content, bg=theme.PANEL, padx=6, pady=4)
+        wrap.pack(fill="x", pady=(0, 1))
+        self._render_insight_items(wrap, project_insights(reports))
+        # 引导：点会话行钻取单会话构成。
+        tk.Label(self._decomp_inner,
+                 text=f"\u2190 \u70b9\u9009\u5de6\u4fa7\u4f1a\u8bdd\u884c\uff0c\u94bb\u53d6\u5355\u6b21{_SCORE_NAME}\u7684\u6784\u6210\u4e0e\u5efa\u8bae",
+                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                 justify="left", anchor="w", wraplength=320, padx=8, pady=8).pack(fill="x")
+
+    def _build_project_summary_card(self) -> None:
+        """项目主体卡：项目聚合分 + 等级 + 评分覆盖率 + 会话数。项目视角缺失已久的主答案。"""
+        sec = CollapsibleSection(self._decomp_inner, "项目概览",
+                                 theme.GROUP_COLORS["G6"], expand=True)
+        card = tk.Frame(sec.content, bg=theme.PANEL, padx=10, pady=8)
+        card.pack(fill="x", pady=(0, 1))
+
+        agg = self._aggregate
+        n_total = len(getattr(self, "_reports", None) or [])
+        n_scored = getattr(self, "_scored_count", 0)
+        agg_score = getattr(agg, "score", None)
+        agg_tier = getattr(agg, "tier", None) or ""
+
+        if agg_score is None:
+            tk.Label(card, text="项目暂无综合效率分（会话缺净增行或成本数据）",
+                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                     anchor="w").pack(anchor="w")
+            return
+
+        row = tk.Frame(card, bg=theme.PANEL)
+        row.pack(fill="x")
+        name_lbl = tk.Label(row, text=f"项目{_SCORE_NAME}", bg=theme.PANEL, fg=theme.MUTED,
+                            font=theme.FONT_UI_SMALL, cursor="hand2")
+        name_lbl.pack(side="left")
+        if _SCORE_TIP:
+            Tooltip(name_lbl, _SCORE_TIP)
+        tk.Label(row, text=format_value("score", agg_score), bg=theme.PANEL,
+                 fg=theme.GRADE_HEX.get(agg_tier, theme.FG),
+                 font=("Consolas", 16, "bold")).pack(side="left", padx=(4, 8))
+        if agg_tier:
+            tk.Label(row, text=agg_tier, bg=theme.GRADE_HEX.get(agg_tier, theme.MUTED),
+                     fg=theme.FG_WHITE, font=theme.FONT_UI_SMALL_BOLD,
+                     padx=6, pady=1).pack(side="left", padx=(0, 8))
+        # 评分覆盖率：多少会话真正参与了评分（无产出轴的会话不计分）。
+        tk.Label(row, text=f"评分覆盖 {n_scored}/{n_total}", bg=theme.PANEL,
+                 fg=theme.MUTED, font=theme.FONT_UI).pack(side="right")
+
+        tk.Label(card, text="＝ 全项目聚合的产出/成本/质量三轴加权（分子和÷分母和口径）",
+                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                 anchor="w").pack(anchor="w", pady=(2, 0))
+        if getattr(agg, "tcer", None) is not None:
+            tk.Label(card, text=f"项目 TCER {agg.tcer:.1f} 行/百万", bg=theme.PANEL,
+                     fg=theme.FG, font=theme.FONT_UI_SMALL, anchor="e").pack(anchor="e")
+
+    def _build_project_factor_section(self, agg_axes, reports) -> None:
+        """项目三轴构成：聚合轴值 + 会话离散度（min–median–max 须线），
+        一眼看出哪条轴是短板、以及会话间是否分化严重。"""
+        sec = CollapsibleSection(self._decomp_inner, "得分构成（三轴 · 含会话离散度）",
+                                 theme.GROUP_COLORS["G2"], expand=True)
+        grid = tk.Frame(sec.content, bg=theme.PANEL, padx=4, pady=4)
+        grid.pack(fill="x", pady=(0, 1))
+
+        # 各轴收集所有已评分会话的分值，算 min/median/max。
+        per_axis: dict[str, list[float]] = {a.key: [] for a in SCORE_AXES}
+        for r in reports:
+            d = score_decompose(r)
+            if d is None:
+                continue
+            for k in per_axis:
+                v = d.get(k)
+                if v is not None:
+                    per_axis[k].append(v)
+
+        weights = metrics.SCORE_WEIGHTS
+        for axis in SCORE_AXES:
+            val = agg_axes.get(axis.key, 0.0)
+            vals = sorted(per_axis.get(axis.key) or [])
+            wt = weights.get(axis.key)
+            wt_txt = f"权重{wt:.0%}" if wt is not None else ""
+            axis_tip = (f"{axis.name}（{axis.formula}）\n{axis.tip}" if axis.tip else None)
+
+            row = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=4)
+            row.pack(fill="x")
+            name_lbl = tk.Label(row, text=axis.name, bg=theme.PANEL, fg=theme.FG,
+                                font=theme.FONT_UI_SMALL, width=8, anchor="w",
+                                cursor="hand2")
+            name_lbl.pack(side="left")
+            color = theme.VALUE_GOOD if val >= SCORE_AXIS_NEUTRAL else theme.VALUE_BAD
+            val_lbl = tk.Label(row, text=format_axis(val), bg=theme.PANEL, fg=color,
+                               font=theme.FONT_VALUE, width=5, anchor="e")
+            val_lbl.pack(side="left", padx=4)
+            if axis_tip:
+                Tooltip(name_lbl, axis_tip)
+                Tooltip(val_lbl, axis_tip)
+
+            # Bar 底 + min–max 须线 + 聚合值标记 + 中性参考线 0.5。
+            bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=8)
+            bar_bg.pack(side="left", fill="x", expand=True, padx=4)
+            if vals:
+                lo, hi = vals[0], vals[-1]
+                tk.Frame(bar_bg, bg=theme.AXIS_SPREAD, height=8).place(
+                    relx=min(1.0, max(0.0, lo)), rely=0,
+                    relwidth=min(1.0, max(0.0, hi)) - min(1.0, max(0.0, lo)),
+                    relheight=1.0)
+            tk.Frame(bar_bg, bg=color, width=2, height=8).place(
+                relx=min(1.0, max(0.0, val)), rely=0, relheight=1.0)
+            tk.Frame(bar_bg, bg="#555555", width=1, height=8).place(
+                relx=0.5, rely=0, relheight=1.0)
+
+            # 离散度文字：min–median–max（会话间分化提示）
+            if len(vals) >= 2:
+                med = vals[len(vals) // 2]
+                spread = f"{format_axis(vals[0])}–{format_axis(med)}–{format_axis(vals[-1])}"
+            else:
+                spread = wt_txt
+            tk.Label(row, text=spread, bg=theme.PANEL, fg=theme.MUTED,
+                     font=(theme.FONT_MONO_NAME, 7)).pack(side="left", padx=4)
+
+        prod_frame = tk.Frame(sec.content, bg=theme.PANEL, padx=10, pady=6)
+        prod_frame.pack(fill="x", pady=(0, 1))
+        tk.Label(prod_frame, text="加权合成 =", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI).pack(side="left")
+        agg = self._aggregate
+        tk.Label(prod_frame,
+                 text=f"项目{_SCORE_NAME}  {format_value('score', getattr(agg, 'score', None))}",
+                 bg=theme.PANEL,
+                 fg=theme.GRADE_HEX.get(getattr(agg, "tier", None) or "", theme.FG),
+                 font=theme.FONT_VALUE).pack(side="left", padx=4)
 
     def _build_summary_card(self, report) -> None:
         """Summary card: 综合效率分 + tier + rank, matching group header style."""
@@ -1730,9 +1951,21 @@ class ScoreRankingView:
         # kind -> (章节标题, 前景色, 行首标记)
         "good": ("亮点", theme.VALUE_GOOD, "\u2713"),
         "drag": ("拖累项", theme.VALUE_BAD, "!"),
+        "cost": ("金额", theme.VIEW_PROJECT, "\uffe5"),  # 橙黄 ¥ 标记：花钱相关
         "tip": ("快速改进", theme.ACCENT, "\u2192"),
     }
-    _INSIGHT_ORDER = ("good", "drag", "tip")
+    _INSIGHT_ORDER = ("good", "drag", "cost", "tip")
+
+    @staticmethod
+    def _wrap_to_width(label, *, indent: int = 0) -> None:
+        """让 Label 的 wraplength 跟随其实际分配宽度自适应（消除固定 300px 造成的
+        无意义窄折行 + 右侧留白）。绑 <Configure>：文字按容器真实宽度换行，窗口/
+        分栏变宽时自动填满。indent 扣除左侧缩进/色条占位。"""
+        def _on_cfg(event, lb=label, ind=indent):
+            w = event.width - ind - 6  # 6px 余量，防紧贴右缘
+            if w > 40 and abs(int(lb.cget("wraplength")) - w) > 4:
+                lb.config(wraplength=w)
+        label.bind("<Configure>", _on_cfg)
 
     def _render_insight_items(self, parent, items) -> None:
         """\u628a\u4e00\u7ec4 Insight \u6309 \u4eae\u70b9/\u62d6\u7d2f\u9879/\u5feb\u901f\u6539\u8fdb \u5206\u7ec4\u6e32\u67d3\u5230 parent\u3002
@@ -1744,7 +1977,7 @@ class ScoreRankingView:
         collapsed = getattr(self, "_insight_collapsed", None)
         if collapsed is None:
             collapsed = self._insight_collapsed = {"good": True}  # \u4eae\u70b9\u9ed8\u8ba4\u6298\u53e0
-        by_kind = {"good": [], "drag": [], "tip": []}
+        by_kind = {"good": [], "drag": [], "cost": [], "tip": []}
         for it in items:
             by_kind.get(it.kind, by_kind["tip"]).append(it)
         rendered = False
@@ -1775,21 +2008,31 @@ class ScoreRankingView:
                 body_col = tk.Frame(row, bg=theme.PANEL)
                 body_col.pack(side="left", fill="x", expand=True, padx=(8, 0))
                 # \u6807\u9898\u884c\uff1a\u6807\u8bb0 + \u7ed3\u8bba
-                tk.Label(body_col, text=f"{mark} {it.title}", bg=theme.PANEL, fg=color,
-                         font=theme.FONT_UI, anchor="w", justify="left",
-                         wraplength=300).pack(fill="x")
+                title_lbl = tk.Label(body_col, text=f"{mark} {it.title}", bg=theme.PANEL,
+                                     fg=color, font=theme.FONT_UI, anchor="w",
+                                     justify="left")
+                title_lbl.pack(fill="x")
+                self._wrap_to_width(title_lbl, indent=0)
                 if it.evidence:
-                    tk.Label(body_col, text=it.evidence, bg=theme.PANEL,
-                             fg=theme.MUTED, font=theme.FONT_UI, anchor="w",
-                             justify="left", wraplength=300).pack(fill="x", padx=(14, 0))
+                    ev_lbl = tk.Label(body_col, text=it.evidence, bg=theme.PANEL,
+                                     fg=theme.MUTED, font=theme.FONT_UI, anchor="w",
+                                     justify="left")
+                    ev_lbl.pack(fill="x", padx=(14, 0))
+                    self._wrap_to_width(ev_lbl, indent=14)
                 if it.action:
-                    tk.Label(body_col, text=f"\u2192 {it.action}", bg=theme.PANEL,
-                             fg=theme.FG, font=theme.FONT_UI, anchor="w",
-                             justify="left", wraplength=290).pack(fill="x", padx=(14, 0))
+                    act_lbl = tk.Label(body_col, text=f"\u2192 {it.action}", bg=theme.PANEL,
+                                      fg=theme.FG, font=theme.FONT_UI, anchor="w",
+                                      justify="left")
+                    act_lbl.pack(fill="x", padx=(14, 0))
+                    self._wrap_to_width(act_lbl, indent=14)
+            # body 必须锚定在自己 header 的正下方（after=header）。否则 pack 会把它
+            # 追加到 parent 末尾——折叠再展开某组后，其正文会跳到整个面板最底部、
+            # 脱离所属标题（金额组尤其明显，因其后还有「快速改进」组）。
             if not is_collapsed:
-                body.pack(fill="x")
+                body.pack(fill="x", after=header)
 
-            def _toggle(_e=None, k=kind, b=body, hl=head_lbl, ht=head_txt, n=len(group), col=color):
+            def _toggle(_e=None, k=kind, b=body, hd=header, hl=head_lbl, ht=head_txt,
+                        n=len(group), col=color):
                 now = not self._insight_collapsed.get(k, False)
                 self._insight_collapsed[k] = now
                 arr = "\u25b6" if now else "\u25bc"
@@ -1797,7 +2040,7 @@ class ScoreRankingView:
                 if now:
                     b.pack_forget()
                 else:
-                    b.pack(fill="x")
+                    b.pack(fill="x", after=hd)
             header.bind("<Button-1>", _toggle)
             head_lbl.bind("<Button-1>", _toggle)
         if not rendered:
