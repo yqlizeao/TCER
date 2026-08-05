@@ -8,7 +8,7 @@ is grounded, reproducible, and testable.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from tcer.core.models import SessionReport
 
@@ -24,6 +24,7 @@ class Insight:
 
 class _TH:
     CHURN_HIGH = 0.30
+    CHURN_SEVERE = 0.60       # 返工极高：几乎在推倒重来
     CHURN_LOW = 0.05
     TOOL_ERR_HIGH = 0.15
     TOOL_ERR_LOW = 0.02
@@ -57,6 +58,58 @@ class _TH:
 
 def _pct(x):
     return "-" if x is None else f"{x * 100:.0f}%"
+
+
+def _basename(path: str) -> str:
+    """取路径末段文件名（证据里只展示文件名，不刷屏整条绝对路径）。"""
+    if not path:
+        return ""
+    return path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _top_churn_file(report) -> tuple[str, int] | None:
+    """本会话被改次数最多的文件 → (文件名, 次数)。无数据返回 None。"""
+    d = getattr(report, "high_churn_details", None)
+    if not d:
+        return None
+    path, cnt = max(d.items(), key=lambda kv: kv[1])
+    return _basename(path), cnt
+
+
+def _top_error_tool(report) -> tuple[str, int] | None:
+    """本会话出错次数最多的工具 → (工具名, 次数)。无数据返回 None。"""
+    d = getattr(report.usage, "tool_errors_by_tool", None)
+    if not d:
+        return None
+    tool, cnt = max(d.items(), key=lambda kv: kv[1])
+    return tool, cnt
+
+
+def _churn_copy(churn: float) -> tuple[str, str]:
+    """按返工严重度给不同措辞（避免所有高返工会话都是同一句呆板文案）。"""
+    if churn >= _TH.CHURN_SEVERE:
+        return ("返工严重：AI 几乎在推倒重来",
+                "这种量级的返工说明方向从一开始就没对齐。下次先让它讲清整体思路、"
+                "你点头后再落笔；把大目标拆成能独立验证的小步，一步跑通再下一步。")
+    if churn >= 0.45:
+        return ("返工偏多：改了又推翻的比例不低",
+                "多半是需求或方案中途在变。开工前把「要什么、不要什么」一次说清，"
+                "让它用 Edit 局部改而非整文件重写，能明显减少回炉。")
+    return ("有一定返工：AI 重写了部分自己刚写的代码",
+            "可以让它改动前先说方案、小步推进；改已有文件优先用 Edit 局部替换。")
+
+
+def _err_copy(rate: float) -> tuple[str, str]:
+    """按工具错误率严重度给不同措辞。"""
+    if rate >= 0.35:
+        return ("AI 的命令/工具调用频繁失败",
+                "失败率这么高通常是运行环境没对齐。先把「怎么跑」写清楚："
+                "命令、目录、依赖装法——写进项目说明，别让它一遍遍试错。")
+    if rate >= 0.15:
+        return ("AI 敲的命令时常报错",
+                "先告诉它这个项目怎么跑（命令、目录、依赖装没装）；"
+                "把常用命令写进项目说明，省得反复试。")
+    return ("偶有工具调用失败", "留意失败集中的那个工具，确认它的前置条件。")
 
 
 # key -> (title, action). evidence built per-call with live numbers via .format().
@@ -219,8 +272,12 @@ def session_insights(report: SessionReport) -> list[Insight]:
     churn = report.churn_ratio
     if churn is not None:
         if churn > _TH.CHURN_HIGH:
-            t, a = _c("churn_high")
-            drag.append(Insight("drag", t, _c("churn_high_ev")[0].format(v=_pct(churn)), a, "churn"))
+            t, a = _churn_copy(churn)   # 按严重度分级措辞
+            ev = _c("churn_high_ev")[0].format(v=_pct(churn))
+            top = _top_churn_file(report)
+            if top and top[1] >= 3:  # 具体证据：改得最多的那个文件
+                ev += f"；改得最多的是 {top[0]}（{top[1]} 次）"
+            drag.append(Insight("drag", t, ev, a, "churn"))
         elif churn < _TH.CHURN_LOW and (report.net_loc or 0) > 0:
             t, a = _c("churn_low")
             good.append(Insight("good", t, _c("churn_low_ev")[0].format(v=_pct(churn)), a, "churn"))
@@ -229,8 +286,12 @@ def session_insights(report: SessionReport) -> list[Insight]:
     err = report.tool_error_rate
     if err is not None and total_tools >= _TH.TOOL_MIN_CALLS:
         if err > _TH.TOOL_ERR_HIGH:
-            t, a = _c("err_high")
-            drag.append(Insight("drag", t, _c("err_ev")[0].format(v=_pct(err), n=total_tools), a, "tool_error_rate"))
+            t, a = _err_copy(err)   # 按严重度分级措辞
+            ev = _c("err_ev")[0].format(v=_pct(err), n=total_tools)
+            top = _top_error_tool(report)
+            if top and top[1] >= 2:  # 具体证据：出错最多的工具
+                ev += f"；出错最多的是 {top[0]}（{top[1]} 次）"
+            drag.append(Insight("drag", t, ev, a, "tool_error_rate"))
         elif err < _TH.TOOL_ERR_LOW:
             t, a = _c("err_low")
             good.append(Insight("good", t, _c("err_ev")[0].format(v=_pct(err), n=total_tools), a, "tool_error_rate"))
@@ -375,6 +436,37 @@ _MIN_SESSIONS = 2          # 少于 2 个已评分会话无跨会话信号
 _MIN_COUNT = 2            # 至 2 个会话出现才纳入
 
 
+_TOOL_FAIL_MIN_TOTAL = 10      # 跨会话工具失败总数达此才值得提
+_TOOL_FAIL_DOMINANT = 0.5      # 单个工具占失败的比例达此即「集中在该工具」
+# 按工具给可执行建议（照着做就行，针对最常失败的工具）
+_TOOL_FAIL_ADVICE = {
+    "Bash": "命令老失败多半是路径/环境/依赖没对齐——把常用命令、工作目录、依赖装法写进项目说明（CLAUDE.md / AGENTS.md），少让 AI 反复试。",
+    "Edit": "Edit 失败常因目标文本没匹配上——让 AI 改前先读该文件确认原文，或改用更小的唯一定位串。",
+    "Read": "Read 失败多是路径不对或文件太大——先 Grep/Glob 定位真实路径，大文件分段读。",
+    "Grep": "Grep 失败常因正则不合法或路径不存在——用更简单的字面量搜索，先确认目录存在。",
+    "Write": "Write 失败常因目录不存在或权限——先确认父目录，必要时先建目录。",
+}
+
+
+def _tool_failure_insight(reports: list[SessionReport]) -> Insight | None:
+    """跨会话把 tool_errors_by_tool 求和，若失败集中在某工具且总量够大，
+    产出一条带**工具名 + 具体次数**的摩擦洞察（对标 /insights 的具体证据）。"""
+    agg: dict[str, int] = {}
+    for r in reports:
+        for tool, cnt in (getattr(r.usage, "tool_errors_by_tool", None) or {}).items():
+            agg[tool] = agg.get(tool, 0) + cnt
+    total = sum(agg.values())
+    if total < _TOOL_FAIL_MIN_TOTAL:
+        return None
+    tool, cnt = max(agg.items(), key=lambda kv: kv[1])
+    if cnt / total < _TOOL_FAIL_DOMINANT:
+        return None  # 失败分散，无单一集中点，不硬凑
+    advice = _TOOL_FAIL_ADVICE.get(
+        tool, f"检查 {tool} 调用的前置条件，减少重复失败。")
+    ev = f"{total} 次工具失败里，{cnt} 次出在 {tool}（占 {cnt / total * 100:.0f}%）"
+    return Insight("drag", f"工具失败集中在 {tool}", ev, advice, "tool_error_rate")
+
+
 def project_insights(reports: list[SessionReport]) -> list[Insight]:
     """跨会话聚合洞察：返回按普遍度排序的系统性 drag + 稳定 good。
 
@@ -417,6 +509,13 @@ def project_insights(reports: list[SessionReport]) -> list[Insight]:
     drags.sort(key=lambda t: t[0], reverse=True)
     goods.sort(key=lambda t: t[0], reverse=True)
     out = [i for _, i in drags] + [i for _, i in goods]
+
+    # 跨会话工具失败归纳（仿 /insights 的「Command Failed 136 / Bash」）：把所有
+    # 会话的 tool_errors_by_tool 求和，若某工具失败集中且总量够大，给具体摩擦洞察。
+    frict = _tool_failure_insight(reports)
+    if frict is not None:
+        out.append(frict)
+
     if not out:
         out = [Insight(
             "tip", "暂无跨会话的系统性模式",
@@ -424,4 +523,324 @@ def project_insights(reports: list[SessionReport]) -> list[Insight]:
             "点选左侧单个会话，查看该会话的具体洞察与改进建议。",
             "score",
         )]
+    return out
+
+
+# ============================================================
+# 活动概览（确定性版 "What You Work On" / "How You Use CC" 的可量化部分）
+# 说明：Claude Code /insights 的主题聚类叙事需 LLM 读懂会话语义——TCER 是纯离线
+# 确定性引擎，做不了也不做。这里只做**有真实数据支撑的可量化聚合**：任务类型、
+# 工具使用、活跃时段、会话规模、总量。不虚构叙事、不臆断主题。
+# ============================================================
+
+
+@dataclass
+class ActivityOverview:
+    n_sessions: int = 0
+    task_type_dist: list = field(default_factory=list)   # [(标签, 数量)]
+    top_tools: list = field(default_factory=list)         # [(工具名, 次数)]
+    time_of_day: list = field(default_factory=list)       # [(时段, 消息数)]
+    size_dist: list = field(default_factory=list)         # [(规模档, 会话数)]
+    total_net_loc: int = 0
+    total_tool_calls: int = 0
+
+
+_TASK_TYPE_LABELS = {
+    "code_creation": "代码创作",
+    "code_maintenance": "代码维护",
+    "non_coding": "非编码",
+}
+
+_SIZE_BUCKETS = (("小 (<100 行)", 0, 100), ("中 (100–1k 行)", 100, 1000),
+                 ("大 (>1k 行)", 1000, None))
+
+
+def _time_bucket(hour: int) -> str:
+    if 6 <= hour < 12:
+        return "上午 (6–12)"
+    if 12 <= hour < 18:
+        return "下午 (12–18)"
+    if 18 <= hour < 24:
+        return "晚间 (18–24)"
+    return "凌晨 (0–6)"
+
+
+def activity_overview(reports: list[SessionReport]) -> ActivityOverview:
+    """项目会话的确定性活动画像——全部来自已有字段，无 LLM、无臆断。
+
+    汇总：任务类型分布、工具使用 top、活跃时段（按逐回合时间戳）、会话规模分档、
+    净增行/工具调用总量。供 GUI「活「活动概览」区块展示。
+    """
+    import collections
+    import datetime as _dt
+
+    ov = ActivityOverview(n_sessions=len(reports))
+    tt = collections.Counter()
+    tools = collections.Counter()
+    tod = collections.Counter()
+    sizes = collections.Counter()
+    for r in reports:
+        key = r.task_category or r.task_type or "unknown"
+        tt[_TASK_TYPE_LABELS.get(key, key)] += 1
+        for tool, cnt in (r.usage.tool_calls or {}).items():
+            tools[tool] += cnt
+            ov.total_tool_calls += cnt
+        for ts in getattr(r.usage, "turn_stats", None) or []:
+            if getattr(ts, "ts", None):
+                tod[_time_bucket(_dt.datetime.fromtimestamp(ts.ts / 1000).hour)] += 1
+        nl = r.net_loc or 0
+        ov.total_net_loc += nl
+        for label, lo, hi in _SIZE_BUCKETS:
+            if nl >= lo and (hi is None or nl < hi):
+                sizes[label] += 1
+                break
+
+    ov.task_type_dist = tt.most_common()
+    ov.top_tools = tools.most_common(6)
+    # 时段按固定顺序（非频非频次）展示，便于阅读
+    _order = ["上午 (6–12)", "下午 (12–18)", "晚间 (18–24)", "凌晨 (0–6)"]
+    ov.time_of_day = [(k, tod[k]) for k in _order if tod[k]]
+    ov.size_dist = [(label, sizes[label]) for label, _, _ in _SIZE_BUCKETS if sizes[label]]
+    return ov
+
+
+# ============================================================
+# 可复制的 CLAUDE.md 规则建议（确定性版 "Suggested CLAUDE.md Additions"）
+# 检测到的系统性 drag → 映射成一条可直接粘贴进 CLAUDE.md / AGENTS.md 的规则，
+# 附触发它的证据。规则文本由模式驱动，不调 LLM。
+# ============================================================
+
+
+@dataclass
+class ClaudeMdSuggestion:
+    rule: str        # 可直接复制进 CLAUDE.md 的规则文本
+    evidence: str    # 为什么建议它（触发的证据）
+    metric: str = ""
+
+
+# metric -> (规则块, 证据模板)。规则块是**可直接粘贴进 CLAUDE.md 的结构化规则***
+# （## 标题 + 具体条目），不是泛泛建议——对标 /insights 的 "Suggested CLAUDE.md
+# Additions"（如 "## Testing Requirements\n- Run the full test suite..."）。
+# 证据模板 {p} 为出现该 drag 的会话占比串。
+_CLAUDE_MD_RULES: dict[str, tuple[str, str]] = {
+    "churn": (
+        "## 代码修改纪律\n"
+        "- 动笔前先说明改动方案，得到确认后再写代码。\n"
+        "- 大改拆成多个小步，每步只改一处、改完立即自查。\n"
+        "- 修改已有代码用 Edit 局部替换，不要整文件 Write 重写。\n"
+        "- 不确定就先只做最小改动验证思路，别一次铺开。",
+        "{p} 的会话返工偏多（AI 反复重写自己刚写的代码）"),
+    "tool_error_rate": (
+        "## 运行环境约定\n"
+        "- 本项目的运行方式：在此写明常用命令、工作目录、依赖安装步骤。\n"
+        "- 执行命令前确认路径存在、依赖已装；失败先排查环境再重试。\n"
+        "- 不要反复用同一条会失败的命令试探。",
+        "{p} 的会话工具调用错误率偏高"),
+    "read_before_write": (
+        "## 先读后改\n"
+        "- 修改任何已存在的文件前，先 Read 该文件或 Grep 相关代码。\n"
+        "- 确认要改的位置与上下文后再动手，禁止未读先改。",
+        "{p} 的会话经常没读文件就动手改"),
+    "unseen_writes": (
+        "## 避免盲写覆盖\n"
+        "- 对已存在的文件一律用 Edit 增量修改。\n"
+        "- 仅新建文件才用 Write；改旧文件用 Write 整篇覆盖是禁止的。",
+        "{p} 的会话有整文件盲写覆盖"),
+    "edit_verify_ratio": (
+        "## 改完即验\n"
+        "- 每次写完或改完代码，立刻运行相关测试或命令确认没坏，再进行下一步。\n"
+        "- 不要把多处改动堆到最后才一次性验证。",
+        "{p} 的会话改完很少验证"),
+    "exploration_ratio": (
+        "## 先定位后修改\n"
+        "- 动手前先用 Grep/Glob 搜索定位相关代码，确认改的位置正确。\n"
+        "- 不要凭猜测直接修改。",
+        "{p} 的会话几乎不搜代码就动手"),
+    "test_loc_ratio": (
+        "## 测试要求\n"
+        "- 实现有规模的功能时，为关键逻辑补上测试用例。\n"
+        "- 优先测试先行：先写会失败的验收测试，再实现到测试通过。",
+        "{p} 的会话产出上规模却几乎没配测试"),
+    "bash_ratio": (
+        "## 优先读代码而非试命令\n"
+        "- 理解逻辑时优先直接读源码，不要靠一连串命令行反复试探。\n"
+        "- 命令只用于确认/验证，不作为主要的探索手段。",
+        "{p} 的会话过度依赖命令行试探"),
+}
+
+
+def claude_md_suggestions(reports: list[SessionReport]) -> list[ClaudeMdSuggestion]:
+    """把跨会话反复出现的系统性短板，转成可直接粘贴进 CLAUDE.md 的规则建议。
+
+    复用 project_insights 的普遍度口径（只对达到系统性阈值的 drag 生成规则），
+    规则文本查 _CLAUDE_MD_RULES 表（模式驱动，不调 LLM）。无系统性短板→返回 []。
+    """
+    scored = [r for r in reports if r.score is not None]
+    n = len(scored)
+    if n < _MIN_SESSIONS:
+        return []
+
+    # 统计每个 metric 上 drag 出现的会话数（每会话每 metric 最多计一次）
+    drag_count: dict[str, int] = {}
+    for r in scored:
+        seen: set[str] = set()
+        for it in session_insights(r):
+            if it.kind != "drag" or it.metric in seen:
+                continue
+            seen.add(it.metric)
+            drag_count[it.metric] = drag_count.get(it.metric, 0) + 1
+
+    out: list[tuple[int, ClaudeMdSuggestion]] = []
+    for metric, cnt in drag_count.items():
+        if metric not in _CLAUDE_MD_RULES:
+            continue
+        if cnt / n < _DRAG_PREVALENCE:
+            continue
+        rule, ev_tmpl = _CLAUDE_MD_RULES[metric]
+        ev = ev_tmpl.format(p=f"{cnt}/{n}（{cnt / n * 100:.0f}%）")
+        out.append((cnt, ClaudeMdSuggestion(rule, ev, metric)))
+    out.sort(key=lambda t: t[0], reverse=True)
+    return [s for _, s in out]
+
+# ============================================================
+# 值得一试（Features to Try）+ 前瞻工作流（On the Horizon）
+# 对标 /insights 的对应两节，但只给可粘贴的自然语言 prompt / 实践建议，不吐
+# 无法核实的配置片段（如 hooks JSON 的确切 schema 无法验证）——按「不臆断」原则，
+# 给 Claude Code 能自己正确落地的自然语言指令。触发全部基于真实聚合信号，无 LLM。
+# ============================================================
+
+
+@dataclass
+class Recommendation:
+    title: str        # 推荐点
+    why: str          # 为什么（触发它的真实证据）
+    prompt: str = ""  # 可直接粘贴给 Claude Code 的自然语言指令（可空）
+
+
+def _agg_signals(reports: list[SessionReport]) -> dict:
+    """聚合 Features/Horizon 判定用的真实信号（一次遍历）。"""
+    sig = {"n": len(reports), "tool_errors": 0, "big_sessions": 0,
+           "low_test_sessions": 0, "total_calls": 0, "high_churn_sessions": 0,
+           "low_rbw_sessions": 0, "unseen_sessions": 0, "ctx_high_sessions": 0,
+           "total_net_loc": 0}
+    for r in reports:
+        sig["tool_errors"] += getattr(r.usage, "tool_errors", 0) or 0
+        sig["total_calls"] += sum((r.usage.tool_calls or {}).values())
+        sig["total_net_loc"] += r.net_loc or 0
+        if (r.net_loc or 0) >= 1000:
+            sig["big_sessions"] += 1
+        tr = r.test_loc_ratio
+        if tr is not None and tr < _TH.TEST_RATIO_LOW and (r.net_loc or 0) >= _TH.NET_LOC_MIN_FOR_TEST:
+            sig["low_test_sessions"] += 1
+        ch = r.churn_ratio
+        if ch is not None and ch > _TH.CHURN_HIGH:
+            sig["high_churn_sessions"] += 1
+        rbw = r.read_before_write
+        if rbw is not None and rbw < _TH.RBW_LOW:
+            sig["low_rbw_sessions"] += 1
+        if (r.unseen_writes or 0) > _TH.UNSEEN_WRITES:
+            sig["unseen_sessions"] += 1
+        ctx = r.context_window_used_ratio
+        if ctx is not None and ctx > _TH.CTX_HIGH:
+            sig["ctx_high_sessions"] += 1
+    return sig
+
+
+def feature_suggestions(reports: list[SessionReport]) -> list[Recommendation]:
+    """针对检测到的摩擦，推荐可立即上手的实践 + 可粘贴 prompt。"""
+    if not reports:
+        return []
+    s = _agg_signals(reports)
+    out: list[Recommendation] = []
+
+    if s["tool_errors"] >= 10 or s["high_churn_sessions"] >= 2:
+        out.append(Recommendation(
+            "改完即测（每步验证）",
+            f"共 {s['tool_errors']} 次工具错误、{s['high_churn_sessions']} 个会话返工偏多——"
+            "把「改一处就跑一次」固化下来，能早发现自引 bug、少堆积返工。",
+            "从现在起：每次修改代码后，立刻运行相关测试或命令验证这次改动，"
+            "确认没坏再继续下一步。不要把多处改动堆到最后一次性验证。"))
+
+    if s["low_test_sessions"] >= 1:
+        out.append(Recommendation(
+            "测试先行（先写验收测试）",
+            f"{s['low_test_sessions']} 个有规模产出的会话几乎没配测试——先定义期望行为，"
+            "再让 AI 实现到测试通过，产出更可靠。",
+            "这个功能用测试先行的方式做：先根据我的描述写出会失败的验收测试，"
+            "我确认后你再实现代码直到测试全绿，中途不要改测试。"))
+
+    if s["n"] >= 5 or s["total_calls"] >= 500:
+        out.append(Recommendation(
+            "把重复流程固化成清单",
+            f"你已有 {s['n']} 个会话、{s['total_calls']} 次工具调用——把常做的多步流程"
+            "（如发布：测试→版本号→tag→推送）写成固定清单，让 AI 一步到位、不漏步。",
+            "以后每次发布都严格按此清单执行，缺一步要提醒我："
+            "1) 跑全量测试并确认通过 2) 更新版本号 3) 提交 4) 打 tag 5) 推送 tag 6) 确认发布产物。"))
+
+    if s["low_rbw_sessions"] >= 2:
+        out.append(Recommendation(
+            "先读后改（固定习惯）",
+            f"{s['low_rbw_sessions']} 个会话经常没读文件就动手——先读再改能少踩坑、少改错地方。",
+            "接下来每次修改文件前，先把目标文件（或相关代码）读一遍再动手；"
+            "找不到位置就先 Grep/Glob 定位，不要凭猜测直接改。"))
+
+    if s["unseen_sessions"] >= 2:
+        out.append(Recommendation(
+            "改旧文件只用 Edit",
+            f"{s['unseen_sessions']} 个会话出现整文件盲写覆盖——容易盖掉原内容、也让新增行数虚高。",
+            "改任何已存在的文件，一律用 Edit 局部替换，不要用 Write 整篇覆盖；"
+            "只有新建文件才用 Write。"))
+
+    if s["ctx_high_sessions"] >= 2:
+        out.append(Recommendation(
+            "长会话适时收口",
+            f"{s['ctx_high_sessions']} 个会话上下文接近塞满——越满 AI 越容易忘掉前面说的、答偏。",
+            "当前上下文已经很长，请先用三五句话总结「已完成什么、还剩什么、关键决定」，"
+            "我据此开新会话继续，避免你在满窗口里丢失前文。"))
+
+    return out
+
+
+def horizon_suggestions(reports: list[SessionReport]) -> list[Recommendation]:
+    """前瞻工作流：把当前交互式模式升级为更自动/并行的用法。"""
+    if not reports:
+        return []
+    s = _agg_signals(reports)
+    out: list[Recommendation] = []
+
+    if s["tool_errors"] >= 10 or s["high_churn_sessions"] >= 2:
+        out.append(Recommendation(
+            "自主修复循环（测试门禁）",
+            f"{s['tool_errors']} 次工具错误 + {s['high_churn_sessions']} 个高返工会话，"
+            "很多是手动逐轮盯出来的——可以让 AI 对着测试自己迭代到全绿再回报。",
+            "进入自主修复循环：读最近一次测试失败输出，诊断根因、改代码、重跑测试；"
+            "失败就迭代，最多 5 轮。全程不要问我，直到测试全绿或 5 轮用尽再总结"
+            "「哪里错了、改了什么、最终测试结果」。现在先跑一次测试开始。"))
+
+    if s["big_sessions"] >= 2 or s["n"] >= 8:
+        out.append(Recommendation(
+            "并行子代理拆解大任务",
+            f"你有 {s['big_sessions']} 个千行级大会话——把发布/大改这类多线程工作拆给"
+            "并行子代理（一个跑测试、一个改版本号、一个写变更日志、一个更新文档），大幅压缩耗时。",
+            "这次发布请拆成并行子代理同时做：A 跑全量测试并报结果；B 更新所有版本号引用；"
+            "C 根据 git log 写结构化变更日志；D 更新 README/文档。四个都完成后汇总清单，"
+            "我批准前不要提交。"))
+
+    if s["low_test_sessions"] >= 1:
+        out.append(Recommendation(
+            "测试驱动自动实现",
+            f"{s['low_test_sessions']} 个有规模产出的会话缺测试——可以反过来：先定验收测试，"
+            "让 AI 对着测试自动实现、自测、自我重构，只在设计边界找你。",
+            "我把期望行为写成验收测试放在测试文件里。你的任务：不改测试，读懂测试契约后"
+            "实现代码，反复跑这些测试直到全绿；再跑全量测试查回归，最后给我完整改动 diff。"))
+
+    if s["total_net_loc"] >= 5000 or s["n"] >= 10:
+        out.append(Recommendation(
+            "让 AI 自己先自审再交",
+            f"你已累计 {s['total_net_loc']:,} 行产出——大改交付前让 AI 先做一轮自我代码审查，"
+            "能提前抓出参数不匹配、作用域、边界这类自引 bug。",
+            "完成实现后，先别说「做完了」。以审查者视角把这次改动的 diff 过一遍，"
+            "重点查：参数/签名是否匹配、变量作用域、边界与空值、有没有漏改的调用点。"
+            "列出发现的问题并修掉，再给我最终结果。"))
+
     return out
