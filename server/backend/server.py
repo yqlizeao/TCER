@@ -41,7 +41,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import analysis  # noqa: E402
 import auth  # noqa: E402
 import db  # noqa: E402
+import diagnosis  # noqa: E402
 import insights  # noqa: E402
+import personas  # noqa: E402
+import projectview  # noqa: E402
 
 _FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend").resolve()
 _MAX_BODY = 64 * 1024 * 1024  # 64 MiB upload cap
@@ -105,6 +108,14 @@ class Handler(BaseHTTPRequestHandler):
             self._guard(self._h_filters)
         elif route == "/api/overview":
             self._guard(lambda: self._h_overview(qs))
+        elif route == "/api/exec":
+            self._guard(lambda: self._h_exec(qs))
+        elif route == "/api/engineering":
+            self._guard(lambda: self._h_engineering(qs))
+        elif route == "/api/diagnosis":
+            self._guard(lambda: self._h_diagnosis(qs))
+        elif route == "/api/projects":
+            self._guard(lambda: self._h_projects(qs))
         elif route == "/api/detail":
             self._guard(lambda: self._h_detail(qs))
         elif route == "/api/aliases":
@@ -255,6 +266,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(db.aggregate_by(dimension=dimension, **f))
         except ValueError as e:
             self._send_json({"error": str(e)}, 400)
+
+    def _h_exec(self, qs: dict) -> None:
+        self._send_json(personas.executive(**self._common_filters(qs)))
+
+    def _h_engineering(self, qs: dict) -> None:
+        self._send_json(personas.engineering(**self._common_filters(qs)))
+
+    def _h_diagnosis(self, qs: dict) -> None:
+        self._send_json(diagnosis.diagnose(**self._common_filters(qs)))
+
+    def _h_projects(self, qs: dict) -> None:
+        self._send_json(projectview.project_board(**self._common_filters(qs)))
 
     def _h_get_aliases(self, qs: dict) -> None:
         kind = self._one(qs, "kind", "project")
