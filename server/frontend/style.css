@@ -81,11 +81,12 @@ button, input, select, textarea { font-family: var(--mono); }
   background: radial-gradient(1000px 500px at 50% -10%, #0e1a1e, var(--bg));
 }
 .login-card {
-  width: 320px; background: var(--panel); border: 1px solid var(--line);
-  border-radius: 10px; padding: 32px 28px; display: flex; flex-direction: column; gap: 12px;
-  box-shadow: 0 20px 60px #0008;
+  width: 320px; background: var(--panel); border: 1px solid var(--card-line);
+  border-radius: 12px; padding: 32px 28px; display: flex; flex-direction: column; gap: 12px;
+  box-shadow: 0 24px 60px #000000cc, 0 4px 14px #00000099;
 }
-.login-brand { font-size: 26px; font-weight: 700; letter-spacing: 3px; color: var(--accent); }
+.login-logo { align-self: center; margin-bottom: 6px; border-radius: 12px; }
+.login-brand { font-size: 26px; font-weight: 700; letter-spacing: 3px; color: var(--accent); text-align: center; }
 .login-sub { font-size: var(--fs-sm); color: var(--tx-dim); margin-bottom: 10px; }
 .login-card input {
   background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius);
@@ -116,8 +117,9 @@ button, input, select, textarea { font-family: var(--mono); }
 }
 .rail-brand {
   font-size: 20px; font-weight: 700; letter-spacing: 3px; color: var(--accent);
-  padding: 4px 10px 18px;
+  padding: 4px 10px 18px; display: flex; align-items: center; gap: 9px;
 }
+.rail-logo { border-radius: 6px; flex: none; }
 .rail-nav { display: flex; flex-direction: column; gap: 3px; flex: 1; }
 .rail-item {
   display: grid; grid-template-columns: 22px 1fr; grid-template-rows: auto auto;
