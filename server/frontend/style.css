@@ -396,3 +396,13 @@ pre.raw { background: var(--bg); border: 1px solid var(--line); border-radius: 6
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--tx-mute); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* --- API Token 管理页 --- */
+.tk-hint { color: var(--tx-dim); font-size: var(--fs-sm); line-height: 1.7; margin: 6px 0 14px; }
+.tk-hint code { background: var(--chip); padding: 1px 5px; border-radius: 4px; color: var(--accent); }
+.tk-gen { display: flex; gap: 8px; align-items: center; }
+.tk-reveal { margin-top: 12px; border: 1px solid var(--accent-dim); background: #0d1f1d; border-radius: var(--radius); padding: 10px 12px; }
+.tk-reveal-hd { color: var(--warn); font-size: var(--fs-sm); margin-bottom: 6px; }
+.tk-reveal-row { display: flex; gap: 8px; align-items: center; }
+.tk-reveal-row code { flex: 1; word-break: break-all; background: var(--bg); padding: 6px 8px; border-radius: 4px; color: var(--tx); font-size: var(--fs-sm); }
+.tk-err { color: var(--bad); font-size: var(--fs-sm); margin-top: 8px; }

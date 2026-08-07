@@ -53,12 +53,13 @@ server/
 
 ```bash
 python server/backend/server.py
-# 打开 http://127.0.0.1:8899  （默认账号 admin/admin，请尽快修改）
+# 打开 http://127.0.0.1:8890  （默认账号 admin/admin，请尽快修改）
 ```
 
-环境变量：`TCER_SERVER_HOST`（默认 127.0.0.1）、`TCER_SERVER_PORT`（8899）、
-`TCER_SERVER_SECRET`（Token 签名密钥，不设则每次重启随机——重启后旧 Token 失效）、
-`TCER_SERVER_DB`（SQLite 路径，默认 `server/backend/tcer_server.db`）。
+环境变量：`TCER_SERVER_HOST`（默认 127.0.0.1）、`TCER_SERVER_PORT`（8890）、
+`TCER_SERVER_SECRET`（Token 签名密钥，不设则每次重启随机——重启后旧登录 Token 失效；
+API Token 存哈希入库，不受重启影响）、`TCER_SERVER_DB`（SQLite 路径，默认
+`server/backend/tcer_server.db`）。
 
 ## 账号管理
 
@@ -86,7 +87,15 @@ python server/backend/manage.py listusers
 | GET | `/api/dimensions` | Bearer | 可对比的维度与指标（UI 不硬编码） → `{dimensions,metrics}` |
 | GET | `/api/compare` | Bearer | 队列对比 `?dimension=&metric=` → `{cohorts,caveat}` |
 | GET | `/api/insights` | Bearer | 行动建议 → `{findings,coverage,caveat}` |
+| GET | `/api/tokens` | 登录 | 列出当前用户的 API Token（仅元数据） → `{tokens}` |
+| POST | `/api/tokens` | 登录 | `{label}` 生成 API Token（原文只返回一次） → `{token}` |
+| DELETE | `/api/tokens?id=` | 登录 | 撤销一个 API Token → `{ok}` |
 | GET | `/api/health` | — | `{ok:true}` |
+
+> **认证两种 Bearer**：`/api/upload` 等接口的 `Authorization: Bearer <token>` 既接受
+> `/api/login` 签发的短期登录 Token，也接受网页「API Token」页生成的长期 Token
+> （存 sha256 哈希，按所属用户归账）。**Token 管理接口只认登录 Token**——防止用
+> API Token 无限增发 Token。客户端上传优先走 API Token（见 `../CLAUDE.md` 客户端 env）。
 
 ### 上传结构（对齐客户端）
 

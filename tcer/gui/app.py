@@ -48,7 +48,6 @@ class TcerGui:
         self._analysis_generation = 0
         self._analysis_cancel = threading.Event()
         self._upload_prefs: dict = upload_prefs.load()
-        self._auto_upload_after: str | None = None
 
         root.title("TCER")
         root.configure(bg=theme.BG)
@@ -92,8 +91,6 @@ class TcerGui:
         self._build_body(root)
         self.refresh_projects()
         root.after(100, self._poll)
-        if self._upload_prefs.get("auto_upload"):
-            self._schedule_auto_upload()
         if self._ui_prefs.get("check_update_on_start"):
             # opt-in 启动自动检查更新:延后 2s 避开启动繁忙,仅「有新版」才弹窗
             root.after(2000, lambda: self.check_for_update(silent=True))
@@ -1028,6 +1025,9 @@ class TcerGui:
 
     # --------------------------------------------------------------- upload
     def show_upload(self) -> None:
+        from tcer.core import env_config
+        if not env_config.upload_enabled():
+            return  # 未配置 TCER_CLIENT_UPLOAD_URL —— 按钮本不该显示；双保险
         projects = [(views.ref_uid(p), f"[{views.project_source_label(p)}] {views.project_label(p)}")
                     for p in self._projects]
         default_proj = None
@@ -1041,16 +1041,18 @@ class TcerGui:
             default_project=default_proj,
             on_upload=self._start_upload,
             on_save_prefs=self._save_upload_prefs,
+            server_url=env_config.server_url() or "",
+            authed=env_config.api_token() is not None,
+            detail=env_config.upload_detail(),
         )
 
     def _save_upload_prefs(self, prefs: dict) -> None:
+        """Persist only the remembered project selection (rest is env-driven)."""
         self._upload_prefs = prefs
         try:
             upload_prefs.save(prefs)
         except OSError:
             pass  # non-fatal — prefs just won't persist across restarts
-        # (Re)arm or cancel the auto-upload timer to match the new setting.
-        self._schedule_auto_upload()
 
     def _project_ref_by_uid(self, uid: str):
         return views.find_ref_by_uid(self._projects, uid)
@@ -1058,12 +1060,18 @@ class TcerGui:
     def _start_upload(self, prefs: dict, dialog=None) -> None:
         """Analyze each selected project fresh, then upload its own report.
 
-        The earlier version reused ``self._current`` and merely relabelled it
-        with the chosen project name — so every project uploaded identical data.
-        Here each selected key is re-analyzed on a worker thread so each upload
-        carries that project's real aggregate (+ sessions when 全部会话 is on).
-        Returns immediately; the combined result arrives via the queue.
+        Server URL / auth (API token) / detail all come from ``env_config`` —
+        the dialog only supplies the project selection. Each selected key is
+        re-analyzed on a worker thread so each upload carries that project's real
+        aggregate (+ sessions when detail is on). Returns immediately; the
+        combined result arrives via the queue.
         """
+        from tcer.core import env_config
+        server_url = env_config.server_url()
+        if not server_url:
+            if dialog is not None:
+                dialog.set_status("未配置 TCER_CLIENT_UPLOAD_URL，无法上传", error=True)
+            return
         keys = list(prefs.get("last_projects") or [])
         if not keys:
             if dialog is not None:
@@ -1083,38 +1091,26 @@ class TcerGui:
             until=params["until"],
             no_loc=self._no_loc,
         )
+        cfg = dict(server_url=server_url, api_token=env_config.api_token(),
+                   detail=env_config.upload_detail())
         threading.Thread(
             target=self._upload_worker,
-            args=(prefs, refs, missing, analysis_args, dialog),
+            args=(cfg, refs, missing, analysis_args, dialog),
             daemon=True,
         ).start()
 
-    def _upload_worker(self, prefs, refs, missing, analysis_args, dialog) -> None:
+    def _upload_worker(self, cfg, refs, missing, analysis_args, dialog) -> None:
         """Off-thread: analyze + upload each selected project, aggregate results.
 
-        Login happens once; per-project failures are collected without aborting
-        the rest. Each project is analyzed fresh so its payload carries that
-        project's own aggregate (and sessions when detail is on).
+        Auth is env-driven: an API token authenticates the upload as its owning
+        user (server fills ``person``); no token → anonymous upload. Per-project
+        failures are collected without aborting the rest. Each project is analyzed
+        fresh so its payload carries that project's own aggregate (and sessions
+        when detail is on).
         """
-        user = prefs.get("username") or None
-        anonymous = bool(prefs.get("anonymous"))
-        detail = bool(prefs.get("detail"))
-        server_url = prefs["server_url"]
-
-        # Anonymous uploads skip login entirely — the server accepts them with no
-        # bearer token. Non-anonymous uploads still exchange credentials first.
-        if anonymous:
-            token = None
-        else:
-            try:
-                token = upload_client.login(server_url, prefs["username"],
-                                            prefs.get("password", ""))
-            except upload_client.UploadError as e:
-                self._q.put(("upload", dialog, False, f"登录失败：{e}"))
-                return
-            except Exception as e:  # noqa: BLE001
-                self._q.put(("upload", dialog, False, f"登录出错：{e}"))
-                return
+        server_url = cfg["server_url"]
+        api_token = cfg.get("api_token")
+        detail = bool(cfg.get("detail"))
 
         total_inserted = 0
         ok_projects = 0
@@ -1126,12 +1122,11 @@ class TcerGui:
                     project=ref.key, source=ref.source, project_ref=ref,
                     **analysis_args,
                 )
-                payload = upload_client.build_payload(
+                total_inserted += upload_client.token_upload(
+                    server_url=server_url, api_token=api_token,
                     aggregate=a.aggregate, reports=a.reports,
-                    n_sessions=a.n_sessions, project=key, user=user,
-                    anonymous=anonymous, detail=detail,
+                    n_sessions=a.n_sessions, project=key, detail=detail,
                 )
-                total_inserted += upload_client.upload(server_url, token, payload)
                 ok_projects += 1
             except Exception as e:  # noqa: BLE001 — collect per-project failures
                 errors.append(f"{label}: {e}")
@@ -1144,29 +1139,6 @@ class TcerGui:
             shown = "；".join(errors[:3])
             parts.append(f"失败：{shown}" + (f" 等 {len(errors)} 项" if len(errors) > 3 else ""))
         self._q.put(("upload", dialog, ok, " ".join(parts)))
-
-    def _schedule_auto_upload(self) -> None:
-        """Arm (or cancel) the background auto-upload timer per prefs."""
-        if self._auto_upload_after is not None:
-            try:
-                self.root.after_cancel(self._auto_upload_after)
-            except (ValueError, tk.TclError):
-                pass
-            self._auto_upload_after = None
-        if not self._upload_prefs.get("auto_upload"):
-            return
-        interval_min = int(self._upload_prefs.get("interval_min", 30) or 30)
-        self._auto_upload_after = self.root.after(
-            max(1, interval_min) * 60_000, self._auto_upload_tick)
-
-    def _auto_upload_tick(self) -> None:
-        """Timer callback: silently upload remembered projects, then re-arm."""
-        self._auto_upload_after = None
-        prefs = self._upload_prefs
-        if (prefs.get("server_url") and prefs.get("last_projects")
-                and (prefs.get("anonymous") or prefs.get("username"))):
-            self._start_upload(prefs, dialog=None)
-        self._schedule_auto_upload()
 
     # --------------------------------------------------------------- entry
     @classmethod
