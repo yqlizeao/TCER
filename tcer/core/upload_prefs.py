@@ -1,24 +1,19 @@
-"""Persistence for the GUI 上传 dialog's options.
+"""Persistence for the GUI 上传 dialog's remembered project selection.
+
+Since server URL, auth, and detail options moved to environment config
+(``env_config``; ``TCER_CLIENT_UPLOAD_URL`` / ``TCER_CLIENT_UPLOAD_AUTH_TOKEN`` /
+``TCER_CLIENT_UPLOAD_DETAIL``), the only thing the dialog still persists is
+**which projects were last selected**, so reopening the dialog pre-checks them.
 
 Reads/writes a small JSON file under ``app_dirs.prefs_dir()`` (发布版优先 exe
 同目录,回退 ``~/.tcer/``):``<prefs_dir>/tcer_upload.json``, mirroring the
 atomic write pattern used by ``metrics.save_baselines``.
 
-早期版本曾存 ``~/.claude/tcer_upload.json``,首次用到新目录时会自动迁移过来
-(详见 ``app_dirs``)。
-
-Stored keys: server_url, username, password (optionally, obfuscated — NOT
-encrypted), anonymous, last_project, detail, auto_upload, interval_min,
-remember_password.
-
-The password, when the user opts to remember it, is stored base64-obfuscated
-only — this is deterrence against shoulder-surfing a plaintext file, not real
-protection. The UI notes this. When ``remember_password`` is false the password
-is never written.
+早期版本曾在此存 server_url / 账号 / 密码 / 选项,现已全部移除(改由环境变量驱动);
+旧文件里的这些字段被静默忽略,只读取 ``last_projects``。
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import tempfile
@@ -31,28 +26,8 @@ def _prefs_path():
 
 
 _DEFAULTS: dict = {
-    "server_url": "http://127.0.0.1:8899",
-    "username": "",
-    "password": "",
-    "remember_password": False,
-    "anonymous": False,
     "last_projects": [],   # list of selected project keys (multi-select)
-    "all_sessions": False,  # upload every session (detail), not just aggregate
-    "detail": False,
-    "auto_upload": False,
-    "interval_min": 30,
 }
-
-
-def _obfuscate(text: str) -> str:
-    return base64.b64encode(text.encode("utf-8")).decode("ascii")
-
-
-def _deobfuscate(text: str) -> str:
-    try:
-        return base64.b64decode(text.encode("ascii")).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        return ""
 
 
 def load() -> dict:
@@ -65,28 +40,17 @@ def load() -> dict:
         return prefs
     if not isinstance(stored, dict):
         return prefs
-    prefs.update({k: stored[k] for k in _DEFAULTS if k in stored})
-    # Back-compat: an earlier version stored a single ``last_project`` scalar.
-    if not prefs["last_projects"] and stored.get("last_project"):
-        prefs["last_projects"] = [stored["last_project"]]
-    if not isinstance(prefs["last_projects"], list):
-        prefs["last_projects"] = []
-    # Password is stored obfuscated under a separate key so a plaintext
-    # "password" is never persisted by accident.
-    if prefs.get("remember_password") and stored.get("password_obf"):
-        prefs["password"] = _deobfuscate(str(stored["password_obf"]))
-    else:
-        prefs["password"] = ""
+    projs = stored.get("last_projects")
+    if not projs and stored.get("last_project"):  # back-compat scalar
+        projs = [stored["last_project"]]
+    prefs["last_projects"] = projs if isinstance(projs, list) else []
     return prefs
 
 
 def save(prefs: dict) -> None:
-    """Atomically write prefs. Password only persisted if remember_password."""
-    out = {k: prefs.get(k, _DEFAULTS[k]) for k in _DEFAULTS}
-    remember = bool(out.get("remember_password"))
-    pwd = str(out.pop("password", "") or "")
-    if remember and pwd:
-        out["password_obf"] = _obfuscate(pwd)
+    """Atomically persist the remembered project selection only."""
+    projs = prefs.get("last_projects")
+    out = {"last_projects": projs if isinstance(projs, list) else []}
     p = _prefs_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")

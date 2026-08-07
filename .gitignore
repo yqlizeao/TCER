@@ -27,5 +27,22 @@ env/
 .DS_Store
 Thumbs.db
 
+# Local env config (opt-in networking secrets: TCER_CLIENT_UPLOAD_URL /
+# TCER_CLIENT_UPLOAD_AUTH_TOKEN / TCER_CLIENT_UPLOAD_DETAIL). Read by
+# tcer.core.env_config from the exe/cwd dir — must never be committed
+# (holds the upload API token).
+.env
+.env.*
+!.env.example
+
+# Local server runtime data (root-level deploy layout: SQLite DB + logs).
+# server/.gitignore covers server/*.db|*.log; these mirror it for repo root.
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
 # TCER report exports
 *.csv

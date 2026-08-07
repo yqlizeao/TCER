@@ -6,6 +6,7 @@ const VIEWS = {
   engineering: { title: "工程效能", render: renderEngineering },
   diagnosis: { title: "问题诊断", render: renderDiagnosis },
   sessions: { title: "会话明细", render: renderSessions },
+  tokens: { title: "API Token", render: renderTokens },
 };
 
 async function route() {

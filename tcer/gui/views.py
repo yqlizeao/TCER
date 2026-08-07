@@ -276,11 +276,15 @@ class FilterBar:
         Tooltip(refresh_btn, "重新扫描磁盘，刷新全部项目列表")
 
         # -- Actions (right side) --
-        for factory in [
+        # 上传按钮仅在配置了 TCER_CLIENT_UPLOAD_URL 时出现（opt-in 联网；未配置默认隐藏）。
+        from tcer.core import env_config
+        factories = [
             lambda: self._make_tool_menu(bar),
             lambda: self._make_export_menu(bar),
-            lambda: self._make_upload_button(bar),
-        ]:
+        ]
+        if env_config.upload_enabled():
+            factories.append(lambda: self._make_upload_button(bar))
+        for factory in factories:
             factory().pack(side="right", padx=2)
 
         self.status = tk.Label(bar, text="就绪", bg=theme.BG, fg="#9cdcfe", anchor="e")
