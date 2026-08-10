@@ -20,9 +20,9 @@ POST /api/visibility         (Bearer) {id|project, visibility}  -> {ok}  set one
 GET  /api/dimensions         (Bearer)                           -> {dimensions, metrics}
 GET  /api/compare            (Bearer) ?dimension=&metric=&...   -> {cohorts, caveat}
 GET  /api/insights           (Bearer) ?filters...               -> {findings, coverage}
-GET  /api/tokens             (login)  list caller's API tokens   -> {tokens}
-POST /api/tokens             (login)  {label} mint API token      -> {token}
-DELETE /api/tokens           (login)  ?id= revoke API token       -> {ok}
+GET  /api/tokens             (login)  list caller's auth tokens   -> {tokens}
+POST /api/tokens             (login)  {label} mint auth token      -> {token}
+DELETE /api/tokens           (login)  ?id= revoke auth token       -> {ok}
 GET  /api/health                                                -> {ok:true}
 
 Static frontend is served from ``../frontend`` for any non-/api path.
@@ -39,7 +39,7 @@ Env:
     TCER_FEISHU_APP_ID / TCER_FEISHU_APP_SECRET / TCER_FEISHU_REDIRECT_URI
 
 Auth: an ``Authorization: Bearer <token>`` may carry either a short-lived login
-token (issued by /api/login) or a long-lived API token (minted from the web UI,
+token (issued by /api/login) or a long-lived auth token (minted from the web UI,
 stored hashed). Token management endpoints require a *login* token specifically.
 """
 from __future__ import annotations
@@ -130,12 +130,12 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             return None
         # A bearer may be either a short-lived login token (HMAC) or a long-lived
-        # API token minted from the web UI. Try the session token first, then fall
-        # back to the API-token table so uploads can authenticate with either.
+        # Auth token minted from the web UI. Try the session token first, then fall
+        # back to the auth-token table so uploads can authenticate with either.
         user = auth.verify_token(token)
         if user:
             return user
-        return db.verify_api_token(token)
+        return db.verify_auth_token(token)
 
     def log_message(self, fmt, *args):  # quieter default logging
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -369,12 +369,12 @@ class Handler(BaseHTTPRequestHandler):
     def _h_filters(self) -> None:
         self._send_json(db.distinct_values())
 
-    # -- API tokens --------------------------------------------------------- #
+    # -- Auth tokens -------------------------------------------------------- #
     def _session_user(self) -> str | None:
-        """Username from a *login* (HMAC) token only — NOT an API token.
+        """Username from a *login* (HMAC) token only — NOT an auth token.
 
         Token management must be done from an interactive web session; allowing
-        an API token to mint more API tokens would be a privilege-escalation
+        an auth token to mint more auth tokens would be a privilege-escalation
         path with no expiry.
         """
         token = auth.bearer_from_header(self.headers.get("Authorization"))
@@ -385,7 +385,7 @@ class Handler(BaseHTTPRequestHandler):
         if not user:
             self._send_json({"error": "unauthorized"}, 401)
             return
-        self._send_json({"tokens": db.list_api_tokens(user)})
+        self._send_json({"tokens": db.list_auth_tokens(user)})
 
     def _h_create_token(self) -> None:
         user = self._session_user()
@@ -393,7 +393,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "unauthorized"}, 401)
             return
         data = self._read_json() or {}
-        raw = db.create_api_token(user, str(data.get("label") or "") or None)
+        raw = db.create_auth_token(user, str(data.get("label") or "") or None)
         # The raw token is returned exactly once — it is never stored or
         # recoverable afterwards (only its hash is persisted).
         self._send_json({"token": raw})
@@ -405,7 +405,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         tid = self._one(qs, "id")
         try:
-            ok = db.delete_api_token(user, int(tid))
+            ok = db.delete_auth_token(user, int(tid))
         except (TypeError, ValueError):
             self._send_json({"error": "invalid id"}, 400)
             return

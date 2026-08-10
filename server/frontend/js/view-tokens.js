@@ -1,7 +1,7 @@
 /* 页面：Auth Token 管理 —— 生成 / 查看 / 撤销上传凭据。
 
-   客户端把 token 填入 tcer_ui.json 的 upload.auth_token 后上传时，服务端按该
-   token 归属的用户记账；本页让用户自助生成 token（生成后只显示一次，仅存哈希）、
+   客户端把 auth token 填入 tcer_ui.json 的 upload.auth_token 后上传时，服务端按该
+   token 归属的用户记账；本页让用户自助生成 auth token（生成后只显示一次，仅存哈希）、
    查看已有 token 元数据、随时撤销。管理接口要求登录态 token（非 auth token），故只
    在网页登录后可用。 */
 // ------------------------- 页面：Auth Token -------------------------
