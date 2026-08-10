@@ -44,3 +44,6 @@ logs/
 
 # TCER report exports
 *.csv
+
+# 运维脚本（含内网信息，仅本地使用，不入库）
+sop.sh
