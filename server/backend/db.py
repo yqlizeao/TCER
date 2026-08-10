@@ -137,6 +137,14 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     last_used_at INTEGER             -- epoch s, refreshed on each successful auth
 );
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(username);
+
+CREATE TABLE IF NOT EXISTS feishu_users (
+    open_id      TEXT PRIMARY KEY,   -- Feishu open_id; login username is "feishu:<open_id>"
+    name         TEXT NOT NULL,      -- display name from Feishu profile
+    avatar_url   TEXT,               -- profile avatar URL (may be empty)
+    created_at   INTEGER NOT NULL,
+    last_login_at INTEGER
+);
 """
 
 # Columns added after the first schema shipped; applied idempotently on init.
@@ -241,6 +249,50 @@ def user_count() -> int:
         return conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# Feishu users (OAuth login; no password — identity comes from Feishu)
+# --------------------------------------------------------------------------- #
+def feishu_username(open_id: str) -> str:
+    """Login username for a Feishu identity, namespaced to avoid clashing with
+    local accounts. Stored in tokens / uploads' ``uploaded_by`` audit column.
+    """
+    return f"feishu:{open_id}"
+
+
+def upsert_feishu_user(open_id: str, name: str, avatar_url: str | None) -> None:
+    """Insert or refresh a Feishu user's profile on each successful login."""
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO feishu_users(open_id, name, avatar_url, created_at, last_login_at) "
+            "VALUES(?,?,?,?,?) "
+            "ON CONFLICT(open_id) DO UPDATE SET "
+            "name=excluded.name, avatar_url=excluded.avatar_url, "
+            "last_login_at=excluded.last_login_at",
+            (open_id, name, avatar_url or "", now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_feishu_user(open_id: str) -> dict | None:
+    """Return {open_id, name, avatar_url} for a Feishu user, or None."""
+    conn = connect()
+    try:
+        r = conn.execute(
+            "SELECT open_id, name, avatar_url FROM feishu_users WHERE open_id=?",
+            (open_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if r is None:
+        return None
+    return {"open_id": r["open_id"], "name": r["name"],
+            "avatar_url": r["avatar_url"] or ""}
 
 
 # --------------------------------------------------------------------------- #

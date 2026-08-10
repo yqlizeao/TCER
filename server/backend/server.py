@@ -3,6 +3,10 @@
 Endpoints
 ---------
 POST /api/login              {username, password}              -> {token}
+GET  /api/config                                                -> {password_login, feishu_login}
+GET  /api/me                 (Bearer)                           -> {username, name, avatar_url, kind}
+GET  /api/auth/feishu/start                                     -> 302 Feishu consent
+GET  /api/auth/feishu/callback ?code=&state=                    -> 302 / (token in fragment)
 POST /api/upload             (Bearer) upload payload            -> {inserted}
 GET  /api/filters            (Bearer)                           -> {persons, projects, models}
 GET  /api/overview           (Bearer) ?metric=&...              -> {totals, series}
@@ -29,6 +33,8 @@ Env:
     TCER_SERVER_PORT (default 8890)
     TCER_SERVER_SECRET  (token signing key; random if unset)
     TCER_SERVER_DB      (sqlite path)
+    TCER_LOGIN_MODE     (password | feishu | both; default password)
+    TCER_FEISHU_APP_ID / TCER_FEISHU_APP_SECRET / TCER_FEISHU_REDIRECT_URI
 
 Auth: an ``Authorization: Bearer <token>`` may carry either a short-lived login
 token (issued by /api/login) or a long-lived API token (minted from the web UI,
@@ -41,13 +47,14 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 # Allow running as a script (python server/backend/server.py) or as a module.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import analysis  # noqa: E402
 import auth  # noqa: E402
 import db  # noqa: E402
+import feishu  # noqa: E402
 import diagnosis  # noqa: E402
 import insights  # noqa: E402
 import personas  # noqa: E402
@@ -78,6 +85,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _redirect(self, location: str, status: int = 302) -> None:
+        self.send_response(status)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _read_json(self) -> dict | None:
         length = int(self.headers.get("Content-Length") or 0)
@@ -130,6 +143,14 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         if route == "/api/health":
             self._send_json({"ok": True})
+        elif route == "/api/config":
+            self._h_config()
+        elif route == "/api/me":
+            self._guard(self._h_me)
+        elif route == "/api/auth/feishu/start":
+            self._h_feishu_start()
+        elif route == "/api/auth/feishu/callback":
+            self._h_feishu_callback(qs)
         elif route == "/api/filters":
             self._guard(self._h_filters)
         elif route == "/api/overview":
@@ -198,6 +219,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- handlers ---------------------------------------------------------- #
     def _h_login(self) -> None:
+        if not feishu.password_enabled():
+            self._send_json({"error": "账号密码登录已关闭，请使用飞书登录"}, 403)
+            return
         data = self._read_json()
         if not data or "username" not in data or "password" not in data:
             self._send_json({"error": "username and password required"}, 400)
@@ -206,6 +230,69 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"token": auth.issue_token(str(data["username"]))})
         else:
             self._send_json({"error": "invalid credentials"}, 401)
+
+    # -- login config / identity ------------------------------------------- #
+    def _h_config(self) -> None:
+        """Public (no-auth) login-page config: which methods are offered."""
+        self._send_json({
+            "password_login": feishu.password_enabled(),
+            "feishu_login": feishu.feishu_login_enabled(),
+        })
+
+    def _h_me(self) -> None:
+        """Identity of the current bearer: name + avatar for the sidebar.
+
+        Feishu users carry a real name + avatar URL; password users have no
+        avatar, so the client renders their name's initial instead (avatar="").
+        """
+        user = self._auth_user() or ""
+        if user.startswith("feishu:"):
+            prof = db.get_feishu_user(user[len("feishu:"):])
+            if prof:
+                self._send_json({"username": user, "name": prof["name"],
+                                 "avatar_url": prof["avatar_url"], "kind": "feishu"})
+                return
+        self._send_json({"username": user, "name": user,
+                         "avatar_url": "", "kind": "password"})
+
+    # -- Feishu OAuth ------------------------------------------------------- #
+    def _h_feishu_start(self) -> None:
+        if not feishu.feishu_login_enabled():
+            self._send_json({"error": "飞书登录未启用"}, 404)
+            return
+        # A short-lived signed token doubles as the OAuth ``state`` (CSRF guard):
+        # the callback re-verifies it, so no server-side state store is needed.
+        state = auth.issue_token("feishu-oauth-state", ttl=600)
+        redirect = feishu.redirect_uri(self.headers.get("Host"))
+        self._redirect(feishu.authorize_url(state, redirect))
+
+    def _h_feishu_callback(self, qs: dict) -> None:
+        if not feishu.feishu_login_enabled():
+            self._send_json({"error": "飞书登录未启用"}, 404)
+            return
+        code = self._one(qs, "code")
+        state = self._one(qs, "state")
+        # Verify the state we signed in _h_feishu_start (CSRF / replay guard).
+        if not state or auth.verify_token(state) != "feishu-oauth-state":
+            self._redirect("/?feishu_error=" + quote("登录校验失败，请重试"))
+            return
+        if not code:
+            self._redirect("/?feishu_error=" + quote("未收到授权码"))
+            return
+        redirect = feishu.redirect_uri(self.headers.get("Host"))
+        try:
+            tok = feishu.exchange_code(str(code), redirect)
+            info = feishu.fetch_user_info(tok)
+        except feishu.FeishuError as e:
+            self._redirect("/?feishu_error=" + quote(str(e)))
+            return
+        db.upsert_feishu_user(info["open_id"], info["name"], info["avatar_url"])
+        username = db.feishu_username(info["open_id"])
+        login_token = auth.issue_token(username)
+        # Hand the token back to the SPA via the URL fragment (never sent to the
+        # server / logs); the front-end reads it on load and stores it.
+        frag = urlencode({"token": login_token, "name": info["name"]})
+        self._redirect(f"/#feishu={frag}")
 
     def _h_upload(self) -> None:
         # Read the body first so we can decide auth from the payload: anonymous
