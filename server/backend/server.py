@@ -14,6 +14,9 @@ GET  /api/session            (Bearer) ?id=                      -> {session deta
 GET  /api/dimensions         (Bearer)                           -> {dimensions, metrics}
 GET  /api/compare            (Bearer) ?dimension=&metric=&...   -> {cohorts, caveat}
 GET  /api/insights           (Bearer) ?filters...               -> {findings, coverage}
+GET  /api/tokens             (login)  list caller's API tokens   -> {tokens}
+POST /api/tokens             (login)  {label} mint API token      -> {token}
+DELETE /api/tokens           (login)  ?id= revoke API token       -> {ok}
 GET  /api/health                                                -> {ok:true}
 
 Static frontend is served from ``../frontend`` for any non-/api path.
@@ -23,9 +26,13 @@ Run:
     python server/backend/server.py         # direct
 Env:
     TCER_SERVER_HOST (default 127.0.0.1)
-    TCER_SERVER_PORT (default 8899)
+    TCER_SERVER_PORT (default 8890)
     TCER_SERVER_SECRET  (token signing key; random if unset)
     TCER_SERVER_DB      (sqlite path)
+
+Auth: an ``Authorization: Bearer <token>`` may carry either a short-lived login
+token (issued by /api/login) or a long-lived API token (minted from the web UI,
+stored hashed). Token management endpoints require a *login* token specifically.
 """
 from __future__ import annotations
 
@@ -41,7 +48,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import analysis  # noqa: E402
 import auth  # noqa: E402
 import db  # noqa: E402
+import diagnosis  # noqa: E402
 import insights  # noqa: E402
+import personas  # noqa: E402
+import projectview  # noqa: E402
 
 _FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend").resolve()
 _MAX_BODY = 64 * 1024 * 1024  # 64 MiB upload cap
@@ -52,6 +62,8 @@ _CONTENT_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
 }
 
 
@@ -78,7 +90,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_user(self) -> str | None:
         token = auth.bearer_from_header(self.headers.get("Authorization"))
-        return auth.verify_token(token) if token else None
+        if not token:
+            return None
+        # A bearer may be either a short-lived login token (HMAC) or a long-lived
+        # API token minted from the web UI. Try the session token first, then fall
+        # back to the API-token table so uploads can authenticate with either.
+        user = auth.verify_token(token)
+        if user:
+            return user
+        return db.verify_api_token(token)
 
     def log_message(self, fmt, *args):  # quieter default logging
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -92,6 +112,15 @@ class Handler(BaseHTTPRequestHandler):
             self._h_upload()
         elif route == "/api/aliases":
             self._h_set_alias()
+        elif route == "/api/tokens":
+            self._h_create_token()
+        else:
+            self._send_json({"error": "not found"}, 404)
+
+    def do_DELETE(self) -> None:
+        route = urlparse(self.path).path
+        if route == "/api/tokens":
+            self._h_delete_token(parse_qs(urlparse(self.path).query))
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -105,6 +134,14 @@ class Handler(BaseHTTPRequestHandler):
             self._guard(self._h_filters)
         elif route == "/api/overview":
             self._guard(lambda: self._h_overview(qs))
+        elif route == "/api/exec":
+            self._guard(lambda: self._h_exec(qs))
+        elif route == "/api/engineering":
+            self._guard(lambda: self._h_engineering(qs))
+        elif route == "/api/diagnosis":
+            self._guard(lambda: self._h_diagnosis(qs))
+        elif route == "/api/projects":
+            self._guard(lambda: self._h_projects(qs))
         elif route == "/api/detail":
             self._guard(lambda: self._h_detail(qs))
         elif route == "/api/aliases":
@@ -119,6 +156,8 @@ class Handler(BaseHTTPRequestHandler):
             self._guard(lambda: self._h_compare(qs))
         elif route == "/api/insights":
             self._guard(lambda: self._h_insights(qs))
+        elif route == "/api/tokens":
+            self._guard(self._h_list_tokens)
         elif route.startswith("/api/"):
             self._send_json({"error": "not found"}, 404)
         else:
@@ -209,6 +248,48 @@ class Handler(BaseHTTPRequestHandler):
     def _h_filters(self) -> None:
         self._send_json(db.distinct_values())
 
+    # -- API tokens --------------------------------------------------------- #
+    def _session_user(self) -> str | None:
+        """Username from a *login* (HMAC) token only — NOT an API token.
+
+        Token management must be done from an interactive web session; allowing
+        an API token to mint more API tokens would be a privilege-escalation
+        path with no expiry.
+        """
+        token = auth.bearer_from_header(self.headers.get("Authorization"))
+        return auth.verify_token(token) if token else None
+
+    def _h_list_tokens(self) -> None:
+        user = self._session_user()
+        if not user:
+            self._send_json({"error": "unauthorized"}, 401)
+            return
+        self._send_json({"tokens": db.list_api_tokens(user)})
+
+    def _h_create_token(self) -> None:
+        user = self._session_user()
+        if not user:
+            self._send_json({"error": "unauthorized"}, 401)
+            return
+        data = self._read_json() or {}
+        raw = db.create_api_token(user, str(data.get("label") or "") or None)
+        # The raw token is returned exactly once — it is never stored or
+        # recoverable afterwards (only its hash is persisted).
+        self._send_json({"token": raw})
+
+    def _h_delete_token(self, qs: dict) -> None:
+        user = self._session_user()
+        if not user:
+            self._send_json({"error": "unauthorized"}, 401)
+            return
+        tid = self._one(qs, "id")
+        try:
+            ok = db.delete_api_token(user, int(tid))
+        except (TypeError, ValueError):
+            self._send_json({"error": "invalid id"}, 400)
+            return
+        self._send_json({"ok": ok})
+
     # -- Decision Lab ------------------------------------------------------- #
     def _h_dimensions(self) -> None:
         """Comparable knobs + metrics, so the UI never hardcodes the list."""
@@ -255,6 +336,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(db.aggregate_by(dimension=dimension, **f))
         except ValueError as e:
             self._send_json({"error": str(e)}, 400)
+
+    def _h_exec(self, qs: dict) -> None:
+        self._send_json(personas.executive(**self._common_filters(qs)))
+
+    def _h_engineering(self, qs: dict) -> None:
+        self._send_json(personas.engineering(**self._common_filters(qs)))
+
+    def _h_diagnosis(self, qs: dict) -> None:
+        self._send_json(diagnosis.diagnose(**self._common_filters(qs)))
+
+    def _h_projects(self, qs: dict) -> None:
+        self._send_json(projectview.project_board(**self._common_filters(qs)))
 
     def _h_get_aliases(self, qs: dict) -> None:
         kind = self._one(qs, "kind", "project")
@@ -323,7 +416,7 @@ def main() -> None:
         db.create_user("admin", "admin")
         sys.stderr.write("[tcer-server] created default user admin/admin — change it!\n")
     host = os.environ.get("TCER_SERVER_HOST", "127.0.0.1")
-    port = int(os.environ.get("TCER_SERVER_PORT", "8899"))
+    port = int(os.environ.get("TCER_SERVER_PORT", "8890"))
     httpd = ThreadingHTTPServer((host, port), Handler)
     sys.stderr.write(f"[tcer-server] serving on http://{host}:{port}\n")
     try:

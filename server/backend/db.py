@@ -127,6 +127,16 @@ CREATE TABLE IF NOT EXISTS person_aliases (
     raw        TEXT PRIMARY KEY,
     canonical  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    username    TEXT NOT NULL,       -- owner; uploads authenticate as this user
+    token_hash  TEXT UNIQUE NOT NULL,-- sha256 of the opaque token (never stored raw)
+    label       TEXT,                -- user-supplied note ("laptop", "ci", …)
+    created_at  INTEGER NOT NULL,
+    last_used_at INTEGER             -- epoch s, refreshed on each successful auth
+);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(username);
 """
 
 # Columns added after the first schema shipped; applied idempotently on init.
@@ -229,6 +239,86 @@ def user_count() -> int:
     conn = connect()
     try:
         return conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# API tokens (long-lived, minted from the web UI, used by uploads)
+# --------------------------------------------------------------------------- #
+def _hash_token(token: str) -> str:
+    """Hash a raw API token for storage / lookup (never store the raw token)."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_api_token(username: str, label: str | None = None) -> str:
+    """Mint a new opaque API token for ``username`` and return the RAW token.
+
+    Only the sha256 hash is persisted; the raw value is shown to the user once
+    and never recoverable afterwards (same model as GitHub personal tokens).
+    """
+    raw = "tcer_" + secrets.token_urlsafe(32)
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO api_tokens(username, token_hash, label, created_at) "
+            "VALUES(?,?,?,?)",
+            (username, _hash_token(raw), (label or "").strip() or None, int(time.time())),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return raw
+
+
+def verify_api_token(token: str) -> str | None:
+    """Return the owning username if ``token`` is a valid API token, else None.
+
+    Refreshes ``last_used_at`` on success so the UI can show token activity.
+    """
+    if not token:
+        return None
+    th = _hash_token(token)
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT id, username FROM api_tokens WHERE token_hash=?", (th,)
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("UPDATE api_tokens SET last_used_at=? WHERE id=?",
+                     (int(time.time()), row["id"]))
+        conn.commit()
+        return row["username"]
+    finally:
+        conn.close()
+
+
+def list_api_tokens(username: str) -> list[dict]:
+    """List a user's API tokens (metadata only — raw tokens are never stored)."""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, label, created_at, last_used_at FROM api_tokens "
+            "WHERE username=? ORDER BY created_at DESC", (username,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {"id": r["id"], "label": r["label"],
+         "created_at": r["created_at"], "last_used_at": r["last_used_at"]}
+        for r in rows
+    ]
+
+
+def delete_api_token(username: str, token_id: int) -> bool:
+    """Revoke one of ``username``'s API tokens by id. Returns True if removed."""
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "DELETE FROM api_tokens WHERE id=? AND username=?", (token_id, username))
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 

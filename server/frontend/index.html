@@ -3,147 +3,97 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TCER 效率仪表盘</title>
+<title>TCER 效率分析</title>
+<link rel="icon" type="image/png" href="assets/tcer_logo_64.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<!-- 登录 -->
+
+<!-- Login gate -->
 <div id="login" class="login-wrap">
   <form id="login-form" class="login-card">
-    <h1>TCER</h1>
-    <p class="muted">编程效率计量面板</p>
-    <input id="username" type="text" placeholder="账号" autocomplete="username" required>
-    <input id="password" type="password" placeholder="密码" autocomplete="current-password" required>
-    <button type="submit">登录</button>
-    <div id="login-err" class="err"></div>
+    <img class="login-logo" src="assets/tcer_logo_128.png" alt="TCER" width="64" height="64">
+    <div class="login-brand">TCER</div>
+    <div class="login-sub">AI 编程效率分析</div>
+    <input id="login-user" type="text" placeholder="账号" autocomplete="username" required>
+    <input id="login-pass" type="password" placeholder="密码" autocomplete="current-password" required>
+    <button type="submit" class="btn-primary">登录</button>
+    <div id="login-err" class="login-err"></div>
   </form>
 </div>
 
-<!-- 主应用 -->
+<!-- App shell -->
 <div id="app" class="app hidden">
-  <!-- 左侧菜单 -->
-  <aside id="sidebar" class="sidebar">
-    <div class="side-head">
-      <span class="logo">TCER</span>
-      <button id="side-toggle" class="icon-btn" title="收起/展开"></button>
-    </div>
-    <nav class="menu">
-      <a class="menu-item active" data-view="dashboard"><i class="mi mi-dash"></i><span>总览仪表盘</span></a>
-      <div class="menu-group">
-        <div class="menu-label"><span>详情</span></div>
-        <a class="menu-item" data-view="detail-project"><i class="mi mi-proj"></i><span>项目聚合</span></a>
-        <a class="menu-item" data-view="detail-person"><i class="mi mi-user"></i><span>人员聚合</span></a>
-        <a class="menu-item" data-view="detail-model"><i class="mi mi-model"></i><span>模型聚合</span></a>
-      </div>
-      <a class="menu-item" data-view="sessions"><i class="mi mi-list"></i><span>会话详情</span></a>
-      <div class="menu-group">
-        <div class="menu-label"><span>决策实验室</span></div>
-        <a class="menu-item" data-view="insights"><i class="mi mi-bulb"></i><span>行动建议</span></a>
-        <a class="menu-item" data-view="compare"><i class="mi mi-scale"></i><span>队列对比</span></a>
-      </div>
+  <aside class="rail">
+    <div class="rail-brand"><img class="rail-logo" src="assets/tcer_logo_64.png" alt="" width="24" height="24"><span>TCER</span></div>
+    <nav class="rail-nav" id="rail-nav">
+      <button class="rail-item active" data-view="projects">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+        <span class="rail-tx">项目总览</span><span class="rail-hint">ROI · AI 渗透</span>
+      </button>
+      <button class="rail-item" data-view="exec">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M12 2v20"/><path d="M17 6.5c0-2-2.2-3-5-3s-5 1-5 3 2.2 3 5 3.5 5 1.5 5 3.5-2.2 3-5 3-5-1-5-3"/></svg></span>
+        <span class="rail-tx">投入产出</span><span class="rail-hint">花了多少 · 换来多少</span>
+      </button>
+      <button class="rail-item" data-view="engineering">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 14l3-4 3 3 5-6"/></svg></span>
+        <span class="rail-tx">工程效能</span><span class="rail-hint">采用 · 质量 · 短板</span>
+      </button>
+      <button class="rail-item" data-view="diagnosis">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18 9 9 0 000-18z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg></span>
+        <span class="rail-tx">问题诊断</span><span class="rail-hint">分级建议 · 证据</span>
+      </button>
+      <button class="rail-item" data-view="sessions">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h10"/></svg></span>
+        <span class="rail-tx">会话明细</span><span class="rail-hint">逐条查看</span>
+      </button>
+      <button class="rail-item" data-view="tokens">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M15 7a4 4 0 11-4 4h-7"/><path d="M7 11v4"/><path d="M11 11v3"/></svg></span>
+        <span class="rail-tx">API Token</span><span class="rail-hint">上传凭据管理</span>
+      </button>
     </nav>
-    <div class="side-foot">
-      <span id="who" class="muted"></span>
-      <button id="logout" class="icon-btn" title="退出">⎋</button>
+    <div class="rail-foot">
+      <span id="who" class="who"></span>
+      <button id="logout" class="btn-ghost">退出</button>
     </div>
   </aside>
 
-  <!-- 右侧内容 -->
-  <main class="content">
-    <!-- 总览 -->
-    <section id="view-dashboard" class="view">
-      <div class="view-head">
-        <h1>总览仪表盘</h1>
-        <div class="range-tabs" id="range-tabs">
-          <button data-days="7" class="active">近 7 天</button>
-          <button data-days="30">近 30 天</button>
-          <button data-days="90">近 90 天</button>
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-title" id="view-title">项目总览</div>
+      <div class="topbar-filters">
+        <div class="fg">
+          <span class="fg-label">时间范围</span>
+          <div class="seg" id="range-seg">
+            <button data-days="7" class="active">近 7 天</button>
+            <button data-days="30">近 30 天</button>
+            <button data-days="90">近 90 天</button>
+            <button data-days="0">全部</button>
+          </div>
+        </div>
+        <div class="fg">
+          <span class="fg-label">成员</span>
+          <select id="f-person" class="filter" title="按成员筛选（可多选）" multiple size="1"></select>
+        </div>
+        <div class="fg">
+          <span class="fg-label">项目</span>
+          <select id="f-project" class="filter" title="按项目筛选（可多选）" multiple size="1"></select>
         </div>
       </div>
-      <div id="kpis" class="kpis"></div>
-      <div class="chart-grid">
-        <section class="chart-card">
-          <div class="chart-card-head"><h2>按人员</h2><span class="muted" id="metric-name-1"></span><span class="zoom-hint">点击放大 ⤢</span></div>
-          <div class="chart" id="chart-person"></div>
-        </section>
-        <section class="chart-card">
-          <div class="chart-card-head"><h2>按项目</h2><span class="muted" id="metric-name-2"></span><span class="zoom-hint">点击放大 ⤢</span></div>
-          <div class="chart" id="chart-project"></div>
-        </section>
-        <section class="chart-card">
-          <div class="chart-card-head"><h2>按模型</h2><span class="muted" id="metric-name-3"></span><span class="zoom-hint">点击放大 ⤢</span></div>
-          <div class="chart" id="chart-model"></div>
-        </section>
-      </div>
-      <div class="metric-switch">
-        <label>曲线指标</label>
-        <select id="dash-metric"></select>
-      </div>
-    </section>
-
-    <!-- 聚合详情（项目/人员/模型共用） -->
-    <section id="view-detail" class="view hidden">
-      <div class="view-head">
-        <h1 id="detail-title">聚合详情</h1>
-        <span class="muted" id="detail-sub"></span>
-      </div>
-      <div class="table-wrap">
-        <table id="detail-table" class="grid"></table>
-      </div>
-    </section>
-
-    <!-- 会话详情 -->
-    <section id="view-sessions" class="view hidden">
-      <div class="filters-bar" id="sess-filters">
-        <div class="filter"><label>项目</label><div class="dropdown" id="fd-projects"></div></div>
-        <div class="filter"><label>人员</label><div class="dropdown" id="fd-persons"></div></div>
-        <div class="filter"><label>模型</label><div class="dropdown" id="fd-models"></div></div>
-        <div class="filter"><label>开始</label><input type="date" id="fs-start"></div>
-        <div class="filter"><label>结束</label><input type="date" id="fs-end"></div>
-        <button id="sess-apply">查询</button>
-      </div>
-      <div class="sess-body">
-        <aside class="sess-list" id="sess-list"></aside>
-        <div class="sess-detail" id="sess-detail">
-          <div class="placeholder">从左侧选择一个会话查看详情</div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 决策实验室 · 行动建议 -->
-    <section id="view-insights" class="view hidden">
-      <div class="view-head">
-        <h1>行动建议</h1>
-        <div class="range-tabs" id="ins-range">
-          <button data-days="30" class="active">近 30 天</button>
-          <button data-days="90">近 90 天</button>
-          <button data-days="0">全部</button>
-        </div>
-      </div>
-      <div id="ins-caveat" class="caveat"></div>
-      <div id="ins-list" class="findings"></div>
-      <div class="view-head sub"><h2>未能给出结论的维度</h2></div>
-      <div id="ins-coverage" class="coverage"></div>
-    </section>
-
-    <!-- 决策实验室 · 队列对比 -->
-    <section id="view-compare" class="view hidden">
-      <div class="filters-bar">
-        <div class="filter"><label>对比维度</label><select id="cmp-dim"></select></div>
-        <div class="filter"><label>指标</label><select id="cmp-metric"></select></div>
-        <div class="range-tabs" id="cmp-range">
-          <button data-days="30" class="active">近 30 天</button>
-          <button data-days="90">近 90 天</button>
-          <button data-days="0">全部</button>
-        </div>
-      </div>
-      <div id="cmp-caveat" class="caveat"></div>
-      <div id="cmp-body"></div>
-    </section>
+    </header>
+    <div class="content" id="content"></div>
   </main>
 </div>
 
 <script src="vendor/echarts.min.js"></script>
-<script src="app.js"></script>
+<!-- 前端按序加载（经典脚本，共享作用域）；打包时按此顺序拼接即可 -->
+<script src="js/core.js"></script>
+<script src="js/view-projects.js"></script>
+<script src="js/view-exec.js"></script>
+<script src="js/view-engineering.js"></script>
+<script src="js/view-diagnosis.js"></script>
+<script src="js/view-sessions.js"></script>
+<script src="js/view-tokens.js"></script>
+<script src="js/main.js"></script>
 </body>
 </html>
