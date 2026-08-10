@@ -281,9 +281,9 @@ def token_upload(
     project: str,
     detail: bool,
 ) -> int:
-    """Build + upload a project's report using env-driven auth.
+    """Build + upload a project's report using config-driven auth.
 
-    Auth model (see ``env_config``): an API token identifies the uploading user
+    Auth model (see ``upload_config``): an API token identifies the uploading user
     server-side (the client never learns the username), so the payload sends
     ``user=None`` and ``anonymous=False`` and lets the server fill ``person``
     from the token. With no API token the upload is anonymous — the server

@@ -1347,25 +1347,27 @@ class ConfirmDeletePopup:
 
 
 class UploadDialog:
-    """上传到 TCER Server — 精简为「选项目 + 上传」两步。
+    """上传到 TCER Server — 「配置 + 选项目 + 上传」。
 
-    服务器地址 / 认证（API Token）/ 是否附带明细全部由环境变量驱动
-    （``env_config``：``TCER_CLIENT_UPLOAD_URL`` / ``TCER_CLIENT_UPLOAD_AUTH_TOKEN`` /
-    ``TCER_CLIENT_UPLOAD_DETAIL``），弹窗不再收集这些。弹窗只负责：多选项目、
-    记住选择、点「立即上传」。``projects`` 是 ``(key, display)`` 列表。
+    服务器地址 / API Token / 是否附带明细在此**可编辑**，保存后写回 ``tcer_ui.json``
+    的 ``upload`` 段（``on_save_config``）。点「立即上传」时先保存配置、再上传所选
+    项目。``projects`` 是 ``(key, display)`` 列表；``config`` 是 ``upload_config``
+    的存储原始值（``url``/``auth_token``/``detail``/``default_url``）。
 
-    上传目标信息（服务器地址、认证身份、是否含明细）以只读方式展示，让用户上传
-    前知道会发到哪、以什么身份、发多少——但不可在此更改。
+    设计：url 留空即用内置默认（占位提示里显示）；token 留空即匿名上传。本地单
+    用户工具，token 明文存同机 json、也在此明文回填，便于用户核对/更换。
     """
 
     def __init__(self, parent, *, prefs: dict, projects: list[tuple[str, str]],
                  default_project: str | None, on_upload, on_save_prefs,
-                 server_url: str, authed: bool, detail: bool) -> None:
+                 on_save_config, config: dict) -> None:
         self._on_upload = on_upload
         self._on_save_prefs = on_save_prefs
+        self._on_save_config = on_save_config
         self._projects = projects
+        self._default_url = str(config.get("default_url") or "")
 
-        win = _new_window(parent, "上传到 TCER Server", "480x560")
+        win = _new_window(parent, "上传到 TCER Server", "480x620")
         self._win = win
         tk.Label(win, text="上传到 TCER Server", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
@@ -1378,13 +1380,21 @@ class UploadDialog:
         sf.canvas.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 4))
         inner = sf.inner
 
-        # -- 上传目标（只读，环境变量驱动）：压缩成一行 --
-        # 上传至 <url> （[非]匿名，[不]含会话详情）
-        anon_txt = "非匿名" if authed else "匿名"
-        detail_txt = "含会话详情" if detail else "不含会话详情"
-        tk.Label(inner, text=f"上传至 {server_url} （{anon_txt}，{detail_txt}）",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI, anchor="w",
-                 wraplength=440, justify="left").pack(fill="x", padx=10, pady=(6, 2))
+        # -- 上传目标（可编辑）：服务器地址 / API Token / 是否含明细 --
+        cfg_card = self._card(inner, "上传目标（留空则用默认；改动点「立即上传」时保存）")
+        self._url_var = tk.StringVar(value=str(config.get("url") or ""))
+        self._token_var = tk.StringVar(value=str(config.get("auth_token") or ""))
+        self._detail_var = tk.BooleanVar(value=bool(config.get("detail")))
+        self._labeled_entry(cfg_card, "服务器地址", self._url_var,
+                            placeholder=f"默认 {self._default_url}")
+        self._labeled_entry(cfg_card, "API Token", self._token_var,
+                            placeholder="留空 = 匿名上传")
+        chk = tk.Checkbutton(  # style-exempt: style.md §3 豁免：UploadDialog
+            cfg_card, text="附带每会话明细（完整对话）", variable=self._detail_var,
+            bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI, anchor="w",
+            selectcolor=theme.PANEL_2, activebackground=theme.PANEL,
+            activeforeground=theme.FG, highlightthickness=0, bd=0, cursor="hand2")
+        chk.pack(fill="x", pady=(4, 0))
 
         # -- 项目选择卡（标题即提示，多选列表紧随其下） --
         card3 = self._card(inner, "项目选择（可多选，Ctrl/Shift 点选）")
@@ -1456,8 +1466,22 @@ class UploadDialog:
         card.pack(fill="x")
         return card
 
+    def _labeled_entry(self, card, label: str, var, *, placeholder: str = "") -> None:
+        """一行「标签 + 深色输入框」，风格与顶栏日期输入框一致（highlight 边框）。"""
+        row = tk.Frame(card, bg=theme.PANEL)
+        row.pack(fill="x", pady=(2, 2))
+        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL, width=11, anchor="w").pack(side="left")
+        e = tk.Entry(row, textvariable=var, bg=theme.PANEL_2, fg=theme.FG,
+                     insertbackground=theme.FG, relief="flat", highlightthickness=1,
+                     highlightbackground=theme.BORDER, highlightcolor=theme.ACCENT,
+                     font=theme.FONT_UI)
+        e.pack(side="left", fill="x", expand=True)
+        if placeholder:
+            Tooltip(e, placeholder)
+
     def _fit_window(self) -> None:
-        """按表单实际高度收紧窗口，消除底部留白。封顶 640 防过高。"""
+        """按表单实际高度收紧窗口，消除底部留白。封顶 720 防过高。"""
         win = self._win
         win.update_idletasks()
         canv = self._sf.canvas
@@ -1466,7 +1490,7 @@ class UploadDialog:
         status_h = self._status.winfo_reqheight() + 2
         action_h = next((w.winfo_reqheight() for w in win.winfo_children()
                          if isinstance(w, tk.Frame) and w is not canv), 0)
-        win_h = max(360, min(top + inner_h + status_h + action_h + 14, 640))
+        win_h = max(360, min(top + inner_h + status_h + action_h + 14, 720))
         cur_h = win.winfo_height()
         adj = (cur_h - win_h) // 2 if cur_h > 200 else 0
         win.geometry(f"480x{int(win_h)}+{int(win.winfo_x())}+{int(win.winfo_y() + adj)}")
@@ -1486,6 +1510,11 @@ class UploadDialog:
         if not prefs["last_projects"]:
             self.set_status("请至少选择一个项目", error=True)
             return
+        # 先保存上传配置（写回 tcer_ui.json 的 upload 段），再保存项目选择、上传。
+        # _start_upload 从 upload_config 读回，故此处保存是上传取到最新配置的前提。
+        self._on_save_config(url=self._url_var.get(),
+                             auth_token=self._token_var.get(),
+                             detail=self._detail_var.get())
         self._on_save_prefs(prefs)
         self.set_status("上传中…")
         self._on_upload(prefs, self)

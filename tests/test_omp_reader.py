@@ -37,13 +37,18 @@ def _thinking_level(level="high") -> dict:
             "timestamp": _ISO, "thinkingLevel": level, "configured": None}
 
 
-def _user(text="hi", ts=_ISO, imgs=0) -> dict:
+def _user(text="hi", ts=_ISO, imgs=0, *, agent=False) -> dict:
+    """A user-role message. ``agent=True`` marks it as an advisor/agent-internal
+    review prompt (omp writes ``synthetic:true`` + ``attribution:"agent"``)."""
     content = [{"type": "text", "text": text}]
     for _ in range(imgs):
         content.append({"type": "image", "mimeType": "image/png", "data": "iVBORw0="})
+    msg = {"role": "user", "content": content,
+           "attribution": "agent" if agent else "user", "timestamp": ts}
+    if agent:
+        msg["synthetic"] = True
     return {"type": "message", "id": "u1", "parentId": None, "timestamp": ts,
-            "message": {"role": "user", "content": content,
-                        "attribution": "user", "timestamp": ts}}
+            "message": msg}
 
 
 def _text(t: str) -> dict:
@@ -460,6 +465,64 @@ def test_analyze_project_folds_subagents_and_counts(tmp_path, monkeypatch):
     assert a.aggregate.usage.input_tokens == 300
     assert len(a.reports) == 1             # subagent is not a separate report
     file_cache.clear()
+
+
+# --------------------------------------------------------------------------- advisor prompts
+
+def test_advisor_user_prompts_excluded_from_metrics(tmp_path):
+    """advisor（omp）审查 prompt 以 role:'user' 写入,但带 synthetic/attribution=agent
+    标记 —— 非真人输入,不能能计入 user_msgs / prompt 信号 / image。"""
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        _user("帮我实现一个解析器"),                        # 真人首条
+        _user("/advisor-review please", agent=True),        # advisor 注入(带 slash 形)
+        _user("look", imgs=2, agent=True),                  # advisor 注入(带图)
+        _user("不对重来"),                                  # 真人纠正
+        _assistant([_text("ok")], _usage(10, 5)),
+    ])
+    u = omp_reader.aggregate_usage(p)
+    assert u.user_msgs == 2                       # 仅两条真人消息
+    assert u.slash_command_count == 0             # advisor 的 /... 不算 slash
+    assert u.correction_msg_count == 1            # 只有真人的"不对重来"
+    assert u.first_prompt_chars == len("帮我实现一个解析器")
+    assert u.image_count == 0                     # advisor 注入的图片不算用户图片
+
+
+def test_advisor_prompts_excluded_from_text_readers(tmp_path):
+    """advisor 审查 prompt 不出现在用户消息弹窗,也不并入会话视图的 user 消息。"""
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        _user("real one"),
+        _user("advisor internal note", agent=True),
+        _user("real two"),
+        _assistant([_text("ok")], _usage(5, 2)),
+    ])
+    assert omp_reader.read_user_messages(p) == ["real one", "real two"]
+    convo = omp_reader.read_conversation(p)
+    user_texts = [c["text"] for c in convo if c["role"] == "user"]
+    assert user_texts == ["real one", "real two"]
+
+
+def test_advisor_transcript_folds_cost_not_user_msgs(tmp_path, monkeypatch):
+    """advisor transcript 存于 <session>/__advisor.jsonl,被当 subagent 折叠:
+    token 成本保留(真实花费),但其 review prompt(synthetic user)不计入 user_msgs。"""
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "agent"))
+    proj = tmp_path / "agent" / "sessions" / "C--repo-app"
+    main = proj / f"{_STEM}.jsonl"
+    _write_omp(main, [_session(), _user("real human message"),
+                      _assistant([_text("reply")], _usage(100, 10, cost=0.5))])
+    # advisor transcript：review prompt 是 synthetic user，assistant 是真实花费
+    adv = proj / _STEM / "__advisor.jsonl"
+    _write_omp(adv, [_session(),
+                     _user("session update: review this turn", agent=True),
+                     _assistant([_text("looks fine")], _usage(200, 20, cost=0.3))])
+
+    assert omp_reader._is_subagent_file(adv) is True   # 折叠进主会话
+    u = omp_reader.aggregate_usage(main)
+    assert u.input_tokens == 300                       # 100 主 + 200 advisor(成本保留)
+    assert abs(u.reported_cost_usd - 0.8) < 1e-9
+    assert u.user_msgs == 1                            # 仅真人那条,advisor prompt 不计
+    assert omp_reader.read_user_messages(main) == ["real human message"]
 
 
 # --------------------------------------------------------------------------- env resolution

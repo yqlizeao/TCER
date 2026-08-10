@@ -1,9 +1,8 @@
 """Persistence for the GUI 上传 dialog's remembered project selection.
 
-Since server URL, auth, and detail options moved to environment config
-(``env_config``; ``TCER_CLIENT_UPLOAD_URL`` / ``TCER_CLIENT_UPLOAD_AUTH_TOKEN`` /
-``TCER_CLIENT_UPLOAD_DETAIL``), the only thing the dialog still persists is
-**which projects were last selected**, so reopening the dialog pre-checks them.
+Since server URL, auth, and detail options moved to ``tcer_ui.json`` 的 upload
+段 (``upload_config``), the only thing this file persists is **which projects
+were last selected**, so reopening the dialog pre-checks them.
 
 Reads/writes a small JSON file under ``app_dirs.prefs_dir()`` (发布版优先 exe
 同目录,回退 ``~/.tcer/``):``<prefs_dir>/tcer_upload.json``, mirroring the
