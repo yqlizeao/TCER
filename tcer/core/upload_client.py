@@ -271,29 +271,29 @@ def upload(server_url: str, token: str, payload: dict,
     return int(data.get("inserted", 0))
 
 
-def login_and_upload(
+def token_upload(
     *,
     server_url: str,
-    username: str,
-    password: str,
+    api_token: str | None,
     aggregate: SessionReport,
     reports: list[SessionReport],
     n_sessions: int,
     project: str,
-    user: str | None,
-    anonymous: bool,
     detail: bool,
 ) -> int:
-    """One-shot: login (skipped for anonymous), build payload, upload.
+    """Build + upload a project's report using env-driven auth.
 
-    Anonymous uploads need no credentials — the server accepts them without a
-    bearer token — so ``login`` is skipped and ``upload`` is called with
-    ``token=None``. Non-anonymous uploads exchange credentials first.
+    Auth model (see ``env_config``): an API token identifies the uploading user
+    server-side (the client never learns the username), so the payload sends
+    ``user=None`` and ``anonymous=False`` and lets the server fill ``person``
+    from the token. With no API token the upload is anonymous — the server
+    accepts it with no bearer, and a stable pseudonym is attached.
+
     Returns inserted row count.
     """
-    token = None if anonymous else login(server_url, username, password)
+    anonymous = not api_token
     payload = build_payload(
         aggregate=aggregate, reports=reports, n_sessions=n_sessions,
-        project=project, user=user, anonymous=anonymous, detail=detail,
+        project=project, user=None, anonymous=anonymous, detail=detail,
     )
-    return upload(server_url, token, payload)
+    return upload(server_url, api_token, payload)
