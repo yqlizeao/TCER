@@ -1,0 +1,33 @@
+# ONE-SHOT purge of accumulated workflow artifacts.
+# release.yml now sets retention-days:1 on every new upload, so artifacts
+# auto-expire going forward — this workflow exists ONLY to clear the backlog
+# that piled up before that change.
+#
+# Use: Actions tab -> "Purge Old Artifacts" -> Run workflow. Run once, then
+# delete this file (no schedule; does nothing on its own).
+#
+# Pinned to a SHA, NOT @v1: the @v1 moving tag still points at v1.4.0
+# (Node 20), which logs a "Node 20 is being deprecated" warning. master was
+# migrated to node24 in PR #63 (commit ca9712b, 2026-04-21) but the repo is
+# marked "no ongoing development" and never cut a v1.5.0 release, so @v1
+# won't pick it up. Pinning the commit SHA gets the node24 build without
+# depending on an unreleased tag or a moving branch.
+# (`actions/delete-package-versions` would NOT work here — it deletes GitHub
+# *Packages*, not Actions artifacts.)
+
+name: Purge Old Artifacts
+
+on:
+  workflow_dispatch: # manual only — no schedule (retention-days handles new ones)
+
+permissions:
+  actions: write
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: c-hive/gha-remove-artifacts@ca9712b3e7e2028a11d9918944e30664a6ed5e82 # node24 (PR #63); @v1 is still node20
+        with:
+          age: '1 second' # delete everything older than 1 second
+          skip-recent: 0 # keep nothing (all backlog artifacts are already in Releases)
