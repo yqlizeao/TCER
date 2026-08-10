@@ -52,7 +52,7 @@ function paintDiagnosis() {
     <div class="diag-layout">
       <div class="diag-nav">${nav}</div>
       <div>
-        <div class="panel-head"><span class="panel-title">${dom ? dom.label : ""}</span></div>
+        <div class="panel-head"><span class="panel-title">${dom ? escapeHTML(dom.label) : ""}</span></div>
         ${cardsHTML}
         <div class="caveat-foot">${d.caveat || ""}</div>
       </div>
@@ -70,13 +70,13 @@ function paintDiagnosis() {
 }
 
 function findingCard(f) {
-  const ev = (f.detail || []).map((e) => `<div class="f-ev">${e}</div>`).join("");
+  const ev = (f.detail || []).map((e) => `<div class="f-ev">${escapeHTML(e)}</div>`).join("");
   const action = f.action
-    ? `<div class="f-action">建议：${f.action.replace(/「([^」]+)」/g, "<b>「$1」</b>")}</div>`
+    ? `<div class="f-action">建议：${escapeHTML(f.action).replace(/「([^」]+)」/g, "<b>「$1」</b>")}</div>`
     : "";
   const badge = `<span class="f-badge sevb-${f.severity}">${SEV_META[f.severity] || f.severity}</span>`;
   return `<div class="finding sev-${f.severity}">
-    <div class="f-head"><span class="f-title">${f.title}</span>${badge}</div>
+    <div class="f-head"><span class="f-title">${escapeHTML(f.title)}</span>${badge}</div>
     ${action}${ev}
   </div>`;
 }

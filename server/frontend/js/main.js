@@ -6,6 +6,7 @@ const VIEWS = {
   engineering: { title: "工程效能", render: renderEngineering },
   diagnosis: { title: "问题诊断", render: renderDiagnosis },
   sessions: { title: "会话明细", render: renderSessions },
+  aliases: { title: "聚合配置", render: renderAliases },
   tokens: { title: "Auth Token", render: renderTokens },
 };
 
@@ -17,7 +18,7 @@ async function route() {
   try { await v.render(); }
   catch (e) {
     document.getElementById("content").innerHTML =
-      `<div class="empty">加载失败：${e.message}</div>`;
+      `<div class="empty">加载失败：${escapeHTML(e.message)}</div>`;
   }
 }
 
@@ -85,7 +86,9 @@ function renderUser(name, avatarUrl) {
   const el = document.getElementById("user-avatar");
   if (avatarUrl) {
     el.className = "user-avatar has-img";
-    el.innerHTML = `<img src="${avatarUrl}" alt="" width="24" height="24">`;
+    // 只允许 https: 开头的头像 URL，防止属性逃逸（javascript: / data: 等协议注入）
+    const safeAvatar = /^https:\/\//i.test(avatarUrl) ? avatarUrl : "";
+    el.innerHTML = `<img src="${escapeHTML(safeAvatar)}" alt="" width="24" height="24">`;
   } else {
     el.className = "user-avatar";
     el.textContent = initialOf(name);

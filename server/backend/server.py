@@ -14,7 +14,9 @@ GET  /api/detail             (Bearer) ?dimension=&...           -> {dimension, r
 GET  /api/aliases            (Bearer) ?kind=project|model|person -> {aliases}
 POST /api/aliases            (Bearer) {kind, raw, canonical}    -> {ok}
 GET  /api/sessions           (Bearer) ?filters...               -> {sessions, total}
-GET  /api/session            (Bearer) ?id=                      -> {session detail}
+GET  /api/session            (Bearer) ?id=                      -> {session detail}  (403 if private & not owner)
+GET  /api/group-summary      (Bearer) ?project=&filters...      -> {group summary of visible sessions}
+POST /api/visibility         (Bearer) {id|project, visibility}  -> {ok}  set one/bulk private|public
 GET  /api/dimensions         (Bearer)                           -> {dimensions, metrics}
 GET  /api/compare            (Bearer) ?dimension=&metric=&...   -> {cohorts, caveat}
 GET  /api/insights           (Bearer) ?filters...               -> {findings, coverage}
@@ -45,6 +47,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
+from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
@@ -62,6 +66,26 @@ import projectview  # noqa: E402
 
 _FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend").resolve()
 _MAX_BODY = 64 * 1024 * 1024  # 64 MiB upload cap
+
+# -- 登录暴力破解防护 -------------------------------------------------------- #
+# 按 IP 记录失败次数；超过阈值后临时锁定。纯内存，重启清零（内网单节点够用）。
+_LOGIN_FAILURES: dict[str, list[float]] = defaultdict(list)
+_LOGIN_MAX_ATTEMPTS = 10   # 窗口内最多失败次数
+_LOGIN_WINDOW_SEC   = 300  # 统计窗口（5 分钟）
+_LOGIN_LOCKOUT_SEC  = 600  # 锁定时长（10 分钟）
+
+
+def _login_check_rate(ip: str) -> bool:
+    """返回 True 表示允许登录尝试，False 表示被限流。"""
+    now = time.monotonic()
+    failures = _LOGIN_FAILURES[ip]
+    # 清理窗口外的旧记录
+    _LOGIN_FAILURES[ip] = [t for t in failures if now - t < _LOGIN_WINDOW_SEC]
+    return len(_LOGIN_FAILURES[ip]) < _LOGIN_MAX_ATTEMPTS
+
+
+def _login_record_failure(ip: str) -> None:
+    _LOGIN_FAILURES[ip].append(time.monotonic())
 
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -127,6 +151,8 @@ class Handler(BaseHTTPRequestHandler):
             self._h_set_alias()
         elif route == "/api/tokens":
             self._h_create_token()
+        elif route == "/api/visibility":
+            self._h_set_visibility()
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -171,6 +197,8 @@ class Handler(BaseHTTPRequestHandler):
             self._guard(lambda: self._h_sessions(qs))
         elif route == "/api/session":
             self._guard(lambda: self._h_session(qs))
+        elif route == "/api/group-summary":
+            self._guard(lambda: self._h_group_summary(qs))
         elif route == "/api/dimensions":
             self._guard(self._h_dimensions)
         elif route == "/api/compare":
@@ -222,6 +250,10 @@ class Handler(BaseHTTPRequestHandler):
         if not feishu.password_enabled():
             self._send_json({"error": "账号密码登录已关闭，请使用飞书登录"}, 403)
             return
+        ip = self.client_address[0]
+        if not _login_check_rate(ip):
+            self._send_json({"error": "登录尝试过于频繁，请稍后再试"}, 429)
+            return
         data = self._read_json()
         if not data or "username" not in data or "password" not in data:
             self._send_json({"error": "username and password required"}, 400)
@@ -229,6 +261,8 @@ class Handler(BaseHTTPRequestHandler):
         if db.verify_user(str(data["username"]), str(data["password"])):
             self._send_json({"token": auth.issue_token(str(data["username"]))})
         else:
+            _login_record_failure(ip)
+            time.sleep(0.5)  # 阶梯延迟，减缓爆破速度
             self._send_json({"error": "invalid credentials"}, 401)
 
     # -- login config / identity ------------------------------------------- #
@@ -448,12 +482,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "unauthorized"}, 401)
             return
         data = self._read_json()
-        if not data or "kind" not in data or "raw" not in data:
-            self._send_json({"error": "kind and raw required"}, 400)
+        # 兼容单条 ``raw`` 与批量 ``raws``（一次性把多个原始标识合并到同一规范名）。
+        if not data or "kind" not in data or ("raw" not in data and "raws" not in data):
+            self._send_json({"error": "kind and raw/raws required"}, 400)
             return
+        raws = data.get("raws")
+        if raws is None:
+            raws = [data["raw"]]
+        if not isinstance(raws, list):
+            self._send_json({"error": "raws must be a list"}, 400)
+            return
+        kind = str(data["kind"])
+        canonical = data.get("canonical")
         try:
-            db.set_alias(str(data["kind"]), str(data["raw"]),
-                         data.get("canonical"))
+            for raw in raws:
+                db.set_alias(kind, str(raw), canonical)
         except ValueError as e:
             self._send_json({"error": str(e)}, 400)
             return
@@ -461,7 +504,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _h_sessions(self, qs: dict) -> None:
         f = self._common_filters(qs)
-        self._send_json(db.sessions_list(**f))
+        self._send_json(db.sessions_list(viewer=self._auth_user(), **f))
 
     def _h_session(self, qs: dict) -> None:
         sid = self._one(qs, "id")
@@ -469,14 +512,71 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "id required"}, 400)
             return
         try:
-            detail = db.session_detail(int(sid))
+            detail = db.session_detail(int(sid), viewer=self._auth_user())
         except (TypeError, ValueError):
             self._send_json({"error": "invalid id"}, 400)
             return
         if detail is None:
             self._send_json({"error": "not found"}, 404)
             return
+        if detail == "forbidden":
+            self._send_json({"error": "无权查看该会话（私有）"}, 403)
+            return
         self._send_json(detail)
+
+    def _h_group_summary(self, qs: dict) -> None:
+        f = self._common_filters(qs)
+        project = self._one(qs, "project")
+        if not project:
+            self._send_json({"error": "project required"}, 400)
+            return
+        self._send_json(db.project_group_summary(
+            project, viewer=self._auth_user(),
+            persons=f["persons"], models=f["models"],
+            start_ts=f["start_ts"], end_ts=f["end_ts"]))
+
+    def _h_set_visibility(self) -> None:
+        """Set session visibility. Body: {id, visibility} for one session, or
+        {project, visibility} to bulk-set every session the caller owns in that
+        project group. Requires an authenticated (owner) identity."""
+        user = self._auth_user()
+        if not user:
+            self._send_json({"error": "unauthorized"}, 401)
+            return
+        data = self._read_json() or {}
+        vis = str(data.get("visibility") or "")
+        if vis not in ("private", "public"):
+            self._send_json({"error": "visibility must be private|public"}, 400)
+            return
+        # Bulk (by project group) vs single (by row id).
+        if data.get("project") is not None and data.get("id") is None:
+            f = self._common_filters({
+                k: [v] for k, v in {
+                    "start": data.get("start"), "end": data.get("end"),
+                }.items() if v is not None})
+            try:
+                n = db.set_project_visibility(
+                    user, str(data["project"]), vis,
+                    persons=data.get("persons") or None,
+                    models=data.get("models") or None,
+                    start_ts=f["start_ts"], end_ts=f["end_ts"])
+            except ValueError as e:
+                self._send_json({"error": str(e)}, 400)
+                return
+            self._send_json({"ok": True, "updated": n})
+            return
+        try:
+            result = db.set_session_visibility(int(data["id"]), user, vis)
+        except (KeyError, TypeError, ValueError):
+            self._send_json({"error": "invalid id"}, 400)
+            return
+        if result == "not_found":
+            self._send_json({"error": "not found"}, 404)
+            return
+        if result == "forbidden":
+            self._send_json({"error": "只能设置自己上传的会话"}, 403)
+            return
+        self._send_json({"ok": True})
 
     # -- static ------------------------------------------------------------ #
     def _serve_static(self, route: str) -> None:

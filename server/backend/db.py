@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS uploads (
     cpe               REAL,
     tool_calls_json   TEXT,           -- raw tool_name -> count (MCP dimension)
     tool_variants_json TEXT,          -- "Skill:x" / "Agent:y" -> count
+    visibility    TEXT NOT NULL DEFAULT 'private',  -- 'private' | 'public'; who may see this session's detail
     raw_json      TEXT NOT NULL       -- full report_row_dict
 );
 
@@ -176,6 +177,7 @@ _MIGRATIONS = {
         "tool_variants_json": "TEXT",
         "score": "REAL",
         "tier": "TEXT",
+        "visibility": "TEXT NOT NULL DEFAULT 'private'",
     },
 }
 
@@ -585,8 +587,49 @@ def canonical_project(raw: str | None, amap: dict[str, str]) -> str:
     return amap.get(raw or "", raw or "未标注")
 
 
-def canonical_person(raw: str | None, amap: dict[str, str]) -> str:
-    return amap.get(raw or "", raw or "未标注")
+def feishu_name_map() -> dict[str, str]:
+    """``{open_id: display_name}`` for all known Feishu users (one query)."""
+    conn = connect()
+    try:
+        return {r["open_id"]: r["name"]
+                for r in conn.execute("SELECT open_id, name FROM feishu_users")}
+    finally:
+        conn.close()
+
+
+def _feishu_display(raw: str | None,
+                    feishu_map: dict[str, str] | None = None) -> str | None:
+    """Real name for a ``feishu:<open_id>`` person handle, else None.
+
+    ``feishu_map`` lets batch callers avoid a per-row DB hit; when omitted a
+    single lookup is issued (used by ``session_detail`` for one row).
+    """
+    if not raw or not raw.startswith("feishu:"):
+        return None
+    oid = raw[len("feishu:"):]
+    if feishu_map is not None:
+        name = feishu_map.get(oid)
+    else:
+        prof = get_feishu_user(oid)
+        name = prof["name"] if prof else None
+    return name or None
+
+
+def canonical_person(raw: str | None, amap: dict[str, str],
+                     feishu_map: dict[str, str] | None = None) -> str:
+    """Canonical person group key.
+
+    Precedence: manual alias (raw→canonical) wins, so a leader can merge one
+    person's several upload identities (feishu handle, 匿名-xxxx pseudonym,
+    machine-local name) under one label. Otherwise a Feishu handle resolves to
+    the account's real name so members never surface as ``feishu:ou_...``.
+    """
+    if raw and raw in amap:
+        return amap[raw]
+    disp = _feishu_display(raw, feishu_map)
+    if disp:
+        return disp
+    return raw or "未标注"
 
 
 def canonical_model(raw: str | None, amap: dict[str, str]) -> str:
@@ -641,6 +684,7 @@ def _fetch_rows(
     project_amap: dict[str, str],
     model_amap: dict[str, str],
     person_amap: dict[str, str],
+    feishu_map: dict[str, str] | None = None,
 ) -> list[dict]:
     """Fetch de-duplicated rows, resolve canonical person/project/model, filter.
 
@@ -664,10 +708,13 @@ def _fetch_rows(
     proj_set = set(projects) if projects else None
     model_set = set(models) if models else None
 
+    if feishu_map is None:
+        feishu_map = feishu_name_map()
+
     out: list[dict] = []
     for r in conn.execute(q, params):
         d = dict(r)
-        d["c_person"] = canonical_person(d["person"], person_amap)
+        d["c_person"] = canonical_person(d["person"], person_amap, feishu_map)
         d["c_project"] = canonical_project(d["project"], project_amap)
         d["c_model"] = canonical_model(d["model"], model_amap)
         if person_set is not None and d["c_person"] not in person_set:
@@ -809,7 +856,9 @@ def distinct_values() -> dict:
             "SELECT DISTINCT model AS v FROM uploads WHERE model IS NOT NULL")]
     finally:
         conn.close()
-    persons = sorted({canonical_person(p, person_amap) for p in raw_persons})
+    feishu_map = feishu_name_map()
+    persons = sorted({canonical_person(p, person_amap, feishu_map)
+                      for p in raw_persons})
     projects = sorted({canonical_project(p, project_amap) for p in raw_projects})
     models = sorted({canonical_model(m, model_amap) for m in raw_models})
     return {"persons": persons, "projects": projects, "models": models}
@@ -933,11 +982,18 @@ def sessions_list(persons: list[str] | None = None,
                   models: list[str] | None = None,
                   start_ts: int | None = None,
                   end_ts: int | None = None,
+                  viewer: str | None = None,
                   limit: int = 1000) -> dict:
     """Filtered session list for the secondary sidebar.
 
     ``aggregate``-kind rows are flagged ``aggregate_only`` so the UI can mark
     them and show a placeholder instead of a session detail view.
+
+    Permission model: a viewer sees their **own** session rows unconditionally
+    plus anyone else's rows explicitly marked ``visibility='public'``. Ownership
+    is keyed on ``uploaded_by`` (the login username, an auditable field), not on
+    the reported ``person`` (which may be an anonymous pseudonym). ``viewer`` is
+    the current login username; ``None`` (unauthenticated) sees only public rows.
     """
     project_amap, model_amap, person_amap = _alias_maps()
     conn = connect()
@@ -949,7 +1005,14 @@ def sessions_list(persons: list[str] | None = None,
 
     rows.sort(key=lambda r: r["ts"] or 0, reverse=True)
     out = []
-    for r in rows[:limit]:
+    for r in rows:
+        owner = _get(r, "uploaded_by")
+        visibility = _get(r, "visibility") or "private"
+        is_owner = viewer is not None and owner == viewer
+        if not is_owner and visibility != "public":
+            continue
+        if len(out) >= limit:
+            break
         out.append({
             "id": r["id"],
             "session_id": r["session_id"],
@@ -965,12 +1028,20 @@ def sessions_list(persons: list[str] | None = None,
             "total_tokens": r["total_tokens"],
             "cost_usd": r["cost_usd"],
             "aggregate_only": r["kind"] == "aggregate",
+            "visibility": visibility,
+            "is_owner": is_owner,
         })
-    return {"sessions": out, "total": len(rows)}
+    return {"sessions": out, "total": len(out)}
 
 
-def session_detail(row_id: int) -> dict | None:
-    """Full ``raw_json`` for one uploaded row, plus its provenance flags."""
+def session_detail(row_id: int, viewer: str | None = None) -> dict | None:
+    """Full ``raw_json`` for one uploaded row, plus its provenance flags.
+
+    Returns ``None`` if the row does not exist. Returns the sentinel string
+    ``"forbidden"`` if the row exists but the ``viewer`` is neither its owner
+    (``uploaded_by``) nor allowed to see it via ``visibility='public'`` — so the
+    caller can answer 403 (leaks nothing) vs 404 distinctly.
+    """
     conn = connect()
     try:
         r = conn.execute("SELECT * FROM uploads WHERE id=?", (row_id,)).fetchone()
@@ -978,19 +1049,136 @@ def session_detail(row_id: int) -> dict | None:
         conn.close()
     if r is None:
         return None
+    owner = _get(r, "uploaded_by")
+    visibility = _get(r, "visibility") or "private"
+    is_owner = viewer is not None and owner == viewer
+    if not is_owner and visibility != "public":
+        return "forbidden"
     try:
         raw = json.loads(r["raw_json"])
     except (ValueError, TypeError):
         raw = {}
+    project_amap, model_amap, person_amap = _alias_maps()
     return {
         "id": r["id"],
         "session_id": r["session_id"],
         "title": r["title"],
-        "person": r["person"],
-        "project": r["project"],
-        "model": r["model"],
+        "person": canonical_person(r["person"], person_amap),
+        "project": canonical_project(r["project"], project_amap),
+        "model": model_display(canonical_model(r["model"], model_amap)),
         "ts": r["ts"],
         "aggregate_only": r["kind"] == "aggregate",
         "has_transcript": bool(raw.get("transcript")),
+        "visibility": visibility,
+        "is_owner": is_owner,
         "raw": raw,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Visibility (per-session private/public sharing)
+# --------------------------------------------------------------------------- #
+def set_session_visibility(row_id: int, viewer: str, visibility: str) -> str:
+    """Set one session row's visibility. Only its owner (``uploaded_by``) may.
+
+    Returns ``"ok"`` on success, ``"not_found"`` if the row is missing, or
+    ``"forbidden"`` if ``viewer`` does not own the row.
+    """
+    if visibility not in ("private", "public"):
+        raise ValueError("visibility must be private|public")
+    conn = connect()
+    try:
+        r = conn.execute("SELECT uploaded_by FROM uploads WHERE id=?",
+                         (row_id,)).fetchone()
+        if r is None:
+            return "not_found"
+        if r["uploaded_by"] != viewer:
+            return "forbidden"
+        conn.execute("UPDATE uploads SET visibility=? WHERE id=?",
+                     (visibility, row_id))
+        conn.commit()
+        return "ok"
+    finally:
+        conn.close()
+
+
+def set_project_visibility(viewer: str, project: str, visibility: str,
+                           persons: list[str] | None = None,
+                           models: list[str] | None = None,
+                           start_ts: int | None = None,
+                           end_ts: int | None = None) -> int:
+    """Bulk-set visibility for every session the ``viewer`` OWNS in one project
+    group (canonical). Overrides each session's prior per-session setting.
+
+    Only rows owned by ``viewer`` (``uploaded_by``) are touched — a bulk action
+    never flips someone else's session. Returns the number of rows updated.
+    Scoping mirrors ``sessions_list`` (same canonical filters) so "this group"
+    means exactly the group the user is looking at.
+    """
+    if visibility not in ("private", "public"):
+        raise ValueError("visibility must be private|public")
+    project_amap, model_amap, person_amap = _alias_maps()
+    conn = connect()
+    try:
+        rows = _fetch_rows(conn, persons, [project] if project else None, models,
+                           start_ts, end_ts, project_amap, model_amap, person_amap)
+        ids = [r["id"] for r in rows
+               if r.get("c_project") == project
+               and _get(r, "uploaded_by") == viewer]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        conn.execute(
+            f"UPDATE uploads SET visibility=? WHERE id IN ({placeholders})",
+            (visibility, *ids))
+        conn.commit()
+        return len(ids)
+    finally:
+        conn.close()
+
+
+def project_group_summary(project: str, viewer: str | None = None,
+                          persons: list[str] | None = None,
+                          models: list[str] | None = None,
+                          start_ts: int | None = None,
+                          end_ts: int | None = None) -> dict:
+    """Rolled-up metrics for one project group's *visible* sessions.
+
+    Same visibility rule as ``sessions_list`` (own rows + public rows), so a
+    group header's summary describes exactly the sessions the viewer can open.
+    Also reports how many of the visible sessions the viewer owns and their
+    current private/public split, to drive the bulk-visibility controls.
+    """
+    project_amap, model_amap, person_amap = _alias_maps()
+    conn = connect()
+    try:
+        rows = _fetch_rows(conn, persons, [project] if project else None, models,
+                           start_ts, end_ts, project_amap, model_amap, person_amap)
+    finally:
+        conn.close()
+
+    visible = []
+    owned = 0
+    n_public = n_private = 0
+    for r in rows:
+        if r.get("c_project") != project:
+            continue
+        owner = _get(r, "uploaded_by")
+        visibility = _get(r, "visibility") or "private"
+        is_owner = viewer is not None and owner == viewer
+        if not is_owner and visibility != "public":
+            continue
+        visible.append(r)
+        if is_owner:
+            owned += 1
+            if visibility == "public":
+                n_public += 1
+            else:
+                n_private += 1
+
+    summary = _agg_metrics(visible)
+    summary["project"] = project
+    summary["owned_count"] = owned
+    summary["owned_public"] = n_public
+    summary["owned_private"] = n_private
+    return summary

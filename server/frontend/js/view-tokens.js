@@ -42,12 +42,12 @@ async function renderTokens() {
   try {
     data = await api("/api/tokens");
   } catch (e) {
-    content.innerHTML = `<div class="empty">加载失败：${e.message}</div>`;
+    content.innerHTML = `<div class="empty">加载失败：${escapeHTML(e.message)}</div>`;
     return;
   }
   const rows = (data.tokens || []).map((t) => `
     <tr>
-      <td>${t.label || "（无备注）"}</td>
+      <td>${escapeHTML(t.label) || "（无备注）"}</td>
       <td class="num">${t.created_at ? fmt.date(t.created_at) : "—"}</td>
       <td class="num">${t.last_used_at ? fmt.date(t.last_used_at) : "从未使用"}</td>
       <td><button class="btn-ghost tk-del" data-id="${t.id}">撤销</button></td>
@@ -96,13 +96,13 @@ async function renderTokens() {
       if (empty) tbody.innerHTML = "";
       const tr = document.createElement("tr");
       tr.innerHTML =
-        `<td>${label || "（无备注）"}</td>` +
+        `<td>${escapeHTML(label) || "（无备注）"}</td>` +
         `<td class="num">${fmt.date(Math.floor(Date.now() / 1000))}</td>` +
         `<td class="num">从未使用</td><td></td>`;
       tbody.insertBefore(tr, tbody.firstChild);
       document.getElementById("tk-label").value = "";
     } catch (e) {
-      document.getElementById("tk-new").innerHTML = `<div class="tk-err">生成失败：${e.message}</div>`;
+      document.getElementById("tk-new").innerHTML = `<div class="tk-err">生成失败：${escapeHTML(e.message)}</div>`;
     }
   });
 

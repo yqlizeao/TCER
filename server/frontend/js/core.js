@@ -123,3 +123,15 @@ function lineChart(el, series, opts = {}) {
 }
 function pctv(v) { return v == null ? null : +(v * 100).toFixed(1); }
 
+// ------------------------- 安全工具 -------------------------
+// 转义 HTML 特殊字符，防止 XSS。所有用户可控数据插入 innerHTML 前必须经过此函数。
+function escapeHTML(s) {
+  if (s == null) return "";
+  return String(s)
+    .replace(/&/g, "&")
+    .replace(/</g, "<")
+    .replace(/>/g, ">")
+    .replace(/"/g, """)
+    .replace(/'/g, "'");
+}
+

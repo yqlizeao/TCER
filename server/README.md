@@ -68,8 +68,13 @@ Auth Token 存哈希入库，不受重启影响）、`TCER_SERVER_DB`（SQLite �
 - `TCER_LOGIN_MODE`：登录方式开关，`password`（默认）| `feishu` | `both`。
   设为 `feishu` 时**关闭账号密码登录**，仅保留飞书登录。
 - `TCER_FEISHU_APP_ID` / `TCER_FEISHU_APP_SECRET`：飞书自建应用的 App ID / App Secret。
-- `TCER_FEISHU_REDIRECT_URI`：可选。OAuth 回调地址（需与飞书开放平台后台登记一致）；
-  不设则按请求 Host 推导为 `<scheme>://<host>/api/auth/feishu/callback`。
+- `TCER_FEISHU_REDIRECT_URI`：OAuth 回调地址（需与飞书开放平台后台登记一致）。
+  **生产环境必须显式设置此项**，不能依赖 `Host` 请求头自动推导——反代/自定义域名下
+  自动推导可能产生不匹配。留空时按请求 Host 推导为 `<scheme>://<host>/api/auth/feishu/callback`
+  （仅适用于本地开发/测试）。示例：
+  ```
+  TCER_FEISHU_REDIRECT_URI=https://tcer.example.com/api/auth/feishu/callback
+  ```
 
 飞书采用标准授权码 OAuth 2.0：前端点「使用飞书登录」→ `/api/auth/feishu/start` 302 跳转
 飞书授权页 → 回调 `/api/auth/feishu/callback` 换取 user_access_token 并拉取用户资料

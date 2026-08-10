@@ -91,7 +91,7 @@ function modelTable(rows) {
   if (!rows.length) return `<div class="empty">无模型数据</div>`;
   const body = rows.map((m) => `
     <tr>
-      <td><span class="model-pill">${m.display || m.model}</span></td>
+      <td><span class="model-pill">${escapeHTML(m.display || m.model)}</span></td>
       <td class="num">${fmt.f2(m.tcer)}</td>
       <td class="num">${fmt.f2(m.cpe)}</td>
       <td class="num">${fmt.int(m.net_loc)}</td>
@@ -113,7 +113,7 @@ function weakSpotsBanner(spots) {
     project_churn: "项目返工率偏高", project_error: "项目错误率偏高" };
   const items = spots.map((s) => {
     const isPerson = s.kind.startsWith("person");
-    return `<div class="f-ev">${isPerson ? "成员" : "项目"} <b>${s.subject}</b> ${label[s.kind] || ""}：
+    return `<div class="f-ev">${isPerson ? "成员" : "项目"} <b>${escapeHTML(s.subject)}</b> ${label[s.kind] || ""}：
       ${fmt.pct(s.value)} vs 团队 ${fmt.pct(s.team)}（${s.sessions} 会话）</div>`;
   }).join("");
   return `<div class="hi hi-warn" style="margin-bottom:14px">
@@ -125,7 +125,7 @@ function entityTable(rows, field, head) {
   if (!rows.length) return `<div class="empty">无数据</div>`;
   const body = rows.map((r) => `
     <tr>
-      <td>${r[field]}</td>
+      <td>${escapeHTML(r[field])}</td>
       <td class="num">${fmt.f2(r.score)} ${tierChip(r.tier)}</td>
       <td class="num">${fmt.f2(r.tcer)}</td>
       <td class="num">${fmt.pct(r.churn_ratio)}</td>

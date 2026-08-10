@@ -91,7 +91,7 @@ function projectRoiTable(rows) {
   const maxCost = Math.max(...rows.map((r) => r.cost_usd || 0), 1);
   const body = rows.map((r) => `
     <tr>
-      <td>${r.project}</td>
+      <td>${escapeHTML(r.project)}</td>
       <td class="num bar-cell"><div class="bar" style="width:${((r.cost_usd || 0) / maxCost * 100).toFixed(0)}%"></div><span>${fmt.money(r.cost_usd)}</span></td>
       <td class="num">${r.cost_share == null ? "—" : fmt.pct(r.cost_share)}</td>
       <td class="num">${fmt.int(r.net_loc)}</td>

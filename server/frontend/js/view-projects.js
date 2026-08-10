@@ -62,7 +62,7 @@ function outlierPanel(outliers) {
   return outliers.map((o) => `
     <div class="outlier">
       <div class="outlier-head">
-        <span class="outlier-name">${o.project}</span>
+        <span class="outlier-name">${escapeHTML(o.project)}</span>
         <span class="pill ${o.over ? "over" : "under"}">${o.over ? "超预期" : "低于预期"}</span>
         <span class="outlier-roi"><span class="v ${o.over ? "val-good" : "val-bad"}">${o.roi}×</span><br><span class="l">ROI</span></span>
       </div>
@@ -79,7 +79,7 @@ function projNormTable(rows) {
     const roiCls = r.roi != null && r.roi < 1 ? "val-bad" : "val-good";
     const hrsCls = r.hours_saved != null && r.hours_saved < 0 ? "val-bad" : "";
     return `<tr>
-      <td><span class="pid"><span class="dot" style="background:${projColor(i)}"></span>${r.project}</span></td>
+      <td><span class="pid"><span class="dot" style="background:${projColor(i)}"></span>${escapeHTML(r.project)}</span></td>
       <td>${r.stack || "—"}</td>
       <td><div class="pen-cell"><span>${pen.toFixed(1)}%</span><span class="pen-bar ${penBad ? "bad" : ""}"><i style="width:${Math.min(pen,100)}%"></i></span></div></td>
       <td class="num ${accCls}">${r.acceptance == null ? "—" : (r.acceptance*100).toFixed(1)+"%"}</td>
