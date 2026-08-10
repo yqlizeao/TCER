@@ -1,8 +1,9 @@
 /* 页面：API Token 管理 —— 生成 / 查看 / 撤销上传凭据。
 
-   客户端用 TCER_CLIENT_UPLOAD_AUTH_TOKEN 上传时，服务端按该 token 归属的用户记账；
-   本页让用户自助生成 token（生成后只显示一次，仅存哈希）、查看已有 token 元数据、
-   随时撤销。管理接口要求登录态 token（非 API token），故只在网页登录后可用。 */
+   客户端把 token 填入 tcer_ui.json 的 upload.auth_token 后上传时，服务端按该
+   token 归属的用户记账；本页让用户自助生成 token（生成后只显示一次，仅存哈希）、
+   查看已有 token 元数据、随时撤销。管理接口要求登录态 token（非 API token），故只
+   在网页登录后可用。 */
 // ------------------------- 页面：API Token -------------------------
 async function renderTokens() {
   const content = document.getElementById("content");
@@ -26,7 +27,7 @@ async function renderTokens() {
     <div class="panel" style="max-width:820px">
       <div class="panel-title">API Token</div>
       <p class="tk-hint">
-        客户端上传时通过环境变量 <code>TCER_CLIENT_UPLOAD_AUTH_TOKEN</code> 携带 Token；
+        把 Token 填入客户端 <code>tcer_ui.json</code> 的 <code>upload.auth_token</code> 即可携带上传；
         服务端据此把上传归到对应用户名下。未配置 Token 的上传按匿名处理。
         Token 生成后<strong>只显示一次</strong>（服务端仅存哈希，无法找回），请妥善保存。
       </p>

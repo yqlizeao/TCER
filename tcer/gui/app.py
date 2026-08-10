@@ -174,11 +174,15 @@ class TcerGui:
         raise SystemExit(0)
 
     def _on_close(self) -> None:
-        """关闭时保存界面偏好（几何/分栏/筛选/项目），失败不拦退出。"""
+        """关闭时保存界面偏好（几何/分栏/筛选/项目），失败不拦退出。
+
+        更新 ``self._ui_prefs`` 后整体落盘（而非字面量 dict 覆盖），这样 ``upload``
+        等本进程未持有的段不会被抹掉——UploadDialog 写入的上传配置得以保留。
+        """
         try:
             proj = self._selected_project()
             params = self.filter.get_params()
-            ui_prefs.save({
+            self._ui_prefs.update({
                 "geometry": self.root.geometry(),
                 "sashes": [self._paned.sash_coord(i)[0] for i in (0, 1)],
                 "source": self.filter.get_source(),
@@ -189,6 +193,7 @@ class TcerGui:
                 "pinned_sessions": self._pinned_keys,
                 "flagged_sessions": self._flagged_keys,
             })
+            ui_prefs.save(self._ui_prefs)
         except tk.TclError:
             pass
         self.root.destroy()
@@ -319,6 +324,13 @@ class TcerGui:
                 self._selected_project_idx = new
                 self.project_col.select_idx(new, notify=False)
             else:
+                # 无可见项目：必须取消在途分析并 bump generation，否则上一次
+                # reanalyze 的 worker（generation 未变）回填时会命中 _on_analysis，
+                # 把刚清空的视图重新填上、状态错乱。
+                self._analysis_cancel.set()
+                self._analysis_cancel = threading.Event()
+                self._analysis_generation += 1
+                self._selected_project_idx = None
                 self._clear_analysis_view()
                 self.filter.set_status("所选时间范围内无项目活动")
                 return
@@ -411,8 +423,16 @@ class TcerGui:
     def _on_analysis(self, a: analyze.ProjectAnalysis) -> None:
         proj = self._selected_project()
         if proj is None:
+            # generation 门已放行（最新一代），但选中项目已被清空（如时间筛选
+            # 后无可见项目）——不能静默 return，否则 reanalyze 设的「分析中…」
+            # 永不复位、右上角卡死，只能重开项目。复位到就绪态。
+            self.filter.set_status("就绪")
             return
         if a.project_ref and views.ref_uid(a.project_ref) != views.ref_uid(proj):
+            # 结果属于旧选中项目（切项目/切时间区间改选了可见项）。generation
+            # 门放行了它但 ref 已错位——丢弃结果，同时立刻为「当前」项目重新分析，
+            # 而不是把「分析中…」留在屏上永不落地。
+            self.reanalyze()
             return
         self._current = a
         prev_sid = self._selected_session_id
@@ -1025,9 +1045,7 @@ class TcerGui:
 
     # --------------------------------------------------------------- upload
     def show_upload(self) -> None:
-        from tcer.core import env_config
-        if not env_config.upload_enabled():
-            return  # 未配置 TCER_CLIENT_UPLOAD_URL —— 按钮本不该显示；双保险
+        from tcer.core import upload_config
         projects = [(views.ref_uid(p), f"[{views.project_source_label(p)}] {views.project_label(p)}")
                     for p in self._projects]
         default_proj = None
@@ -1041,13 +1059,25 @@ class TcerGui:
             default_project=default_proj,
             on_upload=self._start_upload,
             on_save_prefs=self._save_upload_prefs,
-            server_url=env_config.server_url() or "",
-            authed=env_config.api_token() is not None,
-            detail=env_config.upload_detail(),
+            on_save_config=self._save_upload_config,
+            # 当前上传配置（存储原始值：url/token 空串即"未配置"，占位提示内置默认/匿名）。
+            # 本地单用户工具，token 明文就存在同机 json，回填明文无额外泄露、也便于核对。
+            config=upload_config.stored_config(),
         )
 
+    def _save_upload_config(self, *, url: str, auth_token: str, detail: bool) -> None:
+        """把 dialog 编辑的上传配置写回 ``tcer_ui.json`` 的 upload 段。
+
+        写回后同步 ``self._ui_prefs``（退出时整体落盘的内存副本），避免 ``_on_close``
+        用旧副本覆盖掉刚保存的 upload 段。
+        """
+        from tcer.core import upload_config
+        upload_config.save(url=url, auth_token=auth_token, detail=detail)
+        self._ui_prefs = ui_prefs.load()
+
     def _save_upload_prefs(self, prefs: dict) -> None:
-        """Persist only the remembered project selection (rest is env-driven)."""
+        """Persist only the remembered project selection (rest lives in
+        ``tcer_ui.json`` 的 upload 段, see ``upload_config``)."""
         self._upload_prefs = prefs
         try:
             upload_prefs.save(prefs)
@@ -1060,17 +1090,19 @@ class TcerGui:
     def _start_upload(self, prefs: dict, dialog=None) -> None:
         """Analyze each selected project fresh, then upload its own report.
 
-        Server URL / auth (API token) / detail all come from ``env_config`` —
-        the dialog only supplies the project selection. Each selected key is
-        re-analyzed on a worker thread so each upload carries that project's real
-        aggregate (+ sessions when detail is on). Returns immediately; the
-        combined result arrives via the queue.
+        Server URL / auth (API token) / detail come from ``upload_config``
+        (``tcer_ui.json`` 的 upload 段, saved by the dialog before this fires) —
+        ``prefs`` only supplies the project selection. ``server_url()`` returns
+        None when unconfigured (开源库无内置默认地址); guard and prompt the user.
+        Each selected key is re-analyzed on a worker thread so each upload carries
+        that project's real aggregate (+ sessions when detail is on). Returns
+        immediately; the combined result arrives via the queue.
         """
-        from tcer.core import env_config
-        server_url = env_config.server_url()
+        from tcer.core import upload_config
+        server_url = upload_config.server_url()
         if not server_url:
             if dialog is not None:
-                dialog.set_status("未配置 TCER_CLIENT_UPLOAD_URL，无法上传", error=True)
+                dialog.set_status("请先填写上传服务器地址", error=True)
             return
         keys = list(prefs.get("last_projects") or [])
         if not keys:
@@ -1091,8 +1123,8 @@ class TcerGui:
             until=params["until"],
             no_loc=self._no_loc,
         )
-        cfg = dict(server_url=server_url, api_token=env_config.api_token(),
-                   detail=env_config.upload_detail())
+        cfg = dict(server_url=server_url, api_token=upload_config.api_token(),
+                   detail=upload_config.upload_detail())
         threading.Thread(
             target=self._upload_worker,
             args=(cfg, refs, missing, analysis_args, dialog),
@@ -1102,8 +1134,9 @@ class TcerGui:
     def _upload_worker(self, cfg, refs, missing, analysis_args, dialog) -> None:
         """Off-thread: analyze + upload each selected project, aggregate results.
 
-        Auth is env-driven: an API token authenticates the upload as its owning
-        user (server fills ``person``); no token → anonymous upload. Per-project
+        Auth comes from ``upload_config`` (``tcer_ui.json``): an API token
+        authenticates the upload as its owning user (server fills ``person``);
+        no token → anonymous upload. Per-project
         failures are collected without aborting the rest. Each project is analyzed
         fresh so its payload carries that project's own aggregate (and sessions
         when detail is on).

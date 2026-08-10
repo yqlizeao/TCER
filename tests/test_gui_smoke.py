@@ -824,3 +824,40 @@ def test_session_column_pin_flag_marks(root, reports):
     assert len(col._reports) == 3
     col._filter_var.set("")
     root.update_idletasks()
+
+
+def test_on_analysis_bail_paths_reset_status():
+    """切时间区间后当前 generation 的结果被丢弃时，右上角状态必须落地，
+    不能永远卡在「分析中…」（历史 bug：静默 return 泄漏状态，只能重开项目）。
+
+    - proj is None（时间筛选后无可见项目被清空）→ 复位「就绪」。
+    - ref 不匹配（结果属旧选中项目）→ 不静默丢弃，立即为当前项目重跑。
+    """
+    from types import SimpleNamespace
+    from tcer.gui.app import TcerGui
+    from tcer.gui import views
+
+    # -- 分支 1：proj is None → set_status("就绪") --
+    statuses = []
+    stub = SimpleNamespace(
+        _selected_project=lambda: None,
+        filter=SimpleNamespace(set_status=lambda s: statuses.append(s)),
+    )
+    a = SimpleNamespace(project_ref=None)
+    TcerGui._on_analysis(stub, a)
+    assert statuses == ["就绪"]
+
+    # -- 分支 2：ref 错位 → 触发一次 reanalyze，不静默泄漏 --
+    proj = SimpleNamespace(source="claude", key="cur", config_root=None)
+    other = SimpleNamespace(source="claude", key="old", config_root=None)
+    # ref_uid 需能区分两个 ref；否则本测试前提不成立
+    assert views.ref_uid(proj) != views.ref_uid(other)
+    reanalyzed = []
+    stub2 = SimpleNamespace(
+        _selected_project=lambda: proj,
+        filter=SimpleNamespace(set_status=lambda s: None),
+        reanalyze=lambda: reanalyzed.append(True),
+    )
+    a2 = SimpleNamespace(project_ref=other)
+    TcerGui._on_analysis(stub2, a2)
+    assert reanalyzed == [True]

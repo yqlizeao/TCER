@@ -70,6 +70,24 @@ _OMP_TOOL_MAP = {
 _EDIT_TOOLS = {"write", "edit", "ast_edit"}
 
 
+def _is_agent_attributed(mm: dict) -> bool:
+    """True if a ``user`` message is an agent-internal injection, not real human input.
+
+    omp's advisor (and pi's upstream equivalent) reviews each turn on its own
+    model and injects "session update" review prompts back as ``role:"user"``
+    deltas in its transcript. omp records those with authoritative markers
+    ``synthetic: true`` + ``attribution: "agent"`` precisely so stats never
+    count them as user messages (see advisor/transcript-recorder.ts).
+
+    The advisor transcript lives at ``<session>/__advisor*.jsonl`` and is folded
+    into the parent like a subagent, so without this guard its review prompts
+    inflate ``user_msgs`` and leak into the user-message popup. We trust the
+    source markers rather than the ``__advisor`` filename convention: it is the
+    authoritative signal and generalises to any future agent-attributed delta.
+    """
+    return mm.get("synthetic") is True or mm.get("attribution") == "agent"
+
+
 def iter_events(path: Path):
     """Yield parsed omp session JSONL lines, skipping malformed ones."""
     with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -296,6 +314,11 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
         role = mm.get("role")
 
         if role == "user":
+            # advisor（omp）/上游 pi 的审查 prompt 以 role:"user" 写入其 transcript，
+            # 但带 synthetic/attribution=agent 标记 —— 非真人输入，一律不计入任何
+            # 用户消息指标（user_msgs / 信号 / 图片）。
+            if _is_agent_attributed(mm):
+                continue
             text = _message_text(mm.get("content")).strip()
             if text:
                 u.user_msgs += 1
@@ -413,6 +436,10 @@ def _read_user_messages_single(path: Path) -> list[str]:
         mm = obj.get("message")
         if not isinstance(mm, dict) or mm.get("role") != "user":
             continue
+        # advisor / 上游 pi 审查 prompt（synthetic/attribution=agent）不是真人消息，
+        # 不能出现在用户消息弹窗里。
+        if _is_agent_attributed(mm):
+            continue
         text = _message_text(mm.get("content")).strip()
         if text:
             messages.append(truncate_summary(text, 500))
@@ -435,6 +462,9 @@ def read_conversation(path: Path) -> list[dict]:
             continue
         role = mm.get("role")
         if role == "user":
+            # advisor / 上游 pi 审查 prompt 非真人输入 → 不并入会话视图的用户消息。
+            if _is_agent_attributed(mm):
+                continue
             text = _message_text(mm.get("content")).strip()
             if text:
                 convo.append({"role": "user", "type": "text", "text": text, "ts": ts})
