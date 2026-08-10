@@ -1090,7 +1090,7 @@ class TcerGui:
     def _start_upload(self, prefs: dict, dialog=None) -> None:
         """Analyze each selected project fresh, then upload its own report.
 
-        Server URL / auth (API token) / detail come from ``upload_config``
+        Server URL / auth (Auth Token) / detail come from ``upload_config``
         (``tcer_ui.json`` 的 upload 段, saved by the dialog before this fires) —
         ``prefs`` only supplies the project selection. ``server_url()`` returns
         None when unconfigured (开源库无内置默认地址); guard and prompt the user.
@@ -1123,7 +1123,7 @@ class TcerGui:
             until=params["until"],
             no_loc=self._no_loc,
         )
-        cfg = dict(server_url=server_url, api_token=upload_config.api_token(),
+        cfg = dict(server_url=server_url, auth_token=upload_config.auth_token(),
                    detail=upload_config.upload_detail())
         threading.Thread(
             target=self._upload_worker,
@@ -1134,7 +1134,7 @@ class TcerGui:
     def _upload_worker(self, cfg, refs, missing, analysis_args, dialog) -> None:
         """Off-thread: analyze + upload each selected project, aggregate results.
 
-        Auth comes from ``upload_config`` (``tcer_ui.json``): an API token
+        Auth comes from ``upload_config`` (``tcer_ui.json``): an auth token
         authenticates the upload as its owning user (server fills ``person``);
         no token → anonymous upload. Per-project
         failures are collected without aborting the rest. Each project is analyzed
@@ -1142,7 +1142,7 @@ class TcerGui:
         when detail is on).
         """
         server_url = cfg["server_url"]
-        api_token = cfg.get("api_token")
+        auth_token = cfg.get("auth_token")
         detail = bool(cfg.get("detail"))
 
         total_inserted = 0
@@ -1156,7 +1156,7 @@ class TcerGui:
                     **analysis_args,
                 )
                 total_inserted += upload_client.token_upload(
-                    server_url=server_url, api_token=api_token,
+                    server_url=server_url, auth_token=auth_token,
                     aggregate=a.aggregate, reports=a.reports,
                     n_sessions=a.n_sessions, project=key, detail=detail,
                 )

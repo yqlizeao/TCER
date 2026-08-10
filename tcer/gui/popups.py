@@ -1349,7 +1349,7 @@ class ConfirmDeletePopup:
 class UploadDialog:
     """上传到 TCER Server — 「配置 + 选项目 + 上传」。
 
-    服务器地址 / API Token / 是否附带明细在此**可编辑**，保存后写回 ``tcer_ui.json``
+    服务器地址 / Auth Token / 是否附带明细在此**可编辑**，保存后写回 ``tcer_ui.json``
     的 ``upload`` 段（``on_save_config``）。点「立即上传」时先保存配置、再上传所选
     项目。``projects`` 是 ``(key, display)`` 列表；``config`` 是 ``upload_config``
     的存储原始值（``url``/``auth_token``/``detail``/``default_url``）。
@@ -1380,14 +1380,14 @@ class UploadDialog:
         sf.canvas.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 4))
         inner = sf.inner
 
-        # -- 上传目标（可编辑）：服务器地址 / API Token / 是否含明细 --
+        # -- 上传目标（可编辑）：服务器地址 / Auth Token / 是否含明细 --
         cfg_card = self._card(inner, "上传目标（留空则用默认；改动点「立即上传」时保存）")
         self._url_var = tk.StringVar(value=str(config.get("url") or ""))
         self._token_var = tk.StringVar(value=str(config.get("auth_token") or ""))
         self._detail_var = tk.BooleanVar(value=bool(config.get("detail")))
         self._labeled_entry(cfg_card, "服务器地址", self._url_var,
                             placeholder=f"默认 {self._default_url}")
-        self._labeled_entry(cfg_card, "API Token", self._token_var,
+        self._labeled_entry(cfg_card, "Auth Token", self._token_var,
                             placeholder="留空 = 匿名上传")
         chk = tk.Checkbutton(  # style-exempt: style.md §3 豁免：UploadDialog
             cfg_card, text="附带每会话明细（完整对话）", variable=self._detail_var,

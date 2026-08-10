@@ -1,6 +1,6 @@
 """TCER 客户端上传配置（存于 ``tcer_ui.json`` 的 ``upload`` 段）。
 
-历史上这三项配置（服务器地址 / API Token / 是否附带明细）由环境变量 +
+历史上这三项配置（服务器地址 / Auth Token / 是否附带明细）由环境变量 +
 ``.env`` 文件驱动（旧 ``env_config`` 模块）。但"整体包 + ``tcer_ui.json``"的
 分发形态下，再单独维护一个 ``.env`` 很别扭——配置应集中到与界面偏好同一个
 ``tcer_ui.json`` 里，随包分发、随包覆盖。
@@ -11,7 +11,7 @@
     {
       "upload": {
         "url": "https://your-server.example",  # 服务器地址；空 → 未配置
-        "auth_token": "",              # API Token；空 → 匿名上传
+        "auth_token": "",              # Auth Token；空 → 匿名上传
         "detail": true                 # 是否附带每会话明细（对话）
       },
       "geometry": ...                  # 其它界面偏好
@@ -56,8 +56,8 @@ def server_url() -> str | None:
     return v or (DEFAULT_URL.rstrip("/") or None)
 
 
-def api_token() -> str | None:
-    """配置的 API Token，未配置返回 None（→ 匿名上传）。"""
+def auth_token() -> str | None:
+    """配置的 Auth Token，未配置返回 None（→ 匿名上传）。"""
     v = str(_section().get("auth_token") or "").strip()
     return v or None
 
@@ -77,7 +77,7 @@ def upload_enabled() -> bool:
 def stored_config() -> dict:
     """当前存储的上传配置原始值（供 dialog 编辑回填）。
 
-    与 ``server_url()``/``api_token()`` 的**取值语义**不同：这里返回用户实际填的
+    与 ``server_url()``/``auth_token()`` 的**取值语义**不同：这里返回用户实际填的
     原始串（未回退默认/匿名），空串即"未配置"。``detail`` 缺失时给内置默认，让
     复选框有确定初值。``default_url`` 附带内置默认，供输入框占位提示。
     """
@@ -94,7 +94,7 @@ def save(*, url: str, auth_token: str, detail: bool) -> None:
     """把上传配置写回 ``tcer_ui.json`` 的 ``upload`` 段（load-merge，不抹其它段）。
 
     只持久化用户填的原始值（url/token 去首尾空白）：空串照存空串——``server_url``/
-    ``api_token`` 的取值逻辑会把空串当"未配置"回退默认/匿名，故存空即"清除"。
+    ``auth_token`` 的取值逻辑会把空串当"未配置"回退默认/匿名，故存空即"清除"。
     与 ``ui_prefs`` 一致：写失败静默（配置丢了重填即可，不值得打断）。
     """
     prefs = ui_prefs.load()

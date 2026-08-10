@@ -274,7 +274,7 @@ def upload(server_url: str, token: str, payload: dict,
 def token_upload(
     *,
     server_url: str,
-    api_token: str | None,
+    auth_token: str | None,
     aggregate: SessionReport,
     reports: list[SessionReport],
     n_sessions: int,
@@ -283,17 +283,17 @@ def token_upload(
 ) -> int:
     """Build + upload a project's report using config-driven auth.
 
-    Auth model (see ``upload_config``): an API token identifies the uploading user
+    Auth model (see ``upload_config``): an auth token identifies the uploading user
     server-side (the client never learns the username), so the payload sends
     ``user=None`` and ``anonymous=False`` and lets the server fill ``person``
-    from the token. With no API token the upload is anonymous — the server
+    from the token. With no auth token the upload is anonymous — the server
     accepts it with no bearer, and a stable pseudonym is attached.
 
     Returns inserted row count.
     """
-    anonymous = not api_token
+    anonymous = not auth_token
     payload = build_payload(
         aggregate=aggregate, reports=reports, n_sessions=n_sessions,
         project=project, user=None, anonymous=anonymous, detail=detail,
     )
-    return upload(server_url, api_token, payload)
+    return upload(server_url, auth_token, payload)
