@@ -9,6 +9,8 @@
 const S = {
   token: localStorage.getItem("tcer_token") || "",
   user: localStorage.getItem("tcer_user") || "",
+  name: localStorage.getItem("tcer_name") || "",
+  avatar: localStorage.getItem("tcer_avatar") || "",
   view: "projects",
   days: 7,
   persons: [],
