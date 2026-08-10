@@ -1,9 +1,39 @@
-/* 页面：API Token 管理 —— 生成 / 查看 / 撤销上传凭据。
+/* 页面：Auth Token 管理 —— 生成 / 查看 / 撤销上传凭据。
 
    客户端用 TCER_CLIENT_UPLOAD_AUTH_TOKEN 上传时，服务端按该 token 归属的用户记账；
    本页让用户自助生成 token（生成后只显示一次，仅存哈希）、查看已有 token 元数据、
-   随时撤销。管理接口要求登录态 token（非 API token），故只在网页登录后可用。 */
-// ------------------------- 页面：API Token -------------------------
+   随时撤销。管理接口要求登录态 token（非 auth token），故只在网页登录后可用。 */
+// ------------------------- 页面：Auth Token -------------------------
+
+/* 复制文本到剪贴板。navigator.clipboard 仅在安全上下文（HTTPS / localhost）可用，
+   HTTP 部署下它为 undefined 或直接 reject —— 这正是「点了复制没反应」的根因。
+   回退到 execCommand("copy")：临时 textarea 选中 + 复制，兼容非安全上下文。 */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      /* fall through to legacy path */
+    }
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
 async function renderTokens() {
   const content = document.getElementById("content");
   content.innerHTML = `<div class="empty">加载中…</div>`;
@@ -24,7 +54,7 @@ async function renderTokens() {
 
   content.innerHTML = `
     <div class="panel" style="max-width:820px">
-      <div class="panel-title">API Token</div>
+      <div class="panel-title">Auth Token</div>
       <p class="tk-hint">
         客户端上传时通过环境变量 <code>TCER_CLIENT_UPLOAD_AUTH_TOKEN</code> 携带 Token；
         服务端据此把上传归到对应用户名下。未配置 Token 的上传按匿名处理。
@@ -54,9 +84,9 @@ async function renderTokens() {
           </div>
         </div>`;
       document.getElementById("tk-copy").addEventListener("click", () => {
-        navigator.clipboard.writeText(r.token).then(() => {
-          document.getElementById("tk-copy").textContent = "已复制";
-        }, () => {});
+        copyText(r.token).then((ok) => {
+          document.getElementById("tk-copy").textContent = ok ? "已复制" : "复制失败";
+        });
       });
       // Prepend the new token's row without a full re-render, so the one-time
       // reveal above stays on screen (a re-render would wipe it).

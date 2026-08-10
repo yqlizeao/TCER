@@ -58,8 +58,27 @@ python server/backend/server.py
 
 环境变量：`TCER_SERVER_HOST`（默认 127.0.0.1）、`TCER_SERVER_PORT`（8890）、
 `TCER_SERVER_SECRET`（Token 签名密钥，不设则每次重启随机——重启后旧登录 Token 失效；
-API Token 存哈希入库，不受重启影响）、`TCER_SERVER_DB`（SQLite 路径，默认
+Auth Token 存哈希入库，不受重启影响）、`TCER_SERVER_DB`（SQLite 路径，默认
 `server/backend/tcer_server.db`）。
+
+### 飞书登录（opt-in）
+
+未配置 App 凭据时**完全休眠、零联网**（与上传功能同一姿态）。相关环境变量：
+
+- `TCER_LOGIN_MODE`：登录方式开关，`password`（默认）| `feishu` | `both`。
+  设为 `feishu` 时**关闭账号密码登录**，仅保留飞书登录。
+- `TCER_FEISHU_APP_ID` / `TCER_FEISHU_APP_SECRET`：飞书自建应用的 App ID / App Secret。
+- `TCER_FEISHU_REDIRECT_URI`：可选。OAuth 回调地址（需与飞书开放平台后台登记一致）；
+  不设则按请求 Host 推导为 `<scheme>://<host>/api/auth/feishu/callback`。
+
+飞书采用标准授权码 OAuth 2.0：前端点「使用飞书登录」→ `/api/auth/feishu/start` 302 跳转
+飞书授权页 → 回调 `/api/auth/feishu/callback` 换取 user_access_token 并拉取用户资料
+（open_id / 姓名 / 头像）→ 签发登录 Token 经 URL fragment 回传给 SPA。飞书用户登录名
+命名空间化为 `feishu:<open_id>`，资料存 `feishu_users` 表，每次登录刷新。
+
+登录后左下角展示用户：飞书用户显示**头像图片 + 姓名**；账号密码用户无头像，显示
+**姓名首字母大写**占位。`GET /api/me`（Bearer）返回 `{username, name, avatar_url, kind}`；
+`GET /api/config`（免认证）返回 `{password_login, feishu_login}` 供登录页显隐两种入口。
 
 ## 账号管理
 
@@ -87,15 +106,15 @@ python server/backend/manage.py listusers
 | GET | `/api/dimensions` | Bearer | 可对比的维度与指标（UI 不硬编码） → `{dimensions,metrics}` |
 | GET | `/api/compare` | Bearer | 队列对比 `?dimension=&metric=` → `{cohorts,caveat}` |
 | GET | `/api/insights` | Bearer | 行动建议 → `{findings,coverage,caveat}` |
-| GET | `/api/tokens` | 登录 | 列出当前用户的 API Token（仅元数据） → `{tokens}` |
-| POST | `/api/tokens` | 登录 | `{label}` 生成 API Token（原文只返回一次） → `{token}` |
-| DELETE | `/api/tokens?id=` | 登录 | 撤销一个 API Token → `{ok}` |
+| GET | `/api/tokens` | 登录 | 列出当前用户的 Auth Token（仅元数据） → `{tokens}` |
+| POST | `/api/tokens` | 登录 | `{label}` 生成 Auth Token（原文只返回一次） → `{token}` |
+| DELETE | `/api/tokens?id=` | 登录 | 撤销一个 Auth Token → `{ok}` |
 | GET | `/api/health` | — | `{ok:true}` |
 
 > **认证两种 Bearer**：`/api/upload` 等接口的 `Authorization: Bearer <token>` 既接受
-> `/api/login` 签发的短期登录 Token，也接受网页「API Token」页生成的长期 Token
+> `/api/login` 签发的短期登录 Token，也接受网页「Auth Token」页生成的长期 Token
 > （存 sha256 哈希，按所属用户归账）。**Token 管理接口只认登录 Token**——防止用
-> API Token 无限增发 Token。客户端上传优先走 API Token（见 `../CLAUDE.md` 客户端 env）。
+> Auth Token 无限增发 Token。客户端上传优先走 Auth Token（见 `../CLAUDE.md` 客户端 env）。
 
 ### 上传结构（对齐客户端）
 
