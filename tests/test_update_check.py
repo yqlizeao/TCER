@@ -95,3 +95,31 @@ def test_latest_release_missing_tag_returns_none():
     with mock.patch("urllib.request.urlopen",
                     return_value=_FakeResp(json.dumps(payload))):
         assert update_check.latest_release() is None
+
+
+# --- asset_for_current_platform（命名加版本号仍命中）-----------------------
+
+def test_asset_for_current_platform_versioned_names():
+    """asset_for_current_platform 宽松匹配：v1.5.2+ 资产名含版本号仍命中。
+
+    Windows 命中 ``TCER-windows-x64-v1.5.2.exe``（endswith '.exe'）；
+    mac 命中 ``TCER-macos-arm64-v1.5.2.zip``（含 'macos'+'arm64'）。
+    mock 平台使两分支都能在任意 runner 上验证。
+    """
+    from tcer.core import updater
+    release = {"assets": [
+        ("TCER-windows-x64-v1.5.2.exe", "http://ex/win"),
+        ("TCER-macos-arm64-v1.5.2.zip", "http://ex/mac"),
+    ]}
+    with mock.patch.object(updater.sys, "platform", "win32"), \
+         mock.patch.object(updater.os, "name", "nt"):
+        name, _ = updater.asset_for_current_platform(release)
+    assert name == "TCER-windows-x64-v1.5.2.exe"
+
+    with mock.patch.object(updater.sys, "platform", "darwin"), \
+         mock.patch.object(updater.os, "name", "posix"):
+        name, _ = updater.asset_for_current_platform(release)
+    assert name == "TCER-macos-arm64-v1.5.2.zip"
+
+    # 无匹配资产
+    assert updater.asset_for_current_platform({"assets": [("README.md", "x")]}) is None

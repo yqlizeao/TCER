@@ -29,10 +29,17 @@ def current_exe():
 
 
 def download_target():
-    """建议下载目标:exe 同目录(避免 Windows ``move`` 跨盘失败)。"""
+    """建议下载目标。
+
+    Windows: exe 同目录(避免 ``move`` 跨盘失败)，后缀 ``.exe``。
+    macOS: 系统 temp 目录下的 ``.app.zip``（mac 改打 .app 包，下载的是 zip；
+    不写进 .app 内部以免污染 bundle）。
+    """
     exe = current_exe()
-    suffix = ".exe" if os.name == "nt" else ".new"
-    return exe.parent / ("TCER.update" + suffix)
+    if os.name == "nt":
+        return exe.parent / "TCER.update.exe"
+    import tempfile
+    return Path(tempfile.gettempdir()) / "TCER.update.zip"
 
 
 def asset_for_current_platform(release):
@@ -123,14 +130,57 @@ def _windows_replace(exe, new_binary):
     subprocess.Popen(["cmd", "/c", str(bat)], env=_clean_launch_env(), close_fds=True)
 
 
-def _mac_replace(exe, new_binary):
-    # mac 允许覆盖运行中的二进制(当前进程继续用已加载的旧映像)
-    shutil.copy2(new_binary, exe)
+def _mac_replace(exe, new_archive):
+    """mac 替换安装。按当前安装形态分流：
+
+    - 当前 exe 在 ``.app`` bundle 内、且下载的是 ``.app.zip`` → 解压替换整个 bundle。
+    - 否则（旧式裸二进制，fallback）→ ``copy2 + chmod``。
+    """
+    new_archive = Path(new_archive)
+    in_bundle = (exe.parent.name == "MacOS"
+                 and exe.parent.parent.name == "Contents")
+    if in_bundle and new_archive.suffix == ".zip":
+        _mac_replace_app_bundle(exe, new_archive)
+        return
+    # 旧式裸二进制（fallback）
+    shutil.copy2(new_archive, exe)
     os.chmod(exe, 0o755)
-    # 清掉下载文件带的 quarantine 标记,免得重启时被 Gatekeeper 拦
     try:
         subprocess.run(["xattr", "-d", "com.apple.quarantine", str(exe)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
     subprocess.Popen([str(exe)], env=_clean_launch_env(), close_fds=True)
+
+
+def _mac_replace_app_bundle(exe, new_zip):
+    """把下载的 ``.app.zip`` 解压、替换当前 ``.app`` bundle，再启动新实例。
+
+    用 ``ditto -x`` 解（与 CI 的 ``ditto -c`` 配对，保留 unix 可执行权限）；旧
+    ``.app`` rename 到 ``.old``（运行中的文件允许 rename，当前进程持旧映像继续
+    到退出），新 ``.app`` move 到位，``xattr -dr`` 清整个 bundle 的 quarantine。
+    残留 ``.old`` 由下次更新开头清理。
+    """
+    import tempfile
+    # .../TCER.app/Contents/MacOS/TCER → .../TCER.app
+    app_bundle = exe.parent.parent.parent
+    with tempfile.TemporaryDirectory() as td:
+        subprocess.run(["ditto", "-x", "-k", str(new_zip), td],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        apps = list(Path(td).glob("*.app"))
+        if not apps:
+            raise RuntimeError("mac .app.zip 解压后未找到 .app bundle")
+        new_app = apps[0]
+        old = app_bundle.parent / (app_bundle.name + ".old")
+        if old.exists():
+            shutil.rmtree(old, ignore_errors=True)
+        if app_bundle.exists():
+            app_bundle.rename(old)      # 运行中允许 rename
+        shutil.move(str(new_app), str(app_bundle))
+    try:
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(app_bundle)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+    subprocess.Popen(["open", "-n", str(app_bundle)],
+                     env=_clean_launch_env(), close_fds=True)

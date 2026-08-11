@@ -17,13 +17,13 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            asset_name: TCER-windows-x64.exe
+            asset_name: TCER-windows-x64
             ext: .exe
             icon: tcer/gui/assets/tcer_logo.ico
             sep: ';'                    # Windows add-data 分隔符
           - os: macos-latest            # = Apple Silicon / M 芯片 runner
             asset_name: TCER-macos-arm64
-            ext: ''
+            ext: .zip                   # mac 打包成 .app.zip（双击友好，保留可执行权限）
             icon: tcer_logo.icns         # CI 内现生成
             sep: ':'
     runs-on: ${{ matrix.os }}
@@ -70,22 +70,40 @@ jobs:
           sips -z 1024 1024 "$SRC" --out logo.iconset/icon_512x512@2x.png
           iconutil -c icns logo.iconset -o tcer_logo.icns
 
-      - name: Build (PyInstaller onefile)
+      - name: Build (PyInstaller)
         run: |
-          pyinstaller --noconfirm --onefile --windowed \
-            --name TCER \
-            --icon "${{ matrix.icon }}" \
-            --add-data "tcer/config${{ matrix.sep }}tcer/config" \
-            --add-data "tcer/gui/assets${{ matrix.sep }}tcer/gui/assets" \
-            tcer/__main__.py
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # mac：--windowed（无 --onefile）生成 dist/TCER.app bundle，双击友好。
+            # 不用 --onefile：onefile 产裸 Mach-O 单文件，mac 双击会丢权限 + quarantine 报错。
+            pyinstaller --noconfirm --windowed \
+              --name TCER \
+              --icon "${{ matrix.icon }}" \
+              --add-data "tcer/config${{ matrix.sep }}tcer/config" \
+              --add-data "tcer/gui/assets${{ matrix.sep }}tcer/gui/assets" \
+              tcer/__main__.py
+          else
+            # Windows：--onefile 单 exe
+            pyinstaller --noconfirm --onefile --windowed \
+              --name TCER \
+              --icon "${{ matrix.icon }}" \
+              --add-data "tcer/config${{ matrix.sep }}tcer/config" \
+              --add-data "tcer/gui/assets${{ matrix.sep }}tcer/gui/assets" \
+              tcer/__main__.py
+          fi
 
-      - name: Rename to asset name
-        run: mv "dist/TCER${{ matrix.ext }}" "${{ matrix.asset_name }}"
+      - name: Package asset              # 资产名含版本号：TCER-windows-x64-v1.5.2.exe / TCER-macos-arm64-v1.5.2.zip
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # ditto 打 zip（保留 unix 可执行权限；普通 zip / 浏览器解压会丢权限）
+            ditto -c -k --keepParent "dist/TCER.app" "${{ matrix.asset_name }}-${{ github.ref_name }}.zip"
+          else
+            mv "dist/TCER${{ matrix.ext }}" "${{ matrix.asset_name }}-${{ github.ref_name }}${{ matrix.ext }}"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}
+          name: ${{ matrix.asset_name }}-${{ github.ref_name }}
+          path: ${{ matrix.asset_name }}-${{ github.ref_name }}${{ matrix.ext }}
 
   release:
     needs: build
