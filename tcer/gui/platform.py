@@ -103,7 +103,7 @@ def apply_dark_titlebar(widget) -> None:
     **限制**：仅启动时检测，运行中切换系统主题需重启 GUI 才生效。
     """
     if PLATFORM != "win32":
-        return
+        return  # mac/linux：标题栏由系统绘制，跟随系统外观（mac 深色模式即深色标题栏，无需 DWM）
     global _DARK_THEME
     try:
         import ctypes

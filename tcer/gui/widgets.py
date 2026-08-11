@@ -10,6 +10,7 @@ import tkinter as tk
 
 from . import theme
 from .metric_defs import Metric, UNSUPPORTED_LABEL
+from .platform import PLATFORM
 
 
 class Tooltip:
@@ -413,21 +414,64 @@ class SelectableLabel(tk.Text):
         self.clipboard_append(self.get("1.0", "end-1c"))
 
 
+class _MacButton(tk.Label):
+    """mac 上模拟扁平按钮：``tk.Label`` + 点击/hover 绑定。
+
+    macOS Tk 的 Aqua 主题忽略 ``tk.Button`` 的 ``bg``（bpo-44243 → 白按钮）；
+    视角切换 pill 早已用 tk.Label 绕开此限制，flat_button 在 mac 上同此处理。
+    兼容 tk.Button 的 ``command``（构造时传入与 ``.config(command=)`` 重设），
+    供依赖该 API 的菜单按钮（``views._make_tool_menu`` 等）使用。
+    """
+
+    def __init__(self, master, *, command=None, base_bg, hover_bg, **kw):
+        super().__init__(master, **kw)
+        self._base_bg = base_bg
+        self._hover_bg = hover_bg
+        self._command = command
+        self._click_id = None
+        self._rebind_click()
+        self.bind("<Enter>", lambda _e: self.config(bg=self._hover_bg), add="+")
+        self.bind("<Leave>", lambda _e: self.config(bg=self._base_bg), add="+")
+
+    def _rebind_click(self) -> None:
+        if self._click_id is not None:
+            self.unbind("<Button-1>", self._click_id)
+            self._click_id = None
+        if self._command is not None:
+            self._click_id = self.bind(
+                "<Button-1>", lambda _e: self._command(), add="+")
+
+    def configure(self, cnf=None, **kw):
+        # tk.Label 无 command 选项：拦截后自行处理（构造与 .config(command=) 通用）。
+        if "command" in kw:
+            self._command = kw.pop("command")
+            self._rebind_click()
+        return super().configure(cnf, **kw)
+
+    config = configure
+
+
 def flat_button(parent, text, command=None, *, primary=False, padx=None, pady=None, **kw):
     """统一扁平按钮：一致的配色/内边距/hover 反馈（按钮效果一致性的单一来源）。
 
     ``primary=True`` 用主题强调色（主操作），否则面板灰（普通操作）。
     padx/pady 默认 PAD_M/PAD_XS；传值可放大主操作按钮（如「立即更新」）。
+    macOS 下用 ``_MacButton``（tk.Label）绕开 Aqua 主题 tk.Button 的白背景 bug。
     """
     base_bg = theme.ACCENT if primary else theme.PANEL
     hover_bg = theme.HOVER_ACCENT if primary else theme.HOVER_BG
     fg = theme.FG_WHITE if primary else theme.FG
+    pad_x = theme.PAD_M if padx is None else padx
+    pad_y = theme.PAD_XS if pady is None else pady
+    if PLATFORM == "darwin":
+        return _MacButton(parent, command=command, base_bg=base_bg, hover_bg=hover_bg,
+                          text=text, bg=base_bg, fg=fg, font=theme.FONT_UI,
+                          padx=pad_x, pady=pad_y, cursor="hand2",
+                          highlightthickness=0, **kw)
     btn = tk.Button(parent, text=text, command=command, relief="flat",  # style-exempt: flat_button 本体
                     bg=base_bg, fg=fg, bd=0, cursor="hand2",
                     activebackground=hover_bg, activeforeground=fg,
-                    padx=theme.PAD_M if padx is None else padx,
-                    pady=theme.PAD_XS if pady is None else pady,
-                    font=theme.FONT_UI, **kw)
+                    padx=pad_x, pady=pad_y, font=theme.FONT_UI, **kw)
     btn.bind("<Enter>", lambda _e: btn.config(bg=hover_bg), add="+")
     btn.bind("<Leave>", lambda _e: btn.config(bg=base_bg), add="+")
     return btn

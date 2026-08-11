@@ -231,6 +231,35 @@ def test_flat_button_and_card_hover(root):
     frame.destroy()
 
 
+def test_mac_button_command_compat(root):
+    """_MacButton：command 兼容 tk.Button 的构造传入与 .config(command=) 重设。
+
+    Windows 上 flat_button 仍返回 tk.Button；本测试直接构造 _MacButton 验证其
+    command 拦截逻辑（菜单按钮 _make_tool_menu 依赖 .config(command=)）。
+    """
+    from tcer.gui.widgets import _MacButton
+
+    fired = []
+    def cb_a():
+        fired.append("a")
+    def cb_b():
+        fired.append("b")
+    btn = _MacButton(root, command=cb_a, base_bg="#111", hover_bg="#222",
+                     text="t", bg="#111", fg="#fff")
+    assert btn._command is cb_a, "构造时 command 应记录"
+    assert btn._click_id is not None, "command 应绑定 <Button-1>"
+
+    btn.config(command=cb_b)               # 菜单按钮 _make_tool_menu 的用法
+    assert btn._command is cb_b, "config(command=) 应更新 command"
+    assert btn._click_id is not None
+
+    btn.config(command=None)               # 解绑
+    assert btn._command is None and btn._click_id is None
+
+    btn.config(bg="#333")                  # 普通 config 走 tk.Label，不被 command 拦截
+    assert btn.cget("bg") == "#333"
+
+
 def test_check_row_toggle(root):
     """CheckRow：整行点击 toggle var；外部改 var 后 _draw 反映选中态。"""
     from tcer.gui.widgets import CheckRow
