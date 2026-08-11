@@ -356,7 +356,12 @@ class SelectableLabel(tk.Text):
     """
 
     def __init__(self, parent, *, text="", bg=theme.PANEL, fg=theme.FG,
-                 font=None, justify="left", width=60, padx=0, pady=0, **kw):
+                 font=None, justify="left", width=60, wraplength=None,
+                 padx=0, pady=0, **kw):
+        # wraplength 仅作 API 兼容：吸收被替换的 tk.Label 残留的 wraplength= 参数。
+        # 本控件换行由 widget 实际像素宽度决定（pack(fill="x") + <Configure> 重算），
+        # 不依赖 tk.Text 不支持的 wraplength，故此处显式忽略。
+        del wraplength
         super().__init__(parent, wrap="word", bg=bg, fg=fg,
                          font=font or theme.FONT_UI, relief="flat", bd=0,
                          highlightthickness=0, padx=padx, pady=pady,
@@ -408,10 +413,11 @@ class SelectableLabel(tk.Text):
         self.clipboard_append(self.get("1.0", "end-1c"))
 
 
-def flat_button(parent, text, command=None, *, primary=False, padx=None, **kw):
+def flat_button(parent, text, command=None, *, primary=False, padx=None, pady=None, **kw):
     """统一扁平按钮：一致的配色/内边距/hover 反馈（按钮效果一致性的单一来源）。
 
     ``primary=True`` 用主题强调色（主操作），否则面板灰（普通操作）。
+    padx/pady 默认 PAD_M/PAD_XS；传值可放大主操作按钮（如「立即更新」）。
     """
     base_bg = theme.ACCENT if primary else theme.PANEL
     hover_bg = theme.HOVER_ACCENT if primary else theme.HOVER_BG
@@ -420,7 +426,8 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, **kw):
                     bg=base_bg, fg=fg, bd=0, cursor="hand2",
                     activebackground=hover_bg, activeforeground=fg,
                     padx=theme.PAD_M if padx is None else padx,
-                    pady=theme.PAD_XS, font=theme.FONT_UI, **kw)
+                    pady=theme.PAD_XS if pady is None else pady,
+                    font=theme.FONT_UI, **kw)
     btn.bind("<Enter>", lambda _e: btn.config(bg=hover_bg), add="+")
     btn.bind("<Leave>", lambda _e: btn.config(bg=base_bg), add="+")
     return btn

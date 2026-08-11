@@ -31,7 +31,7 @@ _SCORE_NAME = metric_name("score")        # 综合效率分
 _SCORE_SHORT = "效率分"                    # 窄列/徽标用简称
 _SCORE_TIP = metric_tip("score")          # 悬停完整解释
 from .widgets import (CalendarPopup, Card, CollapsibleSection, FlatMenu,
-                      MetricCell, ScrollFrame, Tooltip, flat_button)
+                      MetricCell, ScrollFrame, SelectableLabel, Tooltip, flat_button)
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
 
@@ -530,7 +530,7 @@ class ProjectColumn:
         self._refresh_count_label()
         if not projects:
             # 空状态引导：告诉用户去哪里产生数据，而不是留一片空白。
-            self._empty_hint = tk.Label(
+            self._empty_hint = SelectableLabel(
                 self.container,
                 text="未发现任何会话数据\n\n"
                      "请确认本机存在以下任一目录：\n"
@@ -661,14 +661,14 @@ class ProjectColumn:
             menu.add_separator()
 
             menu.add_command(
-                label="查看项目概览（指标分类）",
+                label="项目视角",
                 command=lambda: self._select_and_view(idx, "project"),
-                image=ui_icon(self.container, "project"), compound="left",
+                image=ui_icon(self.container, "view-project"), compound="left",
             )
             menu.add_command(
-                label="查看会话详情视图",
+                label="会话视角",
                 command=lambda: self._select_and_view(idx, "session"),
-                image=ui_icon(self.container, "session"), compound="left",
+                image=ui_icon(self.container, "view-session"), compound="left",
             )
 
         menu.add_separator()
@@ -934,6 +934,20 @@ class SessionColumn:
         from . import popups
         menu = FlatMenu(self.container)
 
+        # 标记操作（高频卡片状态管理，放最上面，与卡片角标一致）。
+        menu.add_command(
+            label="取消置顶" if sid in self._pinned else "置顶",
+            command=lambda: self.controller.toggle_session_pin(sid),
+            image=ui_icon(self.container, "pin-on"), compound="left",
+        )
+        menu.add_command(
+            label="取消红旗" if sid in self._flagged else "加红旗",
+            command=lambda: self.controller.toggle_session_flag(sid),
+            image=ui_icon(self.container, "flag-on"), compound="left",
+        )
+
+        menu.add_separator()
+
         # Session info sub-items
         menu.add_command(
             label=f"查看详情 · {sid[:20]}…",
@@ -1022,20 +1036,6 @@ class SessionColumn:
                 f"会话: {sid}\n标题: {title}\n"
                 f"TCER: {tcer_str} · 综合效率分: {score_str} · 成本: {cost_str}"),
             image=ui_icon(self.container, "copy"), compound="left",
-        )
-
-        menu.add_separator()
-
-        # 标记操作（与删除同属卡片管理组）。
-        menu.add_command(
-            label="取消置顶" if sid in self._pinned else "置顶",
-            command=lambda: self.controller.toggle_session_pin(sid),
-            image=ui_icon(self.container, "pin-on"), compound="left",
-        )
-        menu.add_command(
-            label="取消红旗" if sid in self._flagged else "加红旗",
-            command=lambda: self.controller.toggle_session_flag(sid),
-            image=ui_icon(self.container, "flag-on"), compound="left",
         )
 
         menu.add_separator()
@@ -1426,11 +1426,11 @@ class ScoreRankingView:
         self._tree.heading("score_val",
                            text="TCER" if self._fallback_tcer else _SCORE_SHORT)
         if getattr(self, "_fallback_note", None) is None:
-            self._fallback_note = tk.Label(
+            self._fallback_note = SelectableLabel(
                 self._note_parent,
                 text="ℹ 会话缺少综合效率分（无净增行或成本数据）——当前按 TCER 排名。",
                 bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL,
-                anchor="w", padx=theme.PAD_M, pady=theme.PAD_XS)
+                padx=theme.PAD_M, pady=theme.PAD_XS)
         if self._fallback_tcer:
             self._fallback_note.pack(fill="x", before=self._paned_ref)
         else:
@@ -1720,19 +1720,19 @@ class ScoreRankingView:
         box.pack(fill="x", pady=(0, 1))
 
         # 总量一行
-        tk.Label(box, text=f"{ov.n_sessions} 个会话 · 净增 {ov.total_net_loc:,} 行 · "
-                           f"{ov.total_tool_calls:,} 次工具调用",
-                 bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI_SMALL,
-                 anchor="w", wraplength=430, justify="left").pack(fill="x", pady=(0, 4))
+        SelectableLabel(box, text=f"{ov.n_sessions} 个会话 · 净增 {ov.total_net_loc:,} 行 · "
+                        f"{ov.total_tool_calls:,} 次工具调用",
+                        bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(fill="x", pady=(0, 4))
 
         def _dist_row(label, pairs, fmt=lambda k, v: f"{k} {v}"):
             if not pairs:
                 return
             tk.Label(box, text=label, bg=theme.PANEL, fg=theme.MUTED,
                      font=theme.FONT_UI_SMALL, anchor="w").pack(fill="x", pady=(4, 0))
-            tk.Label(box, text="  ·  ".join(fmt(k, v) for k, v in pairs),
-                     bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI_SMALL,
-                     anchor="w", wraplength=430, justify="left").pack(fill="x")
+            SelectableLabel(box, text="  ·  ".join(fmt(k, v) for k, v in pairs),
+                            bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI_SMALL,
+                            justify="left").pack(fill="x")
 
         _dist_row("任务类型", ov.task_type_dist)
         _dist_row("最常用工具", ov.top_tools)
@@ -1751,25 +1751,12 @@ class ScoreRankingView:
             card = tk.Frame(sec.content, bg=theme.PANEL, padx=8, pady=6)
             card.pack(fill="x", pady=(0, 1))
             # 证据行（为什么建议）
-            ev = tk.Label(card, text=s.evidence, bg=theme.PANEL, fg=theme.MUTED,
-                          font=theme.FONT_UI_SMALL, anchor="w", justify="left")
-            ev.pack(fill="x")
-            self._wrap_to_width(ev, indent=0)
-            # 规则文本（可复制）
-            rule = tk.Label(card, text=s.rule, bg=theme.CONTROL_BG, fg=theme.FG,
-                            font=theme.FONT_UI_SMALL, anchor="w", justify="left",
-                            padx=6, pady=4)
-            rule.pack(fill="x", pady=(2, 2))
-            self._wrap_to_width(rule, indent=12)
-            btn = flat_button(card, "复制规则",
-                              lambda t=s.rule: self._copy_rule(t), padx=theme.PAD_M)
-            btn.pack(anchor="e")
-
-    def _copy_rule(self, text: str) -> None:
-        if self._controller is not None:
-            self._controller.root.clipboard_clear()
-            self._controller.root.clipboard_append(text)
-            self._controller.filter.set_status("已复制到剪贴板")
+            SelectableLabel(card, text=s.evidence, bg=theme.PANEL, fg=theme.MUTED,
+                            font=theme.FONT_UI_SMALL, justify="left").pack(fill="x")
+            # 规则文本（可选中复制）
+            SelectableLabel(card, text=s.rule, bg=theme.CONTROL_BG, fg=theme.FG,
+                            font=theme.FONT_UI_SMALL, justify="left",
+                            padx=6, pady=4).pack(fill="x", pady=(2, 2))
 
     def _build_reco_section(self, title: str, recos) -> None:
         """渲染一组 Recommendation（Features/Horizon 共用）：标题 + 为什么 +
@@ -1781,23 +1768,14 @@ class ScoreRankingView:
         for rc in recos:
             card = tk.Frame(sec.content, bg=theme.PANEL, padx=8, pady=6)
             card.pack(fill="x", pady=(0, 1))
-            tl = tk.Label(card, text=f"\u25b8 {rc.title}", bg=theme.PANEL, fg=theme.FG,
-                          font=theme.FONT_UI_BOLD, anchor="w", justify="left")
-            tl.pack(fill="x")
-            self._wrap_to_width(tl, indent=0)
-            wl = tk.Label(card, text=rc.why, bg=theme.PANEL, fg=theme.MUTED,
-                          font=theme.FONT_UI_SMALL, anchor="w", justify="left")
-            wl.pack(fill="x")
-            self._wrap_to_width(wl, indent=0)
+            SelectableLabel(card, text=f"\u25b8 {rc.title}", bg=theme.PANEL, fg=theme.FG,
+                            font=theme.FONT_UI_BOLD, justify="left").pack(fill="x")
+            SelectableLabel(card, text=rc.why, bg=theme.PANEL, fg=theme.MUTED,
+                            font=theme.FONT_UI_SMALL, justify="left").pack(fill="x")
             if rc.prompt:
-                pl = tk.Label(card, text=rc.prompt, bg=theme.CONTROL_BG, fg=theme.FG,
-                              font=theme.FONT_UI_SMALL, anchor="w", justify="left",
-                              padx=6, pady=4)
-                pl.pack(fill="x", pady=(2, 2))
-                self._wrap_to_width(pl, indent=12)
-                flat_button(card, "复制指令",
-                            lambda t=rc.prompt: self._copy_rule(t),
-                            padx=theme.PAD_M).pack(anchor="e")
+                SelectableLabel(card, text=rc.prompt, bg=theme.CONTROL_BG, fg=theme.FG,
+                                font=theme.FONT_UI_SMALL, justify="left",
+                                padx=6, pady=4).pack(fill="x", pady=(2, 2))
 
     def _build_feature_section(self, reports) -> None:
         """值得一试：针对检测到的摩擦推荐可上手实践 + 可粘贴 prompt。"""
@@ -1821,9 +1799,9 @@ class ScoreRankingView:
         agg_tier = getattr(agg, "tier", None) or ""
 
         if agg_score is None:
-            tk.Label(card, text="项目暂无综合效率分（会话缺净增行或成本数据）",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                     anchor="w").pack(anchor="w")
+            SelectableLabel(card, text="项目暂无综合效率分（会话缺净增行或成本数据）",
+                            bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                            justify="left").pack(fill="x")
             return
 
         row = tk.Frame(card, bg=theme.PANEL)
@@ -1844,9 +1822,9 @@ class ScoreRankingView:
         tk.Label(row, text=f"评分覆盖 {n_scored}/{n_total}", bg=theme.PANEL,
                  fg=theme.MUTED, font=theme.FONT_UI).pack(side="right")
 
-        tk.Label(card, text="＝ 全项目聚合的产出/成本/质量三轴加权（分子和÷分母和口径）",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                 anchor="w").pack(anchor="w", pady=(2, 0))
+        SelectableLabel(card, text="＝ 全项目聚合的产出/成本/质量三轴加权（分子和÷分母和口径）",
+                        bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(fill="x", pady=(2, 0))
         if getattr(agg, "tcer", None) is not None:
             tk.Label(card, text=f"项目 TCER {agg.tcer:.1f} 行/百万", bg=theme.PANEL,
                      fg=theme.FG, font=theme.FONT_UI_SMALL, anchor="e").pack(anchor="e")
@@ -1935,8 +1913,8 @@ class ScoreRankingView:
         card.pack(fill="x", pady=(0, 1))
 
         sid = report.meta.session_id or report.meta.path.stem
-        tk.Label(card, text=sid[:40], bg=theme.PANEL, fg=theme.ACCENT,
-                 font=theme.FONT_MONO, anchor="w").pack(anchor="w")
+        SelectableLabel(card, text=sid[:40], bg=theme.PANEL, fg=theme.ACCENT,
+                        font=theme.FONT_MONO, justify="left").pack(fill="x")
 
         # 综合效率分 + grade + rank row
         row = tk.Frame(card, bg=theme.PANEL)
@@ -1970,9 +1948,9 @@ class ScoreRankingView:
                 break
 
         # 一句话解释：0–100 分怎么来的（三条正交轴加权，去术语门槛）。
-        tk.Label(card, text="＝ 产出效率 · 成本 · 质量 三轴各比参考线，按会话规模收缩后加权",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                 anchor="w").pack(anchor="w", pady=(2, 0))
+        SelectableLabel(card, text="＝ 产出效率 · 成本 · 质量 三轴各比参考线，按会话规模收缩后加权",
+                        bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(fill="x", pady=(2, 0))
 
         # TCER
         if report.tcer is not None:
@@ -2057,9 +2035,9 @@ class ScoreRankingView:
         if getattr(self, "_scored_count", 0) < 2:
             sec = CollapsibleSection(self._decomp_inner, "与项目均值对比",
                                      theme.GROUP_COLORS["G2"], expand=False)
-            tk.Label(sec.content, text="仅 1 个已评分会话，暂无可对比的项目均值。",
-                     bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                     anchor="w", padx=10, pady=6).pack(fill="x", pady=(0, 1))
+            SelectableLabel(sec.content, text="仅 1 个已评分会话，暂无可对比的项目均值。",
+                            bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                            padx=10, pady=6, justify="left").pack(fill="x", pady=(0, 1))
             return
 
         sec = CollapsibleSection(self._decomp_inner, "与项目均值对比",
@@ -2103,17 +2081,6 @@ class ScoreRankingView:
     }
     _INSIGHT_ORDER = ("good", "drag", "cost", "tip")
 
-    @staticmethod
-    def _wrap_to_width(label, *, indent: int = 0) -> None:
-        """让 Label 的 wraplength 跟随其实际分配宽度自适应（消除固定 300px 造成的
-        无意义窄折行 + 右侧留白）。绑 <Configure>：文字按容器真实宽度换行，窗口/
-        分栏变宽时自动填满。indent 扣除左侧缩进/色条占位。"""
-        def _on_cfg(event, lb=label, ind=indent):
-            w = event.width - ind - 6  # 6px 余量，防紧贴右缘
-            if w > 40 and abs(int(lb.cget("wraplength")) - w) > 4:
-                lb.config(wraplength=w)
-        label.bind("<Configure>", _on_cfg)
-
     def _render_insight_items(self, parent, items) -> None:
         """\u628a\u4e00\u7ec4 Insight \u6309 \u4eae\u70b9/\u62d6\u7d2f\u9879/\u5feb\u901f\u6539\u8fdb \u5206\u7ec4\u6e32\u67d3\u5230 parent\u3002
 
@@ -2155,23 +2122,17 @@ class ScoreRankingView:
                 body_col = tk.Frame(row, bg=theme.PANEL)
                 body_col.pack(side="left", fill="x", expand=True, padx=(8, 0))
                 # \u6807\u9898\u884c\uff1a\u6807\u8bb0 + \u7ed3\u8bba
-                title_lbl = tk.Label(body_col, text=f"{mark} {it.title}", bg=theme.PANEL,
-                                     fg=color, font=theme.FONT_UI, anchor="w",
-                                     justify="left")
-                title_lbl.pack(fill="x")
-                self._wrap_to_width(title_lbl, indent=0)
+                SelectableLabel(body_col, text=f"{mark} {it.title}", bg=theme.PANEL,
+                                fg=color, font=theme.FONT_UI,
+                                justify="left").pack(fill="x")
                 if it.evidence:
-                    ev_lbl = tk.Label(body_col, text=it.evidence, bg=theme.PANEL,
-                                     fg=theme.MUTED, font=theme.FONT_UI, anchor="w",
-                                     justify="left")
-                    ev_lbl.pack(fill="x", padx=(14, 0))
-                    self._wrap_to_width(ev_lbl, indent=14)
+                    SelectableLabel(body_col, text=it.evidence, bg=theme.PANEL,
+                                    fg=theme.MUTED, font=theme.FONT_UI,
+                                    justify="left").pack(fill="x", padx=(14, 0))
                 if it.action:
-                    act_lbl = tk.Label(body_col, text=f"\u2192 {it.action}", bg=theme.PANEL,
-                                      fg=theme.FG, font=theme.FONT_UI, anchor="w",
-                                      justify="left")
-                    act_lbl.pack(fill="x", padx=(14, 0))
-                    self._wrap_to_width(act_lbl, indent=14)
+                    SelectableLabel(body_col, text=f"\u2192 {it.action}", bg=theme.PANEL,
+                                    fg=theme.FG, font=theme.FONT_UI,
+                                    justify="left").pack(fill="x", padx=(14, 0))
             # body 必须锚定在自己 header 的正下方（after=header）。否则 pack 会把它
             # 追加到 parent 末尾——折叠再展开某组后，其正文会跳到整个面板最底部、
             # 脱离所属标题（金额组尤其明显，因其后还有「快速改进」组）。

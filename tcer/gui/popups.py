@@ -54,11 +54,11 @@ class UpdatePopup:
 
         if release is None:
             # 检查失败——给 Releases 页兜底
-            tk.Label(body, text="检查失败:无法连接 GitHub。", bg=theme.BG,
-                     fg=theme.WARNING, font=theme.FONT_UI, wraplength=400,
-                     justify="left").pack(anchor="w", pady=(4, 2))
-            tk.Label(body, text=f"当前版本:v{current_version}", bg=theme.BG,
-                     fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(anchor="w")
+            SelectableLabel(body, text="检查失败:无法连接 GitHub。", bg=theme.BG,
+                            fg=theme.WARNING, font=theme.FONT_UI,
+                            justify="left").pack(fill="x", pady=(4, 2))
+            SelectableLabel(body, text=f"当前版本:v{current_version}", bg=theme.BG,
+                            fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(fill="x")
             url = f"https://github.com/{update_check.GITHUB_REPO}/releases"
             flat_button(body, "前往 Releases 页", primary=True,
                         command=lambda: webbrowser.open(url)
@@ -70,14 +70,14 @@ class UpdatePopup:
         if newer:
             tk.Label(body, text="● 发现新版本", bg=theme.BG, fg=theme.SUCCESS,
                      font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(4, 2))
-            tk.Label(body,
-                     text=f"当前 v{current_version}   →   最新 {release['tag']}",
-                     bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(anchor="w")
+            SelectableLabel(body,
+                            text=f"当前 v{current_version}   →   最新 {release['tag']}",
+                            bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(fill="x")
         else:
             tk.Label(body, text="● 已是最新版本", bg=theme.BG, fg=theme.SUCCESS,
                      font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(4, 2))
-            tk.Label(body, text=f"当前版本 v{current_version}(已是最新)",
-                     bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(anchor="w")
+            SelectableLabel(body, text=f"当前版本 v{current_version}(已是最新)",
+                            bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(fill="x")
         if newer:
             # 按钮(立即更新 / 前往下载)置于发布说明**之前**:长文本会撑高滚动区,
             # 按钮放后面易被挤出可视行被裁;放顶部始终可见。
@@ -87,7 +87,8 @@ class UpdatePopup:
             if can_self:
                 self._update_btn = flat_button(
                     body, "立即更新", primary=True,
-                    command=lambda: controller.start_self_update(release, self))
+                    command=lambda: controller.start_self_update(release, self),
+                    padx=theme.PAD_L, pady=theme.PAD_S)
                 self._update_btn.pack(anchor="w", pady=(8, 0))
             else:
                 flat_button(body, "前往下载", primary=True,
@@ -104,9 +105,9 @@ class UpdatePopup:
             sf.canvas.pack(fill="both", expand=True, pady=(8, 0))
             if len(notes) > self._NOTES_LIMIT:
                 notes = notes[:self._NOTES_LIMIT].rstrip() + "\n…"
-            tk.Label(sf.inner, text=notes, bg=theme.PANEL, fg=theme.FG,
-                     font=theme.FONT_UI_SMALL, wraplength=400, justify="left",
-                     anchor="nw").pack(fill="x")
+            SelectableLabel(sf.inner, text=notes, bg=theme.PANEL, fg=theme.FG,
+                            font=theme.FONT_UI_SMALL,
+                            justify="left").pack(fill="x")
         # 无底部「关闭」按钮:标题栏 × 即可关闭
 
     def set_progress(self, text):
@@ -163,9 +164,9 @@ class SessionDetailPopup:
             row.pack(fill="x")
             tk.Label(row, text=key, bg=theme.PANEL, fg=theme.MUTED, width=10,
                      anchor="w", font=theme.FONT_UI).pack(side="left")
-            tk.Label(row, text=str(val), bg=theme.PANEL, fg=theme.FG,
-                     anchor="w", font=theme.FONT_UI, wraplength=400,
-                     justify="left").pack(side="left", fill="x", expand=True)
+            SelectableLabel(row, text=str(val), bg=theme.PANEL, fg=theme.FG,
+                            font=theme.FONT_UI,
+                            justify="left").pack(side="left", fill="x", expand=True)
 
         tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
         meta_row("会话 ID", r.meta.session_id or "(无)")
@@ -226,11 +227,11 @@ class SessionDetailPopup:
             tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
             warn = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=6)
             warn.pack(fill="x")
-            tk.Label(warn,
-                     text=f"⚠ {r.unseen_writes} 个「未见文件的 Write」（LOC 假设为新文件，"
-                          "若覆写已有文件会高估 added）",
-                     bg=theme.PANEL, fg=theme.WARNING, justify="left",
-                     font=theme.FONT_UI, wraplength=520).pack(anchor="w")
+            SelectableLabel(warn,
+                            text=f"⚠ {r.unseen_writes} 个「未见文件的 Write」（LOC 假设为新文件，"
+                                 "若覆写已有文件会高估 added）",
+                            bg=theme.PANEL, fg=theme.WARNING, justify="left",
+                            font=theme.FONT_UI).pack(fill="x")
 
 
 class ToolCallsPopup:
@@ -374,13 +375,13 @@ class ModelsPopup:
                 warn.pack(fill="x", pady=(0, 4))
                 names = "、".join(pricing_mod.label(m) for m in unmatched[:6])
                 more = f" 等 {len(unmatched)} 个" if len(unmatched) > 6 else ""
-                tk.Label(
+                SelectableLabel(
                     warn,
                     text=f"⚠ {len(unmatched)} 个模型未在价表中（按默认 list 价）：{names}{more}\n"
                          f"成本可能偏差；可在 tcer/config/model_pricing.json 补充条目。",
                     bg=theme.WARN_TINT_BG, fg=theme.WARNING,
-                    font=theme.FONT_UI, justify="left", wraplength=500,
-                ).pack(anchor="w")
+                    font=theme.FONT_UI, justify="left",
+                ).pack(fill="x")
 
             # Per-model blocks sorted by token count descending
             items = []
@@ -498,11 +499,11 @@ class CostBreakdownPopup:
         if unmatched:
             warn = tk.Frame(inner, bg=theme.WARN_TINT_BG, padx=10, pady=6)
             warn.pack(fill="x", pady=(0, 4))
-            tk.Label(
+            SelectableLabel(
                 warn,
                 text=f"⚠ {len(unmatched)} 个模型未在价表中，成本按默认 list 价估算（见各行「默认价」标记）。",
-                bg=theme.WARN_TINT_BG, fg=theme.WARNING, font=theme.FONT_UI, wraplength=500, justify="left",
-            ).pack(anchor="w")
+                bg=theme.WARN_TINT_BG, fg=theme.WARNING, font=theme.FONT_UI, justify="left",
+            ).pack(fill="x")
 
         max_cost = items[0][1] if items else 1
 
@@ -628,9 +629,9 @@ class BaselinesPopup:
                            hint=hint)
             self._method_rows[val] = row
 
-        tk.Label(inner, text="基准与筛选时间范围无关，始终基于全部历史会话。",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                 anchor="w", justify="left", wraplength=440).pack(fill="x", padx=10, pady=(8, 2))
+        SelectableLabel(inner, text="基准与筛选时间范围无关，始终基于全部历史会话。",
+                        bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(fill="x", padx=10, pady=(8, 2))
 
         # -- 结果区（校准后填充）--
         self._section_header(inner, "校准结果")
@@ -728,9 +729,9 @@ class BaselinesPopup:
         note = result.get("note") or ""
         values = result.get("values")
         if values is None:
-            tk.Label(self._result_frame, text=result.get("msg", "样本不足，无法计算基准。"),
-                     bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
-                     wraplength=420, justify="left").pack(anchor="w", padx=10, pady=8)
+            SelectableLabel(self._result_frame, text=result.get("msg", "样本不足，无法计算基准。"),
+                            bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
+                            justify="left").pack(fill="x", padx=10, pady=8)
             return
         head = tk.Frame(self._result_frame, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
         head.pack(fill="x", pady=(6, 0))
@@ -747,9 +748,9 @@ class BaselinesPopup:
         # per_project 现为**有序列表**，含全部项目（样本不足者 values=None）。
         per = result.get("per_project") or []
         if not per:
-            tk.Label(self._result_frame, text=result.get("msg", "没有可用于计算的项目。"),
-                     bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
-                     wraplength=440, justify="left").pack(anchor="w", padx=10, pady=8)
+            SelectableLabel(self._result_frame, text=result.get("msg", "没有可用于计算的项目。"),
+                            bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
+                            justify="left").pack(fill="x", padx=10, pady=8)
             return
         n_ok = sum(1 for it in per if it.get("values"))
         head = tk.Frame(self._result_frame, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
@@ -778,10 +779,10 @@ class BaselinesPopup:
                          bg=theme.PANEL, fg=self._COLOR, font=theme.FONT_MONO,
                          anchor="e").pack(side="right")
             else:
-                tk.Label(self._result_frame,
-                         text=info.get("reason", "样本不足，跳过"),
-                         bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL,
-                         anchor="w").pack(fill="x", padx=10)
+                SelectableLabel(self._result_frame,
+                                text=info.get("reason", "样本不足，跳过"),
+                                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL
+                                ).pack(fill="x", padx=10)
         if n_ok:
             self._set_apply_enabled(True)
 
@@ -839,10 +840,10 @@ class AdvancedPopup:
         card.pack(fill="x")
         no_loc_var = tk.BooleanVar(value=no_loc)
         CheckRow(card, "跳过 LOC（仅 Token 指标，不算 TCER/CPE/综合效率分）", no_loc_var)
-        tk.Label(card,
-                 text="全部指标均来自会话数据回放；TCER 不读取真实仓库、不依赖 git。",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                 wraplength=400, justify="left").pack(anchor="w", pady=(6, 0))
+        SelectableLabel(card,
+                        text="全部指标均来自会话数据回放；TCER 不读取真实仓库、不依赖 git。",
+                        bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(fill="x", pady=(6, 0))
 
         btn_bar = tk.Frame(win, bg=theme.BG)
         btn_bar.pack(pady=8)
@@ -957,9 +958,9 @@ class FilesTouchedPopup:
         win = _new_window(parent, "涉及文件", "560x480")
         tk.Label(win, text=f"涉及文件（共 {len(details)} 个）", bg=theme.BG,
                  fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
-        tk.Label(win, text="会话中被读取、写入或编辑过的文件及操作次数。",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI, wraplength=520,
-                 justify="left").pack()
+        SelectableLabel(win, text="会话中被读取、写入或编辑过的文件及操作次数。",
+                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
+                        justify="left").pack(fill="x")
 
         sf = ScrollFrame(win, bg=theme.PANEL)
         sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
@@ -993,9 +994,9 @@ class FilesTouchedPopup:
                 d_disp = d if len(d) < 50 else "…" + d[-47:]
                 row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=1)
                 row.pack(fill="x")
-                tk.Label(row, text=d_disp, bg=theme.PANEL, fg=theme.MUTED,
-                         font=(theme.FONT_MONO_NAME, 8), anchor="w",
-                         width=48).pack(side="left")
+                SelectableLabel(row, text=d_disp, bg=theme.PANEL, fg=theme.MUTED,
+                                font=(theme.FONT_MONO_NAME, 8),
+                                width=48).pack(side="left")
                 bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=6)
                 bar_bg.pack(side="left", fill="x", expand=True, padx=4)
                 tk.Frame(bar_bg, bg=theme.WARNING, height=6).place(
@@ -1014,19 +1015,19 @@ class FilesTouchedPopup:
             tk.Label(sec, text=f"搜索足迹（{len(searched)} 处）",
                      bg=theme.PANEL, fg=theme.SECTION_ACCENT,
                      font=theme.FONT_UI_BOLD).pack(anchor="w")
-            tk.Label(sec, text="Grep/Glob 扫过的路径及次数，反映探索范围（不计入涉及文件）。",
-                     bg=theme.PANEL, fg=theme.MUTED,
-                     font=theme.FONT_UI_SMALL, wraplength=500,
-                     justify="left").pack(anchor="w")
+            SelectableLabel(sec, text="Grep/Glob 扫过的路径及次数，反映探索范围（不计入涉及文件）。",
+                            bg=theme.PANEL, fg=theme.MUTED,
+                            font=theme.FONT_UI_SMALL,
+                            justify="left").pack(fill="x")
             max_s = top_searched[0][1]
             for p, cnt in top_searched:
                 p_disp = p.replace("\\", "/")
                 p_disp = p_disp if len(p_disp) < 50 else "…" + p_disp[-47:]
                 row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=1)
                 row.pack(fill="x")
-                tk.Label(row, text=p_disp, bg=theme.PANEL, fg=theme.MUTED,
-                         font=(theme.FONT_MONO_NAME, 8), anchor="w",
-                         width=48).pack(side="left")
+                SelectableLabel(row, text=p_disp, bg=theme.PANEL, fg=theme.MUTED,
+                                font=(theme.FONT_MONO_NAME, 8),
+                                width=48).pack(side="left")
                 bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=6)
                 bar_bg.pack(side="left", fill="x", expand=True, padx=4)
                 tk.Frame(bar_bg, bg=theme.SECTION_ACCENT, height=6).place(
@@ -1058,8 +1059,8 @@ class FilesTouchedPopup:
             sw = tk.Frame(hdr, bg=color, width=8, height=8)
             sw.pack(side="left", padx=(0, 5))
             sw.pack_propagate(False)
-            tk.Label(hdr, text=display, bg=theme.PANEL, fg=theme.FG, anchor="w",
-                     font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
+            SelectableLabel(hdr, text=display, bg=theme.PANEL, fg=theme.FG,
+                            font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
             tk.Label(hdr, text=f"{cnt} 次", bg=theme.PANEL, fg=theme.MUTED, anchor="e",
                      font=theme.FONT_MONO).pack(side="right")
 
@@ -1086,9 +1087,9 @@ class MemoryFilesPopup:
         win = _new_window(parent, "项目记忆文件", "560x460")
         tk.Label(win, text=f"项目记忆文件（{count} 个）", bg=theme.BG,
                  fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
-        tk.Label(win, text=f"路径：{memory_dir}",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI, wraplength=520,
-                 justify="left").pack()
+        SelectableLabel(win, text=f"路径：{memory_dir}",
+                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
+                        justify="left").pack(fill="x")
 
         # 按钮栏：打开目录（居中）
         btn_bar = tk.Frame(win, bg=theme.BG)
@@ -1131,8 +1132,8 @@ class MemoryFilesPopup:
             tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
             hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
             hdr.pack(fill="x")
-            tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
-                     font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
+            SelectableLabel(hdr, text=name, bg=theme.PANEL, fg=theme.FG,
+                            font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
             size_txt = f"{size:,} B" if size < 1024 else f"{size / 1024:.1f} KB"
             tk.Label(hdr, text=size_txt, bg=theme.PANEL, fg=theme.MUTED, anchor="e",
                      font=theme.FONT_MONO).pack(side="right")
@@ -1312,15 +1313,15 @@ class ConfirmDeletePopup:
         body = tk.Frame(win, bg=theme.BG)
         body.pack(fill="both", expand=True, padx=20)
         disp_title = title if len(title) <= 36 else title[:36] + "…"
-        tk.Label(body, text=f"将永久删除本地会话“{disp_title}”",
-                 bg=theme.BG, fg=theme.FG, font=theme.FONT_UI,
-                 anchor="w", justify="left").pack(anchor="w", pady=(2, 0))
-        tk.Label(body, text=f"Session ID: {session_id}",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_MONO,
-                 anchor="w", justify="left").pack(anchor="w", pady=(2, 0))
-        tk.Label(body, text="将一并删除其 subagent 与 tool-results 数据，此操作不可恢复。",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
-                 anchor="w", justify="left", wraplength=410).pack(anchor="w", pady=(12, 0))
+        SelectableLabel(body, text=f"将永久删除本地会话“{disp_title}”",
+                        bg=theme.BG, fg=theme.FG, font=theme.FONT_UI,
+                        justify="left").pack(fill="x", pady=(2, 0))
+        SelectableLabel(body, text=f"Session ID: {session_id}",
+                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_MONO,
+                        justify="left").pack(fill="x", pady=(2, 0))
+        SelectableLabel(body, text="将一并删除其 subagent 与 tool-results 数据，此操作不可恢复。",
+                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
+                        justify="left").pack(fill="x", pady=(12, 0))
 
         # 按钮行（右对齐）
         btn_bar = tk.Frame(win, bg=theme.BG)

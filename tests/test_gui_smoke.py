@@ -124,9 +124,23 @@ def test_project_overview_popup(root, reports):
 
 def test_session_detail_popup(root, reports):
     from tcer.gui.popups import SessionDetailPopup
+    from tcer.gui.widgets import SelectableLabel
 
     SessionDetailPopup(root, reports[0])
     root.update_idletasks()
+
+    # 元数据值（session ID / 工作目录）渲染为可选中复制文本
+    sels = []
+    def _collect(w):
+        for c in w.winfo_children():
+            if isinstance(c, SelectableLabel):
+                sels.append(c)
+            _collect(c)
+    _collect(root)
+    assert sels, "SessionDetailPopup 未渲染 SelectableLabel"
+    sid = reports[0].meta.session_id or ""
+    assert any(sid and sid in s.get("1.0", "end-1c") for s in sels), \
+        "session ID 应出现在可选中文本中（可拖选复制）"
 
 
 def test_metric_panel_renders(root, reports):
@@ -306,8 +320,14 @@ def test_ranking_falls_back_to_tcer(root, reports):
 
 
 def _walk_labels(w, out):
+    from tcer.gui.widgets import SelectableLabel
     for c in w.winfo_children():
-        if isinstance(c, tk.Label):
+        if isinstance(c, SelectableLabel):  # tk.Text 子类：用 get 取全文本（可选中复制）
+            try:
+                out.append(c.get("1.0", "end-1c"))
+            except tk.TclError:
+                pass
+        elif isinstance(c, tk.Label):
             try:
                 out.append(c.cget("text"))
             except tk.TclError:
@@ -512,10 +532,12 @@ def test_user_msgs_popup_renders(root):
     labels: list = []
     _collect(root, labels)
     assert labels, "UserMsgsPopup 未渲染出 SelectableLabel"
-    first = labels[0]
-    assert first.cget("state") == "disabled"          # 只读但可选中复制
-    assert "短消息" in first.get("1.0", "end-1c")      # 文本已写入
-    assert int(first.cget("height")) >= 1
+    # module-scoped root 累积先前测试的 Toplevel，用 any/all 避免与其它弹窗的
+    # SelectableLabel 顺序耦合（labels[0] 可能是早先弹窗的 session id 等）。
+    texts = [s.get("1.0", "end-1c") for s in labels]
+    assert all(s.cget("state") == "disabled" for s in labels), "SelectableLabel 应只读"
+    assert any("短消息" in t for t in texts), "短消息应写入某 SelectableLabel"
+    assert any(int(s.cget("height")) >= 1 for s in labels), "高度应撑开"
 
 
 def test_user_msgs_popup_grouped(root):
@@ -757,14 +779,92 @@ def test_files_touched_popup_with_search_footprint(root):
     """FilesTouchedPopup 三块（文件列表 / 目录热度 / 搜索足迹）都渲染不崩；
     搜索路径经独立参数传入，与文件列表分开。"""
     from tcer.gui.popups import FilesTouchedPopup
+    from tcer.gui.widgets import SelectableLabel
 
     details = {"/proj/a.py": 3, "/proj/sub/b.py": 2, "/proj/c.py": 1}
     searched = {"/proj/sub": 18, "/proj": 9, "/proj/a.py": 4}
     FilesTouchedPopup(root, details, searched)
     root.update_idletasks()
+
+    # 文件/搜索路径渲染为可选中复制
+    sels = []
+    def _collect(w):
+        for c in w.winfo_children():
+            if isinstance(c, SelectableLabel):
+                sels.append(c)
+            _collect(c)
+    _collect(root)
+    texts = [s.get("1.0", "end-1c") for s in sels]
+    assert any("a.py" in t for t in texts), "文件路径应可选中间"
+
     # 无 searched 时（Claude 常态）也不崩
     FilesTouchedPopup(root, details, None)
     root.update_idletasks()
+
+
+def test_update_popup_release_notes_selectable(root):
+    """UpdatePopup 发布说明渲染为可选中复制文本（A 类长文本改造）。"""
+    from tcer.gui.popups import UpdatePopup
+    from tcer.gui.widgets import SelectableLabel
+
+    release = {"tag": "v9.9.9", "notes": "发布说明正文样例，可选中复制。",
+               "url": "https://example.com"}
+    UpdatePopup(root, "v1.0.0", release, controller=None)
+    root.update_idletasks()
+
+    sels = []
+    def _collect(w):
+        for c in w.winfo_children():
+            if isinstance(c, SelectableLabel):
+                sels.append(c)
+            _collect(c)
+    _collect(root)
+    texts = [s.get("1.0", "end-1c") for s in sels]
+    assert any("发布说明正文样例" in t for t in texts), "发布说明应渲染为可选中文本"
+
+
+def test_ranking_insights_are_selectable_no_copy_button(root):
+    """ScoreView 洞察/规则/推荐文本为 SelectableLabel；复制按钮已由选中复制取代。"""
+    import copy
+    from tcer.gui.views import ScoreRankingView
+    from tcer.gui.widgets import SelectableLabel
+
+    base = _report("p0", 300)
+    reps = []
+    for i in range(3):
+        r = copy.copy(base)
+        r.meta = copy.copy(base.meta)
+        r.meta.session_id = f"p{i}"
+        r.churn_ratio = 0.5
+        reps.append(r)
+
+    frame = tk.Frame(root)
+    frame.pack()
+    view = ScoreRankingView(frame)
+    view.update(reps)
+    root.update_idletasks()
+
+    # 分解面板内有 SelectableLabel（洞察/规则/推荐文本）
+    sels = []
+    def _collect(w):
+        for c in w.winfo_children():
+            if isinstance(c, SelectableLabel):
+                sels.append(c)
+            _collect(c)
+    _collect(view._decomp_inner)
+    assert sels, "洞察区应渲染 SelectableLabel"
+
+    # 复制按钮已被选中复制取代 —— 遍历 Button 确认无「复制规则/复制指令」残留
+    btn_texts = []
+    def _scan_btn(w):
+        for c in w.winfo_children():
+            if isinstance(c, tk.Button):
+                btn_texts.append(c.cget("text"))
+            _scan_btn(c)
+    _scan_btn(view._decomp_inner)
+    assert not any("复制规则" in t or "复制指令" in t for t in btn_texts), \
+        "选中复制取代后不应再有复制按钮"
+    frame.destroy()
 
 
 def test_radar_popup_axes_track_live_baselines(root, reports):
