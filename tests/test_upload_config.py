@@ -25,7 +25,7 @@ def test_defaults_when_unconfigured(tmp_path, monkeypatch):
     _point_prefs(tmp_path, monkeypatch)
     assert upload_config.DEFAULT_URL == ""               # 不硬编码任何地址
     assert upload_config.server_url() is None            # 未配置 → None
-    assert upload_config.api_token() is None             # 匿名
+    assert upload_config.auth_token() is None             # 匿名
     assert upload_config.upload_detail() is upload_config.DEFAULT_DETAIL
     assert upload_config.upload_enabled() is True         # 默认常驻
 
@@ -38,7 +38,7 @@ def test_reads_configured_values(tmp_path, monkeypatch):
         "detail": False,
     }})
     assert upload_config.server_url() == "https://tcer.example.com"
-    assert upload_config.api_token() == "tcer_abc123"
+    assert upload_config.auth_token() == "tcer_abc123"
     assert upload_config.upload_detail() is False
     assert upload_config.upload_enabled() is True
 
@@ -48,7 +48,7 @@ def test_blank_fields_fall_back(tmp_path, monkeypatch):
     _point_prefs(tmp_path, monkeypatch)
     _write_prefs(tmp_path, {"upload": {"url": "  ", "auth_token": "  "}})
     assert upload_config.server_url() is None
-    assert upload_config.api_token() is None
+    assert upload_config.auth_token() is None
     # detail 缺失 → 内置默认
     assert upload_config.upload_detail() is upload_config.DEFAULT_DETAIL
 
@@ -58,7 +58,7 @@ def test_malformed_upload_section_ignored(tmp_path, monkeypatch):
     _point_prefs(tmp_path, monkeypatch)
     _write_prefs(tmp_path, {"upload": "not-a-dict"})
     assert upload_config.server_url() is None
-    assert upload_config.api_token() is None
+    assert upload_config.auth_token() is None
     assert upload_config.upload_detail() is upload_config.DEFAULT_DETAIL
 
 
@@ -87,13 +87,13 @@ def test_save_roundtrip_and_getter_semantics(tmp_path, monkeypatch):
     _point_prefs(tmp_path, monkeypatch)
     upload_config.save(url="https://srv/", auth_token="  tok  ", detail=False)
     assert upload_config.server_url() == "https://srv"   # 去尾斜杠
-    assert upload_config.api_token() == "tok"            # 去空白
+    assert upload_config.auth_token() == "tok"            # 去空白
     assert upload_config.upload_detail() is False
     # 清空：存空串，取值 → 未配置（None）/ 匿名
     upload_config.save(url="", auth_token="", detail=True)
     assert upload_config.stored_config()["url"] == ""
     assert upload_config.server_url() is None
-    assert upload_config.api_token() is None
+    assert upload_config.auth_token() is None
     assert upload_config.upload_detail() is True
 
 
