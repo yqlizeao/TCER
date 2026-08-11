@@ -1,23 +1,30 @@
-# TCER v1.5.1
+# TCER v1.5.2
 
-修复 macOS 上栏按钮显示为白色（Aqua 主题 bug）+ 标题栏跟随系统深色。
+macOS 改用标准 `.app` 包（双击运行）+ 发布资产名加版本号；Windows 不受影响。
 
-## macOS：按钮全白修复
+## macOS：改用 .app 包（双击运行）
 
-- **问题**：macOS Tk 的 Aqua 主题忽略 `tk.Button` 的 `bg`（[bpo-44243](https://bugs.python.org/issue44243)），导致 `flat_button`（上栏刷新 / 工具 ▾ / 导出 ▾ / 上传 / 预设，以及各弹窗的校准 / 取消 / 前往下载等按钮）在 mac 上显示为白色，与深色界面冲突。
-- **修复**：`flat_button` 在 mac 上改用 `_MacButton`（`tk.Label` 子类 + 点击/hover 绑定）绘制，绕过 Aqua 主题，bg/fg/hover 全可控。视角切换按钮早已用此法（故一直正常），现推广到全部 `flat_button`。
-- **API 兼容**：`_MacButton` 兼容 `tk.Button` 的 `command`（构造传入与 `.config(command=)` 重绑），菜单按钮（工具 ▾ / 导出 ▾）的弹窗逻辑不受影响。
-- **Windows / Linux 不变**：仅 `PLATFORM == "darwin"` 走 `_MacButton`，其余平台仍是原 `tk.Button`。
+- **问题**：v1.5.1 及更早的 mac 包是裸 Mach-O 单文件（`TCER-macos-arm64`），浏览器下载丢失可执行权限 + 打上 quarantine，Finder 不当程序、丢给文本编辑器读二进制 → 报「文本编码 Unicode(UTF-8)不适用」。
+- **修复**：CI 改用 `--windowed`（无 `--onefile`）生成 `TCER.app` bundle，用 `ditto` 打成 `.app.zip` 上传。下载解压后**双击 `TCER.app`** 即可运行（首次需「右键 → 打开」过 Gatekeeper，因为项目不做代码签名）。
+- **自动更新**：`updater._mac_replace` 重写支持 `.app.zip`——下载 zip → `ditto -x` 解压 → 旧 `.app` rename 到 `.old`（不删运行中文件）→ 新 `.app` move 到位 → 清 quarantine → `open` 启动。同时保留裸二进制 fallback（旧式安装也兼容）。
 
-## macOS：标题栏跟随系统
+## 发布资产名加版本号
 
-- mac 标题栏由系统绘制、跟随系统外观（mac 深色模式 → 深色标题栏），无需代码干预。纯标准库 Tk 无法做到「系统浅色时也强制深」（需 pyobjc NSWindow，违背零依赖），故保持跟随系统。
+- Windows：`TCER-windows-x64-v1.5.2.exe`（原 `TCER-windows-x64.exe`）。
+- macOS：`TCER-macos-arm64-v1.5.2.zip`（原 `TCER-macos-arm64`）。
+- 自动更新不受影响：[`asset_for_current_platform`](tcer/core/updater.py) 按「Windows `.exe` 结尾 / mac 含 `macos`+`arm64`」匹配，命名加版本号仍命中。
+
+## ⚠️ mac 用户：从 v1.5.0 / v1.5.1 升级
+
+- mac 包格式从「裸二进制」改成「`.app.zip`」，**旧版（≤1.5.1）的应用内自动更新无法完成这次格式迁移**（旧 updater 会把 zip 当裸二进制 copy → 损坏安装）。
+- **请手动下载本次 `TCER-macos-arm64-v1.5.2.zip`，解压后替换旧文件**；此后新版 updater 懂 `.app.zip`，自动更新恢复正常。
+- Windows 用户不受影响，应用内自动更新照常。
 
 ## 说明
 
 - 客户端纯离线、零第三方依赖不变；指标公式不变。
-- GUI 冒烟测试 36 项全过（新增 `_MacButton` 的 command 兼容测试）。
+- Windows GUI 冒烟测试通过；mac 的 `.app` 自动更新替换逻辑需实机验证（v1.5.2 → v1.5.3 那次自动更新）。
 
 ---
 
-**完整变更**：`v1.5.0...v1.5.1`
+**完整变更**：`v1.5.1...v1.5.2`
