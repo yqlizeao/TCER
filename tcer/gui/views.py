@@ -32,6 +32,7 @@ _SCORE_SHORT = "效率分"                    # 窄列/徽标用简称
 _SCORE_TIP = metric_tip("score")          # 悬停完整解释
 from .widgets import (CalendarPopup, Card, CollapsibleSection, FlatMenu,
                       MetricCell, ScrollFrame, SelectableLabel, Tooltip, flat_button)
+from .platform import CLICK_CURSOR
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
 
@@ -212,11 +213,11 @@ class FilterBar:
             click = lambda e, v=val: self._set_view(v)
             icon = _seg_icons.get(val)
             if icon is not None:
-                il = tk.Label(pill, image=icon, bg=theme.CONTROL_BG, cursor="hand2")
+                il = tk.Label(pill, image=icon, bg=theme.CONTROL_BG, cursor=CLICK_CURSOR)
                 il.pack(side="left", padx=(4, 0))
                 il.bind("<Button-1>", click)
                 self._view_icon_lbls[val] = il
-            btn = tk.Label(pill, text=label, pady=1, cursor="hand2",
+            btn = tk.Label(pill, text=label, pady=1, cursor=CLICK_CURSOR,
                            font=theme.FONT_UI_SMALL)
             btn.pack(side="left", padx=(2, 6))
             btn.bind("<Button-1>", click)
@@ -382,7 +383,7 @@ class FilterBar:
         e.pack(side="left")
         cal_icon = ui_icon(wrap, "calendar")
         cal = tk.Label(wrap, text="" if cal_icon else "▦", image=cal_icon, compound="left",
-                       bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI, cursor="hand2", padx=5,
+                       bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI, cursor=CLICK_CURSOR, padx=5,
                        highlightthickness=1, highlightbackground=theme.BORDER)
         Tooltip(cal, "点击选择日期")
         cal.bind("<Enter>", lambda _ev: cal.config(fg=theme.ACCENT), add="+")
@@ -740,7 +741,7 @@ class SessionColumn:
         search_wrap.pack(side="right")  # 先 pack → 占最右
         _si = ui_icon(search_wrap, "search")
         if _si is not None:
-            _s_lbl = tk.Label(search_wrap, image=_si, bg=theme.PANEL_2, cursor="hand2")
+            _s_lbl = tk.Label(search_wrap, image=_si, bg=theme.PANEL_2, cursor=CLICK_CURSOR)
             _s_lbl.pack(side="left", padx=(3, 0), pady=1)
             _s_lbl.bind("<Button-1>", lambda _e: search.focus_set())
         search = tk.Entry(search_wrap, textvariable=self._filter_var, width=10,
@@ -754,11 +755,11 @@ class SessionColumn:
         self._ff_img = {"off": ui_icon(header, "flag"), "on": ui_icon(header, "flag-on")}
         _ff0 = self._ff_img["off"]
         if _ff0 is not None:
-            self._flag_filter = tk.Label(header, image=_ff0, bg=theme.PANEL, cursor="hand2")
+            self._flag_filter = tk.Label(header, image=_ff0, bg=theme.PANEL, cursor=CLICK_CURSOR)
             self._flag_filter.image = _ff0
         else:
             self._flag_filter = tk.Label(header, text="旗", bg=theme.PANEL,
-                                         fg=theme.MUTED, font=theme.FONT_UI_SMALL, cursor="hand2")
+                                         fg=theme.MUTED, font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
         self._flag_filter.pack(side="right", padx=(6, 2))  # 后 pack → 搜索框左边
         self._flag_filter.bind("<Button-1>", lambda _e: self._toggle_flag_only())
         self._flag_filter.bind("<Enter>", lambda _e: self._flag_filter.configure(bg=theme.HOVER_BG))
@@ -883,7 +884,7 @@ class SessionColumn:
         ti_lbl.pack(fill="x", padx=6, pady=(1, 1))
         sid_disp = sid[:36] + "..." if len(sid) > 36 else sid
         sid_lbl = tk.Label(card.frame, text=sid_disp, bg=theme.PANEL_2, fg="#6B7077",
-                           font=theme.FONT_MONO, cursor="hand2", anchor="w")
+                           font=theme.FONT_MONO, cursor=CLICK_CURSOR, anchor="w")
         sid_lbl.pack(fill="x", padx=6, pady=(1, 4))
         # top_row/marks_row/时间标签随卡片选中；标记图标自行绑事件（见 _mark_icon）。
         for w in (top_row, t_lbl, marks_row, ti_lbl, sid_lbl):
@@ -899,13 +900,13 @@ class SessionColumn:
         """
         img = ui_icon(self.container, f"{kind}-on" if is_on else kind)
         if img is not None:
-            lbl = tk.Label(parent, image=img, bg=theme.PANEL_2, cursor="hand2")
+            lbl = tk.Label(parent, image=img, bg=theme.PANEL_2, cursor=CLICK_CURSOR)
             lbl.image = img  # 防 GC（ui_icon 已模块级缓存，双保险）
         else:
             ch = "▾" if kind == "pin" else "◆"
             fg = (theme.ACCENT if kind == "pin" else theme.ERROR) if is_on else theme.MUTED
             lbl = tk.Label(parent, text=ch, bg=theme.PANEL_2, fg=fg,
-                           font=theme.FONT_UI_SMALL, cursor="hand2")
+                           font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
         lbl.pack(side="left", padx=(2, 0))
 
         def toggle(_e):
@@ -1166,7 +1167,7 @@ class MetricPanel:
         collapsed = group.id == "G4"
         arrow_lbl = tk.Label(header, text=f"{'▶' if collapsed else '▼'} {group.name}",
                              bg=theme.GROUP_COLORS[group.id], fg=theme.FG,
-                             font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor="hand2")
+                             font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor=CLICK_CURSOR)
         arrow_lbl.pack(side="left")
         # body 容纳该组全部子组/网格；折叠时 pack_forget 它（整组收起）。
         body = tk.Frame(gframe, bg=theme.BG)
@@ -1222,7 +1223,7 @@ class MetricPanel:
         # rows between collapse and expand are auto-collapsed by Tk's grid.
         exp_row = len(metrics)
         expander = tk.Label(grid, text="", bg=theme.PANEL, fg=theme.MUTED,
-                            font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor="hand2")
+                            font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor=CLICK_CURSOR)
         expander.grid(row=exp_row, column=0, columnspan=_PER_ROW,
                       sticky="w", pady=(1, 0))
         expander.grid_remove()  # hidden until _apply_grid finds empty cells
@@ -1807,7 +1808,7 @@ class ScoreRankingView:
         row = tk.Frame(card, bg=theme.PANEL)
         row.pack(fill="x")
         name_lbl = tk.Label(row, text=f"项目{_SCORE_NAME}", bg=theme.PANEL, fg=theme.MUTED,
-                            font=theme.FONT_UI_SMALL, cursor="hand2")
+                            font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
         name_lbl.pack(side="left")
         if _SCORE_TIP:
             Tooltip(name_lbl, _SCORE_TIP)
@@ -1860,7 +1861,7 @@ class ScoreRankingView:
             row.pack(fill="x")
             name_lbl = tk.Label(row, text=axis.name, bg=theme.PANEL, fg=theme.FG,
                                 font=theme.FONT_UI_SMALL, width=8, anchor="w",
-                                cursor="hand2")
+                                cursor=CLICK_CURSOR)
             name_lbl.pack(side="left")
             color = theme.VALUE_GOOD if val >= SCORE_AXIS_NEUTRAL else theme.VALUE_BAD
             val_lbl = tk.Label(row, text=format_axis(val), bg=theme.PANEL, fg=color,
@@ -1923,7 +1924,7 @@ class ScoreRankingView:
         score_val = report.score
         tier_ = report.tier or ""
         name_lbl = tk.Label(row, text=_SCORE_NAME, bg=theme.PANEL, fg=theme.MUTED,
-                            font=theme.FONT_UI_SMALL, cursor="hand2")
+                            font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
         name_lbl.pack(side="left")
         if _SCORE_TIP:
             Tooltip(name_lbl, _SCORE_TIP)
@@ -1983,7 +1984,7 @@ class ScoreRankingView:
             axis_tip = f"{name}（{desc}）\n{axis.tip}" if axis.tip else None
             name_lbl = tk.Label(row, text=name, bg=theme.PANEL, fg=theme.FG,
                                 font=theme.FONT_UI_SMALL, width=8, anchor="w",
-                                cursor="hand2")
+                                cursor=CLICK_CURSOR)
             name_lbl.pack(side="left")
             color = theme.VALUE_GOOD if val >= SCORE_AXIS_NEUTRAL else theme.VALUE_BAD
             val_lbl = tk.Label(row, text=format_axis(val), bg=theme.PANEL, fg=color,
@@ -2104,7 +2105,7 @@ class ScoreRankingView:
             is_collapsed = collapsed.get(kind, False)
 
             # \u5206\u7ec4\u6807\u9898\uff08\u53ef\u70b9\u51fb\u6298\u53e0\uff09\uff1a\u25bc/\u25b6 + \u540d\u79f0\uff08N\uff09
-            header = tk.Frame(parent, bg=theme.PANEL, cursor="hand2")
+            header = tk.Frame(parent, bg=theme.PANEL, cursor=CLICK_CURSOR)
             header.pack(fill="x", pady=(8, 2))
             arrow = "\u25b6" if is_collapsed else "\u25bc"
             head_lbl = tk.Label(header, text=f"{arrow} {head_txt}\uff08{len(group)}\uff09",
@@ -2283,7 +2284,7 @@ class ModelCompareView:
         header.pack(fill="x")
         arrow_lbl = tk.Label(header, text=f"{'▶' if collapsed else '▼'} {group.name}",
                              bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
-                             font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor="hand2")
+                             font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor=CLICK_CURSOR)
         arrow_lbl.pack(side="left")
         body = tk.Frame(gframe, bg=theme.BG)
         body.pack(fill="x")

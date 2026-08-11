@@ -17,6 +17,7 @@ from tcer.core.format import FMT_SHORT_MINUTE, fmt_dt
 from . import theme
 from .metric_defs import GROUPS, Metric, METRIC_BY_KEY, format_plot, raw_value
 from .widgets import CheckRow, FlatMenu, ScrollFrame, Tooltip, flat_button
+from .platform import CLICK_CURSOR
 
 # 兼容旧名：图表代码里沿用 views 时代的别名。
 metric_raw_value = raw_value
@@ -208,7 +209,7 @@ class MetricTrendSelector:
         # 还得再点里面」的双层操作。tk 点击不冒泡，整框（含所有子）递归绑定。
         from .views import ui_icon as _ui_icon
         self._overlay_box = tk.Frame(parent, bg=theme.PANEL, highlightthickness=2,
-                                     highlightbackground=theme.ACCENT, cursor="hand2")
+                                     highlightbackground=theme.ACCENT, cursor=CLICK_CURSOR)
         self._overlay_box.pack(fill="x", padx=2, pady=(4, 6))
         head = tk.Frame(self._overlay_box, bg=theme.PANEL)
         head.pack(fill="x", padx=8, pady=(4, 0))
@@ -453,12 +454,12 @@ class TrendChart:
             members: list = []
             icon = ui_icon(seg, val)
             if icon is not None:
-                il = tk.Label(pill, image=icon, bg=theme.CONTROL_BG, cursor="hand2")
+                il = tk.Label(pill, image=icon, bg=theme.CONTROL_BG, cursor=CLICK_CURSOR)
                 il.pack(side="left", padx=(4, 0))
                 il.bind("<Button-1>", click)
                 members.append(il)
             lbl = tk.Label(pill, text=label, bg=theme.CONTROL_BG, fg=theme.MUTED,
-                           cursor="hand2", font=theme.FONT_UI_SMALL, padx=3)
+                           cursor=CLICK_CURSOR, font=theme.FONT_UI_SMALL, padx=3)
             lbl.pack(side="left")
             lbl.bind("<Button-1>", click)
             members.append(lbl)
@@ -1820,7 +1821,7 @@ class HeatmapChart:
             holder = tk.Frame(seg, bg=theme.CONTROL_BG)
             holder.pack(side="left", padx=1)
             lbl = tk.Label(holder, text=label, bg=theme.CONTROL_BG, fg=theme.MUTED,
-                           cursor="hand2", font=theme.FONT_UI_SMALL, padx=6)
+                           cursor=CLICK_CURSOR, font=theme.FONT_UI_SMALL, padx=6)
             lbl.pack()
             lbl.bind("<Button-1>", lambda _e, v=val: self._set_view(v))
             self._view_pills[val] = lbl

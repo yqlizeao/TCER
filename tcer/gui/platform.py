@@ -9,6 +9,10 @@ import sys
 
 PLATFORM = sys.platform  # 'win32', 'darwin', 'linux'
 
+# 可点击控件光标：Windows/Linux 用 hand2（手型，可点击反馈）；mac 的 Tk hand2 是
+# 低清位图小手、观感差，且 mac 原生按钮 hover 不变光标，故 mac 用默认（空串）。
+CLICK_CURSOR = "" if PLATFORM == "darwin" else "hand2"
+
 # ---------------------------------------------------------------------------
 # Fonts — each OS picks its best CJK / monospace font; tkinter falls back
 # gracefully if the exact name is missing.

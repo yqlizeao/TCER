@@ -10,7 +10,7 @@ import tkinter as tk
 
 from . import theme
 from .metric_defs import Metric, UNSUPPORTED_LABEL
-from .platform import PLATFORM
+from .platform import PLATFORM, CLICK_CURSOR
 
 
 class Tooltip:
@@ -58,7 +58,7 @@ class CheckRow:
                  font=None, icon=None, hint=None) -> None:
         self.var = var
         self._on_toggle = on_toggle
-        self._row = tk.Frame(parent, bg=theme.PANEL, cursor="hand2")
+        self._row = tk.Frame(parent, bg=theme.PANEL, cursor=CLICK_CURSOR)
         self._row.pack(fill="x", padx=2)
         self._members: list = []
         if icon is not None:
@@ -139,7 +139,7 @@ class CollapsibleSection:
         self.header = tk.Frame(self.frame, bg=color, padx=6, pady=3)
         self.header.pack(fill="x", pady=(1, 0))
         self._arrow = tk.Label(self.header, text=f"▼ {title}", bg=color, fg=theme.FG,
-                               font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor="hand2")
+                               font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor=CLICK_CURSOR)
         self._arrow.pack(side="left")
         self.content = tk.Frame(self.frame, bg=theme.BG)
         self.content.pack(fill="both", expand=expand)
@@ -253,7 +253,7 @@ class Card:
                  bg: str = theme.PANEL_2, padx: int = 2, pady: int = 2) -> None:
         self.frame = tk.Frame(parent, bg=bg, relief="flat", borderwidth=1,
                               highlightthickness=1, highlightbackground=theme.BORDER,
-                              cursor="hand2")
+                              cursor=CLICK_CURSOR)
         self.frame.pack(fill="x", padx=padx, pady=pady)
         self._on_click = on_click
         self._on_right_click = on_right_click
@@ -310,8 +310,8 @@ class MetricCell:
         self.value.pack(anchor="w")
 
         if on_click:
-            self.value.config(cursor="hand2")
-            self.title.config(cursor="hand2")
+            self.value.config(cursor=CLICK_CURSOR)
+            self.title.config(cursor=CLICK_CURSOR)
             self.value.bind("<Button-1>", lambda e: on_click())
             self.title.bind("<Button-1>", lambda e: on_click())
 
@@ -466,10 +466,10 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, pady=No
     if PLATFORM == "darwin":
         return _MacButton(parent, command=command, base_bg=base_bg, hover_bg=hover_bg,
                           text=text, bg=base_bg, fg=fg, font=theme.FONT_UI,
-                          padx=pad_x, pady=pad_y, cursor="hand2",
+                          padx=pad_x, pady=pad_y, cursor=CLICK_CURSOR,
                           highlightthickness=0, **kw)
     btn = tk.Button(parent, text=text, command=command, relief="flat",  # style-exempt: flat_button 本体
-                    bg=base_bg, fg=fg, bd=0, cursor="hand2",
+                    bg=base_bg, fg=fg, bd=0, cursor=CLICK_CURSOR,
                     activebackground=hover_bg, activeforeground=fg,
                     padx=pad_x, pady=pad_y, font=theme.FONT_UI, **kw)
     btn.bind("<Enter>", lambda _e: btn.config(bg=hover_bg), add="+")
@@ -517,7 +517,7 @@ class FlatMenu:
                 if command is not None:
                     command()
             for w in (row, lbl):
-                w.configure(cursor="hand2")
+                w.configure(cursor=CLICK_CURSOR)
                 w.bind("<Enter>", enter)
                 w.bind("<Leave>", leave)
                 w.bind("<Button-1>", click)
@@ -548,7 +548,7 @@ class FlatMenu:
                 command()
 
         for w in (row, lbl):
-            w.configure(cursor="hand2")
+            w.configure(cursor=CLICK_CURSOR)
             w.bind("<Enter>", enter)
             w.bind("<Leave>", leave)
             w.bind("<Button-1>", click)
@@ -632,18 +632,18 @@ class CalendarPopup:
         head = tk.Frame(self.win, bg=theme.PANEL)
         head.pack(fill="x", padx=1, pady=1)
         prev = tk.Label(head, text=" ◀ ", bg=theme.PANEL, fg=theme.MUTED,
-                        font=theme.FONT_UI, cursor="hand2")
+                        font=theme.FONT_UI, cursor=CLICK_CURSOR)
         prev.pack(side="left", padx=2, pady=3)
         prev.bind("<Button-1>", lambda _e: self._shift(-1))
         self._title = tk.Label(head, text="", bg=theme.PANEL, fg=theme.FG,
                                font=theme.FONT_UI_BOLD, width=9)
         self._title.pack(side="left", expand=True, fill="x", pady=3)
         nxt = tk.Label(head, text=" ▶ ", bg=theme.PANEL, fg=theme.MUTED,
-                       font=theme.FONT_UI, cursor="hand2")
+                       font=theme.FONT_UI, cursor=CLICK_CURSOR)
         nxt.pack(side="left", padx=2, pady=3)
         nxt.bind("<Button-1>", lambda _e: self._shift(1))
         clr = tk.Label(head, text=" ✕ ", bg=theme.PANEL, fg=theme.MUTED,
-                       font=theme.FONT_UI, cursor="hand2")
+                       font=theme.FONT_UI, cursor=CLICK_CURSOR)
         clr.pack(side="left", padx=2, pady=3)
         Tooltip(clr, "清除日期")
         clr.bind("<Button-1>", lambda _e: self._clear(), add="+")
@@ -674,7 +674,7 @@ class CalendarPopup:
                         and day == self._today.day)
             cell = tk.Label(self._grid, text=str(day), bg=theme.PANEL_2, fg=theme.FG,
                             width=3, font=theme.FONT_UI_BOLD if is_today else theme.FONT_UI,
-                            cursor="hand2")
+                            cursor=CLICK_CURSOR)
             if is_today:
                 cell.config(fg=theme.SUCCESS)
             cell.bind("<Enter>", lambda _e, c=cell, t=is_today:

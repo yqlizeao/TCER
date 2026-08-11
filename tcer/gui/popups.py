@@ -15,6 +15,7 @@ from tcer.core import metrics
 from . import theme
 from .metric_defs import METRIC_BY_KEY
 from .widgets import CheckRow, ScrollFrame, SelectableLabel, Tooltip, flat_button, new_window
+from .platform import CLICK_CURSOR
 
 
 # 共享弹窗外壳在 widgets.new_window；保留旧名兼容既有调用。
@@ -1334,12 +1335,12 @@ class ConfirmDeletePopup:
         del_btn = tk.Button(btn_bar, text="删除会话", command=_do_delete,  # style-exempt: style.md §3 豁免：删除确认红色警示
                             bg=self._DANGER, fg=theme.FG_WHITE, relief="flat",
                             activebackground=self._DANGER_ACTIVE, activeforeground=theme.FG_WHITE,
-                            padx=16, pady=5, font=theme.FONT_UI_BOLD, cursor="hand2")
+                            padx=16, pady=5, font=theme.FONT_UI_BOLD, cursor=CLICK_CURSOR)
         del_btn.pack(side="right")
         cancel_btn = tk.Button(btn_bar, text="取消", command=win.destroy,  # style-exempt: style.md §3 豁免：删除确认
                               bg=theme.PANEL_2, fg=theme.FG, relief="flat",
                               activebackground=theme.PANEL, activeforeground=theme.FG,
-                              padx=16, pady=5, font=theme.FONT_UI, cursor="hand2")
+                              padx=16, pady=5, font=theme.FONT_UI, cursor=CLICK_CURSOR)
         cancel_btn.pack(side="right", padx=(0, 8))
 
         win.bind("<Escape>", lambda e: win.destroy())
@@ -1394,7 +1395,7 @@ class UploadDialog:
             cfg_card, text="附带每会话明细（完整对话）", variable=self._detail_var,
             bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI, anchor="w",
             selectcolor=theme.PANEL_2, activebackground=theme.PANEL,
-            activeforeground=theme.FG, highlightthickness=0, bd=0, cursor="hand2")
+            activeforeground=theme.FG, highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
         chk.pack(fill="x", pady=(4, 0))
 
         # -- 项目选择卡（标题即提示，多选列表紧随其下） --
@@ -1448,7 +1449,7 @@ class UploadDialog:
         self._upload_btn = tk.Button(  # style-exempt: style.md §3 豁免：UploadDialog
             action, text="立即上传", command=self._do_upload, bg=theme.ACCENT,
             fg=theme.FG_WHITE, relief="flat", padx=16, pady=6, font=theme.FONT_UI_BOLD,
-            cursor="hand2")
+            cursor=CLICK_CURSOR)
         self._upload_btn.pack(fill="x")
 
         # 已去掉显式关闭按钮；保留 Esc 退出，并用标题栏 × 关闭。
