@@ -53,8 +53,47 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
+
+def _load_dotenv() -> None:
+    """把 ``.env`` 里的键值补进 ``os.environ``（真实环境变量优先，不覆盖）。
+
+    纯标准库、按需读取；找不到文件就静默跳过（零配置仍可跑）。**必须在下面
+    import auth / db 之前调用**——那两个模块在 import 期就快照了
+    ``TCER_SERVER_SECRET`` / ``TCER_SERVER_DB``，晚一步 .env 就等于没配。
+    查找顺序：server/.env（部署时最常见）> 仓库根 .env > 当前工作目录 .env。
+    """
+    here = Path(__file__).resolve().parent          # server/backend
+    candidates = [here.parent / ".env",             # server/.env
+                  here.parent.parent / ".env",      # 仓库根 .env
+                  Path.cwd() / ".env"]
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if not key or key in os.environ:         # 真实环境变量优先
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            os.environ[key] = value
+
+
 # Allow running as a script (python server/backend/server.py) or as a module.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+_load_dotenv()  # 先于 auth/db 的 import-time 快照
 import analysis  # noqa: E402
 import auth  # noqa: E402
 import db  # noqa: E402
@@ -606,6 +645,13 @@ def main() -> None:
     port = int(os.environ.get("TCER_SERVER_PORT", "8890"))
     httpd = ThreadingHTTPServer((host, port), Handler)
     sys.stderr.write(f"[tcer-server] serving on http://{host}:{port}\n")
+    # 登录方式实际生效值——配错 .env 时一眼可见（曾出现 .env 未被读取的静默失败）。
+    sys.stderr.write(
+        f"[tcer-server] login mode={feishu.login_mode()} "
+        f"password={feishu.password_enabled()} feishu={feishu.feishu_login_enabled()}\n")
+    if feishu.login_mode() == "feishu" and not feishu.enabled():
+        sys.stderr.write("[tcer-server] 警告：TCER_LOGIN_MODE=feishu 但未配置 "
+                         "TCER_FEISHU_APP_ID/APP_SECRET，暂回退账密登录\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

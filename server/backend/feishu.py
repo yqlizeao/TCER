@@ -63,7 +63,15 @@ def login_mode() -> str:
 
 
 def password_enabled() -> bool:
-    return login_mode() in ("password", "both")
+    """账密登录是否开放。
+
+    ``feishu`` 模式本意是关闭账密，但飞书未配 APP_ID/SECRET 时它是休眠的——
+    两边都关会把所有人锁在门外，故此时回退开放账密（配好凭据即自动关闭）。
+    """
+    mode = login_mode()
+    if mode == "feishu" and not enabled():
+        return True
+    return mode in ("password", "both")
 
 
 def feishu_login_enabled() -> bool:
