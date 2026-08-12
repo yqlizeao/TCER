@@ -83,17 +83,17 @@ async function paintAliasBody() {
   }).join("");
 
   // 合并操作区：选一个原始标识 + 目标规范名（或输入新名）→ 建立映射。
-  const rawOptions = rows.flatMap((r) => r.raw_names || [])
+  const rawItems = rows.flatMap((r) => r.raw_names || [])
     .filter((v, i, a) => v && a.indexOf(v) === i).sort()
-    .map((raw) => `<option value="${escapeHTML(raw)}">${escapeHTML(raw)}</option>`).join("");
+    .map((raw) => ({ value: raw, label: raw }));
   const groupOptions = groups
     .map((g) => `<option value="${escapeHTML(g)}">${escapeHTML(g)}</option>`).join("");
 
   body.innerHTML = `
     <div class="alias-merge">
       <div class="alias-merge-row">
-        <label>把标识（可多选，Ctrl/Shift 点选）</label>
-        <select id="alias-raw" class="filter alias-raw-multi" multiple size="6">${rawOptions || '<option value="">（暂无数据）</option>'}</select>
+        <label>把标识（可多选）</label>
+        <div id="alias-raw" class="alias-raw-ms"></div>
         <div class="alias-merge-target">
           <label>合并到</label>
           <select id="alias-target" class="filter" style="min-width:180px">
@@ -108,9 +108,15 @@ async function paintAliasBody() {
     </div>
     <div class="alias-cards">${cards || '<div class="empty">窗口内无数据</div>'}</div>`;
 
+  // 原始标识多选：下拉框 + tag 占位（替代原生 select multiple）。
+  const rawMulti = createMultiSelect(document.getElementById("alias-raw"), {
+    options: rawItems,
+    placeholder: rawItems.length ? "选择要合并的标识…" : "（暂无数据）",
+    searchable: true,
+  });
+
   document.getElementById("alias-apply").addEventListener("click", async () => {
-    const raws = Array.from(document.getElementById("alias-raw").selectedOptions)
-      .map((o) => o.value).filter(Boolean);
+    const raws = rawMulti.getValues().filter(Boolean);
     const newName = document.getElementById("alias-newname").value.trim();
     const target = document.getElementById("alias-target").value;
     const canonical = newName || target;

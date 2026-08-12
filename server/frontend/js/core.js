@@ -135,3 +135,108 @@ function escapeHTML(s) {
     .replace(/'/g, "&#39;");
 }
 
+
+// ------------------------- 多选下拉（tag 占位） -------------------------
+// 通用多选组件：一个下拉框，未选时显示占位符，选中项以可删除的 tag 形式占位在框内，
+// 点击展开面板勾选。替代原生 <select multiple>（一行拉不开、不好用）。
+//   createMultiSelect(container, { options:[{value,label}], values:[], placeholder, searchable, onChange })
+// 返回 { getValues, setValues, destroy }。
+function createMultiSelect(container, opts = {}) {
+  const options = opts.options || [];
+  const placeholder = opts.placeholder || "请选择";
+  const searchable = opts.searchable !== false;
+  let values = new Set(opts.values || []);
+  const labelOf = (v) => {
+    const o = options.find((x) => x.value === v);
+    return o ? o.label : v;
+  };
+
+  container.classList.add("ms");
+  container.innerHTML =
+    '<div class="ms-control" tabindex="0">' +
+      '<div class="ms-tags"></div>' +
+      '<span class="ms-arrow" aria-hidden="true">▾</span>' +
+    '</div>' +
+    '<div class="ms-panel hidden">' +
+      (searchable ? '<input class="ms-search" type="text" placeholder="搜索…">' : "") +
+      '<div class="ms-options"></div>' +
+    '</div>';
+
+  const control = container.querySelector(".ms-control");
+  const tagsEl = container.querySelector(".ms-tags");
+  const panel = container.querySelector(".ms-panel");
+  const search = container.querySelector(".ms-search");
+  const optsEl = container.querySelector(".ms-options");
+
+  function renderTags() {
+    if (!values.size) {
+      tagsEl.innerHTML = '<span class="ms-ph">' + escapeHTML(placeholder) + '</span>';
+      return;
+    }
+    tagsEl.innerHTML = Array.from(values).map((v) =>
+      '<span class="ms-tag"><span class="ms-tag-tx">' + escapeHTML(labelOf(v)) + '</span>' +
+      '<button class="ms-tag-x" data-value="' + escapeHTML(v) + '" title="移除" type="button">×</button></span>'
+    ).join("");
+  }
+
+  function renderOptions() {
+    const q = ((search && search.value) || "").toLowerCase();
+    const rows = options.filter((o) => !q || String(o.label).toLowerCase().includes(q));
+    if (!rows.length) {
+      optsEl.innerHTML = '<div class="ms-empty">无匹配项</div>';
+      return;
+    }
+    optsEl.innerHTML = rows.map((o) => {
+      const on = values.has(o.value);
+      return '<div class="ms-opt ' + (on ? "on" : "") + '" data-value="' + escapeHTML(o.value) + '">' +
+        '<span class="ms-check">' + (on ? "✓" : "") + '</span>' +
+        '<span class="ms-opt-tx">' + escapeHTML(o.label) + '</span></div>';
+    }).join("");
+  }
+
+  function open() {
+    panel.classList.remove("hidden");
+    container.classList.add("open");
+    renderOptions();
+    if (search) { search.value = ""; search.focus(); }
+  }
+  function close() { panel.classList.add("hidden"); container.classList.remove("open"); }
+  function toggle() { panel.classList.contains("hidden") ? open() : close(); }
+
+  control.addEventListener("click", (e) => {
+    if (e.target.closest(".ms-tag-x")) return;   // 删除 tag 交给下方处理
+    toggle();
+  });
+  control.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+    else if (e.key === "Escape") close();
+  });
+  tagsEl.addEventListener("click", (e) => {
+    const x = e.target.closest(".ms-tag-x");
+    if (!x) return;
+    e.stopPropagation();
+    values.delete(x.dataset.value);
+    renderTags(); renderOptions();
+    if (opts.onChange) opts.onChange(getValues());
+  });
+  optsEl.addEventListener("click", (e) => {
+    const opt = e.target.closest(".ms-opt");
+    if (!opt) return;
+    const v = opt.dataset.value;
+    if (values.has(v)) values.delete(v); else values.add(v);
+    renderTags(); renderOptions();
+    if (opts.onChange) opts.onChange(getValues());
+  });
+  if (search) search.addEventListener("input", renderOptions);
+
+  // 点击组件外部关闭面板。
+  const onDocClick = (e) => { if (!container.contains(e.target)) close(); };
+  document.addEventListener("click", onDocClick);
+
+  function getValues() { return Array.from(values); }
+  function setValues(vs) { values = new Set(vs || []); renderTags(); renderOptions(); }
+  function destroy() { document.removeEventListener("click", onDocClick); }
+
+  renderTags();
+  return { getValues, setValues, destroy };
+}

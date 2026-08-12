@@ -54,19 +54,23 @@
         <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h10"/></svg></span>
         <span class="rail-tx">会话明细</span><span class="rail-hint">逐条查看</span>
       </button>
-      <button class="rail-item" data-view="aliases">
-        <span class="rail-ic"><svg viewBox="0 0 24 24"><circle cx="7" cy="8" r="3"/><circle cx="17" cy="8" r="3"/><path d="M2 20c0-3 2.5-5 5-5s5 2 5 5"/><path d="M12 20c0-3 2.5-5 5-5s5 2 5 5"/></svg></span>
-        <span class="rail-tx">聚合配置</span><span class="rail-hint">人员 · 项目合并</span>
-      </button>
-      <button class="rail-item" data-view="tokens">
-        <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M15 7a4 4 0 11-4 4h-7"/><path d="M7 11v4"/><path d="M11 11v3"/></svg></span>
-        <span class="rail-tx">Auth Token</span><span class="rail-hint">上传凭据管理</span>
-      </button>
     </nav>
     <div class="rail-foot">
       <div class="user">
-        <span id="user-avatar" class="user-avatar"></span>
-        <span id="who" class="who"></span>
+        <button id="user-trigger" class="user-trigger" title="账户与设置">
+          <span id="user-avatar" class="user-avatar"></span>
+          <span id="who" class="who"></span>
+        </button>
+        <div id="user-menu" class="user-menu hidden">
+          <button class="user-menu-item" data-view="aliases">
+            <span class="user-menu-ic"><svg viewBox="0 0 24 24"><circle cx="7" cy="8" r="3"/><circle cx="17" cy="8" r="3"/><path d="M2 20c0-3 2.5-5 5-5s5 2 5 5"/><path d="M12 20c0-3 2.5-5 5-5s5 2 5 5"/></svg></span>
+            <span>聚合配置</span>
+          </button>
+          <button class="user-menu-item" data-view="tokens">
+            <span class="user-menu-ic"><svg viewBox="0 0 24 24"><path d="M15 7a4 4 0 11-4 4h-7"/><path d="M7 11v4"/><path d="M11 11v3"/></svg></span>
+            <span>Auth Token</span>
+          </button>
+        </div>
       </div>
       <button id="logout" class="btn-ghost">退出</button>
     </div>

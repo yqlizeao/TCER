@@ -41,14 +41,39 @@ function getMulti(id) {
 }
 
 // ------------------------- 事件 -------------------------
+// 切换视图并同步高亮：侧栏项项高亮当前视图，菜单项（聚合配置/Auth Token）不在侧栏，
+// 切到它们时清空侧栏高亮。
+function goView(view) {
+  S.view = view;
+  document.querySelectorAll(".rail-item").forEach((x) =>
+    x.classList.toggle("active", x.dataset.view === view));
+  document.querySelectorAll(".user-menu-item").forEach((x) =>
+    x.classList.toggle("active", x.dataset.view === view));
+  route();
+}
+
 function bind() {
   document.getElementById("rail-nav").addEventListener("click", (e) => {
     const btn = e.target.closest(".rail-item");
     if (!btn) return;
-    document.querySelectorAll(".rail-item").forEach((x) => x.classList.remove("active"));
-    btn.classList.add("active");
-      S.view = btn.dataset.view;
-    route();
+    goView(btn.dataset.view);
+  });
+
+  // 左下角用户菜单：点头像/名字展开，含 聚合配置 / Auth Token 两个页面入口。
+  const userTrigger = document.getElementById("user-trigger");
+  const userMenu = document.getElementById("user-menu");
+  userTrigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    userMenu.classList.toggle("hidden");
+  });
+  userMenu.addEventListener("click", (e) => {
+    const item = e.target.closest(".user-menu-item");
+    if (!item) return;
+    userMenu.classList.add("hidden");
+    goView(item.dataset.view);
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".user")) userMenu.classList.add("hidden");
   });
 
   document.getElementById("range-seg").addEventListener("click", (e) => {
