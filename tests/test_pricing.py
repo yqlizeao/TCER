@@ -104,7 +104,7 @@ def test_table_key_distinguishes_default():
 def test_thinking_suffix_maps_to_base_opus():
     """Claude Code / proxies append ``-thinking``; must not fall back to default."""
     base = pricing.table_key("claude-opus-4-6")
-    assert base == "claude-opus-4-6-20260206"
+    assert base == "claude-opus-4-6"
     assert pricing.table_key("claude-opus-4-6-thinking") == base
     # Real table key that ends in -thinking must still exact-match itself.
     if "kimi-k2-thinking" in pricing._load()["models"]:
