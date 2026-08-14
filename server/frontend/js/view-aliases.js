@@ -83,9 +83,27 @@ async function paintAliasBody() {
   }).join("");
 
   // 合并操作区：选一个原始标识 + 目标规范名（或输入新名）→ 建立映射。
-  const rawItems = rows.flatMap((r) => r.raw_names || [])
-    .filter((v, i, a) => v && a.indexOf(v) === i).sort()
-    .map((raw) => ({ value: raw, label: raw }));
+  // 源选项：若该标识已并入某规范名，标签写成「原始名 (规范名)」，便于辨认已有合并。
+  // 例：claude：d--xx-xxxx-sdad (sdad)。成员/模型同理。
+  const rawItems = [];
+  const seenRaw = new Set();
+  for (const r of rows) {
+    const groupDisp = r.display || r.group || "";
+    for (const raw of (r.raw_names || [])) {
+      if (!raw || seenRaw.has(raw)) continue;
+      seenRaw.add(raw);
+      const mapped = amap[raw];
+      // 显式别名优先；否则 raw 已挂在与自身不同的规范组下，也视为已合并。
+      let tag = null;
+      if (mapped && mapped !== raw) {
+        tag = (mapped === r.group) ? groupDisp : mapped;
+      } else if (r.group && raw !== r.group && raw !== groupDisp) {
+        tag = groupDisp;
+      }
+      rawItems.push({ value: raw, label: tag ? `${raw} (${tag})` : raw });
+    }
+  }
+  rawItems.sort((a, b) => a.label.localeCompare(b.label, "zh"));
   const groupOptions = groups
     .map((g) => `<option value="${escapeHTML(g)}">${escapeHTML(g)}</option>`).join("");
 
