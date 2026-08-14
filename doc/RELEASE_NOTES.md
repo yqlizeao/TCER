@@ -1,33 +1,23 @@
-# TCER v1.5.3
+# TCER v1.5.4
 
-价表同步至 cc-switch v3.19.2：新增 9 个模型、调整 5 个模型价格。纯数据更新，GUI 与指标公式不变。
+价表快速跟进：新增 Grok 4.6 与 Gemini 3.7 Flash、修正 Grok 4.5 缓存价、补 DeepSeek V4 Flash 别名。纯数据更新，GUI 与指标公式不变。
 
-## 价表同步（cc-switch v3.19.2，189 条）
+## 新增模型
 
-**新增 9 个模型**：
+- **Gemini 3.7 Flash**（`gemini-3.7-flash`）：Google 昨日发布的最强 Flash 档。本地按**官方介绍价**先行补录——input $0.75 / output $3.75 / 缓存读 $0.075（2026-12-31 前生效；2027-01-01 起转标准价 $1.50 / $7.50 / $0.15，已在价表条目注明）。
+- **Grok 4.6**（`grok-4.6`）：input $2 / output $6 / 缓存读 $0.5（cc-switch 上游 7dc0a72 同步）。
+- **DeepSeek V4 Flash 别名**（`deepseek-v4-flash-0731`）：与 `deepseek-v4-flash` 同价（0.14/0.28/0.0028）。
 
-- Claude：`claude-opus-4-6`、`claude-sonnet-4-6`（短名，此前仅有带日期全名）
-- GPT：`gpt-5.3-codex-spark`
-- Gemini：`gemini-3.5-flash-lite`
-- Kimi：`kimi-k2.7-code-highspeed`
-- GLM：`glm-5-turbo`、`glm-5v-turbo`
-- Qwen：`qwen3.8-max`、`qwen3.6-flash`
+## 价格修正
 
-**调整 5 个模型价格**（均为降价）：
-
-- `gpt-5.6-terra`：input 2.5→2、output 15→12
-- `gpt-5.6-luna`：input 1→0.2、output 6→1.2（回归轻量档定位）
-- `deepseek-chat`：input 0.27→0.14、output 1.1→0.28
-- `deepseek-reasoner`：input 0.55→0.14、output 2.19→0.28
-- `minimax-m3`：input 0.6→0.3、output 2.4→1.2
+- **Grok 4.5** 缓存读 $0.5 → **$0.3**（上游修正，与 `grok-4.5-build` 看齐；此前 Grok 源会话的缓存读成本略被高估，本次起更准）。
 
 ## 说明
 
-- 价表共 191 条（cc-switch 189 条 + 本地保留 `big-pickle` / `opencode/big-pickle`）。
-- 短名 `claude-opus-4-6` / `claude-sonnet-4-6` 进价表后走精确匹配（优先级最高），不再依赖反向前缀推导。
+- 价表共 194 条（cc-switch 上游 191 + 本地保留 `big-pickle` / `opencode/big-pickle` + 本地先行 `gemini-3.7-flash`）。
+- 上一版疑点撤销：`deepseek-reasoner` 调价后与 chat 同价不是上游笔误——正是 DeepSeek V4 统一定价，本版新增的 `0731` 别名佐证。
 - 客户端纯离线、零第三方依赖不变；指标公式不变。
-- ⚠️ `deepseek-reasoner` 调价后与 `deepseek-chat` 同价，疑似上游笔误，已按 SSOT（cc-switch 为准）照抄，欢迎反馈。
 
 ---
 
-**完整变更**：[`v1.5.2...v1.5.3`](https://github.com/yqlizeao/TCER/compare/v1.5.2...v1.5.3)
+**完整变更**：[`v1.5.3...v1.5.4`](https://github.com/yqlizeao/TCER/compare/v1.5.3...v1.5.4)

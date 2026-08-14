@@ -4,8 +4,8 @@
     "source": "farion1231/cc-switch — seed_model_pricing()",
     "source_url": "https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/database/schema.rs",
     "source_raw": "https://raw.githubusercontent.com/farion1231/cc-switch/main/src-tauri/src/database/schema.rs",
-    "fetched_at": "2026-08-13",
-    "ref": "main @ 2026-08-13 = v3.19.2 release（dfb2e52 当日仅改备份逻辑、未碰定价，价表逐条零差异；新增 9：claude-opus-4-6/sonnet-4-6 短名、gpt-5.3-codex-spark、gemini-3.5-flash-lite、kimi-k2.7-code-highspeed、glm-5-turbo、glm-5v-turbo、qwen3.8-max、qwen3.6-flash；变更 5：gpt-5.6-terra/luna 降、deepseek-chat/reasoner 降、minimax-m3 降）",
+    "fetched_at": "2026-08-14",
+    "ref": "main @ 2026-08-14，7dc0a72（新增 2：deepseek-v4-flash-0731 别名、grok-4.6；变更 1：grok-4.5 cache_read 0.5→0.3 向 4.5-build 看齐）+ 本地补录 gemini-3.7-flash（官方介绍价，上游未收录）。前次 2026-08-13 = v3.19.2：新增 9 / 变更 5",
     "unit": "USD per 1,000,000 tokens (厂商官方 list 价；CNY 按官方汇率折算)",
     "fields": {
       "input": "非缓存输入 (input_cost_per_million)",
@@ -13,7 +13,7 @@
       "cache_read": "缓存读取 (cache_read_cost_per_million)",
       "cache_write": "缓存写入/创建 (cache_creation_cost_per_million)；0 表示该模型无独立缓存写入计价"
     },
-    "model_count": 191,
+    "model_count": 194,
     "note": "可自由增删 models 条目；未匹配到的模型回退到 default（Anthropic 通用 list 价）。"
   },
   "default": {
@@ -577,6 +577,14 @@
       "cache_read": 0.025,
       "cache_write": 0
     },
+    "gemini-3.7-flash": {
+      "display_name": "Gemini 3.7 Flash",
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
+      "cache_write": 0,
+      "_note": "2026-12-31 前介绍价（官方标准价 1.5/7.5/0.15 自 2027-01-01 起）；本地先行补录，上游 cc-switch 尚未收录"
+    },
     "gemini-3.6-flash": {
       "display_name": "Gemini 3.6 Flash",
       "input": 1.5,
@@ -788,6 +796,13 @@
       "cache_write": 0
     },
     "deepseek-v4-flash": {
+      "display_name": "DeepSeek V4 Flash",
+      "input": 0.14,
+      "output": 0.28,
+      "cache_read": 0.0028,
+      "cache_write": 0
+    },
+    "deepseek-v4-flash-0731": {
       "display_name": "DeepSeek V4 Flash",
       "input": 0.14,
       "output": 0.28,
@@ -1118,6 +1133,13 @@
     },
     "grok-4.5": {
       "display_name": "Grok 4.5",
+      "input": 2.0,
+      "output": 6.0,
+      "cache_read": 0.3,
+      "cache_write": 0
+    },
+    "grok-4.6": {
+      "display_name": "Grok 4.6",
       "input": 2.0,
       "output": 6.0,
       "cache_read": 0.5,
