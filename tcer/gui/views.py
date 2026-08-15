@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import tkinter as tk
+from pathlib import Path
 from dataclasses import dataclass
 from tkinter import ttk
 
@@ -61,6 +62,22 @@ def project_label(project) -> str:
         return getattr(project, "display_name", None) or getattr(project, "key", default)
     name = getattr(project, "name", None) or getattr(project, "key", str(project))
     return _short_name(name)
+
+
+def project_drive(project) -> str | None:
+    """项目所在盘符（大写单字母）——跨盘同名项目靠它区分。
+
+    Claude：key 是 cwd 编码（``c--GitHub-TCER``），首段即盘符；其余源从
+    ``cwd`` 的 ``Path.drive`` 取。Unix / 无盘符路径返回 None（不显示）。
+    """
+    cwd = getattr(project, "cwd", None)
+    if cwd:
+        drive = Path(cwd).drive  # "C:" / ""
+        return drive[0].upper() if drive else None
+    key = getattr(project, "key", "") or ""
+    if len(key) > 3 and key[1:3] == "--" and key[0].isalpha():
+        return key[0].upper()
+    return None
 
 
 def project_source_label(project) -> str:
@@ -329,6 +346,7 @@ class FilterBar:
     def _build_tool_menu(self, menu) -> None:
         c = self.controller
         menu.add_command(label="项目总览", command=c.show_project_overview)
+        menu.add_command(label="项目画像", command=c.show_project_profile)
         menu.add_command(label="工具序列", command=c.show_tool_sequence)
         menu.add_command(label="会话时间线", command=c.show_session_timeline)
         menu.add_command(label="会话对比", command=c.show_session_compare)
@@ -577,21 +595,34 @@ class ProjectColumn:
         icon = source_icon(card.frame, project_icon_key(project_dir))
         if icon is None:
             # 无图标资源：回退到 [源名] 文字前缀
-            lbl = tk.Label(card.frame, text=f"[{label}] {name}", bg=theme.PANEL_2, fg=fg,
+            drive = project_drive(project_dir)
+            prefix = f"[{label}] {drive}: " if drive else f"[{label}] "
+            lbl = tk.Label(card.frame, text=prefix + name, bg=theme.PANEL_2, fg=fg,
                            font=theme.FONT_UI_BOLD, anchor="w")
             lbl.pack(fill="x", padx=3, pady=3)
             card.bind_to(lbl)
             return card
-        # 图标 + 名称横排，取代 [Claude] 之类的文字标注
+        # 图标 + 盘符 + 名称横排，取代 [Claude] 之类的文字标注。盘符小字灰显
+        # （同事在不同盘建同名文件夹时，列表里靠它区分——名字本身被剥掉盘符）。
         row = tk.Frame(card.frame, bg=theme.PANEL_2)
         row.pack(fill="x", padx=3, pady=3)
         img_lbl = tk.Label(row, image=icon, bg=theme.PANEL_2)
         img_lbl.pack(side="left", padx=(0, 4))
         Tooltip(img_lbl, label)  # 悬停图标显示来源名（图标取代了文字标注）
+        drive = project_drive(project_dir)
+        bindees = [row, img_lbl]
+        if drive:
+            drive_lbl = tk.Label(row, text=f"{drive}:", bg=theme.PANEL_2,
+                                 fg=theme.MUTED, font=theme.FONT_UI_SMALL_BOLD,
+                                 anchor="w", padx=1)
+            drive_lbl.pack(side="left", padx=(0, 3))
+            Tooltip(drive_lbl, f"项目所在盘符 {drive}:（同名项目可能在不同盘）")
+            bindees.append(drive_lbl)
         name_lbl = tk.Label(row, text=name, bg=theme.PANEL_2, fg=fg,
                             font=theme.FONT_UI_BOLD, anchor="w")
         name_lbl.pack(side="left", fill="x", expand=True)
-        for w in (row, img_lbl, name_lbl):
+        bindees.append(name_lbl)
+        for w in bindees:
             card.bind_to(w)
         return card
 
@@ -720,7 +751,8 @@ class SessionColumn:
 
     def __init__(self, parent, controller) -> None:
         self.controller = controller
-        self._cards: list[Card] = []
+        self._cards: list[Card] = []       # 当前过滤后可见的卡片
+        self._all_cards: list[Card] = []   # 全量卡片（过滤只 pack/pack_forget 复用）
         self._selected = None
 
         col = tk.Frame(parent, bg=theme.PANEL)
@@ -782,7 +814,67 @@ class SessionColumn:
         if flagged is not None:
             self._flagged = set(flagged)
         self._all_reports = self._sorted(reports)
+        self._rebuild_cards()
         self._render(reset=reset)
+
+    def _rebuild_cards(self) -> None:
+        """销毁并按当前排序/标记重建全部卡片（数据或置顶/红旗标记变化时）。
+
+        搜索/红旗**过滤**不重建——见 _render（打字每键都重建 100 张卡要
+        ~600ms，主线程明显卡顿；pack 复用降到毫秒级）。构建本身也分批走
+        ``after_idle``：首批同步建好即可见，其余每空闲批补齐，长列表不再
+        一次性冻结主线程。
+        """
+        if getattr(self, "_build_after", None) is not None:
+            try:
+                self.container.after_cancel(self._build_after)
+            except tk.TclError:
+                pass
+            self._build_after = None
+        for card in getattr(self, "_all_cards", ()):
+            card.frame.destroy()
+        self._all_cards = []
+        self._selected = None
+        self._pending_reports = list(self._all_reports)
+        self._pending_select_sid = None
+        self._build_batch()
+
+    _BUILD_BATCH = 25
+
+    def _build_batch(self) -> None:
+        """建一批卡片（同步 ~150ms 上限），未完待续走 after_idle。"""
+        batch = self._pending_reports[: self._BUILD_BATCH]
+        del self._pending_reports[: self._BUILD_BATCH]
+        needle = self._filter_var.get().strip().casefold()
+        flag_only = self._flag_only.get()
+        for r in batch:
+            card = self._make_card(r)  # Card 自 pack（尾部追加，顺序正确）
+            self._all_cards.append(card)
+            if self._filtered_out(r, needle, flag_only):
+                card.frame.pack_forget()
+        if self._pending_reports:
+            # 用 after(1) 而非 after_idle：idle 回调会被 update_scroll 里的
+            # update_idletasks() 一次性全部触发（等于没分批）；带延迟的定时器
+            # 只在主循环正常轮转时到期，批与批之间 UI 可响应输入。
+            self._build_after = self.container.after(1, self._build_batch)
+            return
+        self._build_after = None
+        # 全部建完：刷新计数/空提示，并补发构建期间被请求的选中。
+        self._render()
+        if self._pending_select_sid is not None:
+            sid, self._pending_select_sid = self._pending_select_sid, None
+            self.select_by_sid(sid, notify=False)
+
+    def _filtered_out(self, r, needle: str, flag_only: bool) -> bool:
+        if needle and not (
+            needle in (r.meta.title or "").casefold()
+            or needle in (r.meta.session_id or r.meta.path.stem).casefold()
+            or any(needle in _m.casefold() for _m in r.usage.models)
+        ):
+            return True
+        if flag_only and (r.meta.session_id or r.meta.path.stem) not in self._flagged:
+            return True
+        return False
 
     def _sorted(self, reports):
         """置顶段排前，段内及非置顶段均按结束时间倒序。"""
@@ -801,6 +893,7 @@ class SessionColumn:
         self._pinned = set(pinned)
         self._flagged = set(flagged)
         self._all_reports = self._sorted(self._all_reports)
+        self._rebuild_cards()  # 置顶/红旗图标在卡片上，标记变化须重建
         self._render(reset=reset)
         if keep_sid is not None:
             self.select_by_sid(keep_sid, notify=False)
@@ -819,28 +912,26 @@ class SessionColumn:
         self._render()
 
     def _render(self, reset: bool = False) -> None:
+        """搜索 / 红旗过滤：只 pack/pack_forget 复用已建卡片，不销毁重建。
+
+        搜索框每个键入字符都会走到这里——重建 100 张卡 ~600ms 会卡成幻灯片，
+        pack 调整是毫秒级。保持可见卡片按 _all_reports 顺序重 pack（pack 顺序
+        即显示顺序）。"""
         needle = self._filter_var.get().strip().casefold()
         flag_only = self._flag_only.get()
-        for card in self._cards:
-            card.frame.destroy()
-        self._cards.clear()
-        self._selected = None
-        if needle:
-            self._reports = [
-                r for r in self._all_reports
-                if needle in (r.meta.title or "").casefold()
-                or needle in (r.meta.session_id or r.meta.path.stem).casefold()
-                or any(needle in _m.casefold() for _m in r.usage.models)
-            ]
-        else:
-            self._reports = list(self._all_reports)
-        if flag_only:
-            self._reports = [
-                r for r in self._reports
-                if (r.meta.session_id or r.meta.path.stem) in self._flagged
-            ]
-        for r in self._reports:
-            self._cards.append(self._make_card(r))
+        self._reports = []
+        self._cards = []
+        for r, card in zip(self._all_reports, self._all_cards):
+            if self._filtered_out(r, needle, flag_only):
+                card.frame.pack_forget()
+                continue
+            card.frame.pack(fill="x", padx=1, pady=1)
+            self._reports.append(r)
+            self._cards.append(card)
+        # 被过滤掉的卡片若处于选中态，视觉随隐藏消失；引用一并清掉。
+        if self._selected is not None and self._selected not in self._cards:
+            self._selected = None
+            self._selected_idx = None
         if getattr(self, "_empty_hint", None) is not None:
             self._empty_hint.destroy()
             self._empty_hint = None
@@ -882,15 +973,43 @@ class SessionColumn:
         ti_lbl = tk.Label(card.frame, text=title_disp, bg=theme.PANEL_2, fg=theme.FG,
                           font=theme.FONT_UI_SMALL, anchor="w")
         ti_lbl.pack(fill="x", padx=6, pady=(1, 1))
+        # 摘要行：左侧主模型短名，右侧消耗成本金额（纯文本，无卡片底）——
+        # 不点开指标页就能扫一眼谁花的多少（数据全在 report 上，零额外扫描）。
+        sum_row = tk.Frame(card.frame, bg=theme.PANEL_2)
+        sum_row.pack(fill="x", padx=6, pady=(0, 1))
+        sum_lbl = tk.Label(sum_row, bg=theme.PANEL_2, fg=theme.MUTED,
+                           font=theme.FONT_UI_SMALL, anchor="w",
+                           text=self._summary_line(r))
+        sum_lbl.pack(side="left")
+        # 成本对齐指标分类「总成本」的数值样式：FONT_VALUE 等宽粗体 + 按好坏
+        # 方向着色——与 MetricCell.set_value 同一规则（down 指标：>0 红、
+        # ==0 绿「零成本即最优」），精度按卡片场景收窄到两位小数。
+        cost_fg = (theme.VALUE_BAD if r.cost > 0 else theme.VALUE_GOOD)
+        cost_lbl = tk.Label(sum_row, bg=theme.PANEL_2, fg=cost_fg,
+                            font=theme.FONT_VALUE, anchor="e",
+                            text=f"${r.cost:.2f}")
+        cost_lbl.pack(side="right")
         sid_disp = sid[:36] + "..." if len(sid) > 36 else sid
         sid_lbl = tk.Label(card.frame, text=sid_disp, bg=theme.PANEL_2, fg="#6B7077",
                            font=theme.FONT_MONO, cursor=CLICK_CURSOR, anchor="w")
         sid_lbl.pack(fill="x", padx=6, pady=(1, 4))
         # top_row/marks_row/时间标签随卡片选中；标记图标自行绑事件（见 _mark_icon）。
-        for w in (top_row, t_lbl, marks_row, ti_lbl, sid_lbl):
+        for w in (top_row, t_lbl, marks_row, ti_lbl, sum_row, sum_lbl,
+                  cost_lbl, sid_lbl):
             card.bind_to(w)
             w.bind("<Double-Button-1>", lambda e, s=sid: self.controller.show_session_detail(s))
         return card
+
+    def _summary_line(self, r) -> str:
+        """卡片摘要行文本：模型短名 · 持续时间（成本在右侧、评级已移除）。"""
+        from tcer.core import pricing as _pricing
+        from tcer.core.format import fmt_duration_ms
+        main = max(r.usage.per_model.items(),
+                   key=lambda kv: getattr(kv[1], "total", 0),
+                   default=None) if r.usage.per_model else None
+        model_txt = _pricing.label(main[0]) if main else "-"
+        dur = fmt_duration_ms(r.usage.session_duration_ms)
+        return f"{model_txt} · {dur}" if dur != "-" else model_txt
 
     def _mark_icon(self, parent, card, sid, kind, *, is_on, tip):
         """卡片右上角可点击标记图标：左键 toggle（不选中卡片），右键复用卡片菜单。
@@ -1076,10 +1195,15 @@ class SessionColumn:
         if not self.controller._current:
             messagebox.showinfo("定位", "请先分析一个项目，趋势图才有数据。")
             return
-        # Switch notebook to trend tab (3rd tab, 0-indexed)
+        # Switch notebook to the tab hosting the trend chart（按控件归属定位，
+        # 不硬编码索引——页签重排后索引会失同步）。
         try:
             nb = self.controller._nb
-            nb.select(2)
+            trend_root = self.controller.trend_chart._body  # 页签直接子控件
+            for tab_id in nb.tabs():
+                if nb.nametowidget(tab_id) is trend_root:
+                    nb.select(tab_id)
+                    break
         except Exception:
             pass
         # Ensure trend chart has data (may not have been drawn yet)
@@ -1118,6 +1242,9 @@ class SessionColumn:
             if (r.meta.session_id or r.meta.path.stem) == sid:
                 self._select(card, sid, notify=notify)
                 return True
+        # 分批构建尚未完成：记下待选，最后一批建完时补发。
+        if getattr(self, "_pending_reports", None):
+            self._pending_select_sid = sid
         return False
 
 
@@ -1211,7 +1338,9 @@ class MetricPanel:
                 on_click = self.controller.show_cost_breakdown
             else:
                 on_click = None
-            cell = MetricCell(grid, metric, on_click=on_click)
+            from .metric_defs import APPROX_KEYS
+            cell = MetricCell(grid, metric, on_click=on_click,
+                              approx=metric.key in APPROX_KEYS)
             cell.frame.grid(row=i // _PER_ROW, column=i % _PER_ROW, sticky="nsew", padx=2)
             self._cells[metric.key] = cell
             cells.append(cell)
@@ -1548,7 +1677,7 @@ class ScoreRankingView:
                 seg_w = w - 2 - x
             fill = theme.GRADE_HEX.get(g, theme.MUTED)
             if self._grade_filter and self._grade_filter != g:
-                fill = "#3a3a3a"
+                fill = theme.GRADE_DIM
             c.create_rectangle(x, y0, x + seg_w, y0 + bar_h,
                                fill=fill, outline=theme.BG, width=1)
             if seg_w > 36:
@@ -1883,7 +2012,7 @@ class ScoreRankingView:
                         relx=lo, rely=0, relwidth=hi - lo, relheight=1.0)
             tk.Frame(bar_bg, bg=color, width=3).place(
                 relx=min(1.0, max(0.0, val)), rely=0, relheight=1.0, anchor="n")
-            tk.Frame(bar_bg, bg="#555555", width=1).place(
+            tk.Frame(bar_bg, bg=theme.BAR_TICK, width=1).place(
                 relx=0.5, rely=0, relheight=1.0)
 
             # 离散度文字：min–median–max（会话间分化提示）
@@ -2004,7 +2133,7 @@ class ScoreRankingView:
                 tk.Frame(bar_bg, bg=color).place(
                     relx=0, rely=0, relwidth=bar_w, relheight=1.0)
             # 参考线 0.5（与基准持平）
-            tk.Frame(bar_bg, bg="#555555", width=1).place(
+            tk.Frame(bar_bg, bg=theme.BAR_TICK, width=1).place(
                     relx=0.5, rely=0, relheight=1.0)
 
             # Weight (short, muted)

@@ -161,6 +161,8 @@ def list_project_refs() -> list[ProjectRef]:
     cwd_by_key: dict[str, str | None] = {}
     for p in discover_sessions():
         meta = read_session_meta(p)
+        if meta.is_subagent:
+            continue  # 子代理折入父会话（subagent_spawned），不单独计 session
         cwd = _normalize_cwd(meta.cwd)
         key = encode_hash(cwd) if cwd else _NO_CWD_KEY
         groups.setdefault(key, []).append(p)
@@ -217,12 +219,15 @@ def read_session_meta(path: Path) -> SessionMeta:
     session_id = _first_str(info.get("id")) or session_dir.name
     cwd = info.get("cwd") if isinstance(info.get("cwd"), str) else _decode_cwd(session_dir.parent.name)
     title = _first_str(summary.get("generated_title"), summary.get("session_summary"))
+    # 新版 grok build 把子代理写成同项目下的独立会话目录（summary 带
+    # session_kind="subagent"，父会话有 subagent_spawned/finished 事件）。
+    kind = _first_str(summary.get("session_kind"), info.get("session_kind"))
     return SessionMeta(
         session_id=session_id,
         cwd=cwd,
         title=title,
         path=path,
-        is_subagent=False,
+        is_subagent=(kind == "subagent"),
         entrypoint=_first_str(summary.get("agent_name")),
         source="grok",
         sandbox_policy=_json_label(summary.get("sandbox_profile")),
@@ -230,13 +235,47 @@ def read_session_meta(path: Path) -> SessionMeta:
     )
 
 
+def subagent_dirs_of(path: Path) -> list[Path]:
+    """父会话 updates.jsonl 里 subagent_spawned 指向的子代理会话目录。
+
+    子代理是同项目编码目录下的兄弟目录（目录名 == child_session_id）；
+    由父会话事件定位——子代理自己不折（无嵌套 spawn），递归自然终止。
+    """
+    child_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for obj in iter_updates(path):
+        update = _update_of(obj)
+        if update.get("sessionUpdate") != "subagent_spawned":
+            continue
+        cid = _first_str(update.get("child_session_id"))
+        # spawn 事件可能重投（grok 已知行为）：按 id 去重，否则子会话被折入
+        # 两次（token/LOC 双计，违背铁律 #1）。
+        if cid and cid not in seen_ids:
+            seen_ids.add(cid)
+            child_ids.append(cid)
+    if not child_ids:
+        return []
+    project_dir = path.parent.parent
+    out = []
+    for cid in child_ids:
+        d = project_dir / cid
+        if d.is_dir() and (d / "updates.jsonl").is_file():
+            out.append(d / "updates.jsonl")
+    return out
+
+
 def aggregate_usage(path: Path) -> TokenUsage:
-    """Aggregate Grok token and tool usage from one session's ``updates.jsonl``."""
+    """Aggregate Grok token and tool usage from one session's ``updates.jsonl``.
+
+    子代理会话（subagent_spawned 的 child_session_id）折入父会话——Token 与
+    LOC 保留真实成本、不单独计为 session（#5 铁律，同 Claude/omp 口径）。
+    """
     u = TokenUsage()
     turn_idx = 0
     current_model = ""
     api_duration_ms = 0
     call_id_to_name: dict[str, str] = {}
+    errored_calls: set[str] = set()  # 已计过错的 toolCallId（多次 failed 行只计一次）
     in_user_run = False  # coalesce consecutive user chunks into one message
 
     for obj in iter_updates(path):
@@ -280,7 +319,13 @@ def aggregate_usage(path: Path) -> TokenUsage:
                     turn_idx += 1
                     u.user_msgs += 1
                 in_user_run = True
-                mid = meta.get("modelId")
+                # modelId 实测挂在 update._meta（446/446 处），params._meta 里
+                # 从未出现；两处都查以防版本差异（update._meta 存在但缺
+                # modelId 时仍要回退 params._meta）。
+                umeta = update.get("_meta")
+                mid = umeta.get("modelId") if isinstance(umeta, dict) else None
+                if not (isinstance(mid, str) and mid):
+                    mid = meta.get("modelId")
                 if isinstance(mid, str) and mid:
                     current_model = pricing.normalize(mid)
             continue
@@ -306,16 +351,25 @@ def aggregate_usage(path: Path) -> TokenUsage:
         if su == "tool_call_update":
             raw_output = update.get("rawOutput")
             code = raw_output.get("exit_code") if isinstance(raw_output, dict) else None
-            if code is not None and _as_int(code) != 0:
+            status = update.get("status")
+            cid = update.get("toolCallId")
+            cid_key = cid if isinstance(cid, str) else None
+            # 失败判定：exit_code 非零，或 status="failed"（SearchReplace
+            # NoMatchesFound / TaskOutput TaskNotFound 等无 exit code 的失败，
+            # 语义等同 Claude tool_result 的 is_error）。同一调用可能产生多条
+            # failed 状态行——按 toolCallId 去重，只计一次。
+            failed = (code is not None and _as_int(code) != 0) or status == "failed"
+            already = cid_key is not None and cid_key in errored_calls
+            if failed and not already:
                 u.tool_errors += 1
-                cid = update.get("toolCallId")
-                tname = call_id_to_name.get(cid) if isinstance(cid, str) else None
+                if cid_key is not None:
+                    errored_calls.add(cid_key)
+                tname = call_id_to_name.get(cid_key) if cid_key else None
                 if tname:
                     u.tool_errors_by_tool[tname] = u.tool_errors_by_tool.get(tname, 0) + 1
-            status = update.get("status")
             if status == "completed" and isinstance(raw_output, dict):
                 # A finished Task subagent counts as a completed task.
-                if call_id_to_name.get(update.get("toolCallId")) == "Task":
+                if call_id_to_name.get(cid_key) == "Task":
                     u.completed_task_count += 1
             continue
 
@@ -325,6 +379,8 @@ def aggregate_usage(path: Path) -> TokenUsage:
         u.session_duration_ms = u.ended_at - u.started_at
     _apply_signals(u, path.parent)
     _apply_events(u, path.parent)
+    for child in subagent_dirs_of(path):
+        u = u.merge(aggregate_usage(child))
     return u
 
 
@@ -400,8 +456,12 @@ def _apply_events(u: TokenUsage, session_dir: Path) -> None:
                     continue
                 if obj.get("type") != "permission_resolved":
                     continue
-                u.permission_request_count += 1
-                u.permission_wait_ms_total += _as_int(obj.get("wait_ms"))
+                wait = _as_int(obj.get("wait_ms"))
+                if wait > 0:
+                    # 只计真实等待的人审：自动放行（decision=allow, wait=0）
+                    # 实测占 ~99%，计入会让「审批次数」读起来像数千次人审。
+                    u.permission_request_count += 1
+                    u.permission_wait_ms_total += wait
     except OSError:
         return
 
@@ -585,6 +645,17 @@ def _loc_scan(path: Path):
 
     # has_signal may be True with only non-code paths → empty SessionLoc.
     sloc = acc.finish() if has_signal else SessionLoc(added=0, deleted=0)
+    # 子代理 LOC 折入父会话（merge_session_locs 重算 high_churn，同 omp 口径）。
+    child_locs = []
+    child_signal = has_signal
+    for child in subagent_dirs_of(path):
+        c_loc, c_sig = _loc_scan(child)
+        child_locs.append(c_loc)
+        child_signal = child_signal or c_sig
+    if child_locs:
+        from tcer.core.loc import merge_session_locs
+        sloc = merge_session_locs([sloc, *child_locs])
+        has_signal = child_signal
     return sloc, has_signal
 
 
@@ -629,6 +700,9 @@ def _add_turn_usage(u: TokenUsage, usage, default_model: str) -> int:
             turn_input += tin
     if added_any:
         u.assistant_msgs += 1
+        # 真·API 请求数：一个 turn_completed 可聚合多次模型调用（中位 3），
+        # 请求数展示与每请求延迟都按 modelCalls 口径（缺失按 1 回退）。
+        u.api_calls += max(1, _as_int(usage.get("modelCalls")))
         if turn_input > 0:
             u.peak_input_tokens = max(u.peak_input_tokens, turn_input)
     else:

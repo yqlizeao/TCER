@@ -22,7 +22,10 @@ T = TypeVar("T")
 
 # (resolved_path, mtime_ns, size, *extra_key) → value
 _CACHE: dict[tuple, Any] = {}
-_MAX_ENTRIES = 512
+# 上限须容下「全部项目总览」的工作集：44 项目 × 数百会话文件 × 每文件
+# usage/loc/meta 多变体 ≈ 2000 条。512 时全项目热态总览发生 LRU 轮换
+# （实测 4.3s ≈ 冷态，单项目热态被挤回 464ms），2048 覆盖后回到毫秒级。
+_MAX_ENTRIES = 2048
 
 
 def clear() -> None:

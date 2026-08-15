@@ -1362,10 +1362,11 @@
     },
     "o1-mini": {
       "display_name": "OpenAI o1-mini",
-      "input": 0.55,
-      "output": 2.2,
+      "input": 1.1,
+      "output": 4.4,
       "cache_read": 0.55,
-      "cache_write": 0
+      "cache_write": 0,
+      "_note": "OpenAI 官方价 1.1/4.4/cached 0.55；cc-switch 上游误录 input/output 为一半（input 恰等于 cached 价的指纹，与 o3-mini 同一处上游错误，2026-08-15 修正）"
     },
     "codex-mini": {
       "display_name": "Codex Mini",

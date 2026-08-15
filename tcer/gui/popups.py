@@ -826,6 +826,35 @@ class BaselinesPopup:
         self._win.destroy()
 
 
+class HtmlSectionsPopup:
+    """HTML 报告选节 — 导出项目报告前勾选要包含的章节（默认全选 = 旧行为）。"""
+
+    def __init__(self, parent, on_ok) -> None:
+        from .html_report import PROJECT_SECTIONS, _SECTION_LABELS
+        win = _new_window(parent, "HTML 报告章节", "380x300")
+        tk.Label(win, text="选择要包含的章节", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING, pady=10).pack()
+
+        inner = tk.Frame(win, bg=theme.PANEL)
+        inner.pack(fill="both", expand=True, padx=10, pady=5)
+        card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=10)
+        card.pack(fill="x")
+        vars_ = {}
+        for key in PROJECT_SECTIONS:
+            v = tk.BooleanVar(value=True)
+            vars_[key] = v
+            CheckRow(card, _SECTION_LABELS.get(key, key), v)
+
+        btn_bar = tk.Frame(win, bg=theme.BG)
+        btn_bar.pack(pady=8)
+        flat_button(btn_bar, "继续导出",
+                    lambda: (on_ok([k for k, v in vars_.items() if v.get()]),
+                             win.destroy()),
+                    primary=True, padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
+        flat_button(btn_bar, "取消", win.destroy,
+                    padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
+
+
 class AdvancedPopup:
     """高级选项 — 跳过 LOC 开关（产品定位：只分析会话数据，无仓库扫描项）。"""
 
@@ -1256,7 +1285,7 @@ class RadarPopup:
             py = cy - R * norm * math.sin(angle)
             data_pts.extend([px, py])
         canvas.create_polygon(data_pts, outline=theme.ACCENT,
-                              fill="#1a3a5a", width=2)
+                              fill=theme.RADAR_FILL, width=2)
         for ai in range(0, len(data_pts), 2):
             px, py = data_pts[ai], data_pts[ai + 1]
             canvas.create_oval(px - 3, py - 3, px + 3, py + 3,
@@ -1533,6 +1562,6 @@ def _copy(win, text: str) -> None:
 
 # 分析类弹窗已拆分至 popups_analysis.py；re-export 保持既有 import 路径。
 from .popups_analysis import (  # noqa: E402,F401
-    ProjectOverviewPopup, SessionComparePopup, SessionTimelinePopup,
-    ToolSequencePopup,
+    ProjectOverviewPopup, ProjectProfilePopup, SessionComparePopup,
+    SessionTimelinePopup, ToolSequencePopup,
 )

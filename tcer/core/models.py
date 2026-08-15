@@ -131,8 +131,23 @@ class TokenUsage:
     task_count: int = 0
     completed_task_count: int = 0
     aborted_task_count: int = 0
+    # 真·API 请求数（Grok turn_completed.usage.modelCalls：一个回合可含多次
+    # 模型调用，中位 3；其余源无该字段时 0，展示层回退 assistant_msgs）。
+    api_calls: int = 0
     compaction_count: int = 0
     compaction_event_count: int = 0
+    # 压缩代价（Claude compactMetadata）：累计丢弃 token 与压缩耗时；
+    # 触发方式 compaction_triggers（auto/manual → 次数，压缩代价括号展示）。
+    compaction_discarded_tokens: int = 0
+    compaction_pre_tokens_max: int = 0
+    compaction_duration_ms_total: int = 0
+    compaction_triggers: dict[str, int] = field(default_factory=dict)  # auto/manual → 次数
+    # 压缩事件发生位置（回合号，取边界之后的首个回合；Claude compact_boundary）。
+    # 与 compaction_count 互补：那个说次数，这个说发生在哪——供分段衰减/恢复分析。
+    compaction_turns: list[int] = field(default_factory=list)
+    # 逐回合 LOC 流水 (turn, added, deleted)（分段 TCER / 效率衰减曲线用）。
+    # 当前仅 Claude 路径填充（reader 缓冲回放时携带回合号）；其余源留空。
+    turn_net_locs: list[tuple[int, int, int]] = field(default_factory=list)
     web_search_count: int = 0
     web_search_end_count: int = 0
     image_count: int = 0
@@ -265,8 +280,23 @@ class TokenUsage:
             task_count=self.task_count + other.task_count,
             completed_task_count=self.completed_task_count + other.completed_task_count,
             aborted_task_count=self.aborted_task_count + other.aborted_task_count,
+            api_calls=self.api_calls + other.api_calls,
             compaction_count=self.compaction_count + other.compaction_count,
             compaction_event_count=self.compaction_event_count + other.compaction_event_count,
+            compaction_discarded_tokens=self.compaction_discarded_tokens + other.compaction_discarded_tokens,
+            compaction_pre_tokens_max=max(self.compaction_pre_tokens_max, other.compaction_pre_tokens_max),
+            compaction_duration_ms_total=self.compaction_duration_ms_total + other.compaction_duration_ms_total,
+            compaction_triggers=_merge_dicts(self.compaction_triggers, other.compaction_triggers),
+            compaction_turns=self.compaction_turns + [
+                t + self_max_ts_turn + 1 for t in other.compaction_turns
+            ],
+            # turn_net_locs 与 turn_stats 同一回合编号空间（reader 的 turn_idx），
+            # 必须按 turn_stats 的最大回合 rebase——按 tool_ops 的最大值会在
+            # 「末尾有无工具回合」时错位（self_max_turn < self_max_ts_turn），
+            # 分段 TCER 会把 LOC 记到错误的段。
+            turn_net_locs=self.turn_net_locs + [
+                (t + self_max_ts_turn + 1, a, d) for (t, a, d) in other.turn_net_locs
+            ],
             web_search_count=self.web_search_count + other.web_search_count,
             web_search_end_count=self.web_search_end_count + other.web_search_end_count,
             image_count=self.image_count + other.image_count,
@@ -422,7 +452,7 @@ class SessionReport:
     unseen_writes: int = 0  # Write calls whose target file hadn't been touched yet
                             # in this session (F1 exposure: prior size assumed 0)
     # --- timing metrics ---
-    avg_turn_latency_sec: float | None = None  # (ended_at - started_at) / effective_turns in seconds
+    avg_request_latency_ms: float | None = None  # mean(turn_stats.duration_ms)，cc-switch「平均延迟」同口径
     session_duration_minutes: float | None = None  # session_duration_ms / 60000
     # --- tool usage pattern ---
     read_write_ratio: float | None = None  # Read / (Write + Edit)
@@ -455,6 +485,19 @@ class SessionReport:
     edit_verify_ratio: float | None = None  # Write/Edit 后 3 回合内跑 Bash 的占比（改→验闭环）
     first_edit_turn: int | None = None      # 首次 Write/Edit 的回合号（1-based；None=未动手）
     bash_ratio: float | None = None         # Bash/PowerShell ÷ 总工具调用（盲区暴露面）
+    # --- 工具重试循环（卡死信号；见 metrics.retry_loop_metrics）---
+    retry_loop_count: int = 0        # 同工具+同路径连续重复 ≥3 次的循环个数
+    retry_loop_max_len: int = 0      # 最长循环的重复次数
+    retry_loop_details: dict | None = None  # {"Tool:path": 最长 run}（弹窗展示）
+    # --- 单回合成本异常（见 metrics.turn_cost_analysis）---
+    turn_cost_max_share: float | None = None  # 最贵回合占回合成本合计的份额 0..1
+    turn_cost_spike_turn: int | None = None   # 最贵回合的回合号
+    cache_invalidation_events: int = 0        # 缓存写翻倍且读回落的回合数
+    # --- 人机时间结构（见 metrics.activity_metrics）---
+    ai_active_ratio: float | None = None      # Σ 逐回合耗时 ÷ 会话墙钟（0..1）
+    user_gap_median_min: float | None = None  # 相邻回合间隔的中位数（分钟，1–30 分钟窗口）
+    # --- 分段效率衰减（见 metrics.segment_metrics；逐回合 LOC 当前仅 Claude）---
+    efficiency_decay_ratio: float | None = None  # 末段 TCER ÷ 首段 TCER（<0.5 明显衰减）
     memory_files: list[str] | None = None   # project memory/*.md paths (project-level only)
     memory_dir: str | None = None           # absolute path to the memory/ directory
     # --- Codex/local-agent runtime metrics ---
@@ -465,6 +508,9 @@ class SessionReport:
     context_window_used_ratio: float | None = None
     reasoning_output_ratio: float | None = None
     output_tps: float | None = None  # 输出吞吐（tokens/sec）= Σ output_tokens ÷ Σ 单次
+    # --- 复核批新增（C1-C3）---
+    cost_reported_ratio: float | None = None   # 价表计价 ÷ 源自报成本（1.0=一致）
+    loc_patch_agreement: float | None = None    # 回放 LOC vs structuredPatch 一致率 0..1
                                      # 补全生成耗时（秒）。仅 Codex/Grok/omp 提供逐补全
                                      # duration；Claude 只有轮级墙钟(含工具+等待)不可用，
                                      # OpenCode/Pi 无逐补全耗时——均留 None。见 metrics.output_tps。

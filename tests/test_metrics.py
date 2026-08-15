@@ -659,3 +659,215 @@ def test_infer_task_type_extended_signals():
         net_loc=50, total_tokens=1_000_000,
         test_net_loc=40,
     ) == "code_maintenance"
+
+
+def test_retry_loop_metrics_detects_runs():
+    from tcer.core.metrics import retry_loop_metrics
+    from tcer.core.models import TokenUsage, ToolOp
+
+    u = TokenUsage()
+    u.tool_ops = [
+        ToolOp(0, "Read", "a.py"),
+        ToolOp(1, "Edit", "a.py"), ToolOp(2, "Edit", "a.py"), ToolOp(3, "Edit", "a.py"),
+        ToolOp(4, "Edit", "a.py"),   # 4 连 Edit a.py → 一个长度 4 的循环
+        ToolOp(5, "Read", "b.py"),
+        ToolOp(6, "Read", "b.py"), ToolOp(7, "Read", "b.py"),  # 3 连 → 一个长度 3
+        ToolOp(8, "Bash", ""), ToolOp(9, "Bash", ""), ToolOp(10, "Bash", ""),  # 无路径不参与
+        ToolOp(11, "Grep", "src/"), ToolOp(12, "Grep", "src/"),  # 2 连不够
+    ]
+    m = retry_loop_metrics(u)
+    assert m["count"] == 2
+    assert m["max_len"] == 4
+    assert m["details"] == {"Edit:a.py": 4, "Read:b.py": 3}
+    # 无循环
+    u2 = TokenUsage()
+    u2.tool_ops = [ToolOp(0, "Read", "x.py"), ToolOp(1, "Edit", "x.py")]
+    assert retry_loop_metrics(u2) == {"count": 0, "max_len": 0, "details": None}
+
+
+def test_compute_populates_retry_loop_fields():
+    from tcer.core.metrics import compute
+    from tcer.core.models import SessionMeta, TokenUsage, ToolOp
+
+    meta = SessionMeta(session_id="s", cwd="/tmp", title=None, path=Path("/tmp/s.jsonl"),
+                       is_subagent=False)
+    u = TokenUsage(input_tokens=1000, output_tokens=100)
+    u.tool_ops = [ToolOp(i, "Edit", "a.py") for i in range(5)]
+    r = compute(meta, u, net_loc=10, task_type="feature")
+    assert r.retry_loop_count == 1
+    assert r.retry_loop_max_len == 5
+    assert r.retry_loop_details == {"Edit:a.py": 5}
+
+
+def test_retry_loop_insight_fires():
+    from tcer.core.insights import session_insights
+    from tcer.core.metrics import compute
+    from tcer.core.models import SessionMeta, TokenUsage, ToolOp
+
+    meta = SessionMeta(session_id="s", cwd="/tmp", title=None, path=Path("/tmp/s.jsonl"),
+                       is_subagent=False)
+    u = TokenUsage(input_tokens=1000, output_tokens=100)
+    u.tool_ops = [ToolOp(i, "Edit", "a.py") for i in range(6)]
+    r = compute(meta, u, net_loc=10, task_type="feature")
+    hits = [i for i in session_insights(r) if i.metric == "retry_loop_count"]
+    assert hits and "a.py" in hits[0].evidence
+
+
+def test_turn_cost_analysis_spike_and_invalidation():
+    from tcer.core.metrics import turn_cost_analysis
+    from tcer.core.models import TokenUsage, TurnStat
+
+    u = TokenUsage()
+    u.turn_stats = [
+        TurnStat(0, ts=1, input_tokens=1000, cache_write=100, cache_read=5000,
+                 output_tokens=200, model="claude-sonnet-4-5"),
+        TurnStat(1, ts=2, input_tokens=1000, cache_write=100, cache_read=6000,
+                 output_tokens=200, model="claude-sonnet-4-5"),
+        # 大户回合 + 缓存失效（cw 翻倍、cr 回落）
+        TurnStat(2, ts=3, input_tokens=30000, cache_write=5000, cache_read=1000,
+                 output_tokens=5000, model="claude-sonnet-4-5"),
+    ]
+    m = turn_cost_analysis(u)
+    assert m["spike_turn"] == 2
+    assert m["max_turn_share"] > 0.30
+    assert m["max_turn_cost"] > 0
+    assert m["cache_invalidation_events"] == 1
+    # 无数据
+    assert turn_cost_analysis(TokenUsage())["max_turn_share"] is None
+
+
+def test_compute_populates_turn_cost_fields():
+    from tcer.core.metrics import compute
+    from tcer.core.models import SessionMeta, TokenUsage, TurnStat
+
+    meta = SessionMeta(session_id="s", cwd="/tmp", title=None, path=Path("/tmp/s.jsonl"),
+                       is_subagent=False)
+    u = TokenUsage(input_tokens=1000, output_tokens=100)
+    u.turn_stats = [
+        TurnStat(0, ts=1, input_tokens=100, cache_write=0, cache_read=0,
+                 output_tokens=10, model="claude-sonnet-4-5"),
+        TurnStat(1, ts=2, input_tokens=5000, cache_write=0, cache_read=0,
+                 output_tokens=500, model="claude-sonnet-4-5"),
+    ]
+    r = compute(meta, u, net_loc=10, task_type="feature")
+    assert r.turn_cost_spike_turn == 1
+    assert r.turn_cost_max_share is not None and r.turn_cost_max_share > 0.5
+
+
+def test_activity_metrics_ratio_and_gap():
+    from tcer.core.metrics import activity_metrics
+    from tcer.core.models import TokenUsage, TurnStat
+
+    T = 1_770_000_000_000
+    u = TokenUsage()
+    u.session_duration_ms = 30 * 60_000
+    u.turn_stats = [
+        # 3 回合各 5 分钟 AI 耗时 → 15/30 = 0.5
+        TurnStat(0, ts=T, duration_ms=5 * 60_000),
+        # 间隔 10 分钟（在 1–30 分钟窗口内）
+        TurnStat(1, ts=T + 10 * 60_000, duration_ms=5 * 60_000),
+        # 间隔 2 分钟
+        TurnStat(2, ts=T + 12 * 60_000, duration_ms=5 * 60_000),
+    ]
+    m = activity_metrics(u)
+    assert m["ai_active_ratio"] == 0.5
+    assert sorted([10.0, 2.0])[0] == 2.0
+    assert m["user_gap_median_min"] == 6.0  # median(10, 2)
+    # 无 duration / 无窗口内间隔 → None
+    u2 = TokenUsage()
+    u2.turn_stats = [TurnStat(0, ts=T)]
+    assert activity_metrics(u2) == {"ai_active_ratio": None, "user_gap_median_min": None}
+    # 窗口外间隔不计：<1 分钟与 >30 分钟
+    u3 = TokenUsage()
+    u3.turn_stats = [TurnStat(0, ts=T), TurnStat(1, ts=T + 30_000),
+                     TurnStat(2, ts=T + 31 * 60_000)]
+    assert activity_metrics(u3)["user_gap_median_min"] is None
+    # Grok 审批等待从活跃时间中扣除
+    u4 = TokenUsage()
+    u4.session_duration_ms = 10 * 60_000
+    u4.permission_wait_ms_total = 5 * 60_000
+    u4.turn_stats = [TurnStat(0, ts=T, duration_ms=8 * 60_000)]
+    assert activity_metrics(u4)["ai_active_ratio"] == 0.3
+
+
+def test_segment_metrics_decay_and_compaction():
+    from tcer.core.metrics import segment_metrics
+    from tcer.core.models import TokenUsage, TurnStat
+
+    u = TokenUsage()
+    # 9 回合：前 3 回合每回合 10 行 1Mt，后 3 回合每回合 1 行 1Mt → 末/首 = 0.1
+    u.turn_stats = []
+    u.turn_net_locs = []
+    for i in range(9):
+        u.turn_stats.append(TurnStat(i, ts=i, input_tokens=500_000,
+                                     cache_read=400_000, output_tokens=100_000))
+        loc = 10 if i < 3 else (5 if i < 6 else 1)
+        u.turn_net_locs.append((i, loc, 0))
+    u.compaction_turns = [5]
+    m = segment_metrics(u)
+    assert m["decay_ratio"] == 0.1
+    segs = m["segments"]
+    assert segs[0]["tcer"] == 10 and segs[2]["tcer"] == 1
+    assert segs[1]["compactions"] == 1
+    # 无逐回合 LOC → tcer None（token 曲线仍可用）
+    u2 = TokenUsage()
+    u2.turn_stats = u.turn_stats
+    m2 = segment_metrics(u2)
+    assert m2["decay_ratio"] is None
+    assert m2["segments"][0]["tokens"] > 0
+    # 空
+    assert segment_metrics(TokenUsage())["decay_ratio"] is None
+
+
+def test_compute_populates_decay_ratio():
+    from tcer.core.metrics import compute
+    from tcer.core.models import SessionMeta, TokenUsage, TurnStat
+
+    meta = SessionMeta(session_id="s", cwd="/tmp", title=None, path=Path("/tmp/s.jsonl"),
+                       is_subagent=False)
+    u = TokenUsage(input_tokens=1000, output_tokens=100)
+    u.turn_stats = [TurnStat(i, ts=i, input_tokens=100, output_tokens=10) for i in range(9)]
+    u.turn_net_locs = [(i, 10 if i < 3 else 1, 0) for i in range(9)]
+    r = compute(meta, u, net_loc=40, task_type="feature")
+    assert abs(r.efficiency_decay_ratio - 0.1) < 1e-9
+
+
+def test_merge_rebases_turn_net_locs_by_turn_stats():
+    """merge 的 turn_net_locs 必须按 turn_stats 的最大回合 rebase（与
+    turn_stats 同一编号空间），否则末尾无工具回合的会话合并后 LOC 错段。"""
+    from tcer.core.models import TokenUsage, TurnStat
+
+    a = TokenUsage(input_tokens=10, output_tokens=5)
+    a.turn_stats = [TurnStat(i, ts=i, input_tokens=1, output_tokens=1)
+                    for i in range(5)]          # 5 回合
+    a.tool_ops = []                             # 无工具 → tool_ops max = -1
+    a.turn_net_locs = [(0, 10, 0)]
+    b = TokenUsage(input_tokens=10, output_tokens=5)
+    b.turn_stats = [TurnStat(i, ts=i, input_tokens=1, output_tokens=1)
+                    for i in range(3)]
+    b.turn_net_locs = [(0, 7, 0)]
+    m = a.merge(b)
+    # b 的回合 0 必须 rebase 到 5 之后（若按 tool_ops 的 -1 会错位到 0）
+    assert m.turn_net_locs == [(0, 10, 0), (5, 7, 0)]
+
+
+def test_segment_metrics_turn_number_not_index():
+    """段边界按回合号（TurnStat.turn）归属，不是列表下标——零 usage 桩造成
+    回合号空洞时，尾段 LOC 不得被丢弃。"""
+    from tcer.core.metrics import segment_metrics
+    from tcer.core.models import TokenUsage, TurnStat
+
+    u = TokenUsage()
+    # 6 个 stat 但回合号 0..5 中 2 号被零 usage 桩消耗（无 TurnStat）→ 5/9 类空洞
+    u.turn_stats = [TurnStat(t, ts=t, input_tokens=100, output_tokens=10)
+                    for t in (0, 1, 3, 4, 5, 6)]
+    # LOC 挂在真实回合号上：末段（回合 5、6）各 10 行，首段（0、1）各 1 行
+    u.turn_net_locs = [(0, 1, 0), (1, 1, 0), (5, 10, 0), (6, 10, 0)]
+    u.compaction_turns = [6]
+    m = segment_metrics(u)
+    segs = m["segments"]
+    # 首段 LOC=2；末段（下标 4..5 = 回合 5、6）LOC=20——旧行为会丢掉回合 6（下标<6 但按 range(4,6) 查到）
+    assert segs[0]["added"] == 2
+    assert segs[2]["added"] == 20
+    assert segs[2]["compactions"] == 1   # 压缩位置也按回合号归段
+    assert abs(m["decay_ratio"] - 10.0) < 1e-9  # 20/2

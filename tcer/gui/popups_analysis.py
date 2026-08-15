@@ -11,6 +11,7 @@ from tkinter import ttk
 
 from tcer.core import format as fmt
 from . import theme
+from .platform import CLICK_CURSOR
 from .metric_defs import GROUPS
 from .widgets import ScrollFrame, Tooltip, flat_button, new_window as _new_window
 
@@ -94,8 +95,85 @@ class SessionComparePopup:
                      bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
                      pady=30).pack()
             return
+        self._build_overlay(sel)
         for group in GROUPS:
             self._build_group(group, sel)
+
+    # ------------------------------------------------------------------ 叠加可视化
+    def _build_overlay(self, sel) -> None:
+        """表格上方：叠加雷达（形状感）+ 逐回合 Token 曲线（谁在后期膨胀）。"""
+        import math
+
+        from .metric_defs import raw_value as metric_raw_value
+        from .metric_defs import METRIC_BY_KEY
+        from .popups import RadarPopup
+
+        card = tk.Frame(self._container, bg=theme.PANEL, padx=6, pady=6)
+        card.pack(fill="x", pady=(0, 6))
+        canvas = tk.Canvas(card, bg=theme.PANEL, highlightthickness=0, height=280)
+        canvas.pack(fill="x")
+        self._ov_canvas = canvas
+
+        # ---- 左：叠加雷达（RadarPopup 同款绝对刻度归一，多边形叠加）----
+        axes = RadarPopup._resolve_axes()
+        cx, cy, R = 175, 148, 96
+        n = len(axes)
+        for frac in (0.5, 1.0):
+            pts = []
+            for ai in range(n):
+                ang = math.pi / 2 + 2 * math.pi * ai / n
+                pts.extend([cx + R * frac * math.cos(ang),
+                            cy - R * frac * math.sin(ang)])
+            canvas.create_polygon(pts, outline=theme.BORDER, fill="", dash=(2, 3))
+        for ai, (key, _ntype, ref) in enumerate(axes):
+            ang = math.pi / 2 + 2 * math.pi * ai / n
+            canvas.create_line(cx, cy, cx + R * math.cos(ang), cy - R * math.sin(ang),
+                               fill=theme.BORDER)
+            lx, ly = cx + (R + 16) * math.cos(ang), cy - (R + 16) * math.sin(ang)
+            m = METRIC_BY_KEY.get(key)
+            canvas.create_text(lx, ly, text=(m.name if m else key)[:4],
+                               fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+        for j, r in enumerate(sel):
+            color = self._COL_COLORS[j % len(self._COL_COLORS)]
+            pts = []
+            for ai, (key, ntype, ref) in enumerate(axes):
+                norm = RadarPopup._normalize(metric_raw_value(r, key), ntype, ref)
+                ang = math.pi / 2 + 2 * math.pi * ai / n
+                pts.extend([cx + R * norm * math.cos(ang),
+                            cy - R * norm * math.sin(ang)])
+            canvas.create_polygon(pts, outline=color, fill="", width=2)
+        canvas.create_text(cx, 262, text="叠加雷达（绝对刻度，外圈=最优）",
+                           fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+
+        # ---- 右：逐回合 Token 曲线（各自归一到峰值，看形状与膨胀）----
+        ox, oy, ow, oh = 390, 36, 520, 200
+        canvas.create_rectangle(ox, oy, ox + ow, oy + oh, outline=theme.BORDER)
+        canvas.create_text(ox + ow / 2, oy - 10, text="逐回合 Token（各自归一）",
+                           fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+        for j, r in enumerate(sel):
+            color = self._COL_COLORS[j % len(self._COL_COLORS)]
+            stats = list(r.usage.turn_stats)
+            if len(stats) < 2:
+                continue
+            peak = max((t.input_tokens + t.cache_write + t.cache_read
+                        + t.output_tokens) for t in stats) or 1
+            pts = []
+            for i, t in enumerate(stats):
+                tot = (t.input_tokens + t.cache_write + t.cache_read
+                       + t.output_tokens)
+                x = ox + i / (len(stats) - 1) * ow
+                y = oy + oh - (tot / peak) * oh * 0.92
+                pts.append((x, y))
+            for i in range(1, len(pts)):
+                canvas.create_line(*pts[i - 1], *pts[i], fill=color, width=2)
+        ly = oy + oh + 14
+        for j, r in enumerate(sel):
+            color = self._COL_COLORS[j % len(self._COL_COLORS)]
+            canvas.create_text(ox + j * 180, ly, text="■", fill=color,
+                               font=theme.FONT_UI_SMALL, anchor="w")
+            canvas.create_text(ox + j * 180 + 12, ly,
+                               text=(r.meta.title or "?")[:18], fill=theme.MUTED,
+                               font=theme.FONT_UI_SMALL, anchor="w")
 
     def _build_group(self, group, sel) -> None:
         # 先算出该组有内容的行；整组皆空则不渲染
@@ -174,9 +252,20 @@ class SessionTimelinePopup:
 
     def __init__(self, parent, report) -> None:
         from .charts import _ChartTooltip
+        self._report = report
+        self._usage = report.usage
         self._stats = list(report.usage.turn_stats)
+        # 逐回合工具调用 / 逐回合 LOC 流水 / 压缩位置（钻取与叠加曲线用）。
+        self._ops_by_turn: dict[int, list] = {}
+        for op in report.usage.tool_ops:
+            self._ops_by_turn.setdefault(op.turn, []).append(op)
+        self._loc_by_turn: dict[int, tuple[int, int]] = {}
+        for turn, a, d in report.usage.turn_net_locs:
+            pa, pd = self._loc_by_turn.get(turn, (0, 0))
+            self._loc_by_turn[turn] = (pa + a, pd + d)
+        self._compaction_turns = list(report.usage.compaction_turns)
         sid = (report.meta.session_id or report.meta.path.stem)[:16]
-        win = _new_window(parent, f"会话时间线 · {sid}…", "900x520")
+        win = _new_window(parent, f"会话时间线 · {sid}…", "900x560")
 
         head = tk.Frame(win, bg=theme.BG, padx=10, pady=6)
         head.pack(fill="x")
@@ -185,7 +274,7 @@ class SessionTimelinePopup:
         n_dur = sum(1 for t in self._stats if t.duration_ms is not None)
         tk.Label(head,
                  text=f"{len(self._stats)} 回合 · {n_dur} 个有权威耗时 · "
-                      "悬停查看明细",
+                      "悬停看明细，点击回合展开工具调用",
                  bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
                      side="left", padx=10)
         # 图例
@@ -199,12 +288,15 @@ class SessionTimelinePopup:
                      font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 6))
 
         self.canvas = tk.Canvas(win, bg=theme.PANEL, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 4))
         self._tooltip = _ChartTooltip(self.canvas)
         self._bar_x: list[tuple[float, float, int]] = []  # (x0, x1, idx)
+        # 点击钻取的明细面板（默认隐藏，点击回合条展开）
+        self._detail = tk.Frame(win, bg=theme.PANEL)
         self.canvas.bind("<Configure>", lambda e: self._draw())
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", lambda e: self._tooltip.hide())
+        self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<Destroy>", lambda e: self._tooltip.hide())
 
     def _draw(self) -> None:
@@ -273,6 +365,56 @@ class SessionTimelinePopup:
                           text=f"耗时（紫线，峰值 {fmt.fmt_duration_ms(max_dur, short=True)}）",
                           fill=theme.CHART_PALETTE[4], font=theme.FONT_UI_SMALL, anchor="e")
 
+        # 逐回合缓存命中率曲线（青绿细线）：定位「哪个回合之后缓存掉下去了」。
+        chr_pts = []
+        for idx, t in enumerate(stats):
+            denom = t.input_tokens + t.cache_write + t.cache_read
+            if denom <= 0:
+                continue
+            ratio = t.cache_read / denom
+            x = self._PAD_L + idx * step + step / 2
+            y = base_y - ratio * plot_h * 0.9
+            chr_pts.append((x, y))
+        if len(chr_pts) >= 2:
+            for i in range(1, len(chr_pts)):
+                c.create_line(*chr_pts[i - 1], *chr_pts[i],
+                              fill=theme.CHART_PALETTE[1], width=1, dash=(3, 2))
+            c.create_text(self._PAD_L, self._PAD_T - 12, text="缓存命中率（青虚线）",
+                          fill=theme.CHART_PALETTE[1], font=theme.FONT_UI_SMALL,
+                          anchor="w")
+
+        # 累计净增行曲线（橙色；仅 Claude 等有逐回合 LOC 流水的源）。
+        if self._loc_by_turn:
+            cum, max_cum = 0, 0
+            loc_pts = []
+            for idx, t in enumerate(stats):
+                a, d = self._loc_by_turn.get(t.turn, (0, 0))
+                cum += a - d
+                max_cum = max(max_cum, abs(cum))
+                x = self._PAD_L + idx * step + step / 2
+                y = base_y - (cum / max_cum if max_cum else 0) * plot_h * 0.9
+                loc_pts.append((x, y))
+            if len(loc_pts) >= 2:
+                for i in range(1, len(loc_pts)):
+                    c.create_line(*loc_pts[i - 1], *loc_pts[i],
+                                  fill=theme.CHART_PALETTE[2], width=2)
+                c.create_text(self._PAD_L + plot_w / 2, self._PAD_T - 12,
+                              text="累计净增行（橙线）",
+                              fill=theme.CHART_PALETTE[2], font=theme.FONT_UI_SMALL)
+
+        # 压缩事件竖线（灰虚线 + 「压缩」标签）：回合号经 turn→下标映射定位
+        # （零 usage 桩使回合号有空洞，直接当 下标 用会错位——同 segment_metrics）。
+        turn_pos = {t.turn: i for i, t in enumerate(stats)}
+        for turn in self._compaction_turns:
+            pos = turn_pos.get(turn)
+            if pos is None:
+                continue
+            x = self._PAD_L + pos * step + step / 2
+            c.create_line(x, self._PAD_T, x, base_y,
+                          fill=theme.MUTED, dash=(2, 4))
+            c.create_text(x, self._PAD_T - 2, text="压缩",
+                          fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+
         # X 轴回合刻度（稀疏）
         tick_every = max(1, n // 12)
         for idx in range(0, n, tick_every):
@@ -336,6 +478,42 @@ class SessionTimelinePopup:
             lines.append(f"⚠ 工具错误 {t.errors} 次")
         self._tooltip.show(event.x, event.y, lines)
 
+    def _on_click(self, event) -> None:
+        """点击回合条 → 下方展开该回合明细（token / 模型 / 工具调用列表）。"""
+        idx = None
+        for x0, x1, i in self._bar_x:
+            if x0 - 2 <= event.x <= x1 + 2:
+                idx = i
+                break
+        for w_ in self._detail.winfo_children():
+            w_.destroy()
+        if idx is None:
+            return  # 点空白处只收起
+        t = self._stats[idx]
+        a, d = self._loc_by_turn.get(t.turn, (0, 0))
+        from tcer.core.pricing import label as _model_label
+        lines = [
+            f"回合 {t.turn + 1} · {fmt.fmt_dt(t.ts, fmt.FMT_SHORT_MINUTE) if t.ts else '-'}",
+            f"Token {t.input_tokens:,} 入 / {t.cache_write:,} 缓写 / "
+            f"{t.cache_read:,} 缓读 / {t.output_tokens:,} 出"
+            + (f" · 模型 {_model_label(t.model)}" if t.model else ""),
+        ]
+        if t.duration_ms is not None:
+            lines.append(f"耗时 {fmt.fmt_duration_ms(t.duration_ms, short=True)}"
+                         + (f" · ⚠ 错误 {t.errors}" if t.errors else ""))
+        if a or d:
+            lines.append(f"本回合净增 {a - d:+d} 行（+{a} / -{d}）")
+        ops = self._ops_by_turn.get(t.turn, [])
+        if ops:
+            names = [f"{op.tool} {op.path}" if op.path else op.tool for op in ops]
+            lines.append("工具：" + " · ".join(names))
+        elif t.tool_calls:
+            lines.append(f"工具调用 {t.tool_calls} 次（无逐调用明细）")
+        self._detail.pack(fill="x", padx=10, pady=(0, 10))
+        tk.Label(self._detail, text=" ｜ ".join(lines), bg=theme.PANEL,
+                 fg=theme.FG, font=theme.FONT_UI_SMALL, anchor="w",
+                 justify="left", wraplength=820).pack(fill="x", padx=6, pady=4)
+
 
 class ProjectOverviewPopup:
     """项目总览 — 全部项目并排对比（点击表头排序）。
@@ -398,8 +576,20 @@ class ProjectOverviewPopup:
         frame = tk.Frame(win, bg=theme.BG)
         frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         cols = [c[0] for c in self._COLS]
+        # 气泡散点（X=成本，Y=TCER，气泡=总 Token，颜色=来源）：「哪个项目花钱
+        # 多产出低」一眼可见；悬停显示项目名，点击选中表中对应行。
+        self._bubble = tk.Canvas(win, bg=theme.PANEL, highlightthickness=0,
+                                 height=210)
+        self._bubble.pack(fill="x", padx=10, pady=(0, 6))
+        self._bubbles: list[tuple[float, float, float, dict]] = []
+        self._bubble.bind("<Configure>", lambda e: self._draw_bubbles())
+        self._bubble.bind("<Motion>", self._bubble_motion)
+        self._bubble.bind("<Leave>", lambda e: self._tip.hide())
+        self._bubble.bind("<Button-1>", self._bubble_click)
+        from .charts import _ChartTooltip
+        self._tip = _ChartTooltip(self._bubble)
         self.tree = ttk.Treeview(frame, columns=cols, show="headings",
-                                 selectmode="none")
+                                 selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
@@ -467,6 +657,71 @@ class ProjectOverviewPopup:
                 else:
                     vals.append(str(v))
             self.tree.insert("", "end", values=vals)
+        self._draw_bubbles()
+
+    # ------------------------------------------------------------------ 气泡散点
+    def _draw_bubbles(self) -> None:
+        c = self._bubble
+        if not c.winfo_exists():
+            return
+        c.delete("all")
+        self._bubbles = []
+        data = [d for d in self._data if d["tcer"] is not None]
+        if not data:
+            c.create_text(c.winfo_width() / 2 or 300, 100,
+                          text="（无 TCER 数据，跳过气泡图）",
+                          fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+            return
+        w = c.winfo_width() or 900
+        h = c.winfo_height() or 210
+        pad = 34
+        max_cost = max(d["cost"] for d in data) or 1.0
+        max_tcer = max(d["tcer"] for d in data) or 1.0
+        max_tok = max(d["tokens"] for d in data) or 1
+        sources = sorted({d["source"] for d in data})
+        palette = list(theme.CHART_PALETTE)
+        scolor = {s: palette[i % len(palette)] for i, s in enumerate(sources)}
+        c.create_text(pad, 12, text="Y: TCER（越高越省）", anchor="w",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+        c.create_text(w - pad, 12, text="X: 总成本 →", anchor="e",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+        c.create_line(pad, h - 18, w - pad, h - 18, fill=theme.BORDER)
+        for d in data:
+            x = pad + (d["cost"] / max_cost) * (w - 2 * pad)
+            y = h - 24 - (d["tcer"] / max_tcer) * (h - 60)
+            r = 5 + 15 * (d["tokens"] / max_tok) ** 0.5
+            c.create_oval(x - r, y - r, x + r, y + r,
+                          fill=scolor[d["source"]], outline=theme.FG, width=1)
+            self._bubbles.append((x, y, r, d))
+
+    def _bubble_hit(self, x, y):
+        for bx, by, r, d in self._bubbles:
+            if (x - bx) ** 2 + (y - by) ** 2 <= (r + 3) ** 2:
+                return d
+        return None
+
+    def _bubble_motion(self, event) -> None:
+        d = self._bubble_hit(event.x, event.y)
+        if d is None:
+            self._tip.hide()
+            self._bubble.config(cursor="")
+            return
+        self._bubble.config(cursor=CLICK_CURSOR)
+        self._tip.show(event.x, event.y,
+                       f"{d['name']}\n成本 {fmt.fmt_money(d['cost'])} · "
+                       f"TCER {fmt.fmt_float(d['tcer'], '0.0')}\n"
+                       f"{d['sessions']} 会话 · {d['tokens']:,} Token")
+
+    def _bubble_click(self, event) -> None:
+        d = self._bubble_hit(event.x, event.y)
+        if d is None:
+            return
+        for iid in self.tree.get_children():
+            vals = self.tree.item(iid, "values")
+            if vals and vals[1] == d["name"]:
+                self.tree.selection_set(iid)
+                self.tree.see(iid)
+                break
 
 
 class ToolSequencePopup:
@@ -547,3 +802,110 @@ class ToolSequencePopup:
         tk.Label(inner, text=f"共 {n_pairs} 次相邻转移 · 显示 Top {len(top)}",
                  bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
                  pady=6).pack()
+
+
+class ProjectProfilePopup:
+    """项目画像 — 跨会话热点文件 / 模型混用策略 / 技能·子代理·MCP 复用。
+
+    全部来自会话数据聚合（analyze.file_hotspots / model_switch_stats /
+    tool_profile），不读磁盘仓库。技能/子代理维度仅 Claude 源产生
+    （tool_variants），MCP 为五源通用。
+    """
+
+    def __init__(self, parent, analysis) -> None:
+        from tcer.core import analyze as _analyze
+
+        win = _new_window(parent, "项目画像", "860x640")
+        head = tk.Frame(win, bg=theme.BG, padx=10, pady=8)
+        head.pack(fill="x")
+        tk.Label(head, text="项目画像", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING).pack(side="left")
+        n = analysis.n_sessions
+        tk.Label(head, text=f"{n} 个会话 · 跨会话聚合 · 纯会话数据推导",
+                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL
+                 ).pack(side="left", padx=12)
+
+        sf = ScrollFrame(win, bg=theme.BG)
+        sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        body = sf.inner
+
+        # ---- ① 跨会话热点文件 ----
+        hot = _analyze.file_hotspots(analysis.reports, top_n=15)
+        self._section(body, "G4", "跨会话热点文件",
+                      "被反复回访的文件 = 注意力/复杂度热点；「返工会话」列 = "
+                      "该文件在其中进入高返工（编辑 ≥3 次）的会话数。")
+        if hot:
+            grid = tk.Frame(body, bg=theme.PANEL, padx=6, pady=4)
+            grid.pack(fill="x")
+            for col, (txt, w, anchor) in enumerate((
+                    ("文件", 46, "w"), ("会话数", 10, "e"),
+                    ("操作数", 10, "e"), ("返工会话", 12, "e"),
+                    ("最近触达", 18, "e"))):
+                tk.Label(grid, text=txt, bg=theme.PANEL, fg=theme.MUTED,
+                         font=theme.FONT_UI_SMALL_BOLD, width=w, anchor=anchor
+                         ).grid(row=0, column=col, padx=2)
+            for i, e in enumerate(hot, start=1):
+                last = (fmt.fmt_dt(e["last_touched"], fmt.FMT_SHORT_MINUTE)
+                        if e["last_touched"] else "-")
+                for col, (txt, w, anchor) in enumerate((
+                        (e["path"], 46, "w"), (str(e["sessions"]), 10, "e"),
+                        (str(e["ops"]), 10, "e"), (str(e["churn_sessions"]), 12, "e"),
+                        (last, 18, "e"))):
+                    tk.Label(grid, text=txt, bg=theme.PANEL,
+                             fg=theme.FG if col == 0 else theme.MUTED,
+                             font=theme.FONT_UI_SMALL, width=w, anchor=anchor,
+                             justify="left").grid(row=i, column=col, padx=2,
+                                                  sticky="w" if col == 0 else "e")
+        else:
+            self._empty(body, "（无涉及文件数据）")
+
+        # ---- ② 模型混用策略 ----
+        ms = _analyze.model_switch_stats(analysis.reports)
+        self._section(body, "G1", "模型混用策略",
+                      "会话内切换模型的方向：贵→便宜 = 委派执行（省），"
+                      "便宜→贵 = 升级救援（救场）。混用 vs 单模型会话对比。")
+        card = tk.Frame(body, bg=theme.PANEL, padx=8, pady=6)
+        card.pack(fill="x")
+        txt = (f"单模型会话 {ms['single_model_sessions']} · 混用会话 "
+               f"{ms['switch_sessions']} · 切换 {ms['switch_count']} 次\n"
+               f"委派（贵→便宜）{ms['delegations']} 次 · "
+               f"升级救援（便宜→贵）{ms['escalations']} 次")
+        tk.Label(card, text=txt, bg=theme.PANEL, fg=theme.FG,
+                 font=theme.FONT_UI, justify="left").pack(anchor="w")
+
+        # ---- ③ 技能 / 子代理 / MCP 复用 ----
+        tp = _analyze.tool_profile(analysis.reports)
+        self._section(body, "G4", "技能 · 子代理 · MCP 复用",
+                      "高频技能可固化进 CLAUDE.md 工作流；MCP 服务器按调用次数"
+                      "排序（五源通用，技能/子代理仅 Claude 源）。")
+        for title, items, note in (
+                ("技能", tp["skills"], f"（{tp['skills_sessions']} 个会话在用）"),
+                ("子代理", tp["agents"], ""),
+                ("MCP 服务器", tp["mcp"], f"（{tp['mcp_sessions']} 个会话在用）")):
+            row = tk.Frame(body, bg=theme.PANEL, padx=8, pady=3)
+            row.pack(fill="x")
+            tk.Label(row, text=f"{title}{note}", bg=theme.PANEL, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL_BOLD, width=10, anchor="w"
+                     ).pack(side="left")
+            if items:
+                chips = "  ·  ".join(f"{k} ×{v}" for k, v in items[:8])
+                more = f"  …等 {len(items)} 项" if len(items) > 8 else ""
+                tk.Label(row, text=chips + more, bg=theme.PANEL, fg=theme.FG,
+                         font=theme.FONT_UI_SMALL, anchor="w", justify="left"
+                         ).pack(side="left", fill="x", expand=True)
+            else:
+                tk.Label(row, text="（无）", bg=theme.PANEL, fg=theme.MUTED,
+                         font=theme.FONT_UI_SMALL).pack(side="left")
+
+    def _section(self, parent, gid, title, note) -> None:
+        gc = theme.GROUP_COLORS[gid]
+        header = tk.Frame(parent, bg=gc, padx=6, pady=3)
+        header.pack(fill="x", pady=(8, 0))
+        tk.Label(header, text=f"▼ {title}", bg=gc, fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        tk.Label(header, text=note, bg=gc, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL, anchor="w").pack(side="left", padx=10)
+
+    def _empty(self, parent, text) -> None:
+        tk.Label(parent, text=text, bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL, pady=8).pack(fill="x")

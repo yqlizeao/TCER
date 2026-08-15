@@ -15,13 +15,24 @@ from tkinter import ttk
 from tcer.core import metrics
 from tcer.core.format import FMT_SHORT_MINUTE, fmt_dt
 from . import theme
-from .metric_defs import GROUPS, Metric, METRIC_BY_KEY, format_plot, raw_value
+from .metric_defs import (GROUPS, Metric, METRIC_BY_KEY, format_plot,
+                          metric_name, raw_value)
 from .widgets import CheckRow, FlatMenu, ScrollFrame, Tooltip, flat_button
 from .platform import CLICK_CURSOR
 
 # 兼容旧名：图表代码里沿用 views 时代的别名。
 metric_raw_value = raw_value
 _metric_by_key = METRIC_BY_KEY
+
+# PIL 抗锯齿是「有则更佳」的增强，不是硬依赖（项目定位零依赖纯标准库）。
+# 缺 Pillow 时 _aa_layer 回退到 canvas 原生绘制（折线带 smooth、无超采样），
+# 图表照常出图——绝不让 ImportError 从绘制路径穿透到调用方。
+try:
+    from PIL import Image, ImageDraw, ImageTk  # noqa: F401
+
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
 
 # Metrics that cannot be plotted (metadata / categorical / constant).
 _NON_PLOTTABLE = frozenset({
@@ -35,29 +46,17 @@ _METRIC_BASELINE: dict[str, str] = {
     "cpe": "CPE_BASELINE",
 }
 
-# Fixed palette for multi-metric overlay (up to 4 lines).
-_OVERLAY_COLORS = ["#007acc", "#4ec9b0", "#ce9178", "#c586c0"]
+# Fixed palette for multi-metric overlay (up to 4 lines) — 主题变体在 theme。
+_OVERLAY_COLORS = list(theme.OVERLAY_COLORS)
 
 # 综合效率分 tier background bands (lo, hi, fill_color, label) — names + thresholds
-# derived from the metric SSOT (metrics.SCORE_TIER_BANDS); only the dark trend-fill
-# colours are presentation-local here.
-_BAND_FILL = {
-    "优秀": "#142814", "良好": "#14202e", "中等": "#2e2a14",
-    "待改进": "#2e1e14", "低效": "#2e1414",
-}
+# derived from the metric SSOT (metrics.SCORE_TIER_BANDS); trend-fill 色随主题
+# （theme.SCORE_BAND_FILL）。
+_BAND_FILL = theme.SCORE_BAND_FILL
 
-# 仪表盘折线色 = theme.GROUP_COLORS 各分类的「提亮同色相版」（展示局部色）。
-# 分类原色是为大块表头填充设计的暗色，直接画细折线在深色单元格(#2d2d30)上会显得
-# 灰蒙蒙；这里亮度提一档、饱和度补一点，保持色相识别（按色识组）又清晰精神。
-# 表头条仍用原 GROUP_COLORS，二者同色相、深浅呼应。
-_DASHBOARD_LINE_COLORS = {
-    "G1": "#9d9da5",   # 中性灰 ← #3a3a3e
-    "G2": "#4aa8ec",   # 亮蓝   ← #1e4a6f
-    "G3": "#2fc4c4",   # 亮青   ← #1e5c5c
-    "G4": "#4cc96a",   # 亮绿   ← #1e5c2b
-    "G5": "#e2a23c",   # 亮橙   ← #6f4a1e
-    "G6": "#b65bd6",   # 亮紫   ← #5a1e6f
-}
+# 仪表盘折线色（theme.DASH_LINE_COLORS）：分类原色是为大块表头填充设计的，
+# 画细折线需同色相提亮（深色主题）/加深（浅色主题）——表头条仍用原 GROUP_COLORS。
+_DASHBOARD_LINE_COLORS = theme.DASH_LINE_COLORS
 
 
 def _build_score_bands() -> list[tuple[float, float, str, str]]:
@@ -141,6 +140,23 @@ def _fmt_num(v: float) -> str:
     return f"{v:.4f}".rstrip("0").rstrip(".")
 
 
+def _aa_layer_flat(c, items, tag: str | None) -> None:
+    """无 PIL 回退：canvas 原生绘制同一组 items（折线 smooth 近似抗锯齿）。"""
+    tags = (tag,) if tag else ()
+    for it in items:
+        if it[0] == "line":
+            pts: list[float] = []
+            for x, y in it[1]:
+                pts.extend((x, y))
+            if len(pts) >= 4:
+                c.create_line(*pts, fill=it[2], width=it[3], smooth=True, tags=tags)
+        else:
+            _, x, y, r, fill, outline = it[:6]
+            lw = it[6] if len(it) > 6 else 1
+            c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline=outline,
+                          width=lw, tags=tags)
+
+
 def _aa_layer(c, items, store, ss: int = 2, pad: int = 3, tag: str | None = None):
     """抗锯齿数据层：把线/点渲染到透明图（ss× 超采样 + LANCZOS 缩回）贴回 canvas。
 
@@ -151,8 +167,10 @@ def _aa_layer(c, items, store, ss: int = 2, pad: int = 3, tag: str | None = None
 
     items: ("line", pts, color, width) | ("dot", x, y, r, fill, outline)
     """
-    from PIL import Image, ImageDraw, ImageTk
     if not items:
+        return
+    if not _HAS_PIL:
+        _aa_layer_flat(c, items, tag)
         return
     xs, ys = [], []
     for it in items:
@@ -182,6 +200,10 @@ def _aa_layer(c, items, store, ss: int = 2, pad: int = 3, tag: str | None = None
             d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=fill, outline=outline,
                       width=max(1, lw * ss))
     im = im.resize((w, h), Image.LANCZOS)
+    # Tk 照片的 RGBA 转换成本随 alpha 值的种类数暴涨：LANCZOS 抗锯齿边缘会
+    # 产生上千种渐变 alpha（实测全幅转换 ~107ms），量化到 16 档后 ~23ms、
+    # 视觉不可辨。两层超采样贴图合计曾让趋势图一次重绘卡近半秒。
+    im.putalpha(im.getchannel("A").point(lambda v: min(255, (v // 16) * 16)))
     photo = ImageTk.PhotoImage(im)
     store.append(photo)
     c.create_image(x0, y0, image=photo, anchor="nw", tags=(tag,) if tag else ())
@@ -447,7 +469,7 @@ class TrendChart:
         seg.pack(side="left", padx=(10, 0))
         self._mode_pills: dict[str, tk.Frame] = {}
         for label, val in (("趋势图", "trend"), ("散点图", "scatter"),
-                           ("仪表板", "dashboard"), ("时段", "heatmap")):
+                           ("相关", "matrix"), ("仪表板", "dashboard"), ("时段", "heatmap")):
             pill = tk.Frame(seg, bg=theme.CONTROL_BG)
             pill.pack(side="left", padx=1)
             click = lambda e, v=val: self._set_mode(v)
@@ -567,6 +589,27 @@ class TrendChart:
         self._scatter_chart = ScatterChart(right)
         self._scatter_chart.update(self._reports)
 
+    def _build_matrix_content(self) -> None:
+        self._clear_content()
+        right = tk.Frame(self._content, bg=theme.BG)
+        right.pack(fill="both", expand=True)
+        self._add_mode_buttons(right)
+        self._matrix_chart = CorrMatrixChart(right, on_drill=self._drill_to_scatter)
+        self._matrix_chart.update(self._reports)
+
+    def _drill_to_scatter(self, x_key: str, y_key: str) -> None:
+        """相关矩阵点格子 → 切散点模式并自动设好 X/Y 轴。"""
+        self._set_mode("scatter")
+        sc = getattr(self, "_scatter_chart", None)
+        if sc is None:
+            return
+        label_for = {k: l for l, k in sc._label_to_key.items()}
+        xl, yl = label_for.get(x_key), label_for.get(y_key)
+        if yl:
+            sc._y_var.set(yl)  # 先 Y 后 X：Y 不触发重绘的竞态（各 trace 重绘幂等）
+        if xl:
+            sc._x_var.set(xl)
+
     def _build_heatmap_content(self) -> None:
         self._clear_content()
         right = tk.Frame(self._content, bg=theme.BG)
@@ -589,14 +632,19 @@ class TrendChart:
         mode = self._mode.get()
         if mode == "scatter":
             self._build_scatter_content()
+        elif mode == "matrix":
+            self._build_matrix_content()
         elif mode == "dashboard":
             self._build_dashboard_content()
         elif mode == "heatmap":
             self._build_heatmap_content()
         else:
             self._build_trend_content()
-            # Restore selector state
+            # Restore selector state: 先全清再恢复保存的键——新 selector 默认
+            # tcer=True，直接叠加会把用户取消勾选的 TCER 又加回来。
             if saved_keys and hasattr(self, '_selector'):
+                for var in self._selector._vars.values():
+                    var.set(False)
                 for k in saved_keys:
                     if k in self._selector._vars:
                         self._selector._vars[k].set(True)
@@ -637,6 +685,8 @@ class TrendChart:
         mode = self._mode.get()
         if mode == "scatter" and hasattr(self, "_scatter_chart"):
             self._scatter_chart.update(self._reports)
+        elif mode == "matrix" and hasattr(self, "_matrix_chart"):
+            self._matrix_chart.update(self._reports)
         elif mode == "dashboard" and hasattr(self, "_dashboard"):
             self._dashboard.update(self._reports)
         elif mode == "heatmap" and hasattr(self, "_heatmap_chart"):
@@ -1210,7 +1260,7 @@ class TrendChart:
         c.create_text(pad_l - 6, pad_t + plot_h / 2, text="0.5", anchor="e",
                       fill="#444444", font=theme.FONT_UI_SMALL)
         c.create_line(pad_l, pad_t + plot_h / 2, pad_l + plot_w,
-                      pad_t + plot_h / 2, fill="#2a2a2a", dash=(2, 4))
+                      pad_t + plot_h / 2, fill=theme.CHART_GRID, dash=(2, 4))
 
         # X-axis
         self._draw_x_axis(c, self._overlay[0].timestamps,
@@ -1254,7 +1304,7 @@ class TrendChart:
         # Left grid lines
         for tv in _nice_ticks(lo_l, hi_l, 4):
             ty = y_l(tv)
-            c.create_line(pad_l, ty, pad_l + plot_w, ty, fill="#2a2a2a", dash=(2, 4))
+            c.create_line(pad_l, ty, pad_l + plot_w, ty, fill=theme.CHART_GRID, dash=(2, 4))
             c.create_text(pad_l - 6, ty, text=_fmt_num(tv), anchor="e",
                           fill=ol_l.color, font=theme.FONT_UI_SMALL)
 
@@ -1519,14 +1569,14 @@ class ScatterChart:
         # Grid lines (Y)
         for tv in _nice_ticks(lo_y, hi_y, 4):
             ty = yv(tv)
-            c.create_line(pad, ty, pad + plot_w, ty, fill="#2a2a2a", dash=(2, 4))
+            c.create_line(pad, ty, pad + plot_w, ty, fill=theme.CHART_GRID, dash=(2, 4))
             c.create_text(pad - 6, ty, text=_fmt_num(tv), anchor="e",
                           fill=theme.MUTED, font=theme.FONT_UI_SMALL)
 
         # Grid lines (X)
         for tv in _nice_ticks(lo_x, hi_x, 4):
             tx = xv(tv)
-            c.create_line(tx, pad, tx, pad + plot_h, fill="#2a2a2a", dash=(2, 4))
+            c.create_line(tx, pad, tx, pad + plot_h, fill=theme.CHART_GRID, dash=(2, 4))
             c.create_text(tx, pad + plot_h + 6, text=_fmt_num(tv), anchor="n",
                           fill=theme.MUTED, font=theme.FONT_UI_SMALL)
 
@@ -1586,6 +1636,166 @@ class ScatterChart:
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="n")
 
 
+def _mix_hex(c1: str, c2: str, t: float) -> str:
+    """两色线性插值（t=0→c1，t=1→c2）；图表色阶用，不进 theme（派生色）。"""
+    t = max(0.0, min(1.0, t))
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(a, b))
+
+
+class CorrMatrixChart:
+    """指标相关性矩阵：N×N Pearson r 网格。
+
+    左侧勾选参与矩阵的指标（默认一组常用预设）；格子按 |r| 深浅着色——
+    正相关 = ACCENT 蓝系、负相关 = WARNING 橙系（同色相深浅，style.md
+    「蓝=强度中性」）。对角线显示指标名。悬停看 r 与样本数；点击格子下钻
+    到散点图并自动设好 X/Y（经 ``on_drill(x_key, y_key)`` 回调）。
+    """
+
+    _PRESET = ("cost", "total_tokens", "tcer", "chr", "churn", "net_loc")
+    _MAX_METRICS = 10  # 超出提示（格子过小不可读）
+
+    def __init__(self, parent, on_drill=None) -> None:
+        self._reports: list = []
+        self._on_drill = on_drill
+        self._frame = tk.Frame(parent, bg=theme.BG)
+        self._frame.pack(fill="both", expand=True)
+        self._tooltip = None
+        self._cells: list[tuple[int, int, int, int, str, str, float, int]] = []
+        self._resize_after: str | None = None
+        self._build(self._frame)
+
+    def _build(self, parent) -> None:
+        # 左：指标多选（与散点图同一 _NON_PLOTTABLE 过滤口径）
+        left = tk.Frame(parent, bg=theme.PANEL, width=190)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        sf = ScrollFrame(left, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True)
+        tk.Label(sf.inner, text="参与矩阵的指标", bg=theme.PANEL, fg=theme.FG,
+                 font=theme.FONT_UI_SMALL_BOLD, anchor="w"
+                 ).pack(fill="x", padx=8, pady=(8, 4))
+        self._vars: dict[str, tk.BooleanVar] = {}
+        for g in GROUPS:
+            for m in g.metrics:
+                if m.key in _NON_PLOTTABLE:
+                    continue
+                v = tk.BooleanVar(value=m.key in self._PRESET)
+                self._vars[m.key] = v
+                CheckRow(sf.inner, m.name, v)
+                v.trace_add("write", lambda *_: self._draw())
+
+        right = tk.Frame(parent, bg=theme.BG)
+        right.pack(side="left", fill="both", expand=True)
+        self._info = tk.Label(right, text="", bg=theme.BG, fg=theme.MUTED,
+                              font=theme.FONT_UI_SMALL, anchor="w")
+        self._info.pack(fill="x", padx=8, pady=(2, 0))
+        self.canvas = tk.Canvas(right, bg=theme.PANEL, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self._tooltip = _ChartTooltip(self.canvas)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Leave>", lambda e: self._tooltip.hide())
+        self.canvas.bind("<Button-1>", self._on_click)
+
+    def update(self, reports) -> None:
+        self._reports = list(reports)
+        self._draw()
+
+    def _on_canvas_configure(self, _event=None) -> None:
+        if self._resize_after is not None:
+            self.canvas.after_cancel(self._resize_after)
+        self._resize_after = self.canvas.after(120, self._draw)
+
+    def _selected(self) -> list[str]:
+        return [k for k, v in self._vars.items() if v.get()]
+
+    def _series(self, key: str) -> list[float]:
+        out = []
+        for r in self._reports:
+            v = metric_raw_value(r, key)
+            if v is not None:
+                out.append(v)
+        return out
+
+    def _draw(self) -> None:
+        c = self.canvas
+        c.delete("all")
+        keys = self._selected()
+        n_sel, n_rep = len(keys), len(self._reports)
+        if n_sel < 2:
+            self._info.config(text="请至少勾选 2 个指标")
+            return
+        if n_sel > self._MAX_METRICS:
+            self._info.config(text=f"已选 {n_sel} 个（建议 ≤{self._MAX_METRICS}，格子会很小）")
+        else:
+            self._info.config(text=f"{n_sel} × {n_sel} · 每格 = 两指标的 Pearson r（点格子下钻散点图）")
+        self._cells = []
+        w = c.winfo_width() or 600
+        h = c.winfo_height() or 400
+        pad = 6
+        cell = min(w - 2 * pad, h - 2 * pad) / n_sel
+        ox = pad + max(0, (w - 2 * pad - cell * n_sel) / 2)
+        oy = pad + max(0, (h - 2 * pad - cell * n_sel) / 2)
+        # 逐对序列（含 n 对齐：两指标都非 None 的会话才算一对）
+        for i, yk in enumerate(keys):
+            for j, xk in enumerate(keys):
+                x0, y0 = ox + j * cell, oy + i * cell
+                x1, y1 = x0 + cell - 2, y0 + cell - 2
+                if i == j:
+                    c.create_rectangle(x0, y0, x1, y1, fill=theme.PANEL_2,
+                                       outline=theme.BORDER)
+                    m = _metric_by_key.get(xk)
+                    nm = (m.name if m else xk)[:4]
+                    c.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=nm,
+                                  fill=theme.FG, font=theme.FONT_UI_SMALL)
+                    continue
+                xs, ys = [], []
+                for r in self._reports:
+                    xv = metric_raw_value(r, xk)
+                    yv = metric_raw_value(r, yk)
+                    if xv is not None and yv is not None:
+                        xs.append(xv)
+                        ys.append(yv)
+                r_val = _pearson_r(xs, ys) if len(xs) >= 3 else None
+                if r_val is None:
+                    fill = theme.PANEL_2
+                    txt = "-"
+                else:
+                    hue = theme.ACCENT if r_val >= 0 else theme.WARNING
+                    fill = _mix_hex(theme.PANEL_2, hue, abs(r_val))
+                    txt = f"{r_val:.2f}"
+                c.create_rectangle(x0, y0, x1, y1, fill=fill, outline=theme.BORDER)
+                if cell >= 34:
+                    c.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=txt,
+                                  fill=theme.FG, font=theme.FONT_MONO)
+                self._cells.append((x0, y0, x1, y1, xk, yk, r_val, len(xs)))
+
+    def _hit(self, x, y):
+        for x0, y0, x1, y1, xk, yk, r_val, n in self._cells:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return x0, y0, x1, y1, xk, yk, r_val, n
+        return None
+
+    def _on_motion(self, event) -> None:
+        hit = self._hit(event.x, event.y)
+        if not hit or hit[6] is None:
+            self._tooltip.hide()
+            self.canvas.config(cursor="")
+            return
+        _, _, _, _, xk, yk, r_val, n = hit
+        self.canvas.config(cursor=CLICK_CURSOR)
+        xn = metric_name(xk)
+        yn = metric_name(yk)
+        self._tooltip.show(event.x, event.y, f"{xn} × {yn}\nr = {r_val:+.3f}（n={n}）")
+
+    def _on_click(self, event) -> None:
+        hit = self._hit(event.x, event.y)
+        if hit and self._on_drill and hit[6] is not None:
+            self._on_drill(hit[4], hit[5])
+
+
 class DashboardChart:
     """6-group sparkline dashboard — one representative metric per G-group.
 
@@ -1606,9 +1816,14 @@ class DashboardChart:
     # 按日聚合时可直接求和的代表指标；其余按日取均值。
     _ADDITIVE = frozenset({"turns", "total_tokens", "net_loc", "cost"})
 
+    # key → 所属组 id（自定义指标后表头仍按所属组着色）。
+    _KEY_GROUP = {m.key: g.id for g in GROUPS for m in g.metrics}
+
     def __init__(self, parent) -> None:
         self._reports: list = []
         self._resize_after: str | None = None
+        # 自定义看板：6 格指标从 ui_prefs 恢复（非法/缺失回退默认代表指标）。
+        self._metrics: list[str] = self._load_metrics()
         bar = tk.Frame(parent, bg=theme.BG)
         bar.pack(fill="x")
         self._daily = tk.BooleanVar(value=False)
@@ -1617,9 +1832,58 @@ class DashboardChart:
             on_toggle=self._draw, font=theme.FONT_UI_SMALL,
             tooltip="开启后按日聚合：会话密度不均时曲线更真实（计数/金额求和，比率求均值）",
         )
+        tk.Label(bar, text="右键格子换指标", bg=theme.BG, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL).pack(side="right", padx=8)
         self.canvas = tk.Canvas(parent, bg=theme.PANEL, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", self._on_configure)
+        self.canvas.bind("<Button-3>", self._on_cell_menu)
+
+    @classmethod
+    def _load_metrics(cls) -> list[str]:
+        from tcer.core import ui_prefs
+        saved = ui_prefs.load().get("dashboard_metrics")
+        keys = [k for k in (saved or [])
+                if isinstance(k, str) and k in cls._KEY_GROUP
+                and k not in _NON_PLOTTABLE]
+        for _gid, key in cls._GROUP_METRICS:
+            if len(keys) >= len(cls._GROUP_METRICS):
+                break
+            if key not in keys:
+                keys.append(key)
+        return keys[:len(cls._GROUP_METRICS)]
+
+    def _save_metrics(self) -> None:
+        from tcer.core import ui_prefs
+        prefs = ui_prefs.load()
+        prefs["dashboard_metrics"] = list(self._metrics)
+        ui_prefs.save(prefs)
+
+    def _on_cell_menu(self, event) -> None:
+        """右键格子 → FlatMenu 按 G1–G6 分组列出可绘指标，选中即换并持久化。"""
+        w = self.canvas.winfo_width() or 1
+        h = self.canvas.winfo_height() or 1
+        cols = 3
+        rows = (len(self._metrics) + cols - 1) // cols
+        gi = (event.y // max(1, h // rows)) * cols + event.x // max(1, w // cols)
+        if not 0 <= gi < len(self._metrics):
+            return
+        menu = FlatMenu(self.canvas)
+        for g in GROUPS:
+            menu.add_command(label=f"— {g.name} —", state="disabled")
+            for m in g.metrics:
+                if m.key in _NON_PLOTTABLE:
+                    continue
+                menu.add_command(
+                    label=f"{m.name}（{m.unit}）" if m.unit else m.name,
+                    command=lambda k=m.key, i=gi: self._pick_metric(i, k))
+        self.canvas.update_idletasks()
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _pick_metric(self, gi: int, key: str) -> None:
+        self._metrics[gi] = key
+        self._save_metrics()
+        self._draw()
 
     def _series(self, key: str) -> list[float | None]:
         """会话序列或按日聚合序列（计数/金额求和，比率求均值）。"""
@@ -1656,13 +1920,13 @@ class DashboardChart:
         w, h = c.winfo_width(), c.winfo_height()
         if w < 10 or h < 10:
             return
-        n_groups = len(self._GROUP_METRICS)
+        n_groups = len(self._metrics)
         cols = 3
         rows = (n_groups + cols - 1) // cols
         cell_w = w // cols
         cell_h = h // rows
 
-        for gi, (gid, key) in enumerate(self._GROUP_METRICS):
+        for gi, key in enumerate(self._metrics):
             col = gi % cols
             row = gi // cols
             x0 = col * cell_w
@@ -1671,7 +1935,8 @@ class DashboardChart:
             metric = _metric_by_key.get(key)
             name = metric.name if metric else key
             unit = metric.unit if metric else ""
-            group_color = theme.GROUP_COLORS.get(gid, theme.PANEL)
+            group_color = theme.GROUP_COLORS.get(
+                self._KEY_GROUP.get(key, "G1"), theme.PANEL)
 
             # Cell background
             c.create_rectangle(x0, y0, x0 + cell_w, y0 + cell_h,
@@ -1717,7 +1982,7 @@ class DashboardChart:
             # Mean line
             ym = yv(mean_v)
             c.create_line(plot_x, ym, plot_x + plot_w, ym,
-                          fill="#444444", dash=(2, 3))
+                          fill=theme.MUTED, dash=(2, 3))
 
             # Sparkline（cell 极小，用 canvas 原生即可；PIL 抗锯齿留给大图）
             # 折线用分类色的提亮版（_DASHBOARD_LINE_COLORS）：原 GROUP_COLORS 偏暗，

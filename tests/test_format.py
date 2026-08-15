@@ -27,3 +27,14 @@ def test_format_constants_and_defaults():
     assert fmt.FMT_SHORT_SECOND == "%m-%d %H:%M:%S"
     assert fmt.fmt_dt(None) == "-"
     assert fmt.fmt_dt(0) == "-"
+
+
+def test_fmt_approx_cn():
+    from tcer.core.format import fmt_approx_cn
+    assert fmt_approx_cn(41041696) == "≈ 0.41亿"
+    assert fmt_approx_cn(200_000_000) == "≈ 2.00亿"
+    assert fmt_approx_cn(150_000) == "≈ 15万"
+    assert fmt_approx_cn(9_999_999) == "≈ 1000万"
+    assert fmt_approx_cn(200_000_000) is not None
+    assert fmt_approx_cn(9999) is None
+    assert fmt_approx_cn(None) is None

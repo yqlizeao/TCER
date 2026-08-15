@@ -583,3 +583,71 @@ def test_scan_skips_subagent_user_prompts(tmp_path):
     assert reader.is_subagent(sub) is True
     assert u.user_msgs == 0
     assert u.first_prompt_chars == 0
+
+
+def test_scan_records_turn_net_locs_and_compaction_turns(tmp_path):
+    """逐回合 LOC 流水 + 压缩回合位置（分段 TCER / 衰减分析的地基）。"""
+    import json
+
+    from tcer.core import reader as R
+
+    def _asst(i, cid, tool, inp):
+        return {"type": "assistant", "timestamp": 1_770_000_000_000 + i * 1000,
+                "message": {"role": "assistant", "id": f"m{i}",
+                            "usage": {"input_tokens": 10, "output_tokens": 5,
+                                      "cache_creation_input_tokens": 0,
+                                      "cache_read_input_tokens": 0},
+                            "content": [{"type": "tool_use", "id": cid, "name": tool,
+                                         "input": inp}]}}
+
+    def _res(cid):
+        return {"type": "user",
+                "message": {"role": "user",
+                            "content": [{"type": "tool_result", "tool_use_id": cid}]}}
+
+    lines = [
+        _asst(0, "t1", "Write", {"file_path": "a.py", "content": "x\ny\nz"}),
+        _res("t1"),
+        {"type": "system", "subtype": "compact_boundary"},
+        _asst(1, "t2", "Edit", {"file_path": "a.py", "old_string": "x",
+                                "new_string": "x\np"}),
+        _res("t2"),
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u, _ = R.scan_session(p, with_loc=True, include_user_texts=False)
+    assert u.turn_net_locs == [(0, 3, 0), (1, 1, 0)]
+    assert u.compaction_turns == [1]  # 边界之后的首个回合
+    assert u.compaction_count == 1
+
+
+def test_f1_correction_writes_back_to_turn_records(tmp_path):
+    """originalFile F1 修正的行差回写进逐回合流水（Σ turn_net_locs = 净 LOC）。"""
+    import json
+
+    from tcer.core import reader as R
+
+    lines = [
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0},
+                     "content": [{"type": "tool_use", "id": "t1", "name": "Write",
+                                  "input": {"file_path": "a.py",
+                                            "content": "\n".join(f"l{i}" for i in range(10))}}]}},
+        # 结果行：原文件其实有 8 行（覆写，净 +2 而非 +10）
+        {"type": "user", "toolUseResult": {"filePath": "a.py",
+                                           "originalFile": "\n".join(f"o{i}" for i in range(8))},
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u, sloc = R.scan_session(p, with_loc=True, include_user_texts=False)
+    assert sloc.added == 2
+    net_by_turn = {}
+    for turn, a, d in u.turn_net_locs:
+        pa, pd = net_by_turn.get(turn, (0, 0))
+        net_by_turn[turn] = (pa + a, pd + d)
+    assert sum(a - d for a, d in net_by_turn.values()) == 2  # 流水与总量一致

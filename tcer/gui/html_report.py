@@ -241,7 +241,8 @@ def _models_section(reports: list[SessionReport]) -> str:
                 cells.append(f'<td class="{cls}">{_esc(metric_defs.model_display(mc, m.key))}</td>')
             body.append(f"<tr><td{tip_attr}>{_esc(m.name)}</td>{''.join(cells)}</tr>")
     note = ('<p class="note">金色 = 该行最优值（按指标好坏方向）。'
-            '产出/行为/质量指标仅统计该模型为主力（&gt;50% Token）的会话。</p>')
+            '产出/行为/质量指标按各模型在会话内的 Token 占比加权分摊：'
+            '单模型会话全额归因，混合会话按占比拆分到每个模型。</p>')
     return f'<div class="scroll"><table>{head}{"".join(body)}</table></div>{note}'
 
 
@@ -317,6 +318,14 @@ def _shell(title: str, body: str) -> str:
 # --------------------------------------------------------------------------- #
 # Public entry points
 # --------------------------------------------------------------------------- #
+# 项目级报告的可选章节 key（导出弹窗据此勾选；默认全选 = 旧行为）。
+PROJECT_SECTIONS = ("kpi", "groups", "score", "models", "sessions", "details")
+_SECTION_LABELS = {
+    "kpi": "总览 KPI", "groups": "六组指标", "score": "评分与排名",
+    "models": "模型对比", "sessions": "会话明细表", "details": "每会话完整指标",
+}
+
+
 def render_project_html(
     reports: list[SessionReport],
     agg: SessionReport,
@@ -325,31 +334,44 @@ def render_project_html(
     source_label: str = "",
     n_sessions: int | None = None,
     n_subagents: int = 0,
+    sections: "list[str] | tuple[str, ...] | set[str] | None" = None,
 ) -> str:
-    """项目级自包含 HTML 报告：总览 + 聚合指标 + 综合效率分排名 + 模型对比 + 会话明细。"""
+    """项目级自包含 HTML 报告：总览 + 聚合指标 + 综合效率分排名 + 模型对比 + 会话明细。
+
+    ``sections`` 传入要保留的章节 key 子集（见 ``PROJECT_SECTIONS``），未选
+    章节直接不拼对应 HTML 块；None = 全选（默认，旧行为不变）。
+    """
+    sel = set(PROJECT_SECTIONS) if sections is None else set(sections)
     n = n_sessions if n_sessions is not None else len(reports)
     extra = f"会话 <b>{n}</b>" + (f"（含 {n_subagents} 个子代理）" if n_subagents else "")
     body = [
         f"<h1>TCER 效率报告 · {_esc(project_name)}</h1>",
         _meta_line(agg, source_label=source_label, extra=extra),
-        _kpi_section(agg, n),
-        _unseen_warning(agg),
-        "<h2>聚合指标（六组分类）</h2>",
-        '<p class="note">白色 = 基准值/纯数据；黄色 = 含 magic number，仅作参考。'
-        "综合效率分为三正交轴加权，聚合视图按聚合口径重算后有效。</p>",
-        _groups_section(agg),
-        "<h2>综合效率分排名</h2>",
-        _score_section(reports),
-        "<h2>模型对比</h2>",
-        _models_section(reports),
-        "<h2>会话明细</h2>",
-        _sessions_table(reports),
-        "<h2>每会话完整指标</h2>",
-        '<p class="note">点击展开单个会话的全部指标（与 GUI 指标分类页一致）。</p>',
-        _session_details_section(reports),
-        f"<footer>由 TCER v{_esc(_version())} 生成 · 纯离线分析，LOC 来自会话内工具调用回放，"
-        "不依赖 git · 成本按 API 官方标价估算，非订阅实际扣费。</footer>",
     ]
+    if "kpi" in sel:
+        body += [_kpi_section(agg, n), _unseen_warning(agg)]
+    if "groups" in sel:
+        body += [
+            "<h2>聚合指标（六组分类）</h2>",
+            '<p class="note">白色 = 基准值/纯数据；黄色 = 含 magic number，仅作参考。'
+            "综合效率分为三正交轴加权，聚合视图按聚合口径重算后有效。</p>",
+            _groups_section(agg),
+        ]
+    if "score" in sel:
+        body += ["<h2>综合效率分排名</h2>", _score_section(reports)]
+    if "models" in sel:
+        body += ["<h2>模型对比</h2>", _models_section(reports)]
+    if "sessions" in sel:
+        body += ["<h2>会话明细</h2>", _sessions_table(reports)]
+    if "details" in sel:
+        body += [
+            "<h2>每会话完整指标</h2>",
+            '<p class="note">点击展开单个会话的全部指标（与 GUI 指标分类页一致）。</p>',
+            _session_details_section(reports),
+        ]
+    body.append(
+        f"<footer>由 TCER v{_esc(_version())} 生成 · 纯离线分析，LOC 来自会话内工具调用回放，"
+        "不依赖 git · 成本按 API 官方标价估算，非订阅实际扣费。</footer>")
     return _shell(f"TCER 效率报告 · {project_name}", "\n".join(body))
 
 

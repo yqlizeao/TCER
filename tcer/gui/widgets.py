@@ -290,10 +290,14 @@ class MetricCell:
 
     Holds ``self.var`` so the panel can update the value without rebuilding.
     Value color reflects sentiment: green=good direction, red=bad, gray=neutral.
+    ``approx=True`` 时数值右侧追加中文量级近似小字（如 41,041,696 ≈ 0.4亿，
+    小号灰白），帮助快速读出大数——精确数照常展示。
     """
 
-    def __init__(self, parent, metric: Metric, on_click=None) -> None:
+    def __init__(self, parent, metric: Metric, on_click=None, *,
+                 approx: bool = False) -> None:
         self.metric = metric
+        self._approx = approx
         self.frame = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=0)
         color = theme.LEVEL_COLORS.get(metric.level, theme.LEVEL_BASIC)
 
@@ -305,9 +309,22 @@ class MetricCell:
 
         self.var = tk.StringVar(value="-")
         value_fg = theme.VALUE_NEUTRAL
-        self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
-                              fg=value_fg, font=theme.FONT_VALUE, anchor="w")
-        self.value.pack(anchor="w")
+        if approx:
+            row = tk.Frame(self.frame, bg=theme.PANEL)
+            row.pack(anchor="w")
+            self.value = tk.Label(row, textvariable=self.var, bg=theme.PANEL,
+                                  fg=value_fg, font=theme.FONT_VALUE, anchor="w")
+            self.value.pack(side="left")
+            self.approx_lbl = tk.Label(row, text="", bg=theme.PANEL, fg=theme.MUTED,
+                                       font=theme.FONT_UI_SMALL, anchor="w")
+            self.approx_lbl.pack(side="left", padx=(4, 0))
+            widgets = (self.frame, self.title, self.value, self.approx_lbl)
+        else:
+            self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
+                                  fg=value_fg, font=theme.FONT_VALUE, anchor="w")
+            self.value.pack(anchor="w")
+            self.approx_lbl = None
+            widgets = (self.frame, self.title, self.value)
 
         if on_click:
             self.value.config(cursor=CLICK_CURSOR)
@@ -316,12 +333,19 @@ class MetricCell:
             self.title.bind("<Button-1>", lambda e: on_click())
 
         tip = f"{metric.name}\n{metric.tip}"
-        for w in (self.frame, self.title, self.value):
+        for w in widgets:
             Tooltip(w, tip)
 
     def set_value(self, text: str) -> None:
         """Update displayed value and apply sentiment-based coloring."""
         self.var.set(text)
+        if self.approx_lbl is not None:
+            try:
+                num = float(text.replace(",", "").replace("%", "").replace("$", ""))
+                from tcer.core.format import fmt_approx_cn
+                self.approx_lbl.config(text=fmt_approx_cn(num) or "")
+            except (ValueError, TypeError):
+                self.approx_lbl.config(text="")
         if text == UNSUPPORTED_LABEL:
             # 数据源不提供该字段 — 弱化显示，与「无数据 -」区分。
             self.value.config(fg=theme.MUTED)
@@ -397,12 +421,76 @@ class SelectableLabel(tk.Text):
             self._last_width = event.width
             self._auto_height()
 
+    # ---- 高度测量合并结算 ----------------------------------------------- #
+    # 每个实例各自 ``update_idletasks()`` 再 count 是灾难：一次强制全量布局
+    # ~40ms，效率榜一次刷新建 47 个洞察条 → 47 次全量布局 ≈ 2s 主线程卡顿。
+    # 改为类级待测队列 + 单个 after_idle：布局只结算一次，逐个 count（便宜）。
+    # 定时器锚定到长命的 toplevel：tkinter 的 after 回调注册在调度 widget 名下，
+    # 该 widget 在 idle 前被销毁（重建流程常见）会连 tcl 命令一起删掉、定时器
+    # 永不触发——待测队列随之永久挂起。每次登记时校验锚存活自愈。
+    _PENDING: "set[SelectableLabel]" = set()
+    _PENDING_AFTER: str | None = None
+    _ANCHOR: "tk.Misc | None" = None
+    _RETRY_MS = 30     # 未布局 widget 的重试间隔
+    _MAX_TRIES = 10    # 重试上限，超限走旧式强制测量兜底
+
     def _auto_height(self) -> None:
-        """按 wrap 后的实际视觉行数撑高，displaylines+1 余量避免末行被裁。"""
-        self.update_idletasks()
-        n = self.count("1.0", "end-1c", "displaylines")
-        lines = n[0] if n and n[0] else 1
-        self.configure(height=max(1, lines + 1))
+        """登记待测高；实际测量合并到下一个空闲点（见 _flush_pending_heights）。"""
+        cls = type(self)
+        self._h_tries = 0
+        cls._PENDING.add(self)
+        cls._arm()
+
+    @classmethod
+    def _arm(cls, delay: int | None = None) -> None:
+        """（重新）武装合并测量定时器；锚死自愈。"""
+        anchor = cls._ANCHOR
+        if anchor is not None and not anchor.winfo_exists():
+            anchor = None
+            cls._PENDING_AFTER = None  # 锚已死：旧定时器必失效，重排
+        if anchor is None:
+            if not cls._PENDING:
+                return
+            w = next(iter(cls._PENDING))
+            try:
+                cls._ANCHOR = anchor = w.winfo_toplevel()
+            except tk.TclError:
+                cls._PENDING.clear()
+                return
+        if cls._PENDING_AFTER is None:
+            if delay is None:
+                cls._PENDING_AFTER = anchor.after_idle(cls._flush_pending_heights)
+            else:
+                cls._PENDING_AFTER = anchor.after(delay, cls._flush_pending_heights)
+
+    @classmethod
+    def _flush_pending_heights(cls) -> None:
+        cls._PENDING_AFTER = None
+        if not cls._PENDING:
+            return
+        pending = [w for w in cls._PENDING if w.winfo_exists()]
+        cls._PENDING.clear()
+        stuck: list = []
+        for w in pending:
+            try:
+                if w.winfo_width() <= 1:
+                    # 尚未布局（宽度仍为初始 1）：此刻测量必错。短暂重试等
+                    # 布局；一直不布局（折叠区等未映射容器）超限后按旧式
+                    # update_idletasks 强制结算兜底。
+                    w._h_tries = getattr(w, "_h_tries", 0) + 1
+                    if w._h_tries <= cls._MAX_TRIES:
+                        stuck.append(w)
+                        continue
+                    w.update_idletasks()
+                n = w.count("1.0", "end-1c", "displaylines")
+                lines = n[0] if n and n[0] else 1
+                w.configure(height=max(1, lines + 1))
+                w._h_tries = 0
+            except tk.TclError:
+                pass  # 竞态销毁：放弃该实例
+        if stuck:
+            cls._PENDING.update(stuck)
+            cls._arm(cls._RETRY_MS)
 
     def _copy_menu(self, event=None) -> None:
         menu = FlatMenu(self)

@@ -52,36 +52,43 @@ def _subgrouped(gid: str, name: str, subgroups: list[Subgroup]) -> Group:
     return Group(gid, name, flat, subgroups)
 
 
+# 数值旁追加中文量级近似小字的指标（如 41,041,696 ≈ 0.4亿；见 widgets.MetricCell
+# 的 approx 参数与 format.fmt_approx_cn）。大数可读性辅助，精确值照常展示。
+APPROX_KEYS = frozenset({"total_tokens"})
+
+
 GROUPS: list[Group] = [
     Group("G1", "会话概况", [
-        Metric("subagent", "子代理", "",
-               "并入该会话的子代理数量。子代理是 Claude Code 为复杂任务自动拆出的并行助手，"
-               "其 Token 与代码行合并计入父会话。", "basic"),
-        Metric("turns", "助手回合", "",
-               "Claude 助手回复的总条数（仅计有真实 token 消耗的回合）；"
-               "括号内为跳过的零 usage 回合（thinking stub 等）。", "basic"),
-        Metric("started", "开始时间", "", "会话第一条助手回复的时间戳。", "basic"),
-        Metric("last_time", "结束时间", "", "会话最后一条助手回复的时间戳，配合「开始时间」可判断活跃时段。", "basic"),
+        Metric("turns", "请求数", "",
+               "会话内向模型 API 发起的请求总数（成功返回且带用量的；与 cc-switch 的"
+               "「请求数」同口径——一次请求对应一条助手响应）。\n"
+               "括号内为跳过的零 usage 桩（thinking stub / 占位行）。", "basic"),
+        Metric("started", "开始时间", "", "会话首个事件的时间戳（Claude 为首条助手回复；其余源含会话头/首条用户消息）。", "basic"),
+        Metric("last_time", "结束时间", "", "会话最后事件的时间戳（Claude 为末条助手回复；其余源含收尾事件），配合「开始时间」可判断活跃时段。", "basic"),
         Metric("duration", "持续时长", "",
                "首条到末条助手回复的时间差，含用户阅读暂停，非 AI 纯计算时间。", "basic"),
         Metric("models", "模型", "", "该会话使用的 AI 模型（友好名），同一会话可能混用多个。", "basic"),
         Metric("tools", "工具调用", "",
                "Claude Code 调用的工具及次数，点击查看详细列表。", "basic"),
-        Metric("latency", "平均延迟", "秒",
-               "公式：首尾时间差 ÷ 回合数\n"
-               "推荐：越低越好（仅供粗略参考）\n"
-               "说明：每回合平均耗时，含用户暂停，不代表 AI 真实响应速度。", "basic", "down"),
+        Metric("latency", "平均延迟", "毫秒",
+               "公式：各次 API 请求耗时的平均值（逐请求 duration 求均值）\n"
+               "推荐：越低越好（编程模型一次补全含长思考，几十秒属常见）\n"
+               "说明：与 cc-switch 的「平均延迟」同口径——模型处理一次请求的完整耗时。"
+               "Codex / Grok / Oh My Pi 提供单次补全精确耗时；Claude 只记录整轮墙钟"
+               "（含工具执行与等待，实测可达十几分钟），无法还原单请求耗时，显示「不适用」。", "basic", "down"),
+        Metric("user_gap_median", "用户响应间隔", "分",
+               "公式：相邻回合时间戳间隔的中位数（只统计 1–30 分钟的间隔）\n"
+               "怎么看：你的「出手节奏」——间隔长说明每次回来都带着想清楚的新指令。\n"
+               "说明：<1 分钟的连发与 >30 分钟的离开不计入。", "basic"),
         Metric("user_msgs", "用户消息", "",
-               "你主动发送的消息条数，点击查看全部；与「助手回合」对比可看交互密度。", "basic"),
+               "你主动发送的消息条数，点击查看全部；与「请求数」对比可看交互密度（一次提问可触发多次 API 请求）。", "basic"),
         Metric("entrypoint", "启动方式", "",
                "会话启动入口：claude-vscode（VS Code 扩展）、claude-cli（命令行）等。", "basic"),
         Metric("memory_files", "项目记忆文件", "个",
                "当前项目 memory/ 目录下的文件数量（项目级指标，项目汇总与会话"
                "视图均显示同一计数）。点击查看文件列表并可跳转到目录。", "basic"),
         Metric("cli_version", "客户端版本", "",
-               "本地代理会话记录中的 CLI / App 版本。Claude 会话或旧记录无此字段时显示 -。", "basic"),
-        Metric("model_provider", "模型供应商", "",
-               "本地代理记录中的模型供应商，用于区分 OpenAI、custom provider 等来源。", "basic"),
+               "会话记录中的 CLI / 客户端版本（各源行级字段；缺失显示 -）。", "basic"),
         Metric("thread_source", "线程来源", "",
                "本地代理线程来源分类，例如 user、automation 或其他未来来源。", "basic"),
         Metric("approval_policy", "审批策略", "",
@@ -90,33 +97,19 @@ GROUPS: list[Group] = [
                "本地代理记录中的沙箱策略 / permission profile，帮助解释工具可用范围。", "basic"),
         Metric("reasoning_effort", "推理强度", "",
                "本地代理记录中的 reasoning effort；不同模型或配置可能为空。", "basic"),
-        Metric("git_branch", "Git 分支", "",
-               "本地代理会话开始时记录的工作分支。", "basic"),
-        Metric("git_commit", "Git 提交", "",
-               "本地代理会话开始时记录的提交。", "basic"),
         Metric("plan_modes", "计划模式", "",
                "会话中进入计划模式（plan mode）的次数——先规划后动手的工作流信号。", "basic"),
         Metric("slash_commands", "斜杠命令", "",
                "以 / 开头或经命令面板发送的用户消息数——工作流自动化程度的信号。", "basic"),
-        Metric("correction_msgs", "纠正消息", "",
-               "含显式纠正措辞（不对/重来/撤销/undo…）的用户消息数。\n"
-               "偏高 = 输出方向频繁跑偏；保守词表匹配，仅作趋势参考。", "basic", "down"),
-        Metric("first_prompt_chars", "首条消息长度", "字",
-               "首条真实用户消息的字符数——任务描述的投入度；过短的开场常伴随更多来回澄清。", "basic"),
         Metric("hook_overhead", "钩子开销", "",
                "stop hook（lint/test 等用户配置的钩子）的累计耗时与失败次数——"
                "「你自己装的钩子拖慢了多少」。", "basic", "down"),
-        Metric("queued_inputs", "排队输入", "",
-               "AI 运行期间用户排队发送输入的次数——打断/并行指令的行为信号。", "basic"),
-        Metric("ratings", "用户评价", "",
-               "会话中用户给出的显式好评/差评次数，来自本地代理的信号记录。", "basic"),
         Metric("permission_wait", "审批等待", "秒",
                "工具执行前等待用户审批的累计时长——「人卡住 AI」的时间。\n"
                "推荐：越低越流畅；括号内为审批请求次数。", "basic", "down"),
-        Metric("itl_p50", "输出间隔P50", "毫秒",
-               "inter-token latency 中位数：相邻输出块的间隔毫秒数，反映生成流畅度。", "basic", "down"),
-        Metric("itl_p99", "输出间隔P99", "毫秒",
-               "inter-token latency P99：输出卡顿的尾部延迟，偏高说明生成经常停顿。", "basic", "down"),
+        Metric("subagent", "子代理", "",
+               "并入该会话的子代理数量。子代理是 Claude Code 为复杂任务自动拆出的并行助手，"
+               "其 Token 与代码行合并计入父会话。", "basic"),
     ]),
     Group("G2", "Token 用量", [
         Metric("total_tokens", "总 Token", "",
@@ -133,10 +126,6 @@ GROUPS: list[Group] = [
                "本地代理单独暴露的推理输出 Token；它已包含在「输出」中，这里只作为推理占比分析，不重复计费。", "basic"),
         Metric("context_window", "上下文窗口", "",
                "本地代理上报的 model_context_window，表示当前模型上下文窗口大小。", "basic"),
-        Metric("peak_input", "峰值输入", "",
-               "单轮输入 Token 峰值 = max(每轮 input + cache_write + cache_read)。\n"
-               "窗口使用率的分子。Claude/Codex/Grok/omp 按 API 回合统计；OpenCode 来自 step-finish 快照"
-               "（禁止用会话累计总输入当峰值，否则多轮会虚高几十倍）。", "basic"),
         Metric("context_window_used", "窗口使用率", "",
                "公式：峰值输入 ÷ 上下文窗口\n"
                "说明：衡量「最挤的一轮」相对模型窗口的压力；≈1 表示顶满窗口，>1 偶见（上报窗口偏小或含系统开销）。"
@@ -203,15 +192,18 @@ GROUPS: list[Group] = [
             Metric("read_write_ratio", "读写比", "",
                    "公式：Read ÷（Write + Edit）\n"
                    "推荐：Read 为改动数的 3 倍以上较健康（仅供参考）\n"
-                   "说明：反映「先读后改」习惯。⚠️ 仅统计 Read 工具，经 Bash 的 cat/head 阅读不计入；故创作/调试类(多用 Bash 看文件)会偏低，不必据此判定「盲写」。", "basic", "up"),
+                   "说明：反映「先读后改」习惯。分子除 Read 外还计入抓取/读取类 MCP 工具"
+                   "（fetch/scrape/extract 等，经它们阅读的上下文同样是「读」）；"
+                   "经 Bash 的 cat/head 阅读不计入——创作/调试类会偏低，不必据此判定「盲写」。", "basic", "up"),
             Metric("edit_ratio", "编辑占比", "",
                    "公式：Edit ÷（Edit + Write）\n"
                    "推荐：>70%\n"
                    "说明：越高越偏增量修改而非整文件重写；新建文件多时自然偏低。", "basic", "up"),
             Metric("exploration_ratio", "探索占比", "",
-                   "公式：（Grep + Glob）÷ 总工具调用\n"
+                   "公式：（Grep + Glob + 网页搜索 + 搜索类 MCP 工具）÷ 总工具调用\n"
                    "推荐：视任务而定（仅供参考）\n"
-                   "说明：⚠️ 分子只含 Grep/Glob，但 Claude Code 大量探索走 Bash（rg/find/cat）与子代理,均不计入；分母含 Bash/TodoWrite 等，故实测普遍低于直觉。仅作粗略趋势参考。", "basic"),
+                   "说明：Claude Code 大量探索走 Bash（rg/find/cat）与子代理，均不计入分子；"
+                   "分母含 Bash/TodoWrite 等，故实测普遍低于直觉。仅作粗略趋势参考。", "basic"),
             Metric("bash_ratio", "Bash 占比", "",
                    "公式：Bash/PowerShell 调用 ÷ 总工具调用\n"
                    "说明：量化「经 Bash 完成的阅读/搜索」盲区暴露面——占比越高，"
@@ -239,6 +231,15 @@ GROUPS: list[Group] = [
                    "说明：部分本地代理会把推理输出 Token 单独上报，比例越高通常表示更多输出预算用于推理。", "basic"),
             Metric("compactions", "上下文压缩", "",
                    "本地代理记录中的上下文压缩次数；数值高表示会话发生过上下文压缩或窗口替换。", "basic"),
+            Metric("compaction_cost", "压缩代价", "",
+                   "公式：Σ 压缩丢弃 Token（compactMetadata 的 cumulativeDroppedTokens 或 pre−post）；"
+                   "括号内为压缩前上下文峰值与压缩总耗时。\n"
+                   "说明：回答「压缩到底丢了多少、值不值」——丢弃量 × 重新读入单价即压缩的隐性成本；"
+                   "部分版本只记 preTokens（无丢弃量字段）时显示 0，仅括号信息可用。", "basic", "down"),
+            Metric("loc_confidence", "LOC 可信度", "",
+                   "公式：1 − |回放−patch| ÷ patch 行数（回放 added/deleted vs Claude 自算 structuredPatch）\n"
+                   "说明：给「净增行」标置信度——吻合率低提示回放假设失效（如 replace_all 多处替换只计一次），"
+                   "该会话的 LOC 类指标需谨慎读。", "basic", "up"),
             Metric("web_searches", "网页搜索", "",
                    "本地代理记录中的网页搜索数量；旧格式仅有结束事件时用结束事件兜底。", "basic"),
             Metric("image_inputs", "图片输入", "",
@@ -258,6 +259,14 @@ GROUPS: list[Group] = [
                    "公式：工具出错次数 ÷ 总工具调用\n"
                    "推荐：越低越好\n"
                    "说明：反映操作可靠性，偏高常因文件不存在、命令失败、Edit 匹配不到；审查/探索类自然略高。", "basic", "down"),
+            Metric("retry_loops", "重试循环", "次",
+                   "公式：同工具对同一路径连续重复调用 ≥3 次的循环个数\n"
+                   "推荐：0，越少越好\n"
+                   "说明：卡死信号——错误率只给比例，循环给结构：同一文件反复 Edit 失败、反复 Read 同一大文件，往往是陷入死循环的回合级证据。无路径的工具（Bash）不参与。", "basic", "down"),
+            Metric("retry_loop_max", "最长重试", "次",
+                   "公式：最长一次重试循环的连续重复次数\n"
+                   "推荐：≤3，越低越好\n"
+                   "说明：单个循环烧掉的回合数上限，与「重试循环」个数互补——个数少但很长时更值得复盘。", "basic", "down"),
             Metric("first_pass_ratio", "一次写对率", "",
                    "公式：只编辑 1 次的文件数 ÷ 被编辑文件总数\n"
                    "推荐：越高越好\n"
@@ -315,17 +324,29 @@ GROUPS: list[Group] = [
                "公式：总成本 ÷ 净增行 × 1000\n"
                "推荐：<$10 优秀 · $10–30 良好 · >$30 需改进\n"
                "说明：每千行净代码花费，可跨项目/模型对比；调试任务偏高属正常。", "basic", "down"),
+        Metric("turn_cost_share", "最贵回合占比", "",
+               "公式：最贵单个回合的成本 ÷ 全部回合成本合计\n"
+               "推荐：≤30%，越低越好\n"
+               "说明：单个回合吃掉全会话三成以上成本时值得复盘——常是失控循环、巨型粘贴或一次读爆上下文的文件；「-」表示无逐回合数据。", "basic", "down"),
+        Metric("cost_vs_reported", "自报成本偏差", "",
+               "公式：价表计价成本 ÷ 源自报成本（1.00 = 口径一致）\n"
+               "说明：交叉验证计价引擎——OpenCode 报会话总额、Oh My Pi / Pi 逐响应累加美元。"
+               "显著偏离 1.0 提示价表错价、漏 1h 缓存档溢价、或未匹配模型走了默认价。", "basic"),
     ]),
     Group("G6", "综合评分", [
         Metric("tcer", "TCER", "行/百万",
                "核心指标：每烧 100 万 Token，AI 写出了多少行净代码——衡量「划不划算」。\n"
                "怎么看：越高越省；新功能通常 >50，参考中位数约 76.6；调试/重构天然偏低，正常。\n"
                "想提高：提高缓存命中率、少返工、别让 AI 反复重写整文件。", "basic", "up"),
+        Metric("efficiency_decay", "效率衰减比", "",
+               "公式：会话末 1/3 回合的分段 TCER ÷ 首 1/3 回合的分段 TCER\n"
+               "推荐：≥0.5；明显低于 0.5 说明上下文越拖越重、后期在空转\n"
+               "说明：定位「长会话什么时候开始不划算」——衰减明显时收口新开一场往往更省；结合会话时间线里的压缩事件竖线看恢复情况。", "basic", "up"),
         Metric("score", "综合效率分", "",
                "0–100 的总分：把「产出效率 · 成本 · 质量」三件正交的事各自和参考线比、\n"
                "按会话规模收缩后加权平均得来。分越高越好。\n"
                "怎么看：>75 优秀 · 60–75 良好 · 45–60 中等 · 25–45 待改进 · <25 低效。\n"
-               "三条轴：产出效率(每百万 token 的任务归一产出) · 成本(每千行花费，已含缓存省的钱) · 质量(少返工/少工具报错/先读后写)。\n"
+               "三条轴：产出效率(每百万 token 的任务归一产出) · 成本(每千行花费，已含缓存省的钱) · 质量(少返工/少工具报错/先读后写；无质量信号时其权重重分给产出/成本轴)。\n"
                "小会话会被拉向中间分，避免「写 5 行就登顶」；全部来自会话数据，单会话与项目聚合均有效。", "compound", "up"),
         Metric("tier", "评级", "",
                "上面「综合效率分」对应的等级标签：优秀/良好/中等/待改进/低效，"
@@ -383,8 +404,8 @@ def _tools_summary(report: SessionReport) -> str:
 
 
 def _turns_display(u) -> str:
-    """助手回合：真实回合数，有跳过时追加 (+N 跳过)"""
-    total = u.assistant_msgs
+    """请求数：与 raw_value 同口径（Grok 按 API 调用数），有跳过追加 (+N 跳过)"""
+    total = u.api_calls or u.assistant_msgs
     skipped = u.empty_usage_skipped
     if skipped:
         return f"{fmt.fmt_int(total)}（+{skipped} 跳过）"
@@ -416,17 +437,17 @@ _SESSION_FMT: dict[str, str] = {
     "subagent": "text", "turns": "text", "started": "text", "last_time": "text",
     "duration": "text", "models": "text", "tools": "text", "entrypoint": "text",
     "task_type": "text", "tier": "text", "cli_version": "text",
-    "model_provider": "text", "thread_source": "text", "approval_policy": "text",
-    "sandbox_policy": "text", "reasoning_effort": "text", "git_branch": "text",
-    "git_commit": "text",
-    "latency": "float:0.0", "user_msgs": "int",
+    "thread_source": "text", "approval_policy": "text",
+    "sandbox_policy": "text", "reasoning_effort": "text",
+    "latency": "int", "user_msgs": "int",
+    "user_gap_median": "float:0.0",
     # G2
     "total_tokens": "int", "input": "int", "output": "int",
     "cache_write": "int", "cache_read": "int", "reasoning_tokens": "int",
-    "context_window": "int", "peak_input": "int", "context_window_used": "pct",
+    "context_window": "int", "context_window_used": "pct",
     "output_tps": "float:0.0",
     # G3
-    "chr": "pct", "io_ratio": "float:0.1", "caf": "float:0.00",
+    "chr": "pct4", "io_ratio": "float:0.1", "caf": "float:0.00",
     "cache_efficiency": "float:0.00", "cache_write_ratio": "pct",
     "non_cached_input_ratio": "pct",
     # G4
@@ -436,8 +457,11 @@ _SESSION_FMT: dict[str, str] = {
     "edit_ratio": "pct", "exploration_ratio": "pct", "thinking_count": "int",
     "files_touched": "int", "search_edit_ratio": "pct", "read_before_write": "pct",
     "tool_error_rate": "pct", "high_churn_files": "int", "unseen_writes": "int",
+    "retry_loops": "int", "retry_loop_max": "int",
     "first_pass_ratio": "pct",
     "memory_files": "int", "reasoning_ratio": "pct", "compactions": "int",
+    "compaction_cost": "int", "cost_vs_reported": "float:0.00",
+    "loc_confidence": "pct",
     "web_searches": "int", "image_inputs": "int", "task_completion": "pct",
     "ttft": "float:0.0", "ttft_p95": "float:0.0", "rate_limit_peak": "pct",
     "patch_success": "pct", "aborted_tasks": "int",
@@ -445,15 +469,15 @@ _SESSION_FMT: dict[str, str] = {
     "cancellations": "int", "regenerations": "int", "reverted_lines": "int",
     "git_commits": "int", "user_modified": "int", "revert_events": "int",
     # G1 新增
-    "ratings": "text", "permission_wait": "text",
-    "itl_p50": "int", "itl_p99": "int",
-    "hook_overhead": "text", "queued_inputs": "int",
-    "slash_commands": "int", "correction_msgs": "int", "first_prompt_chars": "int",
+    "permission_wait": "text",
+    "hook_overhead": "text",
+    "slash_commands": "int",
     "plan_modes": "int", "read_truncations": "int", "reasoning_time": "text",
     # G5
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
+    "turn_cost_share": "pct",
     # G6
-    "tcer": "float:0.0", "score": "float:0.0", "ttaf": "float:0.00",
+    "tcer": "float:0.0", "efficiency_decay": "float:0.00", "score": "float:0.0", "ttaf": "float:0.00",
     "ntcer": "float:0.00",
     "score_output_axis": "float:0.00", "score_cost_axis": "float:0.00",
     "score_quality_axis": "float:0.00",
@@ -464,8 +488,15 @@ _SESSION_FMT: dict[str, str] = {
 _REPORT_ATTR = {
     "churn": "churn_ratio", "added": "code_added", "deleted": "code_deleted",
     "test_loc": "test_net_loc", "doc_loc": "doc_net_loc",
-    "high_churn_files": "high_churn_file_count", "latency": "avg_turn_latency_sec",
+    "high_churn_files": "high_churn_file_count",
     "first_pass_ratio": "first_pass_file_ratio",
+    "retry_loops": "retry_loop_count", "retry_loop_max": "retry_loop_max_len",
+    "latency": "avg_request_latency_ms",
+    "turn_cost_share": "turn_cost_max_share",
+    "user_gap_median": "user_gap_median_min",
+    "efficiency_decay": "efficiency_decay_ratio",
+    "cost_vs_reported": "cost_reported_ratio",
+    "loc_confidence": "loc_patch_agreement",
     "context_window_used": "context_window_used_ratio",
     "reasoning_ratio": "reasoning_output_ratio",
     "task_completion": "task_completion_rate",
@@ -480,7 +511,6 @@ _USAGE_ATTR = {
     "user_msgs": "user_msgs", "thinking_count": "thinking_count",
     "reasoning_tokens": "reasoning_output_tokens",
     "context_window": "model_context_window",
-    "peak_input": "peak_input_tokens",
     "compactions": "compaction_count",
     "web_searches": "web_search_count",
     "aborted_tasks": "aborted_task_count",
@@ -492,12 +522,7 @@ _USAGE_ATTR = {
     "git_commits": "git_commit_count",
     "user_modified": "user_modified_count",
     "revert_events": "revert_events",
-    "itl_p50": "itl_p50_ms",
-    "itl_p99": "itl_p99_ms",
-    "queued_inputs": "queued_input_count",
     "slash_commands": "slash_command_count",
-    "correction_msgs": "correction_msg_count",
-    "first_prompt_chars": "first_prompt_chars",
     "plan_modes": "plan_mode_count",
     "read_truncations": "read_truncation_count",
 }
@@ -518,6 +543,9 @@ def _format_native(fmt_spec: str, v) -> str:
         return fmt.fmt_int(v)
     if fmt_spec == "pct":
         return fmt.fmt_pct(v)
+    if fmt_spec == "pct4":
+        # 百分比保留四位小数（缓存命中率：对比聚合口径时需要更高分辨率）
+        return f"{v * 100:.4f}%" if v is not None else "-"
     if fmt_spec.startswith("float:"):
         return fmt.fmt_float(v, fmt_spec.split(":", 1)[1])
     if fmt_spec == "money":
@@ -563,6 +591,25 @@ def _code_loc_display(report) -> str:
 
 
 # Metrics whose display string is genuinely custom (not just fmt(native)).
+def _compaction_cost_display(r) -> str:
+    """压缩代价显示：丢弃量 +（峰峰值 · 压缩耗时 · 触发方式）；未压缩 "-"。"""
+    u = r.usage
+    if not u.compaction_count:
+        return "-"
+    text = f"{u.compaction_discarded_tokens:,}"
+    parts = []
+    if u.compaction_pre_tokens_max:
+        parts.append(f"峰 {u.compaction_pre_tokens_max:,}")
+    if u.compaction_duration_ms_total:
+        parts.append(f"压缩 {fmt.fmt_duration_ms(u.compaction_duration_ms_total, short=True)}")
+    if u.compaction_triggers:
+        trig = "·".join(f"{k}×{v}" for k, v in sorted(u.compaction_triggers.items()))
+        parts.append(f"触发 {trig}")
+    if parts:
+        text += f"（{' · '.join(parts)}）"
+    return text
+
+
 _DISPLAY_EXTRACTORS = {
     "subagent": lambda r: str(r.subagent_count or 0),
     "code_loc": lambda r: _code_loc_display(r),
@@ -574,19 +621,14 @@ _DISPLAY_EXTRACTORS = {
     "tools": _tools_summary,
     "entrypoint": lambda r: r.meta.entrypoint or "-",
     "cli_version": lambda r: r.meta.cli_version or "-",
-    "model_provider": lambda r: r.meta.model_provider or "-",
     "thread_source": lambda r: r.meta.thread_source or "-",
     "approval_policy": lambda r: r.meta.approval_policy or "-",
     "sandbox_policy": lambda r: r.meta.sandbox_policy or r.meta.permission_profile or "-",
     "reasoning_effort": lambda r: r.meta.reasoning_effort or "-",
-    "git_branch": lambda r: r.meta.git_branch or "-",
-    "git_commit": lambda r: (r.meta.git_commit[:12] if r.meta.git_commit else "-"),
     "task_type": lambda r: _task_category_name(r.task_type) or "-",
     "memory_files": lambda r: str(len(r.memory_files)) if r.memory_files is not None else "-",
     "image_inputs": lambda r: fmt.fmt_int(r.usage.image_count + r.usage.local_image_count),
-    "ratings": lambda r: (
-        f"赞{r.usage.positive_ratings} · 踩{r.usage.negative_ratings}"
-        if (r.usage.positive_ratings or r.usage.negative_ratings) else "-"),
+    "compaction_cost": _compaction_cost_display,
     "permission_wait": lambda r: (
         f"{fmt.fmt_duration_ms(r.usage.permission_wait_ms_total, short=True)}"
         f"（{r.usage.permission_request_count} 次）"
@@ -650,17 +692,10 @@ def raw_value(report, key: str) -> float | None:
             if u.started_at and u.ended_at:
                 return (u.ended_at - u.started_at) / 3600_000
             return None
-        if key == "latency":
-            return report.avg_turn_latency_sec
         if key == "tools":
             return float(sum(u.tool_calls.values())) if u.tool_calls else None
         if key == "image_inputs":
             return float(u.image_count + u.local_image_count)
-        if key == "ratings":
-            # 图表取净评价（好评 − 差评）；无评价 → None 不画点
-            if u.positive_ratings or u.negative_ratings:
-                return float(u.positive_ratings - u.negative_ratings)
-            return None
         if key == "permission_wait":
             return (u.permission_wait_ms_total / 1000
                     if u.permission_request_count else None)
@@ -677,7 +712,9 @@ def raw_value(report, key: str) -> float | None:
             v = getattr(u, _USAGE_ATTR[key])
             return float(v) if v is not None else None
         if key == "turns":
-            return float(u.assistant_msgs)
+            # Grok：一个回合可含多次 API 调用（modelCalls），有 api_calls 时
+            # 显示真·请求数；其余源 = 助手响应数（一次请求一条响应）。
+            return float(u.api_calls or u.assistant_msgs)
         if key == "subagent":
             return float(report.subagent_count)
         if key == "code_loc":
@@ -724,6 +761,38 @@ for _m in METRIC_BY_KEY.values():
     object.__setattr__(_m, "fmt", _SESSION_FMT.get(_m.key, "text"))
 
 
+MODEL_GROUPS: list[Group] = [
+    Group("M_TOK", "Token 用量", [
+        Metric("m_total_tokens", "总 Token", "", "", "basic"),
+        Metric("m_input", "输入", "", "", "basic"),
+        Metric("m_output", "输出", "", "", "basic"),
+        Metric("m_cache_write", "缓存创建", "", "", "basic"),
+        Metric("m_cache_read", "缓存命中", "", "", "basic"),
+    ]),
+    Group("M_COST", "成本", [
+        Metric("m_cost", "总成本", "", "", "basic", "down"),
+        Metric("m_cost_share", "成本占比", "", "", "basic"),
+        Metric("m_tokens_per_dollar", "Token 效率", "", "", "basic", "up"),
+        Metric("m_code_per_dollar", "代码效率", "", "", "basic", "up"),
+    ]),
+    Group("M_EFF", "效率", [
+        Metric("m_token_share", "Token 占比", "", "", "basic"),
+        Metric("m_cache_hit_ratio", "缓存命中率", "", "", "basic", "up"),
+        Metric("m_session_count", "会话数", "", "", "basic"),
+    ]),
+    Group("M_QUAL", "代码质量与行为", [
+        Metric("m_net_loc_per_session", "净增行/会话", "", "", "basic", "up"),
+        Metric("m_tool_error_rate", "工具错误率", "", "", "basic", "down"),
+        Metric("m_exploration_ratio", "探索占比", "", "", "basic"),
+        Metric("m_edit_ratio", "编辑占比", "", "", "basic", "up"),
+        Metric("m_read_write_ratio", "读写比", "", "", "basic", "up"),
+        Metric("m_churn", "返工率", "", "", "basic", "down"),
+        Metric("m_read_before_write", "先读后写率", "", "", "basic", "up"),
+        Metric("m_files_per_session", "涉及文件/会话", "", "", "basic"),
+    ]),
+]
+
+
 # ============================================================
 # 源能力感知 — 区分「该数据源不提供此字段」(不适用) 与「真的没有数据」(-)。
 # 只标注数据源*根本不产生*该字段的清晰情形；字段存在但可能为空的部分支持
@@ -741,11 +810,11 @@ SOURCE_LABELS = {
 # key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
 _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Claude 独有
-    "subagent": frozenset({"claude"}),
+    "subagent": frozenset({"claude", "grok"}),
     "memory_files": frozenset({"claude"}),
     # Claude 的推理输出并入「输出」，不单独上报
-    "reasoning_tokens": frozenset({"codex", "opencode", "grok", "pi"}),
-    "reasoning_ratio": frozenset({"codex", "opencode", "grok", "pi"}),
+    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "grok", "pi"}),
+    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "grok", "pi"}),
     # Codex/Grok 运行时信号（Grok 来自 signals.json）
     "context_window": frozenset({"codex", "grok"}),
     "context_window_used": frozenset({"codex", "grok"}),
@@ -755,7 +824,13 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # 等待，messageCount 可达 400+），拿它当分母会把吞吐虚低 3–10×，故 Claude 不
     # 支持（其单补全耗时仅存在于 OpenTelemetry 遥测，不落 JSONL）。OpenCode（多步
     # 聚合无 step 级 duration）与 Pi（无 duration 字段）同样不提供。
-    "output_tps": frozenset({"codex", "grok", "omp"}),
+    "output_tps": frozenset({"grok", "omp", "pi"}),
+    # 平均延迟需要每请求耗时：Grok 按 modelCalls 均摊（api_calls）、omp 为
+    # 每响应 duration。Claude 整轮墙钟 / Codex 任务级墙钟（实测高一个数量级）
+    # → 不适用；OpenCode 无该字段（pi 有 duration，compute 门控含 pi）。
+    "latency": frozenset({"grok", "omp", "pi"}),
+    # 效率衰减比需要逐回合 LOC 流水（turn_net_locs）——当前仅 Claude reader 填充。
+    "efficiency_decay": frozenset({"claude"}),
     "ttft": frozenset({"codex", "grok", "omp"}),
     "ttft_p95": frozenset({"codex", "omp"}),
     "rate_limit_peak": frozenset({"codex"}),
@@ -768,29 +843,28 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "user_modified": frozenset({"claude"}),
     "revert_events": frozenset({"opencode", "grok"}),
     "hook_overhead": frozenset({"claude"}),
-    "queued_inputs": frozenset({"claude"}),
     "slash_commands": frozenset({"claude", "omp", "pi"}),
-    "correction_msgs": frozenset({"claude", "omp", "pi"}),
-    "first_prompt_chars": frozenset({"claude", "omp", "pi"}),
-    "plan_modes": frozenset({"claude"}),
+    "plan_modes": frozenset({"claude", "omp"}),
+    # 压缩代价（compactMetadata）与 LOC 可信度（structuredPatch）仅 Claude 暴露。
+    "compaction_cost": frozenset({"claude"}),
+    "loc_confidence": frozenset({"claude"}),
+    # 自报成本：OpenCode 会话总额 / omp·pi 逐响应 cost 分量。
+    "cost_vs_reported": frozenset({"opencode", "omp", "pi"}),
     "read_truncations": frozenset({"claude"}),
     "reasoning_time": frozenset({"opencode"}),
     "git_commits": frozenset({"grok"}),
-    "ratings": frozenset({"grok"}),
     "permission_wait": frozenset({"grok"}),
-    "itl_p50": frozenset({"grok"}),
-    "itl_p99": frozenset({"grok"}),
     # 部分源组合（Claude 的限流/压缩/网页搜索来自 system 子类型与
     # usage.server_tool_use，reader 已解析）
-    "rate_limit_hits": frozenset({"claude", "codex"}),
+    "rate_limit_hits": frozenset({"claude", "codex", "omp"}),
     "task_completion": frozenset({"codex", "grok"}),
     "compactions": frozenset({"claude", "codex", "opencode", "grok"}),
     "web_searches": frozenset({"claude", "codex", "grok", "omp", "pi"}),
-    "image_inputs": frozenset({"codex", "opencode", "omp", "pi"}),
+    "image_inputs": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
     # Codex 不上报缓存写入 (reader 恒 0)，显示 0 会误导
-    "cache_write": frozenset({"claude", "opencode", "grok", "omp", "pi"}),
-    "cache_write_ratio": frozenset({"claude", "opencode", "grok", "omp", "pi"}),
-    "cache_efficiency": frozenset({"claude", "opencode", "grok", "omp", "pi"}),
+    "cache_write": frozenset({"claude", "opencode", "omp", "pi"}),
+    "cache_write_ratio": frozenset({"claude", "opencode", "omp", "pi"}),
+    "cache_efficiency": frozenset({"claude", "opencode", "omp", "pi"}),
 }
 
 
@@ -825,55 +899,10 @@ for _k, _allowed in _SOURCE_SUPPORT.items():
 # tab's exact strings (K/M suffix, 免费 / ∞ / - special cases).
 # ============================================================
 
-def _fmt_tok(n: float) -> str:
-    """Format a token count with K/M suffix (e.g. 1_500_000 → '1.5M').
-
-    Retained for any external caller, but the model 对比 tab no longer uses it —
-    per-model token metrics now render through ``format_value`` so they read
-    identically to the 指标分类 grid (full comma-separated numbers).
-    """
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K"
-    return str(int(n))
-
-
-MODEL_GROUPS: list[Group] = [
-    Group("M_TOK", "Token 用量", [
-        Metric("m_total_tokens", "总 Token", "", "", "basic"),
-        Metric("m_input", "输入", "", "", "basic"),
-        Metric("m_output", "输出", "", "", "basic"),
-        Metric("m_cache_write", "缓存创建", "", "", "basic"),
-        Metric("m_cache_read", "缓存命中", "", "", "basic"),
-    ]),
-    Group("M_COST", "成本", [
-        Metric("m_cost", "总成本", "", "", "basic", "down"),
-        Metric("m_cost_share", "成本占比", "", "", "basic"),
-        Metric("m_tokens_per_dollar", "Token 效率", "", "", "basic", "up"),
-        Metric("m_code_per_dollar", "代码效率", "", "", "basic", "up"),
-    ]),
-    Group("M_EFF", "效率", [
-        Metric("m_token_share", "Token 占比", "", "", "basic"),
-        Metric("m_cache_hit_ratio", "缓存命中率", "", "", "basic", "up"),
-        Metric("m_session_count", "会话数", "", "", "basic"),
-    ]),
-    Group("M_QUAL", "代码质量与行为", [
-        Metric("m_net_loc_per_session", "净增行/会话", "", "", "basic", "up"),
-        Metric("m_tool_error_rate", "工具错误率", "", "", "basic", "down"),
-        Metric("m_exploration_ratio", "探索占比", "", "", "basic"),
-        Metric("m_edit_ratio", "编辑占比", "", "", "basic", "up"),
-        Metric("m_read_write_ratio", "读写比", "", "", "basic", "up"),
-        Metric("m_churn", "返工率", "", "", "basic", "down"),
-        Metric("m_read_before_write", "先读后写率", "", "", "basic", "up"),
-        Metric("m_files_per_session", "涉及文件/会话", "", "", "basic"),
-    ]),
-]
-
-MODEL_BY_KEY: dict[str, Metric] = {m.key: m for g in MODEL_GROUPS for m in g.metrics}
 
 # model metric key → session metric key whose name+tip is borrowed for the tooltip
 # (None / absent → no tooltip, matching the model tab's prior behaviour).
+
 _MODEL_TIP_KEY = {
     "m_total_tokens": "total_tokens", "m_input": "input", "m_output": "output",
     "m_cache_write": "cache_write", "m_cache_read": "cache_read", "m_cost": "cost",
@@ -883,6 +912,8 @@ _MODEL_TIP_KEY = {
     "m_read_before_write": "read_before_write",
 }
 
+
+MODEL_BY_KEY: dict[str, Metric] = {m.key: m for g in MODEL_GROUPS for m in g.metrics}
 
 def _tpd_text(mc) -> str:
     if mc.tokens_per_dollar:

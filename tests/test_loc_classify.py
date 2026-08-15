@@ -89,3 +89,12 @@ def test_test_file_detection():
     assert _is_test_file("/repo/src/foo.test.ts")
     assert not _is_test_file("/repo/src/main.py")
     assert not _is_test_file("/repo/src/contest.py")  # 不误伤普通文件
+
+
+def test_docs_dir_code_files_are_not_doc():
+    """docs/ 目录下的源码（组件库文档站常见）是代码不是散文文档。"""
+    from tcer.core.loc import _is_doc_file
+    assert _is_doc_file("docs/guide.md") is True
+    assert _is_doc_file("doc/api.txt") is True
+    assert _is_doc_file("docs/Button.tsx") is False
+    assert _is_doc_file("doc/utils.py") is False

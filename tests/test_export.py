@@ -131,3 +131,20 @@ def test_ui_prefs_roundtrip(tmp_path, monkeypatch):
     assert ui_prefs.valid_geometry("1600x900+-160-40")
     assert not ui_prefs.valid_geometry("garbage")
     assert not ui_prefs.valid_geometry(None)
+
+
+def test_score_decompose_missing_cost_axis_neutral():
+    """成本轴缺失（如 net_loc=0）以 0.5 中性填充，不当最差档拉偏均值。"""
+    from types import SimpleNamespace
+
+    from tcer.core.export import score_decompose, score_decompose_avg
+
+    # 正常会话：成本轴 0.75
+    r1 = SimpleNamespace(score=50.0, score_output_axis=0.5,
+                         score_cost_axis=0.75, score_quality_axis=0.5)
+    # net_loc=0 会话：成本轴 None
+    r2 = SimpleNamespace(score=50.0, score_output_axis=0.5,
+                         score_cost_axis=None, score_quality_axis=0.5)
+    assert score_decompose(r2)["cost"] == 0.5
+    avg = score_decompose_avg([r1, r2])
+    assert avg["cost"] == (0.75 + 0.5) / 2   # 不再被腰斩到 0.375

@@ -14,7 +14,7 @@ from functools import reduce
 from pathlib import Path
 from typing import Callable
 
-from tcer.core import codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, pi_reader, reader
+from tcer.core import codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, pi_reader, pricing, reader
 from tcer.core.models import ProjectRef, SessionMeta, SessionReport, TokenUsage
 from tcer.core.paths import ref_root, resolve_project
 
@@ -33,6 +33,108 @@ class ProjectAnalysis:
     n_subagents: int  # total subagent files folded into the sessions above
     source: str = "claude"
     project_ref: ProjectRef | None = None
+
+
+# --------------------------------------------------------------------------- #
+# 跨会话项目级分析（纯会话数据推导，不读磁盘仓库）
+# --------------------------------------------------------------------------- #
+def file_hotspots(reports: list[SessionReport], top_n: int = 20) -> list[dict]:
+    """跨会话「注意力热点」文件榜：被读/写/改最多的文件。
+
+    每项：``{"path", "sessions", "ops", "churn_sessions", "last_touched"}``。
+    sessions = 触过该文件的会话数（跨会话反复回访 = 架构热点/复杂度热点）；
+    churn_sessions = 该文件在其中进入「高返工」（编辑 ≥3 次）的会话数——
+    跨会话反复重改同一文件是最真实的跨会话返工信号。按 sessions × ops
+    排序，取前 top_n。
+    """
+    info: dict[str, dict] = {}
+    for r in reports:
+        ftd = r.files_touched_details or {}
+        churn = set(r.high_churn_details or {})
+        ts = r.usage.started_at
+        for fp, ops in ftd.items():
+            e = info.setdefault(fp, {"path": fp, "sessions": 0, "ops": 0,
+                                     "churn_sessions": 0, "last_touched": None})
+            e["sessions"] += 1
+            e["ops"] += ops
+            if fp in churn:
+                e["churn_sessions"] += 1
+            if ts and (e["last_touched"] is None or ts > e["last_touched"]):
+                e["last_touched"] = ts
+    out = sorted(info.values(),
+                 key=lambda e: (e["sessions"], e["ops"]), reverse=True)
+    return out[:top_n]
+
+
+def model_switch_stats(reports: list[SessionReport]) -> dict:
+    """模型混用策略（项目级）：会话内切换次数与方向分类。
+
+    逐会话扫 turn_stats 的 model 序列（按价表 output 价排序）：
+    - ``switch_sessions`` / ``single_model_sessions``：混用 vs 单模型会话数；
+    - ``delegations``（贵→便宜，委派执行）/ ``escalations``（便宜→贵，升级
+      救援）次数；模型价未知时不参与方向分类、只计切换；
+    - ``switch_count``：全部切换次数。
+    """
+    out = {"switch_sessions": 0, "single_model_sessions": 0,
+           "switch_count": 0, "delegations": 0, "escalations": 0}
+    for r in reports:
+        models = [t.model for t in r.usage.turn_stats if t.model]
+        uniq = [m for i, m in enumerate(models) if i == 0 or m != models[i - 1]]
+        if len(uniq) <= 1:
+            if uniq:
+                out["single_model_sessions"] += 1
+            continue
+        out["switch_sessions"] += 1
+        for a, b in zip(uniq, uniq[1:]):
+            out["switch_count"] += 1
+            # 方向分类只在两端都能在价表匹配到时做——resolve 对未匹配模型会
+            # 静默回退默认价，用它比方向会把「未知→已知」误判成委派/升级。
+            if pricing.table_key(a) is None or pricing.table_key(b) is None:
+                continue
+            pa = pricing.resolve(a).get("output")
+            pb = pricing.resolve(b).get("output")
+            if pa is None or pb is None or pa == pb:
+                continue
+            if pb < pa:
+                out["delegations"] += 1
+            else:
+                out["escalations"] += 1
+    return out
+
+
+def tool_profile(reports: list[SessionReport]) -> dict:
+    """技能 / 子代理 / MCP 复用画像（项目级聚合）。
+
+    - ``skills`` / ``agents``：``tool_variants``（``Skill:x`` / ``Agent:x``，
+      仅 Claude 源产生）按次数排序的 (name, count) 列表；
+    - ``mcp``：``mcp_calls_by_attr``（五源通用）按次数排序；
+    - ``skills_sessions`` / ``mcp_sessions``：用到任意技能 / MCP 的会话数。
+    """
+    skills: dict[str, int] = {}
+    agents: dict[str, int] = {}
+    mcp: dict[str, int] = {}
+    skill_sessions = mcp_sessions = 0
+    for r in reports:
+        u = r.usage
+        has_skill = has_mcp = False
+        for key, cnt in (u.tool_variants or {}).items():
+            if key.startswith("Skill:"):
+                skills[key.split(":", 1)[1]] = skills.get(key.split(":", 1)[1], 0) + cnt
+                has_skill = True
+            elif key.startswith(("Agent:", "Task:")):
+                agents[key.split(":", 1)[1]] = agents.get(key.split(":", 1)[1], 0) + cnt
+        for key, cnt in (u.mcp_calls_by_attr or {}).items():
+            mcp[key] = mcp.get(key, 0) + cnt
+            has_mcp = True
+        skill_sessions += 1 if has_skill else 0
+        mcp_sessions += 1 if has_mcp else 0
+    return {
+        "skills": sorted(skills.items(), key=lambda kv: -kv[1]),
+        "agents": sorted(agents.items(), key=lambda kv: -kv[1]),
+        "mcp": sorted(mcp.items(), key=lambda kv: -kv[1]),
+        "skills_sessions": skill_sessions,
+        "mcp_sessions": mcp_sessions,
+    }
 
 
 @dataclass(frozen=True)
@@ -321,8 +423,12 @@ def analyze_project(
         return hit
 
     # Group files by parent session id (subagents fold into the owning session).
+    # 排除 workflow 编排日志（Claude Code 写到 subagents/workflows/ 的
+    # journal.jsonl）：非会话回放（type=started/…），折入只虚增 subagent 计数。
     groups: dict[str, list[Path]] = {}
     for f in files:
+        if f.name == "journal.jsonl":
+            continue
         groups.setdefault(reader.parent_session_id(f), []).append(f)
 
     # First pass: per-group metadata (cheap head/tail read) to discover the
@@ -341,6 +447,8 @@ def analyze_project(
     if since or until:
         groups = {}
         for f in files:
+            if f.name == "journal.jsonl":
+                continue
             groups.setdefault(reader.parent_session_id(f), []).append(f)
 
     if session:
@@ -538,8 +646,11 @@ def _analyze_source_project(
         meta = adapter.read_meta(ref, h)
         u = _usage_of(h)
         agg_u = agg_u.merge(u)
+        # 逐会话子代理数（omp/pi 折叠的 SubAgent 计入所属主会话；与 Claude
+        # 路径及聚合层 n_subagents 口径一致，CSV 导出的 subagent_count 不再恒 0）。
+        n_sub_h = (adapter.subagents_of(ref, h) if adapter.subagents_of else 0)
         if no_loc:
-            reports.append(_mk_report(meta, u, None, None, None, ctx=ctx))
+            reports.append(_mk_report(meta, u, None, None, None, ctx=ctx, n_sub=n_sub_h))
             continue
         # Single scan yields the LOC and whether any edit signal existed.
         sloc, has_signal = adapter.loc_of(ref, h, meta)
@@ -550,7 +661,7 @@ def _analyze_source_project(
         _accumulate_sloc_totals(sloc, totals)
         reports.append(_mk_report(
             meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted,
-            ctx=ctx, sloc=sloc, unseen=sloc.unseen_writes,
+            ctx=ctx, sloc=sloc, unseen=sloc.unseen_writes, n_sub=n_sub_h,
         ))
 
     first = handles[0] if handles else None
@@ -578,10 +689,7 @@ def _analyze_source_project(
             task_type_override=agg_tt,
         )
 
-    n_sub_total = (
-        sum(adapter.subagents_of(ref, h) for h in handles)
-        if adapter.subagents_of else 0
-    )
+    n_sub_total = sum(r.subagent_count for r in reports)
     return ProjectAnalysis(
         project_hash=ref.key,
         reports=reports,
@@ -671,6 +779,13 @@ def _grok_side_files_key(f: Path) -> tuple:
             parts.append((name, int(st.st_mtime_ns), int(st.st_size)))
         except OSError:
             parts.append((name, 0, 0))
+    # 子代理 updates.jsonl 签名（折叠源变更须失效缓存，同 omp _omp_subagent_key）
+    for child in grok_reader.subagent_dirs_of(f):
+        try:
+            st = child.stat()
+            parts.append((child.parent.name, int(st.st_mtime_ns), int(st.st_size)))
+        except OSError:
+            parts.append((child.parent.name, 0, 0))
     return tuple(parts)
 
 
@@ -694,6 +809,7 @@ _GROK = _SourceAdapter(
     read_meta=lambda ref, f: grok_reader.read_session_meta(f),
     usage_of=_grok_usage_of,
     loc_of=_grok_loc_of,
+    subagents_of=lambda ref, f: len(grok_reader.subagent_dirs_of(f)),
     session_key=lambda ref, f: (grok_reader.read_session_meta(f).session_id or f.stem),
     not_found="grok project '{project}' not found under ~/.grok/sessions",
     no_sessions="no Grok session files for '{name}'",

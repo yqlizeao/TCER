@@ -111,9 +111,9 @@ def setup_style(ttk) -> None:
     style.configure("Treeview.Heading", background=CONTROL_BG, foreground=FG,
                     relief="flat", borderwidth=1)
     # clam draws a raised (white-ish) border on heading hover/press — keep it dark & flat.
-    style.map("Treeview", background=[("selected", "#094771")])
+    style.map("Treeview", background=[("selected", TREE_SEL_BG)])
     style.map("Treeview.Heading",
-              background=[("active", "#3d3d3d"), ("pressed", "#2b2b2b")],
+              background=[("active", TREE_HEAD_ACTIVE), ("pressed", TREE_HEAD_PRESSED)],
               foreground=[("active", FG)],
               relief=[("active", "flat"), ("pressed", "flat")])
 
@@ -217,3 +217,30 @@ BASELINE_ACCENT = "#dcdcaa"   # 基准值黄（BaselinesPopup）
 MEDAL_COLORS = ("#ffd700", "#a335ee", "#0070dd")   # 排名奖牌 金/紫/蓝
 DANGER = "#e53935"            # 危险操作红（删除确认主按钮）
 DANGER_ACTIVE = "#c62828"     # 危险按钮按下/悬停态
+
+# 图表网格虚线 / 刻度细条（收编自 charts/views 散落 hex）。
+CHART_GRID = "#2a2a2a"        # 趋势/散点中值虚线网格
+RADAR_FILL = "#1a3a5a"        # 雷达数据面半透明深蓝（canvas 无 alpha，实色近似）
+BAR_TICK = "#555555"          # 排名条内分隔细线
+GRADE_DIM = "#3a3a3a"         # 排名分布条中被过滤档的置灰段
+TREE_SEL_BG = "#094771"       # Treeview 选中行底（setup_style map 用）
+TREE_HEAD_ACTIVE = "#3d3d3d"  # 表头 hover
+TREE_HEAD_PRESSED = "#2b2b2b"  # 表头按下
+
+# 趋势叠加折线固定 palette（最多 4 条线）。
+OVERLAY_COLORS = ("#007acc", "#4ec9b0", "#ce9178", "#c586c0")
+# 趋势背景评级带填充（键 = SCORE_TIER_BANDS 评级名）。
+SCORE_BAND_FILL = {
+    "优秀": "#142814", "良好": "#14202e", "中等": "#2e2a14",
+    "待改进": "#2e1e14", "低效": "#2e1414",
+}
+# 仪表盘折线色 = GROUP_COLORS 各分类的「提亮同色相版」（展示局部色）。
+DASH_LINE_COLORS = {
+    "G1": "#9d9da5",   # 中性灰 ← #3a3a3e
+    "G2": "#4aa8ec",   # 亮蓝   ← #1e4a6f
+    "G3": "#2fc4c4",   # 亮青   ← #1e5c5c
+    "G4": "#4cc96a",   # 亮绿   ← #1e5c2b
+    "G5": "#e2a23c",   # 亮橙   ← #6f4a1e
+    "G6": "#b65bd6",   # 亮紫   ← #5a1e6f
+}
+

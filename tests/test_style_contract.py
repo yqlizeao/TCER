@@ -61,3 +61,4 @@ def test_format_plot_no_scientific_notation():
     for v in (0.000012, 1.5e-05, -3e-06, 0.5, 999.9, 1234.5, 1.2e7, 0.0):
         out = format_plot("cost", v, None)
         assert "e" not in out.lower(), f"{v} -> {out}"
+

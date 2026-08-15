@@ -43,6 +43,9 @@ from tcer.core import analyze, codex_reader, grok_reader, loc, metrics, omp_read
 from tcer.core.models import ProjectRef, TokenUsage
 from tcer.core.paths import list_project_refs, ref_root, resolve_project
 
+# 本 audit 进程启动时刻（活文件守卫：晚于此仍在写入的会话文件不做一致性判定）
+_STARTED_AT = time.time()
+
 
 # --------------------------------------------------------------------------- checks
 
@@ -163,7 +166,12 @@ def _claude_files_for_report(report_path: Path, project_hash: str) -> list[Path]
         files.append(main)
     sub = session_dir / "subagents"
     if sub.is_dir():
-        files.extend(sorted(sub.glob("*.jsonl")))
+        # rglob 对齐 analyze 的 discover 深度：Claude Code 会把 workflow 派生
+        # 的子代理写到 subagents/workflows/<wfid>/ 嵌套层，一层 glob 会漏（
+        # 审计口径与 analyze 分叉→稳定假失败）。journal.jsonl 是编排日志非
+        # 会话，与 analyze 同口径排除。
+        files.extend(sorted(
+            f for f in sub.rglob("*.jsonl") if f.name != "journal.jsonl"))
     if not files and report_path.is_file():
         files = [report_path]
     return files
@@ -193,6 +201,24 @@ def _audit_claude_session(report, *, project_hash: str) -> SessionAudit:
         source="claude",
         path=str(report.meta.path),
     )
+    # 活文件守卫：JSONL 在 audit 进程启动后仍被写入（正在进行的会话）时，
+    # analyze 阶段与重扫阶段之间内容必然漂移（token/子代理数只增不减），
+    # 一致性检查天然不可判定——降级为 warning 说明原因，不作回归失败。
+    live = []
+    for f in _claude_files_for_report(report.meta.path, project_hash):
+        try:
+            if f.stat().st_mtime >= _STARTED_AT:
+                live.append(f)
+        except OSError:
+            pass
+    if live:
+        sa.checks.append(_truth(
+            "session_file_stable",
+            False,
+            detail=(f"{len(live)} 个文件在审计期间仍被写入（进行中的会话，"
+                    "数字漂移属预期，不计回归）"),
+            level="info",  # 活文件：不计入失败
+        ))
     files = _claude_files_for_report(report.meta.path, project_hash)
     usages = [reader.aggregate_usage(f) for f in files]
     merged = _merge_usages(usages)
@@ -324,12 +350,16 @@ def _append_metric_bound_checks(sa: SessionAudit, report) -> None:
         ))
     if report.context_window_used_ratio is not None:
         # Peak-turn / window; slight >1 is real, multi-turn cumulative was 50–200×.
+        # 折叠加会话（子代理并入）豁免：merge 取 max(父,子) 峰值而窗口取父模型，
+        # 子代理的回合峰值不与父窗口同域，比值会越界（grok 实测 6.4）。
+        folded = getattr(report, "subagent_count", 0) > 0
         sa.checks.append(_truth(
             "context_window_used_sane",
-            0.0 <= report.context_window_used_ratio <= 5.0,
+            folded or (0.0 <= report.context_window_used_ratio <= 5.0),
             detail=(
                 f"ratio={report.context_window_used_ratio} "
                 f"peak={peak} window={report.usage.model_context_window}"
+                + ("（含折因子代理峰值，豁免）" if folded else "")
             ),
         ))
     u = report.usage
@@ -482,6 +512,15 @@ def _audit_file_session(
             ))
     except Exception as e:  # noqa: BLE001
         sa.checks.append(_truth("cost_usd_ok", False, detail=str(e)))
+    # 价表覆盖检查（与 Claude 路径同款）：--strict-pricing 下对全部六源生效。
+    unmatched = metrics.unmatched_pricing_models(report.usage)
+    sa.info["unmatched_pricing"] = unmatched
+    sa.checks.append(_truth(
+        "all_models_priced",
+        len(unmatched) == 0,
+        detail=f"default-fallback: {unmatched[:8]}",
+        level="info",  # informational unless CLI --strict-pricing
+    ))
     _append_metric_bound_checks(sa, report)
     sa.info["task_type"] = report.task_type
     sa.info["net_loc"] = report.net_loc
@@ -564,6 +603,15 @@ def _audit_opencode_session(report, *, no_loc: bool = False) -> SessionAudit:
                 f"turns={report.usage.assistant_msgs}"
             ),
         ))
+    # 价表覆盖检查（与 Claude 路径同款）：--strict-pricing 下对全部六源生效。
+    unmatched = metrics.unmatched_pricing_models(report.usage)
+    sa.info["unmatched_pricing"] = unmatched
+    sa.checks.append(_truth(
+        "all_models_priced",
+        len(unmatched) == 0,
+        detail=f"default-fallback: {unmatched[:8]}",
+        level="info",  # informational unless CLI --strict-pricing
+    ))
     _append_metric_bound_checks(sa, report)
     sa.info["task_type"] = report.task_type
     sa.info["net_loc"] = report.net_loc

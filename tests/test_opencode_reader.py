@@ -655,3 +655,32 @@ def test_opencode_wsl_no_opencode_dir_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_reader.sys, "platform", "win32")
 
     assert opencode_reader._wsl_data_dirs() == []
+
+
+def test_opencode_legacy_reasoning_folded_into_output(tmp_path, monkeypatch):
+    """legacy 路径 tokens.reasoning 折入 output（与 SQLite 口径一致，
+    成本不低估、reasoning_output_ratio ≤ 1）。"""
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    session_dir = tmp_path / "storage" / "session" / "proj-legacy"
+    message_dir = tmp_path / "storage" / "message"
+    session_dir.mkdir(parents=True)
+    message_dir.mkdir(parents=True)
+    session_file = session_dir / "ses-legacy.json"
+    session_file.write_text(
+        _j({
+            "id": "ses-legacy",
+            "projectID": "proj-legacy",
+            "title": "legacy",
+            "tokens": {"input": 1000, "output": 200, "reasoning": 300},
+        }),
+        encoding="utf-8",
+    )
+    (message_dir / "ses-legacy.json").write_text(
+        _j({"messages": [{"role": "user", "text": "旧版消息"}]}),
+        encoding="utf-8",
+    )
+    usage = opencode_reader.aggregate_usage(session_file.parent, str(session_file))
+    assert usage.output_tokens == 500          # 200 可见 + 300 reasoning
+    assert usage.reasoning_output_tokens == 300
+    ratio = usage.reasoning_output_tokens / usage.output_tokens
+    assert ratio <= 1.0

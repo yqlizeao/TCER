@@ -363,13 +363,25 @@ def _scan_session_uncached(
     cancel_check,
 ) -> tuple[TokenUsage, "SessionLoc | None"]:
     # Lazy import: loc imports reader at module level.
-    from tcer.core.loc import SessionLoc, _is_code, _LocAccumulator
+    from tcer.core.loc import SessionLoc, _EDIT_TOOLS, _is_code, _LocAccumulator
     from tcer.core.models import TurnStat
 
     u = TokenUsage()
     loc_acc = _LocAccumulator() if with_loc else None
     seen: set[str] = set()
+    seen_tool_uses: set[str] = set()  # tool_use id 去重（重发防护，见 tool_use 分支注释）
+    seen_tool_results: set[str] = set()  # 同族：重发的 tool_result 不重复计错  # tool_use id 去重（重发防护，见 tool_use 分支注释）
     call_id_to_name: dict[str, str] = {}  # tool_use_id → tool_name for error attribution
+    # LOC 回放按结果裁决：编辑类 tool_use 先缓冲，等对应 tool_result 到达且
+    # 非 is_error 才回放——失败/被用户拒绝的 Edit/Write 不产生行增量、不污染
+    # file_lines 基线。结果未到的（截断/进行中会话）在文件末尾按成功回放。
+    # 元组携带该调用的回合号（供逐回合 LOC 流水 turn_net_locs）。
+    pending_edits: dict[str, tuple[str, dict, int]] = {}
+    # 本行 toolUseResult.originalFile 的延迟修正：Write 的记账发生在结果行
+    # （缓冲回放），必须先记账再修正，否则 pending_f1 尚未建立、修正会丢失。
+    # 故先暂存，待本行 tool_result 处理完（下一迭代开头）再 note_write_original。
+    orig_fp = None
+    orig_txt = None
     turn_idx = 0  # next turn number to assign to a new response
     # 子代理文件（subagents/*.jsonl）的 user 消息是 Task 工具派发的 prompt，非真人
     # 输入 → 不计入 user_msgs / slash / correction / first_prompt / user_texts。
@@ -380,6 +392,12 @@ def _scan_session_uncached(
         if cancel_check is not None:
             cancel_check()
 
+        # 上一行的 originalFile 修正：上一行的 tool_result（含缓冲 Write 回放）
+        # 已处理完，现在 pending_f1 已建立，可以安全修正。
+        if loc_acc is not None and orig_fp is not None:
+            loc_acc.note_write_original(orig_fp, orig_txt)
+            orig_fp = orig_txt = None
+
         # 用户在 AI 运行时排队输入（打断/并行输入信号）。
         if obj.get("type") == "queue-operation":
             u.queued_input_count += 1
@@ -389,7 +407,8 @@ def _scan_session_uncached(
         if obj.get("type") == "attachment":
             att = obj.get("attachment")
             sub = att.get("type") if isinstance(att, dict) else None
-            if sub == "plan_mode":
+            if sub in ("plan_mode", "plan_mode_reentry"):
+                # reentry（重入计划模式）也是「进入」，此前漏计低估次数。
                 u.plan_mode_count += 1
             elif sub == "read_truncation_notice":
                 u.read_truncation_count += 1
@@ -421,21 +440,48 @@ def _scan_session_uncached(
                     u.rate_limit_names.add("api-429")
             elif sub == "compact_boundary":
                 u.compaction_count += 1
+                # 记录压缩发生位置（边界之后的首个回合号）——分段衰减/恢复分析。
+                u.compaction_turns.append(turn_idx)
+                # 压缩代价（2.1.2xx+）：preTokens（压缩前上下文规模）、
+                # postTokens / cumulativeDroppedTokens（丢弃量；部分版本只有
+                # preTokens + preservedSegment，丢弃量留 0 不臆造）、durationMs。
+                cm = obj.get("compactMetadata")
+                if isinstance(cm, dict):
+                    pre = _as_int(cm.get("preTokens"))
+                    post = _as_int(cm.get("postTokens"))
+                    dropped = _as_int(cm.get("cumulativeDroppedTokens"))
+                    # cumulativeDroppedTokens 是跨压缩的会话累计值（实测
+                    # 151788→300042→458551 递增，差值=各次 pre−post）——取
+                    # max（末次即全会话总量），不能 +=（否则 N 次压缩虚高 N 倍）。
+                    if dropped:
+                        u.compaction_discarded_tokens = max(
+                            u.compaction_discarded_tokens, dropped)
+                    else:
+                        u.compaction_discarded_tokens += max(0, pre - post)
+                    u.compaction_pre_tokens_max = max(u.compaction_pre_tokens_max, pre)
+                    u.compaction_duration_ms_total += _as_int(cm.get("durationMs"))
+                    trig = cm.get("trigger")
+                    if isinstance(trig, str) and trig:
+                        u.compaction_triggers[trig] = u.compaction_triggers.get(trig, 0) + 1
             continue
+
+        # MCP 精确归因：结果行携带 attributionMcpServer/Tool（每次调用一行）。
+        # 新版 Claude Code（2.1.207+）这些键写在行**顶层**且行内没有
+        # toolUseResult——归因读取必须在 tur 分支之外，否则 MCP 维度恒空。
+        srv = obj.get("attributionMcpServer")
+        if isinstance(srv, str) and srv:
+            tool_attr = obj.get("attributionMcpTool")
+            key_attr = f"{srv}/{tool_attr}" if isinstance(tool_attr, str) and tool_attr else srv
+            u.mcp_calls_by_attr[key_attr] = u.mcp_calls_by_attr.get(key_attr, 0) + 1
 
         # 工具结果行的 toolUseResult：originalFile → LOC F1 修正；
         # userModified → 「AI 写完后被人改过」采纳信号。
         tur = obj.get("toolUseResult")
         if isinstance(tur, dict):
-            # MCP 精确归因：结果行携带 attributionMcpServer/Tool（每次调用一行）。
-            srv = obj.get("attributionMcpServer")
-            if isinstance(srv, str) and srv:
-                tool_attr = obj.get("attributionMcpTool")
-                key_attr = f"{srv}/{tool_attr}" if isinstance(tool_attr, str) and tool_attr else srv
-                u.mcp_calls_by_attr[key_attr] = u.mcp_calls_by_attr.get(key_attr, 0) + 1
             if loc_acc is not None and "originalFile" in tur:
-                loc_acc.note_write_original(tur.get("filePath"),
-                                            tur.get("originalFile"))
+                # 暂存，延迟到下一迭代开头再修正（见函数开头注释）。
+                orig_fp = tur.get("filePath")
+                orig_txt = tur.get("originalFile")
             if tur.get("userModified") is True:
                 u.user_modified_count += 1
             # structuredPatch：Claude 自算 diff 的 +/- 行数，作为回放 LOC 的
@@ -471,6 +517,11 @@ def _scan_session_uncached(
             if isinstance(content, str) and content.strip():
                 is_real_user = True
             elif isinstance(content, list):
+                for it in content:
+                    if isinstance(it, dict) and it.get("type") == "image":
+                        # 内联图片输入（base64 块），与 codex/omp 的
+                        # image_count 同口径。
+                        u.image_count += 1
                 is_real_user = any(
                     isinstance(it, dict) and it.get("type") == "text"
                     for it in content
@@ -495,14 +546,26 @@ def _scan_session_uncached(
             # Count tool_result errors (from ALL user-role messages)
             if isinstance(content, list):
                 for item in content:
-                    if (isinstance(item, dict)
-                            and item.get("type") == "tool_result"
-                            and item.get("is_error")):
+                    if not isinstance(item, dict) or item.get("type") != "tool_result":
+                        continue
+                    tid = item.get("tool_use_id")
+                    # rewind 重发的 tool_result 不重复计错/不把历史错误记到
+                    # 当前最后一个回合头上（与 tool_use id 去重同族）。
+                    if isinstance(tid, str) and tid in seen_tool_results:
+                        continue
+                    if isinstance(tid, str) and tid:
+                        seen_tool_results.add(tid)
+                    # 缓冲的编辑回放在此裁决：失败/被拒的调用不回放 LOC。
+                    if (loc_acc is not None and isinstance(tid, str)
+                            and tid in pending_edits):
+                        ename, einp, eturn = pending_edits.pop(tid)
+                        if not item.get("is_error"):
+                            loc_acc.on_tool_use(ename, einp, eturn)
+                    if item.get("is_error"):
                         u.tool_errors += 1
                         if u.turn_stats:
                             u.turn_stats[-1].errors += 1
                         # Attribute error to specific tool via call_id mapping
-                        tid = item.get("tool_use_id")
                         if isinstance(tid, str):
                             tname = call_id_to_name.get(tid)
                             if tname:
@@ -538,6 +601,13 @@ def _scan_session_uncached(
                 cc = usage.get("cache_creation")
                 cw1h = (min(_as_int(cc.get("ephemeral_1h_input_tokens")), cw)
                         if isinstance(cc, dict) else 0)
+                # 推理 token（新版 usage.output_tokens_details.thinking_tokens）：
+                # 按 Anthropic 语义已含在 output 里，这里只作占比分析不加价。
+                det = usage.get("output_tokens_details")
+                if isinstance(det, dict):
+                    think = _as_int(det.get("thinking_tokens"))
+                    if think:
+                        u.reasoning_output_tokens += think
                 # Count assistant turns: only lines with real usage count as turns.
                 # Zero-usage stubs (mimo thinking blocks, synthetic stubs) are tracked
                 # separately in empty_usage_skipped and do not inflate assistant_msgs.
@@ -593,6 +663,16 @@ def _scan_session_uncached(
                         continue
                     item_type = item.get("type")
                     if item_type == "tool_use":
+                        # 重发去重：Claude Code 2.1.227+ rewind/重连后会把历史
+                        # （同 message.id + 同 tool_use id）重写进同一 jsonl——
+                        # token 有 message.id 去重保护，tool_calls/tool_ops/LOC
+                        # 回放没有则双计（实测一文件 13 对重发）。按 tool_use id
+                        # 只计一次；无 id 的块退回逐条计（同 message.id 惯例）。
+                        tuid = item.get("id")
+                        if isinstance(tuid, str) and tuid:
+                            if tuid in seen_tool_uses:
+                                continue
+                            seen_tool_uses.add(tuid)
                         tool_name = item.get("name")
                         if isinstance(tool_name, str):
                             u.tool_calls[tool_name] = u.tool_calls.get(tool_name, 0) + 1
@@ -616,9 +696,33 @@ def _scan_session_uncached(
                             if u.turn_stats and u.turn_stats[-1].turn == current_turn:
                                 u.turn_stats[-1].tool_calls += 1
                             if loc_acc is not None and isinstance(inp, dict):
-                                loc_acc.on_tool_use(tool_name, inp)
+                                if (tool_name in _EDIT_TOOLS
+                                        and isinstance(cid, str) and cid):
+                                    pending_edits[cid] = (tool_name, inp, current_turn)
+                                else:
+                                    loc_acc.on_tool_use(tool_name, inp, current_turn)
+                    elif item_type == "server_tool_use":
+                        # MCP 服务端工具（2.1.2xx+）：与 tool_use 同口径进
+                        # tool_calls/tool_ops（调用在服务端执行，仍是工具行为）。
+                        st_name = item.get("name")
+                        if isinstance(st_name, str) and st_name:
+                            u.tool_calls[st_name] = u.tool_calls.get(st_name, 0) + 1
+                            u.tool_ops.append(ToolOp(
+                                turn=current_turn, tool=st_name, path=""))
+                            if u.turn_stats and u.turn_stats[-1].turn == current_turn:
+                                u.turn_stats[-1].tool_calls += 1
                     elif item_type == "thinking":
                         u.thinking_count += 1
+
+    # 收尾兜底：未到的 originalFile 修正 + 结果未到的编辑调用（截断/进行中
+    # 会话）按成功回放——与旧「立即回放」行为一致，宁可多计不可漏计。
+    if loc_acc is not None:
+        if orig_fp is not None:
+            loc_acc.note_write_original(orig_fp, orig_txt)
+        for ename, einp, eturn in pending_edits.values():
+            loc_acc.on_tool_use(ename, einp, eturn)
+        # 逐回合 LOC 流水交由 usage 携带（SessionLoc 保持两条路径逐字节一致）。
+        u.turn_net_locs = loc_acc.turn_records
 
     # Compute session_duration_ms from the time window
     if u.started_at and u.ended_at:
@@ -713,7 +817,18 @@ def read_conversation(path: Path) -> list[dict]:
 def read_session_meta(path: Path) -> SessionMeta:
     """Extract session metadata cheaply via head/tail sampling (for list views).
 
-    Ports cc-switch's ``read_head_tail_lines`` + ``parse_session``: read the first
+    走 file_cache（mtime/size 签名）：头尾采样本身便宜，但总览/重分析每会话
+    都读一次，几十个会话的项目重复分析累积近百毫秒；缓存后近零。返回对象
+    为共享引用，调用方不得原地修改。
+    """
+    from tcer.core import file_cache
+
+    return file_cache.get_or_compute(
+        path, ("claude_meta",), lambda: _read_session_meta_uncached(path))
+
+
+def _read_session_meta_uncached(path: Path) -> SessionMeta:
+    """Ports cc-switch's ``read_head_tail_lines`` + ``parse_session``: read the first
     ``head_n`` lines and last ``tail_n`` lines only, so listing hundreds of sessions
     doesn't require scanning whole files.
 

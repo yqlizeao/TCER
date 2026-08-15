@@ -182,3 +182,132 @@ def test_user_modified_counted(tmp_path):
     p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
     u = reader_mod.aggregate_usage(p)
     assert u.user_modified_count == 1
+
+
+def test_failed_tool_calls_excluded_from_loc(tmp_path):
+    """is_error 的 Edit/Write 不产生行增量、不污染 file_lines 基线。
+
+    场景：失败 Edit（old_string 不匹配）→ 重试成功净增 1 行；被用户拒绝的
+    Write（权限拒绝）。真实产出 = 1 行。
+    """
+    import json
+
+    from tcer.core import reader as reader_mod
+    lines = [
+        # 失败的 Edit：old_string 不匹配（is_error），不改变文件
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0},
+                     "content": [{"type": "tool_use", "id": "t1", "name": "Edit",
+                                  "input": {"file_path": "a.py", "old_string": "x\ny",
+                                            "new_string": "X\nY\nZ\nW"}}]}},
+        {"type": "user",
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                  "is_error": True,
+                                  "content": "String to replace not found"}]}},
+        # 被用户拒绝的 Write：不产生任何行
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m2",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0},
+                     "content": [{"type": "tool_use", "id": "t2", "name": "Write",
+                                  "input": {"file_path": "b.py",
+                                            "content": "p\nq\nr"}}]}},
+        {"type": "user",
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t2",
+                                  "is_error": True,
+                                  "content": "The user doesn't want to proceed"}]}},
+        # 重试成功的 Edit：净增 1 行
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m3",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0},
+                     "content": [{"type": "tool_use", "id": "t3", "name": "Edit",
+                                  "input": {"file_path": "a.py", "old_string": "a",
+                                            "new_string": "a\nb"}}]}},
+        {"type": "user",
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t3"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    # scan 与 session_loc_full 两条路径一致
+    _, sl = reader_mod.scan_session(p, with_loc=True, include_user_texts=False)
+    sl2 = loc.session_loc_full(p)
+    for s in (sl, sl2):
+        assert s.added == 1            # 只有成功 Edit 的 +1，无幻影行
+        assert s.deleted == 0
+        assert s.unseen_writes == 0    # 被拒的 Write 不计 F1 暴露
+        assert "a.py" in s.file_edit_counts
+        assert "b.py" not in s.file_edit_counts  # 被拒调用不算编辑次数
+    # 工具错误照常计数（不影响错误统计口径）
+    u = reader_mod.aggregate_usage(p)
+    assert u.tool_errors == 2
+
+
+def test_truncated_session_edits_flushed(tmp_path):
+    """结果未到的编辑调用（截断/进行中会话）仍按成功回放（旧行为兼容）。"""
+    import json
+
+    from tcer.core import reader as reader_mod
+    lines = [
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "m1",
+                     "usage": {"input_tokens": 10, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0},
+                     "content": [{"type": "tool_use", "id": "t1", "name": "Write",
+                                  "input": {"file_path": "a.py",
+                                            "content": "x\ny\nz"}}]}},
+        # 文件到此截断：没有 tool_result 行
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    _, sl = reader_mod.scan_session(p, with_loc=True, include_user_texts=False)
+    sl2 = loc.session_loc_full(p)
+    for s in (sl, sl2):
+        assert (s.added, s.deleted, s.unseen_writes) == (3, 0, 1)
+
+
+def test_resent_tool_use_deduped_in_loc(tmp_path):
+    """Claude Code 2.1.227+ rewind/重发：同 tool_use id 的历史对只回放一次
+    （scan_session 与 session_loc_full 两路径同口径）。"""
+    import json
+
+    from tcer.core import reader as R
+
+    def _asst(i, cid, content):
+        return {"type": "assistant", "timestamp": 1_770_000_000_000 + i * 1000,
+                "message": {"role": "assistant", "id": f"m{i}",
+                            "usage": {"input_tokens": 10, "output_tokens": 5,
+                                      "cache_creation_input_tokens": 0,
+                                      "cache_read_input_tokens": 0},
+                            "content": content}}
+
+    tool_block = {"type": "tool_use", "id": "t1", "name": "Edit",
+                  "input": {"file_path": "a.py", "old_string": "x",
+                            "new_string": "x\ny\nz"}}
+    lines = [
+        _asst(0, "t1", [tool_block]),
+        {"type": "user",
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+        # rewind 后整段重发（同 message.id 语义的重复历史，tool_use id 相同）
+        _asst(1, "t1", [tool_block]),
+        {"type": "user",
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u, sloc = R.scan_session(p, with_loc=True, include_user_texts=False)
+    sloc2 = loc.session_loc_full(p)
+    for s in (sloc, sloc2):
+        assert s.added == 2            # 只回放一次（+2），不因重发变 +4
+    assert u.tool_calls.get("Edit") == 1

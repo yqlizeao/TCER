@@ -462,6 +462,8 @@ def test_analyze_project_folds_subagents_and_counts(tmp_path, monkeypatch):
     a = analyze.analyze_project(refs[0].key, source="omp", project_ref=refs[0])
     assert a.n_sessions == 1
     assert a.n_subagents == 1              # folded subagent counted
+    # 逐会话 subagent_count 同步填充（CSV 导出与聚合口径一致，不再恒 0）
+    assert a.reports[0].subagent_count == 1
     assert a.aggregate.usage.input_tokens == 300
     assert len(a.reports) == 1             # subagent is not a separate report
     file_cache.clear()

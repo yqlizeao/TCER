@@ -129,3 +129,17 @@ def test_render_overview_html():
     assert "TCER 项目总览" in out and "P1" in out
     assert "&lt;x&gt;" in out  # 转义
     assert "sortable" in out
+
+
+def test_project_html_section_selection():
+    reports = [_report(500, sid="s1"), _report(2000, sid="s2")]
+    agg = _agg(reports)
+    full = html_report.render_project_html(reports, agg, project_name="P")
+    only_kpi = html_report.render_project_html(reports, agg, project_name="P",
+                                               sections=["kpi"])
+    assert "总览" in only_kpi or "净增" in only_kpi or "KPI" in only_kpi
+    assert "模型对比" not in only_kpi
+    assert "综合效率分排名" not in only_kpi
+    assert "会话明细" not in only_kpi
+    # 默认（None）与全选等价
+    assert "模型对比" in full

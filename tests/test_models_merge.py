@@ -24,7 +24,10 @@ _SPECIAL = {
     "rate_limit_names": {"primary"},
     "ttft_ms_samples": [500, 900],
     "abort_reasons": {"interrupted": 2},
+    "compaction_triggers": {"auto": 2},
     "mcp_calls_by_attr": {"monolith/editor_query": 3},
+    "compaction_turns": [3, 7],
+    "turn_net_locs": [(0, 5, 2), (1, 3, 0)],
     "started_at": 1_700_000_000_000,
     "ended_at": 1_700_000_060_000,
     "session_duration_ms": 60_000,  # 与 started/ended 一致,merge 重算后不变

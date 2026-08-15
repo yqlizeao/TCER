@@ -105,7 +105,7 @@ def _refresh_composite_globals() -> None:
     """Reload module-level constants from config (after cache clear / save)."""
     global TASK_CATEGORIES, TTAF, TCER_BASELINE, CPE_BASELINE, CHR_WEIGHT
     global SCORE_OUTPUT_BASELINE, SCORE_COST_BASELINE, SCORE_WEIGHTS
-    global SCORE_SHRINK_K, SCORE_QUALITY_WEIGHTS
+    global SCORE_SHRINK_K, SCORE_QUALITY_WEIGHTS, SCORE_TIER_BANDS
     TASK_CATEGORIES = _get_task_categories()
     TTAF = _get_ttaf()
     b = _get_baselines()
@@ -119,6 +119,9 @@ def _refresh_composite_globals() -> None:
     SCORE_WEIGHTS = {k: float(v) for k, v in sm["weights"].items()}
     SCORE_SHRINK_K = float(sm["shrink_k"])
     SCORE_QUALITY_WEIGHTS = {k: float(v) for k, v in sm["quality_weights"].items()}
+    # 评级带一并热重载（score_tiers.bands 可手工编辑）——否则 tier() 与已按
+    # 新配置重算的分数脱节（规则 11 冻结陷阱的同族遗漏）。
+    SCORE_TIER_BANDS = _get_score_tier_bands()
 
 
 # Module-level views (backward compat). Always rebuild after cache clear via
@@ -506,6 +509,7 @@ class ModelComparison:
     output_tokens: int = 0
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_1h_tokens: int = 0  # 1h 档缓存写子集（计价加溢价，与会话级口径一致）
     # Cost
     cost: float = 0.0
     session_count: int = 0
@@ -566,6 +570,7 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
             mc.output_tokens += mu.output_tokens
             mc.cache_creation_tokens += mu.cache_creation_input_tokens
             mc.cache_read_tokens += mu.cache_read_input_tokens
+            mc.cache_write_1h_tokens += getattr(mu, "cache_write_1h_tokens", 0)
             mc.session_count += 1
             # 产出/行为/质量按该模型在会话内的 token 占比分摊。单模型会话
             # 权重恰为 1.0（与旧的「主模型全额归因」结果一致）；混合会话按
@@ -595,7 +600,8 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
     for mc in buckets.values():
         mc.cost = cost_usd(
             _FakeModelUsage(mc.input_tokens, mc.output_tokens,
-                            mc.cache_creation_tokens, mc.cache_read_tokens),
+                            mc.cache_creation_tokens, mc.cache_read_tokens,
+                            mc.cache_write_1h_tokens),
             model=mc.model_id)
         grand_cost += mc.cost
         total_input = mc.input_tokens + mc.cache_creation_tokens + mc.cache_read_tokens
@@ -636,13 +642,15 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
 class _FakeModelUsage:
     """Lightweight stand-in for ModelUsage (avoids importing models.py)."""
     __slots__ = ("input_tokens", "output_tokens",
-                 "cache_creation_input_tokens", "cache_read_input_tokens")
+                 "cache_creation_input_tokens", "cache_read_input_tokens",
+                 "cache_write_1h_tokens")
 
-    def __init__(self, i, o, cw, cr):
+    def __init__(self, i, o, cw, cr, cw1h=0):
         self.input_tokens = i
         self.output_tokens = o
         self.cache_creation_input_tokens = cw
         self.cache_read_input_tokens = cr
+        self.cache_write_1h_tokens = cw1h
 
 
 
@@ -726,11 +734,20 @@ def cost_usd(u: TokenUsage, model: str | None = None) -> float:
 # --------------------------------------------------------------------------- #
 # New metrics: timing, tool usage, context efficiency
 # --------------------------------------------------------------------------- #
-def avg_turn_latency_sec(u: TokenUsage) -> float | None:
-    """Average latency per effective assistant turn (seconds). Includes user pauses."""
-    if u.started_at and u.ended_at and u.effective_turns:
-        return (u.ended_at - u.started_at) / 1000 / u.effective_turns
-    return None
+def avg_request_latency_ms(u: TokenUsage) -> float | None:
+    """平均请求延迟（毫秒）——与 cc-switch 的「平均延迟」同口径（每次 API 请求耗时）。
+
+    Grok：Σ(apiDurationMs) ÷ Σ(modelCalls)——apiDurationMs 是回合内多次调用
+    的总和，按调用数均摊才是每请求延迟（此前按回合均值虚高 ~5.7×）。
+    omp：mean(每响应 duration)（每响应即一次补全，精确）。
+    Claude（仅整轮墙钟）/ Codex（仅任务级墙钟）→ None，由 compute 按源门控。
+    """
+    durations = [t.duration_ms for t in u.turn_stats if t.duration_ms]
+    if not durations:
+        return None
+    if u.api_calls > 0:
+        return sum(durations) / u.api_calls
+    return sum(durations) / len(durations)
 
 
 def _tool_leaf(name: str) -> str:
@@ -773,6 +790,189 @@ _CANONICAL_TOOL_NAMES = frozenset({
     "SchedulerCreate", "SchedulerDelete", "ImageGen", "ImageEdit",
     "MemorySearch", "MemoryGet", "LSP", "Thinking",
 })
+
+
+def retry_loop_metrics(u: TokenUsage, *, min_run: int = 3) -> dict:
+    """工具重试循环（卡死信号）：同工具+同路径在 tool_ops 时序上连续重复 ≥min_run 次。
+
+    tool_error_rate 只给比例不给结构——15% 错误率可能是分散的小错，也可能
+    是同一个死循环烧掉几十个回合（Edit 反复匹配失败、Read 反复读同一大文
+    件）。这里按相邻比较找连续 run（O(n)）。只统计 path 非空的调用：Bash
+    等无路径工具不参与，避免把任意 3 连 Bash 误判成循环。
+
+    Returns: {"count": 循环次数, "max_len": 最长循环长度,
+              "details": {"Tool:path": 最长 run} 或 None}
+    """
+    loops = 0
+    max_len = 0
+    details: dict[str, int] = {}
+    run_key: tuple[str, str] | None = None
+    run_len = 0
+
+    def _flush() -> None:
+        nonlocal loops, max_len
+        if run_key is not None and run_len >= min_run:
+            loops += 1
+            label = f"{run_key[0]}:{run_key[1]}"
+            details[label] = max(details.get(label, 0), run_len)
+            max_len = max(max_len, run_len)
+
+    for op in u.tool_ops:
+        key = (op.tool, op.path) if op.path else None
+        if key is not None and key == run_key:
+            run_len += 1
+            continue
+        _flush()
+        run_key = key
+        run_len = 1 if key is not None else 0
+    _flush()
+    return {"count": loops, "max_len": max_len, "details": details or None}
+
+
+def turn_cost_analysis(u: TokenUsage) -> dict:
+    """逐回合成本近似 + 缓存失效尖峰（消费 turn_stats，无新增 IO）。
+
+    - ``max_turn_cost`` / ``max_turn_share`` / ``spike_turn``：最贵回合的近似
+      成本、占全会话回合成本合计的份额、回合号。「大户回合」阈值（30%）在
+      insights._TH.TURN_COST_SPIKE 判定，本函数只产出数值。
+    - ``cache_invalidation_events``：cache_write 环比翻倍且 cache_read 回落
+      的回合数（前缀被改动作废缓存）——比整体 CHR 更能定位哪个回合破坏了
+      缓存。首轮 cache 建立不计（正常冷启动）。
+
+    近似口径：逐回合计价不含 1h 缓存写分档（TurnStat 无该子集）；回合成本
+      合计与 ``cost_usd`` 可能略有出入，仅用于回合间的相对比较。
+    """
+    empty = {"max_turn_cost": None, "max_turn_share": None, "spike_turn": None,
+             "cache_invalidation_events": 0}
+    stats = u.turn_stats
+    if not stats:
+        return empty
+    rate_cache: dict[str, dict[str, float]] = {}
+    costs: list[float] = []
+    for t in stats:
+        key = t.model or ""
+        r = rate_cache.get(key)
+        if r is None:
+            r = pricing.resolve(key) if key else pricing.default_pricing()
+            rate_cache[key] = r
+        costs.append(
+            t.input_tokens * r["input"] / 1e6
+            + t.cache_write * r["cache_write"] / 1e6
+            + t.cache_read * r["cache_read"] / 1e6
+            + t.output_tokens * r["output"] / 1e6
+        )
+    total = sum(costs)
+    if total <= 0:
+        return empty
+    idx = max(range(len(costs)), key=lambda i: costs[i])
+    events = 0
+    for i in range(1, len(stats)):
+        prev, cur = stats[i - 1], stats[i]
+        if (cur.cache_write > prev.cache_write * 2 and cur.cache_write >= 2000
+                and cur.cache_read < prev.cache_read):
+            events += 1
+    return {
+        "max_turn_cost": costs[idx],
+        "max_turn_share": costs[idx] / total,
+        "spike_turn": stats[idx].turn,
+        "cache_invalidation_events": events,
+    }
+
+
+def activity_metrics(u: TokenUsage) -> dict:
+    """人机时间结构：AI 活跃占比 + 用户响应间隔中位数。
+
+    - ``ai_active_ratio``：Σ 逐回合 duration ÷ 会话墙钟（0..1，封顶 1）。
+      回答「时间花在等 AI 还是 AI 在等我」。Grok 扣除审批等待（人在卡 AI
+      的显式时间）；Claude 的 duration 是整轮墙钟（含工具执行），此值为
+      上界估计（tooltip 注明）。
+    - ``user_gap_median_min``：相邻回合时间戳间隔的中位数（分钟），只统计
+      1–30 分钟的间隔（<1 分钟是连发，>30 分钟视作离开，都不算「响应」）。
+    """
+    out = {"ai_active_ratio": None, "user_gap_median_min": None}
+    total_ms = u.session_duration_ms or 0
+    dur = sum(t.duration_ms for t in u.turn_stats if t.duration_ms)
+    if dur > 0 and total_ms > 0:
+        wait = getattr(u, "permission_wait_ms_total", 0) or 0
+        out["ai_active_ratio"] = min(1.0, max(0.0, dur - wait) / total_ms)
+    gaps: list[float] = []
+    ts_prev = None
+    for t in u.turn_stats:
+        if t.ts is None:
+            continue
+        if ts_prev is not None:
+            g = t.ts - ts_prev
+            if 60_000 <= g <= 30 * 60_000:
+                gaps.append(g)
+        ts_prev = t.ts
+    if gaps:
+        gaps.sort()
+        mid = len(gaps) // 2
+        med = gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2
+        out["user_gap_median_min"] = med / 60_000
+    return out
+
+
+def segment_metrics(u: TokenUsage, *, n_segments: int = 3) -> dict:
+    """分段效率：把回合均分为 n 段，逐段算「每百万 Token 净增行」（分段 TCER）。
+
+    回答「长会话什么时候开始空转、该不该收口新开」。``decay_ratio`` = 末段
+    TCER ÷ 首段 TCER（<0.5 即明显衰减）。段内 token 来自 turn_stats、净增行
+    来自 turn_net_locs（当前仅 Claude 填充）——后者为空时各段 TCER/衰减比为
+    None，但段 token 曲线仍可用。压缩位置（compaction_turns）随段返回，供
+    恢复分析定位。
+    """
+    stats = u.turn_stats
+    segs = [{
+        "tokens": 0, "added": 0, "deleted": 0,
+        "compactions": 0, "tcer": None,
+    } for _ in range(n_segments)]
+    if not stats:
+        return {"segments": segs, "decay_ratio": None}
+    n = len(stats)
+    bounds = [(i * n // n_segments, (i + 1) * n // n_segments) for i in range(n_segments)]
+    # 回合号 → 段号的映射：turn_stats 的 turn 字段才是权威回合号——零 usage
+    # 桩消耗回合号但不产生 TurnStat，列表下标与回合号有空洞错位；此前按下标
+    # 查 LOC/压缩位置会把尾段 LOC 静默丢弃、段配对错位（衰减比被压低）。
+    turn_to_seg: dict[int, int] = {}
+    for i, (lo, hi) in enumerate(bounds):
+        for t in stats[lo:hi]:
+            turn_to_seg[t.turn] = i
+    seg_first_turn = [stats[lo].turn for lo, _ in bounds]
+
+    def _seg_of_turn(turn: int) -> int:
+        seg = turn_to_seg.get(turn)
+        if seg is not None:
+            return seg
+        # 不在 stats 里的回合号（截断尾部/极端空洞）：就近归段。
+        for i in range(n_segments - 1, -1, -1):
+            if turn >= seg_first_turn[i]:
+                return i
+        return 0
+
+    loc_by_turn: dict[int, tuple[int, int]] = {}
+    for turn, a, d in u.turn_net_locs:
+        prev = loc_by_turn.get(turn, (0, 0))
+        loc_by_turn[turn] = (prev[0] + a, prev[1] + d)
+    for i, (lo, hi) in enumerate(bounds):
+        for t in stats[lo:hi]:
+            segs[i]["tokens"] += (t.input_tokens + t.cache_write
+                                  + t.cache_read + t.output_tokens)
+    for turn, (a, d) in loc_by_turn.items():
+        seg = segs[_seg_of_turn(turn)]
+        seg["added"] += a
+        seg["deleted"] += d
+    for i in range(n_segments):
+        mt = segs[i]["tokens"] / 1e6
+        net = segs[i]["added"] - segs[i]["deleted"]
+        segs[i]["tcer"] = net / mt if (mt > 0 and u.turn_net_locs) else None
+    for ct in u.compaction_turns:
+        segs[_seg_of_turn(ct)]["compactions"] += 1
+    decay = None
+    first, last = segs[0]["tcer"], segs[-1]["tcer"]
+    if first is not None and last is not None and first > 0:
+        decay = last / first
+    return {"segments": segs, "decay_ratio": decay}
 
 
 def tool_usage_metrics(u: TokenUsage) -> dict[str, float | None]:
@@ -830,11 +1030,10 @@ def cache_efficiency(u: TokenUsage) -> float | None:
 def output_tps(u: TokenUsage) -> float | None:
     """Output generation throughput (tokens/sec) over timed turns.
 
-    Σ output_tokens ÷ Σ duration_ms (in seconds), summed only over ``turn_stats``
-    entries that carry a real per-turn ``duration_ms``. The duration must be a
-    single API completion's generation time — Codex ``task_complete.duration_ms``,
-    Grok per-turn ``api_ms``, omp/Pi ``duration`` — matching the industry
-    definition (output tokens ÷ decode time).
+    Σ output_tokens ÷ Σ duration_ms (in seconds). Grok ``apiDurationMs`` 是回合内
+    全部调用的 API 总时长、omp/Pi ``duration`` 是每响应时长——分子分母同为回合
+    总量，比值正确。Codex 的 ``task_complete.duration_ms`` 实测是任务级墙钟
+    （含工具执行，比单补全高一个数量级）→ Codex 由 compute 门控为 None。
 
     NOTE: Claude is deliberately excluded (see ``metric_defs._SOURCE_SUPPORT``).
     Its JSONL has no per-completion duration; the only timing is ``turn_duration``,
@@ -918,6 +1117,14 @@ def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
 
     # Search-edit ratio: a code-search is "productive" if any Write/Edit
     # happens within WINDOW turns after it. Path-agnostic (see docstring).
+    # 跟进判定用 bisect 在已排序回合集合上二分——线性扫整个列表是
+    # O(搜索数×编辑数)，大会话几十万次比较（实测 48 会话 2 百万次 genexpr）。
+    from bisect import bisect_right
+
+    def _followed_within(turn: int, follow_turns: list[int]) -> bool:
+        i = bisect_right(follow_turns, turn)
+        return i < len(follow_turns) and follow_turns[i] <= turn + WINDOW
+
     edit_turns = sorted({op.turn for op in u.tool_ops if op.tool in _WRITE_EDIT})
     searches = 0
     searches_with_edit = 0
@@ -925,7 +1132,7 @@ def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
         if not _is_code_search_tool(op.tool):
             continue
         searches += 1
-        if any(op.turn < et <= op.turn + WINDOW for et in edit_turns):
+        if _followed_within(op.turn, edit_turns):
             searches_with_edit += 1
     ste = (searches_with_edit / searches) if searches else None
 
@@ -938,7 +1145,7 @@ def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
         if op.tool not in _WRITE_EDIT:
             continue
         edits += 1
-        if any(op.turn < vt <= op.turn + WINDOW for vt in verify_turns):
+        if _followed_within(op.turn, verify_turns):
             edits_with_verify += 1
     vae = (edits_with_verify / edits) if edits else None
 
@@ -1198,7 +1405,12 @@ def compute(
     ta = normalized_tcer(tcer, task_type)
 
     # --- timing metrics ---
-    avg_turn_lat = avg_turn_latency_sec(u)
+    # 源门控（与 _SOURCE_SUPPORT 同判定）：latency 需要 Grok(api_calls 均摊)/
+    # omp(每响应 duration)；output_tps 需要 Grok/omp(总 output÷总 API 时长)。
+    # Claude(整轮墙钟)/Codex(任务级墙钟) 的 duration 语义不符，产出会在
+    # GUI「不适用」而 CSV/上传照发的口径间分裂——直接置 None 三通道一致。
+    _dur_ok = meta.source in ("grok", "omp", "pi")
+    avg_turn_lat = avg_request_latency_ms(u) if _dur_ok else None
     session_dur_min = (u.session_duration_ms / 60000) if u.session_duration_ms else None
 
     # --- tool usage pattern ---
@@ -1268,6 +1480,23 @@ def compute(
             touched.add(op.path)
             ftd[op.path] = ftd.get(op.path, 0) + 1
     fq = file_quality_metrics(u)
+    rl = retry_loop_metrics(u)
+    # C2 自报成本偏差：价表计价 ÷ 源自报成本（opencode 会话总额 / omp·pi 逐响应
+    # 累加）。1.0=口径一致；偏离提示价表错价/漏 1h 档/默认回退失真。
+    cost_reported_ratio = (
+        cost / u.reported_cost_usd
+        if (u.reported_cost_usd and u.reported_cost_usd > 0 and cost is not None)
+        else None
+    )
+    # C3 LOC 可信度：回放 added/deleted vs Claude 自算 structuredPatch 的吻合率。
+    patch_a = getattr(u, "patch_diff_added", 0)
+    patch_d = getattr(u, "patch_diff_deleted", 0)
+    loc_patch_agreement = None
+    if patch_a or patch_d:
+        diff = abs((code_added or 0) - patch_a) + abs((code_deleted or 0) - patch_d)
+        loc_patch_agreement = max(0.0, 1.0 - diff / max(1, patch_a + patch_d))
+    tc = turn_cost_analysis(u)
+    act = activity_metrics(u)
 
     # --- 综合效率分 v2：三正交轴半饱和 + 证据收缩 + 加权（见 efficiency_score）---
     churn_ = churn_ratio(
@@ -1307,7 +1536,7 @@ def compute(
         code_reworked=code_reworked,
         churn_ratio=churn_,
         # --- timing ---
-        avg_turn_latency_sec=avg_turn_lat,
+        avg_request_latency_ms=avg_turn_lat,
         session_duration_minutes=session_dur_min,
         # --- tool usage ---
         read_write_ratio=tool_m["read_write_ratio"],
@@ -1335,11 +1564,22 @@ def compute(
         edit_verify_ratio=fq["edit_verify_ratio"],
         first_edit_turn=fq["first_edit_turn"],
         bash_ratio=tool_m["bash_ratio"],
+        retry_loop_count=rl["count"],
+        retry_loop_max_len=rl["max_len"],
+        retry_loop_details=rl["details"],
+        turn_cost_max_share=tc["max_turn_share"],
+        turn_cost_spike_turn=tc["spike_turn"],
+        cache_invalidation_events=tc["cache_invalidation_events"],
+        ai_active_ratio=act["ai_active_ratio"],
+        user_gap_median_min=act["user_gap_median_min"],
+        efficiency_decay_ratio=segment_metrics(u)["decay_ratio"],
         time_to_first_token_sec=ttft_sec,
         ttft_p95_sec=ttft_p95,
         task_completion_rate=task_completion,
         patch_apply_success_rate=patch_success,
         context_window_used_ratio=context_window_ratio,
         reasoning_output_ratio=reasoning_ratio,
-        output_tps=output_tps(u),
+        output_tps=output_tps(u) if _dur_ok else None,
+        cost_reported_ratio=cost_reported_ratio,
+        loc_patch_agreement=loc_patch_agreement,
     )

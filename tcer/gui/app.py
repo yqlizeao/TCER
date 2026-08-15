@@ -77,13 +77,14 @@ class TcerGui:
         self._pinned_keys = self._ui_prefs.setdefault("pinned_sessions", [])
         self._flagged_keys = self._ui_prefs.setdefault("flagged_sessions", [])
         self._restore_project_uid = self._ui_prefs.get("last_project")
-        if ui_prefs.valid_geometry(self._ui_prefs.get("geometry")):
-            root.geometry(self._ui_prefs["geometry"])
+        sx, sy = root.winfo_screenwidth(), root.winfo_screenheight()
+        fitted = clamp_geometry(self._ui_prefs.get("geometry") or "", sx, sy)
+        if fitted is not None:
+            root.geometry(fitted)
         else:
-            w, h = 1600, 900
-            sx = root.winfo_screenwidth()
-            sy = root.winfo_screenheight()
-            root.geometry(f"{w}x{h}+{(sx - w) // 2}+{(sy - h) // 2 - 40}")
+            # 默认尺寸随屏幕收缩（小屏笔记本/部分 mac 放不下固定 1600×900）
+            w, h = min(1600, int(sx * 0.92)), min(900, int(sy * 0.86))
+            root.geometry(f"{w}x{h}+{(sx - w) // 2}+{max(0, (sy - h) // 2 - 40)}")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.filter = FilterBar(root, self)
@@ -217,6 +218,10 @@ class TcerGui:
         nb = ttk.Notebook(right)
         nb.pack(fill="both", expand=True)
         self._nb = nb
+        self._dirty_tabs: dict[int, bool] = {}  # 页签 → 待补渲染是否需重灌数据
+        # 切页签时补渲染被惰性跳过的视图（见 _render_active_tab）。
+        nb.bind("<<NotebookTabChanged>>", lambda _e: self._render_tab(
+            self._nb.index(self._nb.select())))
         tab_m = tk.Frame(nb, bg=theme.BG)
         tab_b = tk.Frame(nb, bg=theme.PANEL)
         tab_t = tk.Frame(nb, bg=theme.PANEL)
@@ -418,6 +423,14 @@ class TcerGui:
                 # which would raise and stop _poll from rescheduling (freezes GUI).
         except queue.Empty:
             pass
+        except Exception:  # noqa: BLE001 — _poll 必须永远重新排程
+            # 渲染期异常（如缺 PIL 时的图表错误）绝不能终止轮询——after 一旦
+            # 不再排程，后续所有分析结果都会静默丢弃、状态栏永久卡「分析中…」。
+            # 结果处理是一条条独立排队的，跳过当前条、继续处理后续条即可。
+            try:
+                self.filter.set_status("渲染出错（已跳过一条结果）")
+            except Exception:
+                pass
         self.root.after(120, self._poll)
 
     def _on_analysis(self, a: analyze.ProjectAnalysis) -> None:
@@ -448,11 +461,9 @@ class TcerGui:
             self._selected_session_id = prev_sid
         elif a.reports:
             self._selected_session_id = self.session_col.select_first(notify=False)
-        self.ranking_view.update(a.reports, aggregate=a.aggregate)
-        # Trend + 模型对比 must respect the current view mode (project vs
-        # session). _render_session_views handles both, plus the trend highlight.
-        self._render_session_views()
-        self._render_metrics()
+        # 按页签惰性渲染：切项目只画当前看得见的页签（四视图全画要 ~600ms），
+        # 其余标记待渲染，用户切过去时经 <<NotebookTabChanged>> 补上。
+        self._refresh_views(full=True)
         self._update_tab_names()
         status = f"完成 · 共 {a.n_sessions} 个会话"
         if self.filter.get_params().get("task_type") == metrics.AUTO_TASK_TYPE and a.reports:
@@ -478,11 +489,7 @@ class TcerGui:
         """
         self._selected_session_id = sid
         if self.view_mode.get() == "session":
-            self._render_metrics()
-            self._update_model_compare()
-            # Highlight in trend without rebuilding the chart (preserves zoom).
-            self.trend_chart.select_session_by_sid(sid)
-            self._update_ranking_view()
+            self._refresh_views(full=False)
         self._update_tab_names()
 
     # --------------------------------------------------------------- session marks
@@ -575,10 +582,42 @@ class TcerGui:
         self.filter.set_status(f"已删除会话 · 移除 {len(removed)} 项磁盘对象")
 
     def _on_view_change(self) -> None:
-        self._render_metrics()
-        self._update_model_compare()
-        self._update_ranking_view()
+        self._refresh_views(full=False)
         self._update_tab_names()
+
+    # --------------------------------------------------------------- 页签惰性渲染
+    def _refresh_views(self, *, full: bool) -> None:
+        """四个页签全部标脏，只立即渲染当前页签（其余切到时补）。
+
+        ``full=True`` = 新分析结果（页签要重灌数据）；``False`` = 视角/选中
+        变化（数据不变，仅按当前选中重画）。仍挂起的 full 脏标记不被 False
+        刷新降级——未访问过的页签首次补渲染时依旧要灌数据。
+        """
+        for i in range(4):
+            if full or i not in self._dirty_tabs:
+                self._dirty_tabs[i] = full
+        self._render_tab(self._nb.index(self._nb.select()))
+
+    def _render_tab(self, idx: int) -> None:
+        """渲染指定页签（未标脏则跳过）。补渲染时按脏标记决定是否重灌数据。"""
+        if not self._current or idx not in self._dirty_tabs:
+            return
+        full = self._dirty_tabs.pop(idx)
+        if idx == 0:
+            self._render_metrics()
+        elif idx == 1:
+            self._update_model_compare()
+        elif idx == 2:
+            if full:
+                self.ranking_view.update(self._current.reports,
+                                         aggregate=self._current.aggregate)
+            self._update_ranking_view()
+        else:
+            if full:
+                self.trend_chart.update(self._current.reports)
+            # Highlight selected session in trend chart (without rebuild — zoom)
+            if self._selected_session_id:
+                self.trend_chart.select_session_by_sid(self._selected_session_id)
 
     def _update_ranking_view(self) -> None:
         """按视角驱动综合效率分排名右栏（对齐指标分类/模型对比的项目/会话切换）。
@@ -606,17 +645,6 @@ class TcerGui:
                 self.model_compare.update([report])
         else:
             self.model_compare.update(self._current.reports)
-
-    def _render_session_views(self) -> None:
-        """Rebuild TrendChart and model compare. Called only on fresh analysis."""
-        if not self._current:
-            return
-        self.trend_chart.update(self._current.reports)
-        # Highlight selected session in trend chart
-        if self._selected_session_id:
-            self.trend_chart.select_session_by_sid(self._selected_session_id)
-        self._update_model_compare()
-        self._update_ranking_view()
 
     def _update_tab_names(self) -> None:
         """页签名加 (项目)/(会话) 后缀 + 彩色视角图标。
@@ -836,7 +864,7 @@ class TcerGui:
         """打开个人基准校准弹窗。先开窗，由弹窗按需触发后台校准（不预先计算）。
 
         弹窗提供：全部会话 / 逐项目 两种模式、离群过滤开关（默认开）。基准始终
-        基于**全部历史会话**，不受顶栏时间范���影响。
+        基于**全部历史会话**，不受顶栏时间范影响。
         """
         if not self._projects:
             messagebox.showinfo("计算基准", "无项目可用于计算。")
@@ -928,6 +956,13 @@ class TcerGui:
                   else f" · {(report.meta.session_id or '')[:16]}…")
         popups.ToolSequencePopup(self.root, report.usage, suffix)
 
+    def show_project_profile(self) -> None:
+        """项目画像：跨会话热点文件 / 模型混用策略 / 技能·MCP 复用。"""
+        if not self._current:
+            self.filter.set_status("请先分析一个项目")
+            return
+        popups.ProjectProfilePopup(self.root, self._current)
+
     def show_project_overview(self) -> None:
         """跨项目总览：后台分析全部项目（走 mtime 缓存），弹窗可排序对比。"""
         if not self._projects:
@@ -991,6 +1026,20 @@ class TcerGui:
         if not self._current:
             self.filter.set_status("无数据可导出")
             return
+        # 项目级 HTML：先选章节（默认全选 = 旧行为），再走保存对话框。
+        if fmt == "html" and scope != "session":
+            popups.HtmlSectionsPopup(self.root, self._export_project_html)
+            return
+        self._do_export(fmt, scope)
+
+    def _export_project_html(self, sections: list[str]) -> None:
+        """选节回调：无章节时取消导出，否则按选中章节导出。"""
+        if not sections:
+            self.filter.set_status("未选择任何章节，已取消导出")
+            return
+        self._do_export("html", "project", html_sections=sections)
+
+    def _do_export(self, fmt: str, scope: str, html_sections=None) -> None:
         a = self._current
         report = None
         if scope == "session":
@@ -1030,7 +1079,7 @@ class TcerGui:
                 content = html_report.render_project_html(
                     a.reports, a.aggregate, project_name=proj_name,
                     source_label=source_label, n_sessions=a.n_sessions,
-                    n_subagents=a.n_subagents)
+                    n_subagents=a.n_subagents, sections=html_sections)
             elif fmt == "json":
                 content = export_mod.to_json(a.reports, a.aggregate, a.n_sessions)
             elif fmt == "csv":
@@ -1223,13 +1272,39 @@ def _set_windows_app_id() -> None:
 
 
 def _apply_tk_scaling(root) -> None:
-    """按实际 DPI 设置 Tk 缩放，点单位字体随之放大到物理正确尺寸。"""
+    """按实际 DPI 设置 Tk 缩放，点单位字体随之放大到物理正确尺寸。
+
+    mac（Aqua）例外：Tk 自己按点管理字体，显式改 scaling 反而会虚胖。
+    """
+    import sys
+    if sys.platform == "darwin":
+        return
     try:
         dpi = root.winfo_fpixels("1i")
         if dpi > 0:
             root.tk.call("tk", "scaling", dpi / 72.0)
     except tk.TclError:
         pass
+
+
+def clamp_geometry(geometry: str, sw: int, sh: int) -> str | None:
+    """把恢复的窗口几何钳制进当前屏幕——跨机器/跨分辨率迁移的关键防线。
+
+    在 1920×1080 存下的 ``1600x900+169+40``，搬到 1366×768 笔记本或 mac
+    1440×900 上会超出屏幕；多显示器拔掉后 ``+3000+200`` 会落在不存在的屏
+    幕外（窗口整个不可见，看起来像「程序没开」）。尺寸收进屏幕、位置保证
+    标题栏留在可视区。不合法输入返回 None（走默认居中）。
+    """
+    import re
+    m = re.fullmatch(r"(\d{3,5})x(\d{3,5})[+-](-?\d+)[+-](-?\d+)", geometry or "")
+    if not m:
+        return None
+    w, h, x, y = map(int, m.groups())
+    w = max(640, min(w, sw))
+    h = max(480, min(h, sh - 60))          # 留任务栏余量
+    x = min(max(0, x), max(0, sw - 120))   # 至少露出 120px 可拖回
+    y = min(max(0, y), max(0, sh - 60))
+    return f"{w}x{h}+{x}+{y}"
 
 
 def _set_window_icon(root) -> None:

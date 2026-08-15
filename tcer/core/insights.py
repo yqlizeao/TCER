@@ -36,6 +36,7 @@ class _TH:
     AXIS_STRONG = 0.65
     AXIS_WEAK = 0.35
     UNSEEN_WRITES = 3
+    RETRY_LOOP_LEN = 4       # 最长循环达到此长度才提示（≥3 计数、≥4 才值得复盘）
     EDIT_RATIO_LOW = 0.30
     # --- 新增高信号规则阈值 ---
     EXPLORE_LOW = 0.05        # 探索比过低：几乎不搜代码就动手（易改错地方）
@@ -52,6 +53,10 @@ class _TH:
     NET_LOC_MIN_FOR_TEST = 100  # 只有产出上规模才评测试覆盖
     # --- 金额类阈值 ---
     COST_HIGH_USD = 5.0       # 单次会话花费偏高（绝对金额，美元）
+    TURN_COST_SPIKE = 0.30    # 单回合吃掉会话成本的份额达此即为「大户回合」
+    RATE_LIMIT_HITS = 3      # 限流命中次数达此提示（白等时间信号）
+    DECAY_LOW = 0.5           # 末段/首段分段 TCER 之比低于此 = 上下文拖累效率
+    DECAY_MIN_TURNS = 9       # 衰减判定需要足够回合（3 段 × 每段至少 3 回合）
     CPE_HIGH_MULT = 1.5       # 每千行成本高于个人基准的倍数（1.5× 即偏贵）
     CHURN_COST_MIN = 0.30     # 返工到此比例即视为「在烧钱重写」
 
@@ -116,9 +121,10 @@ def _err_copy(rate: float) -> tuple[str, str]:
 # 文案原则（说人话）：title 一句话点出现象；action 给「照着做就行」的具体动作，
 # 不堆术语、不空喊「优化」；亮点(good)不带 action（表扬无需下一步）。
 _COPY: dict[str, tuple[str, str]] = {
-    "unscored": ("这次会话没算出效率分",
-                 "如果你希望它计分，确认这次确实有写或改代码（Write / Edit），且没开「跳过代码统计」。"
-                 "纯问答、只看代码、查资料的会话本来就不计分，属正常。"),
+    "unscored": ("这场会话是空的，没有可评分的数据",
+                 "若你预期它有内容：确认会话文件完整（非截断/进行中），且没开"
+                 "「跳过代码统计」。纯问答/只看代码的会话会按收缩规则拿到中间分，"
+                 "只有零 token 空会话才完全无分。"),
     "unscored_ev": ("这次没有新增代码，也没有成本数据——看起来是纯调研或代码审查", ""),
 
     "churn_high": ("AI 在反复推翻自己刚写的代码",
@@ -144,6 +150,26 @@ _COPY: dict[str, tuple[str, str]] = {
                "对已经存在的文件，让它用 Edit 局部改，别用 Write 整篇覆盖——"
                "覆盖既有丢内容风险，也会让「新增行数」虚高。"),
     "unseen_ev": ("有 {n} 个已存在的文件是没读过就被整篇重写的", ""),
+
+    "retry_loop": ("对同一文件反复重试，像是在原地打转",
+                   "把该文件的相关上下文（完整内容或报错原文）直接贴进对话，"
+                   "让它一次看清再动手；仍打转就换个说法重述目标，或拆小任务。"),
+    "retry_loop_ev": ("{tool_and_path} 连续被调用了 {n} 次", ""),
+
+    "rate_limit": ("被限流反复打断，等恢复的时间全白等了",
+                   "限流多因短时间高频请求或配额见底：拉长请求间隔、给重活换更高配额的"
+                   "模型/渠道，或把大任务拆到低峰时段。"),
+    "rate_limit_ev": ("会话内被 429 限流 {n} 次", ""),
+
+    "turn_spike": ("有一个回合是「大户」，单回合就吃掉了三成以上的会话开销",
+                   "去会话时间线看那个回合在干什么——通常是失控循环、粘贴了巨块内容、"
+                   "或一次读入超大文件；定位到就拆小/避开，钱立刻省下来。"),
+    "turn_spike_ev": ("整场会话 {v} 的回合成本都花在了{n}", ""),
+
+    "ctx_decay": ("上下文越拖越重，后半场效率明显掉下去了",
+                  "长会话后期空转是上下文税——收口这一场，把未完成事项整理成简短"
+                  "清单开新会话继续；新开场缓存冷但窗口轻，通常立刻回血。"),
+    "ctx_decay_ev": ("末 1/3 回合的每百万 Token 产出只有开场的 {v}", ""),
 
     "chr_low": ("缓存没怎么用上，白花了钱",
                 "让每次对话的开头（系统提示、贴的长文件）尽量保持不变——"
@@ -282,6 +308,13 @@ def session_insights(report: SessionReport) -> list[Insight]:
             t, a = _c("churn_low")
             good.append(Insight("good", t, _c("churn_low_ev")[0].format(v=_pct(churn)), a, "churn"))
 
+    # --- 限流命中：429 打断的等待是纯损耗（Claude/Codex/omp）---
+    rl_hits = report.usage.rate_limit_reached_count
+    if rl_hits >= _TH.RATE_LIMIT_HITS:
+        t, a = _c("rate_limit")
+        drag.append(Insight("drag", t, _c("rate_limit_ev")[0].format(n=rl_hits),
+                            a, "rate_limit_reached_count"))
+
     total_tools = sum(report.usage.tool_calls.values()) if report.usage.tool_calls else 0
     err = report.tool_error_rate
     if err is not None and total_tools >= _TH.TOOL_MIN_CALLS:
@@ -308,6 +341,25 @@ def session_insights(report: SessionReport) -> list[Insight]:
     if report.unseen_writes > _TH.UNSEEN_WRITES:
         t, a = _c("unseen")
         drag.append(Insight("drag", t, _c("unseen_ev")[0].format(n=report.unseen_writes), a, "unseen_writes"))
+
+    # --- 工具重试循环：同工具+同路径连续 ≥N 次（结构化的卡死信号）---
+    if report.retry_loop_count > 0 and report.retry_loop_max_len >= _TH.RETRY_LOOP_LEN:
+        t, a = _c("retry_loop")
+        top = max((report.retry_loop_details or {}).items(), key=lambda kv: kv[1],
+                  default=None)
+        label = _basename(top[0]) if top else "同一目标"
+        ev = _c("retry_loop_ev")[0].format(
+            n=report.retry_loop_max_len, tool_and_path=label,
+        )
+        drag.append(Insight("drag", t, ev, a, "retry_loop_count"))
+
+    # --- 上下文拖累效率：末段分段 TCER 明显低于首段（需足够回合）---
+    decay = report.efficiency_decay_ratio
+    if (decay is not None and decay < _TH.DECAY_LOW
+            and len(report.usage.turn_stats) >= _TH.DECAY_MIN_TURNS):
+        t, a = _c("ctx_decay")
+        drag.append(Insight("drag", t, _c("ctx_decay_ev")[0].format(v=f"{decay:.2f} 倍"),
+                            a, "efficiency_decay_ratio"))
 
     chr_ = report.chr
     if chr_ is not None:
@@ -420,6 +472,16 @@ def _cost_insights(report: SessionReport, cost: list) -> None:
     if churn is not None and churn >= _TH.CHURN_COST_MIN and (report.net_loc or 0) > 0:
         t, a = _c("churn_cost")
         cost.append(Insight("cost", t, _c("churn_cost_ev")[0].format(v=_pct(churn)), a, "cost_churn"))
+
+    # 大户回合：单个回合吃掉会话三成以上的钱
+    share = report.turn_cost_max_share
+    if share is not None and share >= _TH.TURN_COST_SPIKE:
+        turn = report.turn_cost_spike_turn
+        where = f"第 {turn + 1} 回合" if turn is not None else "某个回合"
+        t, a = _c("turn_spike")
+        cost.append(Insight(
+            "cost", t, _c("turn_spike_ev")[0].format(v=_pct(share), n=where),
+            a, "turn_cost_max_share"))
 
 
 # ============================================================
@@ -722,11 +784,13 @@ def _agg_signals(reports: list[SessionReport]) -> dict:
     sig = {"n": len(reports), "tool_errors": 0, "big_sessions": 0,
            "low_test_sessions": 0, "total_calls": 0, "high_churn_sessions": 0,
            "low_rbw_sessions": 0, "unseen_sessions": 0, "ctx_high_sessions": 0,
-           "total_net_loc": 0}
+           "retry_loop_sessions": 0, "total_net_loc": 0}
     for r in reports:
         sig["tool_errors"] += getattr(r.usage, "tool_errors", 0) or 0
         sig["total_calls"] += sum((r.usage.tool_calls or {}).values())
         sig["total_net_loc"] += r.net_loc or 0
+        if (r.retry_loop_count or 0) > 0 and (r.retry_loop_max_len or 0) >= _TH.RETRY_LOOP_LEN:
+            sig["retry_loop_sessions"] += 1
         if (r.net_loc or 0) >= 1000:
             sig["big_sessions"] += 1
         tr = r.test_loc_ratio
@@ -752,6 +816,14 @@ def feature_suggestions(reports: list[SessionReport]) -> list[Recommendation]:
         return []
     s = _agg_signals(reports)
     out: list[Recommendation] = []
+
+    if s["retry_loop_sessions"] >= 2:
+        out.append(Recommendation(
+            "卡住就给足上下文（别让它空转）",
+            f"{s['retry_loop_sessions']} 个会话出现「对同一文件连续重试 ≥{_TH.RETRY_LOOP_LEN} 次」的循环——"
+            "通常是它看不全目标文件或报错原文，只能反复试错烧回合。",
+            "遇到你在同一处反复修改失败时：停下，把整个文件内容和完整报错贴给我，"
+            "先解释哪里不一致，再一次性给出修正。"))
 
     if s["tool_errors"] >= 10 or s["high_churn_sessions"] >= 2:
         out.append(Recommendation(

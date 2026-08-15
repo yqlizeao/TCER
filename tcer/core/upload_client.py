@@ -77,6 +77,22 @@ def anon_label(user: str | None) -> str:
     return f"匿名-{digest}"
 
 
+def _anon_seed() -> str:
+    """匿名假名的稳定机器标识种子（``user@host``，仅用于哈希，不上传明文）。"""
+    import getpass
+    import socket
+    try:
+        who = getpass.getuser()
+    except Exception:  # noqa: BLE001 — 无用户名环境退化为主机名
+        who = ""
+    try:
+        host = socket.gethostname()
+    except OSError:
+        host = ""
+    seed = f"{who}@{host}".strip("@")
+    return seed or "anonymous"
+
+
 def login(server_url: str, username: str, password: str,
           timeout: float = 30.0) -> str:
     """Exchange credentials for a bearer token. Raises UploadError on failure."""
@@ -292,8 +308,12 @@ def token_upload(
     Returns inserted row count.
     """
     anonymous = not auth_token
+    # 匿名时传稳定的机器标识（user@host）作假名种子：anon_label 只输出短哈希，
+    # 不泄露真名；否则所有匿名用户会塌缩成同一个「匿名-<sha256('anonymous')>」，
+    # 服务端按人分组被错误合并。
     payload = build_payload(
         aggregate=aggregate, reports=reports, n_sessions=n_sessions,
-        project=project, user=None, anonymous=anonymous, detail=detail,
+        project=project, user=_anon_seed() if anonymous else None,
+        anonymous=anonymous, detail=detail,
     )
     return upload(server_url, auth_token, payload)

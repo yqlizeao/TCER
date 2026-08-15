@@ -435,3 +435,141 @@ def test_signals_update_invalidates_analyze_cache(tmp_path, monkeypatch):
     a2 = analyze.analyze_project("g", source="grok", project_ref=ref)
     assert a2.aggregate.usage.cancellation_count == 5
     file_cache.clear()
+
+
+def test_model_id_read_from_update_meta(tmp_path):
+    """真实数据 modelId 挂在 params.update._meta（446/446 处），非 params._meta。"""
+    p = _write_jsonl(tmp_path / "updates.jsonl", [
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "hi"},
+                     "_meta": {"modelId": "grok-4.5", "promptIndex": 0}}),
+        _notif(_T0 + 1, {"sessionUpdate": "turn_completed", "prompt_id": "p1",
+                         "usage": {"inputTokens": 100, "outputTokens": 10,
+                                   "totalTokens": 110}}),
+    ])
+    u = grok_reader.aggregate_usage(p)
+    # usage 无 modelUsage → 回退 current_model（来自 update._meta.modelId）
+    assert "grok-4.5" in u.per_model
+    assert u.turn_stats and u.turn_stats[0].model == "grok-4.5"
+
+
+def test_failed_status_without_exit_code_counts_error(tmp_path):
+    """status="failed" 且无 exit_code 的失败（SearchReplace NoMatchesFound 等）
+    同样计入 tool_errors——与 Claude 的 is_error 同义。"""
+    p = _write_jsonl(tmp_path / "updates.jsonl", [
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "改一下"}}),
+        _notif(_T0 + 1, {"sessionUpdate": "tool_call", "toolCallId": "c1",
+                         "title": "search_replace",
+                         "rawInput": {"file_path": "a.py", "old_string": "x",
+                                      "new_string": "y"},
+                         "_meta": {"x.ai/tool": {"name": "search_replace",
+                                                  "kind": "edit"}}}),
+        _notif(_T0 + 2, {"sessionUpdate": "tool_call_update", "toolCallId": "c1",
+                         "status": "failed",
+                         "rawOutput": {"type": "SearchReplace",
+                                       "NoMatchesFound": {"count": 1}}}),
+        # exit_code 非零与 status=failed 并存 → 只计一次
+        _notif(_T0 + 3, {"sessionUpdate": "tool_call", "toolCallId": "c2",
+                         "rawInput": {"command": "ls"},
+                         "_meta": {"x.ai/tool": {"name": "execute", "kind": "exec"}}}),
+        _notif(_T0 + 4, {"sessionUpdate": "tool_call_update", "toolCallId": "c2",
+                         "status": "failed",
+                         "rawOutput": {"exit_code": 2}}),
+    ])
+    u = grok_reader.aggregate_usage(p)
+    assert u.tool_errors == 2
+
+
+def test_model_id_falls_back_to_params_meta_when_update_meta_empty(tmp_path):
+    """update._meta 存在但无 modelId 时仍要回退 params._meta（注释口径）。"""
+    p = _write_jsonl(tmp_path / "updates.jsonl", [
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "hi"},
+                     "_meta": {"promptIndex": 0}},
+               params_meta={"modelId": "grok-4.5"}),
+        _notif(_T0 + 1, {"sessionUpdate": "turn_completed", "prompt_id": "p1",
+                         "usage": {"inputTokens": 100, "outputTokens": 10,
+                                   "totalTokens": 110}}),
+    ])
+    u = grok_reader.aggregate_usage(p)
+    assert "grok-4.5" in u.per_model
+
+
+def test_repeated_failed_updates_deduped_by_call(tmp_path):
+    """同一 toolCallId 的多条 failed 状态行只计一次工具错误。"""
+    p = _write_jsonl(tmp_path / "updates.jsonl", [
+        _notif(_T0, {"sessionUpdate": "user_message_chunk",
+                     "content": {"type": "text", "text": "改一下"}}),
+        _notif(_T0 + 1, {"sessionUpdate": "tool_call", "toolCallId": "c1",
+                         "title": "search_replace",
+                         "rawInput": {"file_path": "a.py", "old_string": "x",
+                                      "new_string": "y"},
+                         "_meta": {"x.ai/tool": {"name": "search_replace",
+                                                  "kind": "edit"}}}),
+        _notif(_T0 + 2, {"sessionUpdate": "tool_call_update", "toolCallId": "c1",
+                         "status": "failed",
+                         "rawOutput": {"type": "SearchReplace",
+                                       "NoMatchesFound": {"count": 1}}}),
+        # 同一调用的第二条 failed 行（重发/进度）——不得重复计错
+        _notif(_T0 + 3, {"sessionUpdate": "tool_call_update", "toolCallId": "c1",
+                         "status": "failed",
+                         "rawOutput": {"type": "SearchReplace",
+                                       "NoMatchesFound": {"count": 1}}}),
+    ])
+    u = grok_reader.aggregate_usage(p)
+    assert u.tool_errors == 1
+
+
+def test_subagent_sessions_fold_into_parent(tmp_path):
+    """新版 grok 子代理（session_kind=subagent 独立目录）折入父会话：
+    项目列表不单独计 session；usage/LOC 并入；subagents_of 计数。"""
+    import json as _json
+
+    proj = tmp_path / "sessions" / "C%3A%5Crepo"
+    parent = proj / "019f6e1a-0000-0000-0000-000000000001"
+    child = proj / "019f6e88-0000-0000-0000-000000000002"
+    for d in (parent, child):
+        d.mkdir(parents=True)
+    (parent / "summary.json").write_text(_json.dumps(
+        {"info": {"id": parent.name, "cwd": "C:\repo"},
+         "generated_title": "父"}), encoding="utf-8")
+    (child / "summary.json").write_text(_json.dumps(
+        {"info": {"id": child.name, "cwd": "C:\repo"},
+         "session_kind": "subagent", "generated_title": "子"}), encoding="utf-8")
+    (parent / "updates.jsonl").write_text("\n".join(_json.dumps(x) for x in [
+        {"timestamp": 1, "method": "session/update", "params": {"sessionId": "s",
+         "update": {"sessionUpdate": "user_message_chunk",
+                    "content": {"type": "text", "text": "跑"}}}},
+        {"timestamp": 2, "method": "session/update", "params": {"sessionId": "s",
+         "update": {"sessionUpdate": "subagent_spawned",
+                    "child_session_id": child.name}}},
+        {"timestamp": 3, "method": "session/update", "params": {"sessionId": "s",
+         "update": {"sessionUpdate": "turn_completed", "prompt_id": "p1",
+                    "usage": {"inputTokens": 100, "outputTokens": 10,
+                              "totalTokens": 110, "modelCalls": 2}}}},
+    ]) + "\n", encoding="utf-8")
+    (child / "updates.jsonl").write_text("\n".join(_json.dumps(x) for x in [
+        {"timestamp": 10, "method": "session/update", "params": {"sessionId": "c",
+         "update": {"sessionUpdate": "turn_completed", "prompt_id": "p1",
+                    "usage": {"inputTokens": 50, "outputTokens": 5,
+                              "totalTokens": 55, "modelCalls": 1}}}},
+    ]) + "\n", encoding="utf-8")
+
+    import importlib
+    import os
+    os.environ["GROK_HOME"] = str(tmp_path)
+    import tcer.core.grok_reader as gr
+    import tcer.core.paths as paths_mod
+    paths_mod.reset_claude_roots_cache() if hasattr(paths_mod, "reset_claude_roots_cache") else None
+    gr = importlib.reload(gr)
+
+    refs = gr.list_project_refs()
+    assert len(refs) == 1
+    assert len(refs[0].session_paths) == 1            # 子代理不单独计 session
+    u = gr.aggregate_usage(refs[0].session_paths[0])
+    assert u.input_tokens == 150                       # 100 + 子代理 50
+    assert u.api_calls == 3                            # 2 + 1
+    assert len(gr.subagent_dirs_of(refs[0].session_paths[0])) == 1
+    meta = gr.read_session_meta(child / "updates.jsonl")
+    assert meta.is_subagent is True

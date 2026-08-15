@@ -41,14 +41,16 @@ def score_ranking(reports: list[SessionReport]) -> list[tuple[str, float, str]]:
 def score_decompose(report: SessionReport) -> dict[str, float] | None:
     """三条正交轴的收缩后分值（0–1）：产出/成本/质量。None 当会话未评分。
 
-    质量轴可能为 None（无质量信号）——此时以 0.5（中性）填充展示，避免分解面板
-    出现空洞；效率分本身在 efficiency_score 里已按可用轴重分权，不受影响。
+    质量轴可能为 None（无质量信号）、成本轴可能为 None（无成本数据，如
+    net_loc=0 的会话）——缺失轴一律以 0.5（中性）填充展示，避免分解面板出现
+    空洞、也避免把「无数据」画成最差档拉偏项目均值对比；效率分本身在
+    efficiency_score 里已按可用轴重分权，不受影响。
     """
     if report.score is None:
         return None
     return {
-        "output": report.score_output_axis if report.score_output_axis is not None else 0.0,
-        "cost": report.score_cost_axis if report.score_cost_axis is not None else 0.0,
+        "output": report.score_output_axis if report.score_output_axis is not None else 0.5,
+        "cost": report.score_cost_axis if report.score_cost_axis is not None else 0.5,
         "quality": report.score_quality_axis if report.score_quality_axis is not None else 0.5,
     }
 
@@ -141,7 +143,8 @@ def report_row_dict(r: SessionReport) -> dict:
         # --- timing (epoch ms; server folds ms→s for the time axis) ---
         "started_at": u.started_at,
         "ended_at": u.ended_at,
-        "avg_turn_latency_sec": r.avg_turn_latency_sec,
+        "api_calls": r.usage.api_calls,
+        "avg_request_latency_ms": r.avg_request_latency_ms,
         "session_duration_minutes": r.session_duration_minutes,
         # --- tool usage ---
         "read_write_ratio": r.read_write_ratio,
@@ -233,6 +236,13 @@ def report_row_dict(r: SessionReport) -> dict:
         "edit_verify_ratio": r.edit_verify_ratio,
         "first_edit_turn": r.first_edit_turn,
         "bash_ratio": r.bash_ratio,
+        "retry_loop_count": r.retry_loop_count,
+        "retry_loop_max_len": r.retry_loop_max_len,
+        "turn_cost_max_share": r.turn_cost_max_share,
+        "turn_cost_spike_turn": r.turn_cost_spike_turn,
+        "cache_invalidation_events": r.cache_invalidation_events,
+        "ai_active_ratio": r.ai_active_ratio,
+        "user_gap_median_min": r.user_gap_median_min,
         # Raw tool-name → call count. Keys stay verbatim (``Skill``,
         # ``mcp__server__tool``, …) so downstream consumers can derive the
         # Skill / MCP / plugin dimensions; CSV keeps ignoring it (dict column).
@@ -268,7 +278,7 @@ _CSV_FIELDS = [
     "task_type", "ta_tcer",
     "score", "tier", "score_output_axis", "score_cost_axis", "score_quality_axis",
     "code_added", "code_deleted", "churn_ratio", "unseen_writes",
-    "avg_turn_latency_sec", "session_duration_minutes",
+    "api_calls", "avg_request_latency_ms", "session_duration_minutes",
     "read_write_ratio", "edit_ratio", "exploration_ratio",
     "cache_efficiency", "cache_write_ratio", "non_cached_input_ratio",
     "high_churn_file_count", "test_net_loc", "doc_net_loc", "test_loc_ratio", "doc_loc_ratio",
@@ -293,7 +303,9 @@ _CSV_FIELDS = [
     "first_prompt_chars", "plan_mode_count", "read_truncation_count",
     "reasoning_ms_total", "patch_diff_added", "patch_diff_deleted",
     "source_reported_cost_usd", "edit_verify_ratio", "first_edit_turn",
-    "bash_ratio",
+    "bash_ratio", "retry_loop_count", "retry_loop_max_len",
+    "turn_cost_max_share", "turn_cost_spike_turn", "cache_invalidation_events",
+    "ai_active_ratio", "user_gap_median_min",
     "models", "models_label",
 ]
 

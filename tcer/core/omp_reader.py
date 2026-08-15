@@ -209,7 +209,19 @@ def sessions_for_project(project: str | ProjectRef) -> list[Path]:
 
 
 def read_session_meta(path: Path) -> SessionMeta:
-    """Extract lightweight omp session metadata from the event stream."""
+    """Extract lightweight omp session metadata from the event stream.
+
+    走 file_cache（mtime/size 签名）：meta 要扫全文件收集 title 变更 / 首条
+    用户消息 / 首个 provider，逐会话毫秒级但 30 会话项目重复分析要上百毫秒；
+    缓存后重分析零成本。pi_reader 在此之上 replace 标签，不改动缓存对象。
+    """
+    from tcer.core import file_cache
+
+    return file_cache.get_or_compute(
+        path, ("omp_meta",), lambda: _read_session_meta_uncached(path))
+
+
+def _read_session_meta_uncached(path: Path) -> SessionMeta:
     session_id: str | None = None
     cwd: str | None = None
     title: str | None = None
@@ -306,6 +318,14 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
                 u.models.add(current_model)
             continue
 
+        if typ == "mode_change":
+            # 计划模式生命周期（mode=plan 进入；plan_paused/none 退出不计）。
+            data = obj.get("data")
+            mode = data.get("mode") if isinstance(data, dict) else None
+            if mode == "plan":
+                u.plan_mode_count += 1
+            continue
+
         if typ != "message":
             continue
         mm = obj.get("message")
@@ -362,6 +382,13 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
             u.aborted_task_count += 1
             reason = _first_str(mm.get("errorMessage")) or "aborted"
             u.abort_reasons[reason] = u.abort_reasons.get(reason, 0) + 1
+        elif mm.get("stopReason") == "error":
+            # 429 限流（errorMessage 含 'Too many requests'）——对齐 Claude
+            # api_error(429) 的 rate_limit_hits 口径；其余错误不计。
+            err_msg = mm.get("errorMessage")
+            if isinstance(err_msg, str) and "too many requests" in err_msg.lower():
+                u.rate_limit_reached_count += 1
+                u.rate_limit_names.add("429")
 
         for block in mm.get("content", []) or []:
             if not isinstance(block, dict):
@@ -399,7 +426,10 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
         dur = _as_int(mm.get("duration"))
         if dur > 0:
             active_duration_ms += dur
-            if u.turn_stats and u.turn_stats[-1].duration_ms is None:
+            # 仅当本响应已建 TurnStat（有真实 usage）才回填——零 usage 响应
+            # 不建 stat，dur 落到上一响应会把别人的延迟写在上一条上。
+            if (u.turn_stats and u.turn_stats[-1].duration_ms is None
+                    and u.turn_stats[-1].ts == ts):
                 u.turn_stats[-1].duration_ms = dur
         ttft = _as_int(mm.get("ttft"))
         if ttft > 0:
@@ -653,7 +683,7 @@ def _add_turn_usage(u: TokenUsage, usage: dict, model: str, turn: int, ts: int |
     u.bucket(key).add(i, cw, cr, o, cw1h)
     u.turn_stats.append(TurnStat(
         turn=turn, ts=ts,
-        input_tokens=i, cache_read=cr, output_tokens=o,
+        input_tokens=i, cache_write=cw, cache_read=cr, output_tokens=o,
         model=key,
     ))
 

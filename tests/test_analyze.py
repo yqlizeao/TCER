@@ -406,3 +406,88 @@ def test_filter_activity_window_overlaps():
     table[Path("a")] = usage("2026-07-29", None)
     kept2 = _filter_by_started_at(list(files), lambda f: table[f], "2026-07-30", None)
     assert set(kept2) == {Path("c")}
+
+
+def test_file_hotspots_cross_session():
+    from types import SimpleNamespace
+
+    from tcer.core.analyze import file_hotspots
+
+    def _r(ftd, churn, ts):
+        return SimpleNamespace(files_touched_details=ftd,
+                               high_churn_details=churn,
+                               usage=SimpleNamespace(started_at=ts))
+
+    reports = [
+        _r({"a.py": 4, "b.py": 1}, {"a.py": 3}, 1000),
+        _r({"a.py": 2}, {}, 2000),
+        _r({"c.py": 9}, {}, 3000),
+    ]
+    hot = file_hotspots(reports)
+    assert hot[0]["path"] == "a.py"
+    assert hot[0]["sessions"] == 2 and hot[0]["ops"] == 6
+    assert hot[0]["churn_sessions"] == 1
+    assert hot[0]["last_touched"] == 2000
+    assert hot[1]["path"] == "c.py"  # ops 9 但只 1 个会话，排 a.py 之后
+
+
+def test_model_switch_stats_directions():
+    from types import SimpleNamespace
+
+    from tcer.core.analyze import model_switch_stats
+    from tcer.core.models import TurnStat
+
+    def _r(models):
+        return SimpleNamespace(usage=SimpleNamespace(
+            turn_stats=[TurnStat(i, ts=i, model=m) for i, m in enumerate(models)]))
+
+    # 委派：opus 开场 → sonnet 执行；升级：haiku → opus
+    reports = [
+        _r(["claude-opus-4-5", "claude-opus-4-5", "claude-sonnet-4-5"]),
+        _r(["claude-haiku-4-5", "claude-opus-4-5"]),
+        _r(["claude-sonnet-4-5"]),
+    ]
+    m = model_switch_stats(reports)
+    assert m["switch_sessions"] == 2
+    assert m["single_model_sessions"] == 1
+    assert m["switch_count"] == 2
+    assert m["delegations"] == 1
+    assert m["escalations"] == 1
+
+
+def test_tool_profile_skills_and_mcp():
+    from types import SimpleNamespace
+
+    from tcer.core.analyze import tool_profile
+
+    def _r(variants, mcp):
+        return SimpleNamespace(usage=SimpleNamespace(
+            tool_variants=variants, mcp_calls_by_attr=mcp))
+
+    p = tool_profile([
+        _r({"Skill:dataviz": 3, "Agent:Explore": 2}, {"monolith/query": 5}),
+        _r({"Skill:dataviz": 1}, {}),
+    ])
+    assert p["skills"] == [("dataviz", 4)]
+    assert p["agents"] == [("Explore", 2)]
+    assert p["mcp"] == [("monolith/query", 5)]
+    assert p["skills_sessions"] == 2
+    assert p["mcp_sessions"] == 1
+
+
+def test_model_switch_unknown_model_skips_direction():
+    """方向分类（委派/升级）只在两端都在价表匹配到时做——未匹配模型静默走
+    默认价比方向会把「未知→已知」误判。"""
+    from types import SimpleNamespace
+
+    from tcer.core.analyze import model_switch_stats
+    from tcer.core.models import TurnStat
+
+    def _r(models):
+        return SimpleNamespace(usage=SimpleNamespace(
+            turn_stats=[TurnStat(i, ts=i, model=m) for i, m in enumerate(models)]))
+
+    reports = [_r(["totally-unknown-model-xyz", "claude-opus-4-5"])]
+    m = model_switch_stats(reports)
+    assert m["switch_count"] == 1
+    assert m["delegations"] == 0 and m["escalations"] == 0

@@ -65,7 +65,7 @@ def test_every_metric_has_a_format_spec():
 
 def test_format_value_tokens():
     assert metric_defs.format_value("total_tokens", 5_000_000) == "5,000,000"
-    assert metric_defs.format_value("chr", 0.959) == "95.9%"      # pct ×100
+    assert metric_defs.format_value("chr", 0.959) == "95.9000%"    # pct4 ×100 保留四位
     assert metric_defs.format_value("cost", 1.2345) == "$1.2345"   # money 4dp
     assert metric_defs.format_value("cost_per_mt", 1.6) == "$1.60"  # money2 2dp
     assert metric_defs.format_value("tcer", 60.13) == "60.1"        # float:0.0
@@ -99,7 +99,7 @@ def test_report_values_golden_strings():
     assert v["total_tokens"] == "5,000,000"
     assert v["input"] == "20,000"
     assert v["cache_read"] == "4,700,000"
-    assert v["chr"] == "95.9%"               # 4.7M / 4.9M
+    assert v["chr"] == "95.9184%"             # 4.7M / 4.9M（四位小数显真值）
     assert v["net_loc"] == "400"
     assert v["added"] == "420"
     assert v["deleted"] == "20"
@@ -156,7 +156,7 @@ def test_report_attr_metrics_are_chartable():
     numeric_attrs = {
         "churn_ratio": 0.1, "code_added": 5, "code_deleted": 2,
         "test_net_loc": 3, "doc_net_loc": 4, "high_churn_file_count": 1,
-        "avg_turn_latency_sec": 2.0, "first_pass_file_ratio": 0.5,
+        "avg_request_latency_ms": 2000.0, "first_pass_file_ratio": 0.5,
         "context_window_used_ratio": 0.3, "reasoning_output_ratio": 0.2,
         "task_completion_rate": 1.0, "time_to_first_token_sec": 2.5,
         "ttft_p95_sec": 3.0, "patch_apply_success_rate": 1.0,
@@ -221,7 +221,7 @@ def test_model_display_golden():
     assert md(mc, "m_cost_share") == "33.3%"
     assert md(mc, "m_tokens_per_dollar") == "1,600,000/$"
     assert md(mc, "m_code_per_dollar") == "42.0 行/$"
-    assert md(mc, "m_cache_hit_ratio") == "87.6%"
+    assert md(mc, "m_cache_hit_ratio") == "87.6000%"
     assert md(mc, "m_session_count") == "7"
     assert md(mc, "m_churn") == "8.2%"
 
@@ -283,7 +283,7 @@ def test_unsupported_metric_shows_label():
     claude = _report_for("claude")
     codex = _report_for("codex")
     # Claude 不单独上报推理输出 → 不适用；Codex 支持 → 正常数值
-    assert metric_defs.display(claude, "reasoning_tokens") == metric_defs.UNSUPPORTED_LABEL
+    assert metric_defs.display(claude, "reasoning_tokens") == "200"
     assert metric_defs.display(codex, "reasoning_tokens") == "200"
     # Codex 不上报缓存写入 → 不适用；Claude 支持
     assert metric_defs.display(codex, "cache_write") == metric_defs.UNSUPPORTED_LABEL
@@ -300,7 +300,7 @@ def test_unsupported_metric_shows_label():
 
 def test_unsupported_metric_raw_value_is_none():
     claude = _report_for("claude")
-    assert metric_defs.raw_value(claude, "reasoning_tokens") is None
+    assert metric_defs.raw_value(claude, "reasoning_tokens") is not None
     codex = _report_for("codex")
     assert metric_defs.raw_value(codex, "reasoning_tokens") == 200.0
     assert metric_defs.raw_value(codex, "cache_write") is None

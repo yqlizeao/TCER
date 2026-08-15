@@ -16,6 +16,20 @@ def fmt_int(x: int | None) -> str:
     return f"{x:,}" if x is not None else "-"
 
 
+def fmt_approx_cn(x: float | None) -> str | None:
+    """大数的中文量级近似（如 41041696 → "≈ 0.41亿"），不足万位返回 None。
+
+    指标值旁的小字灰白后缀用：精确数照常展示，近似值帮助快速读出量级。
+    ≥千万用亿（固定两位小数——用户口径：4104万不直观，0.41亿更直观），
+    万级用万（整数）。
+    """
+    if x is None or x < 1e4:
+        return None
+    if x >= 1e7:
+        return f"≈ {x / 1e8:.2f}亿"
+    return f"≈ {x / 1e4:.0f}万"
+
+
 def fmt_pct(x: float | None) -> str:
     return f"{x * 100:.1f}%" if x is not None else "-"
 

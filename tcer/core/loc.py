@@ -106,9 +106,14 @@ _TEST_PATTERNS = [
 # 散文类文档——.csv 计入产出（在闸门里）但属数据、不算文档。
 _DOC_PATTERNS = [
     r'\.(md|mdx|markdown|txt|rtf|rst|org|adoc|asciidoc|tex)$',
-    r'/docs?/',
-    r'README', r'CHANGELOG', r'LICENSE', r'CONTRIBUTING',
+    # 知名文档名锚定到「完整文件名」（可带扩展名）：无锚点子串会把
+    # license_checker.py / my_readme.py 这类代码文件误判成文档。
+    r'(^|/)(readme|changelog|license|contributing)(\.[^/]+)?$',
 ]
+# docs/doc 目录内的文件：仅当本体也是文本/文档后缀才计入「文档行」——
+# 落在 docs/ 下的 .ts/.py 源码（组件库文档站常见）是代码，不是散文文档。
+_DOC_TEXT_RE = re.compile(
+    r'\.(md|mdx|markdown|txt|rtf|rst|org|adoc|asciidoc|tex)$', re.IGNORECASE)
 # 后缀像文档、实为代码工程文件的例外（先于 _DOC_PATTERNS 判断）。
 _DOC_EXCLUDE = [
     r'CMakeLists\.txt$',
@@ -248,7 +253,7 @@ class _LocAccumulator:
         "file_lines", "session_authored", "file_edits",
         "added", "deleted", "unseen", "rework",
         "test_added", "test_deleted", "doc_added", "doc_deleted",
-        "pending_f1",
+        "pending_f1", "pending_f1_turn", "turn_records",
     )
 
     def __init__(self) -> None:
@@ -262,19 +267,27 @@ class _LocAccumulator:
         # F1 待修正：首个 Write 按 old=0 记账的 (path → 该 Write 的新行数)。
         # Claude 的 toolUseResult.originalFile 到达后经 note_write_original 修正。
         self.pending_f1: dict[str, int] = {}
+        # pending_f1 对应的回合号：F1 修正的行差要回写到该回合的流水里。
+        self.pending_f1_turn: dict[str, int | None] = {}
+        # 逐回合 LOC 流水 (turn, added_delta, deleted_delta)——分段 TCER / 效率
+        # 衰减曲线用。不进 SessionLoc（session_loc_full 无回合概念，两条路径
+        # 的 SessionLoc 须逐字节一致）；reader 在扫描结束时自行取走。
+        self.turn_records: list[tuple[int, int, int]] = []
 
-    def on_tool_use(self, name: str, inp: dict) -> None:
+    def on_tool_use(self, name: str, inp: dict, turn: int | None = None) -> None:
         if name not in _EDIT_TOOLS:
             return
         fp = inp.get("file_path") or inp.get("notebook_path") or ""
         if not isinstance(fp, str) or not _is_code(fp):
             return
+        a0, d0 = self.added, self.deleted
         self.file_edits[fp] = self.file_edits.get(fp, 0) + 1
         # First Write to a path: assume old=0 and remember it in pending_f1 —
         # a later toolUseResult.originalFile (session data, not disk) corrects it.
         if name == "Write" and fp not in self.file_lines:
             self.unseen += 1
             self.pending_f1[fp] = _nlines(inp.get("content"))
+            self.pending_f1_turn[fp] = turn
         # Self-rework only against lines this session already wrote — never the
         # disk prior seed (deleting pre-existing code is a normal edit).
         authored_before = self.session_authored.get(fp, 0)
@@ -295,6 +308,8 @@ class _LocAccumulator:
         elif _is_doc_file(fp):
             self.doc_added += a
             self.doc_deleted += d
+        if turn is not None and (a or d):
+            self.turn_records.append((turn, self.added - a0, self.deleted - d0))
 
     def note_write_original(self, fp: str, original_text) -> None:
         """用 ``toolUseResult.originalFile``（Write 前的真实文件内容）修正 F1。
@@ -309,6 +324,7 @@ class _LocAccumulator:
         if not isinstance(original_text, str):
             return
         new = self.pending_f1.pop(fp)
+        f1_turn = self.pending_f1_turn.pop(fp, None)
         self.unseen -= 1  # 先验已知，不再是 F1 暴露
         orig = _nlines(original_text)
         if orig <= 0:
@@ -317,6 +333,9 @@ class _LocAccumulator:
         d_add = ta - new  # ≤ 0：撤销多计的 added
         self.added += d_add
         self.deleted += td
+        # F1 修正同步回写逐回合流水（同一回合追加修正差量，Σ流水 = ΣLOC）。
+        if f1_turn is not None:
+            self.turn_records.append((f1_turn, d_add, td))
         if _is_test_file(fp):
             self.test_added += d_add
             self.test_deleted += td
@@ -345,14 +364,27 @@ def session_loc_full(path: Path) -> SessionLoc:
     Replays Write/Edit/MultiEdit/NotebookEdit in order (with originalFile F1
     correction). Net LOC = added - deleted; churn = deleted / added. Only paths
     with a code suffix are counted. Session data only — never touches disk.
+
+    编辑调用按 tool_result 裁决：is_error 的调用不回放（与 reader.scan_session
+    同一口径，审计交叉验证要求两条路径逐字节一致）；结果未到的在末尾按成功回放。
     """
     acc = _LocAccumulator()
+    pending_edits: dict[str, tuple[str, dict]] = {}
+    # tool_use id 去重（与 reader.scan_session 同口径）：Claude Code 2.1.227+
+    # rewind/重连会重发历史 tool_use+tool_result 对，不去重则 LOC 回放双计。
+    seen_tool_uses: set[str] = set()
+    orig_fp = None
+    orig_txt = None
     for obj in reader.iter_messages(path):
-        # Write 结果行的 originalFile → F1 修正（与 reader.scan_session 一致，
-        # 保证审计交叉验证时两条路径逐字节相同）。
+        # 上一行暂存的 originalFile 修正（Write 已在上一行结果裁决时记账）。
+        if orig_fp is not None:
+            acc.note_write_original(orig_fp, orig_txt)
+            orig_fp = orig_txt = None
+        # Write 结果行的 originalFile → F1 修正（暂存到下一迭代，见上）。
         tur = obj.get("toolUseResult")
         if isinstance(tur, dict) and "originalFile" in tur:
-            acc.note_write_original(tur.get("filePath"), tur.get("originalFile"))
+            orig_fp = tur.get("filePath")
+            orig_txt = tur.get("originalFile")
         msg = obj.get("message")
         if not isinstance(msg, dict):
             continue
@@ -360,15 +392,36 @@ def session_loc_full(path: Path) -> SessionLoc:
         if not isinstance(content, list):
             continue
         for item in content:
-            if not isinstance(item, dict) or item.get("type") != "tool_use":
+            if not isinstance(item, dict):
                 continue
-            name = item.get("name")
-            if not isinstance(name, str):
-                continue
-            inp = item.get("input") or {}
-            if not isinstance(inp, dict):
-                inp = {}
-            acc.on_tool_use(name, inp)
+            itype = item.get("type")
+            if itype == "tool_use":
+                tuid = item.get("id")
+                if isinstance(tuid, str) and tuid:
+                    if tuid in seen_tool_uses:
+                        continue
+                    seen_tool_uses.add(tuid)
+                name = item.get("name")
+                if not isinstance(name, str):
+                    continue
+                inp = item.get("input") or {}
+                if not isinstance(inp, dict):
+                    inp = {}
+                cid = item.get("id")
+                if name in _EDIT_TOOLS and isinstance(cid, str) and cid:
+                    pending_edits[cid] = (name, inp)
+                else:
+                    acc.on_tool_use(name, inp)
+            elif itype == "tool_result":
+                tid = item.get("tool_use_id")
+                if isinstance(tid, str) and tid in pending_edits:
+                    ename, einp = pending_edits.pop(tid)
+                    if not item.get("is_error"):
+                        acc.on_tool_use(ename, einp)
+    if orig_fp is not None:
+        acc.note_write_original(orig_fp, orig_txt)
+    for ename, einp in pending_edits.values():
+        acc.on_tool_use(ename, einp)
     return acc.finish()
 
 

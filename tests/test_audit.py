@@ -184,3 +184,30 @@ def test_abort_reasons_sum_invariant():
 
     assert _mk(2, {"Interrupted by user": 1, "Operation aborted": 1}).ok is True
     assert _mk(2, {"Interrupted by user": 1}).ok is False   # sum=1 != count=2
+
+
+def test_live_file_guard_flags_recently_written_session(tmp_path, monkeypatch):
+    """活文件守卫：mtime 晚于 audit 进程启动的会话标注 info（不判失败）。"""
+    import os
+    import time as _time
+
+    from tcer.core import analyze, audit as A, file_cache
+
+    proj, h = _seed_claude(tmp_path, monkeypatch)
+    f = proj / "SID1.jsonl"
+    _write_jsonl(f, [
+        {"type": "user", "message": {"role": "user",
+         "content": [{"type": "text", "text": "hi"}]},
+         "sessionId": "SID1", "cwd": str(tmp_path / "code"),
+         "timestamp": "2026-03-06T10:00:00Z"},
+        _assistant(_usage(10), msg_id="a1"),
+    ])
+    future = _time.time() + 60  # mtime 推到 audit 进程启动之后 → 触发守卫
+    os.utime(f, (future, future))
+    file_cache.clear()
+    a = analyze.analyze_project(h, source="claude")
+    sa = A._audit_claude_session(a.reports[0], project_hash=h)
+    guard = [c for c in sa.checks if c.name == "session_file_stable"]
+    assert guard and not guard[0].ok and guard[0].level == "info"
+    assert sa.ok  # info 级不判失败
+    file_cache.clear()

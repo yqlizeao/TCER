@@ -397,7 +397,12 @@ def read_user_messages(db_path: Path, session_id: str) -> list[str]:
         ).fetchall()
     for row in rows:
         msg_data = _json_obj(row["message_data"])
-        if msg_data.get("role") != "user":
+        role = msg_data.get("role")
+        if role is None and row["message_data"] in ("user", "assistant"):
+            # 裸字符串角色（data 列直接存 "user"）：aggregate_usage /
+            # read_conversation 都为同一形状做了防御，这里保持一致。
+            role = row["message_data"]
+        if role != "user":
             continue
         data = _json_obj(row["part_data"])
         if data.get("type") == "text":
@@ -838,6 +843,10 @@ def _legacy_usage(path: Path) -> TokenUsage:
     cw = _as_int(tokens.get("cache_write") or tokens.get("tokens_cache_write"))
     reasoning = _as_int(tokens.get("reasoning") or tokens.get("tokens_reasoning"))
     model = _legacy_model_key(obj)
+    # reasoning 折入 output（与 SQLite 路径 _add_session_tokens 同口径）：
+    # OpenCode 的 reasoning 存于 output 之外，不折入会低估成本、且
+    # reasoning_output_ratio 可 >1（护栏测试只覆盖了 SQLite 路径）。
+    o = o + reasoning
     u.input_tokens = i
     u.output_tokens = o
     u.cache_read_input_tokens = cr

@@ -990,3 +990,193 @@ def test_on_analysis_bail_paths_reset_status():
     a2 = SimpleNamespace(project_ref=other)
     TcerGui._on_analysis(stub2, a2)
     assert reanalyzed == [True]
+
+
+def test_trend_chart_without_pil(root, reports, monkeypatch):
+    """缺 Pillow（零依赖环境）时图表回退 canvas 原生绘制，不抛 ImportError。"""
+    from tcer.gui import charts
+    from tcer.gui.views import TrendChart
+
+    monkeypatch.setattr(charts, "_HAS_PIL", False)
+    frame = tk.Frame(root)
+    frame.pack()
+    tc = TrendChart(frame)
+    tc.update(reports)
+    for mode in ("trend", "scatter"):
+        tc._mode.set(mode)
+        tc._switch_mode()
+        root.update_idletasks()
+        tc.update(reports)
+    frame.destroy()
+
+
+def test_trend_chart_matrix_mode(root, reports):
+    """相关矩阵模式：绘制 N×N 网格 + 点击下钻散点轴。"""
+    from tcer.gui.views import TrendChart
+
+    frame = tk.Frame(root)
+    frame.pack()
+    tc = TrendChart(frame)
+    tc.update(reports)
+    tc._set_mode("matrix")
+    root.update_idletasks()
+    tc.update(reports)
+    assert len(tc._matrix_chart.canvas.find_all()) >= 16  # 4×4 对角+格子起步
+    # 下钻：设好散点 X/Y
+    tc._drill_to_scatter("cost", "tcer")
+    assert tc._mode.get() == "scatter"
+    assert tc._scatter_chart._label_to_key[tc._scatter_chart._x_var.get()] == "cost"
+    assert tc._scatter_chart._label_to_key[tc._scatter_chart._y_var.get()] == "tcer"
+    frame.destroy()
+
+
+def test_session_timeline_drill_and_overlays(root, reports):
+    """时间线弹窗：点击回合展开明细；CHR/累计净增/压缩竖线不炸。"""
+    from tcer.gui.popups import SessionTimelinePopup
+
+    r = reports[0]
+    # 造叠加曲线数据（压缩 + 逐回合 LOC）
+    r.usage.compaction_turns = [1]
+    r.usage.turn_net_locs = [(0, 10, 0), (1, -2, 0)]
+    r.usage.tool_ops = [ToolOp(0, "Edit", "a.py")]
+    p = SessionTimelinePopup(root, r)
+    root.update_idletasks()
+    p._draw()
+    # 模拟点击第一根回合条
+    x0, x1, i = p._bar_x[0]
+    p._on_click(type("E", (), {"x": (x0 + x1) / 2})())
+    assert len(p._detail.winfo_children()) == 1
+    # 点空白收起
+    p._on_click(type("E", (), {"x": 2})())
+    assert len(p._detail.winfo_children()) == 0
+
+
+def test_project_profile_popup(root, reports):
+    """项目画像弹窗：热点文件/模型混用/技能 MCP 三节渲染不炸。"""
+    from types import SimpleNamespace
+
+    from tcer.gui.popups import ProjectProfilePopup
+
+    fake = SimpleNamespace(n_sessions=len(reports), reports=reports)
+    ProjectProfilePopup(root, fake)
+    root.update_idletasks()
+
+
+def test_dashboard_custom_metric_persists(root, reports, tmp_path, monkeypatch):
+    """仪表盘右键换指标：写入 ui_prefs 并在重建后恢复。"""
+    from tcer.core import file_cache, ui_prefs
+    from tcer.gui import charts
+
+    file_cache.clear()
+    # 隔离 prefs 落盘：app_dirs 不认 TCER_HOME，直接替换 _prefs_path 指向
+    # tmp_path，绝不触碰真实 ~/.tcer/tcer_ui.json。
+    monkeypatch.setattr(ui_prefs, "_prefs_path",
+                        lambda: tmp_path / "tcer_ui.json")
+    ui_prefs.save({})
+    frame = tk.Frame(root)
+    frame.pack()
+    tc = charts.DashboardChart(frame)
+    tc.update(reports)
+    assert tc._metrics[0] == "turns"  # 默认
+    tc._pick_metric(0, "tcer")
+    tc._draw()
+    assert tc._metrics[0] == "tcer"
+    # 重建恢复
+    tc2 = charts.DashboardChart(frame)
+    assert tc2._metrics[0] == "tcer"
+    ui_prefs.save({})
+    frame.destroy()
+    file_cache.clear()
+
+
+
+
+def test_session_column_batched_build_and_pending_select(root):
+    """分批构建：首批同步可见、后续批经主循环补齐；构建期选中请求建完补发。"""
+    from types import SimpleNamespace
+
+    from tcer.gui.views import SessionColumn
+
+    class _Ctl:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    def mk(i):
+        return SimpleNamespace(
+            meta=SimpleNamespace(session_id=f"sess-{i:03d}", title=f"标题{i}",
+                                 path=SimpleNamespace(stem=f"s{i}"),
+                                 is_subagent=False),
+            usage=SimpleNamespace(started_at=1_770_000_000_000 + i * 3600_000,
+                                  ended_at=None, models=set(),
+                                  per_model={"m": SimpleNamespace(total=1)},
+                                  session_duration_ms=60_000),
+            tier=None, cost=0.0,
+            files_touched_details=None, high_churn_details=None)
+
+    frame = tk.Frame(root)
+    frame.pack()
+    sc = SessionColumn(frame, _Ctl())
+    sc.update([mk(i) for i in range(60)])
+    assert 0 < len(sc._all_cards) <= 25          # 首批同步
+    # 构建未完成时请求选中 → 挂起
+    assert sc.select_by_sid("sess-000", notify=False) is False  # 最旧 → 末批
+    for _ in range(200):                          # 驱动主循环补完剩余批
+        root.update()
+        if not getattr(sc, "_pending_reports", None):
+            break
+    assert len(sc._all_cards) == 60
+    assert sc._selected is not None               # 延迟选中已补发
+    frame.destroy()
+
+
+def test_project_card_shows_drive_letter(root):
+    """项目卡片盘符标识：跨盘同名项目靠盘符区分（名字本身被剥掉盘符）。"""
+    from tcer.gui.views import ProjectColumn, project_drive
+
+    class _Ctl:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    class _P:
+        def __init__(self, key):
+            self.key = key
+            self.source = "claude"
+            self.name = key
+            self.path = None
+
+    frame = tk.Frame(root)
+    frame.pack()
+    col = ProjectColumn(frame, _Ctl())
+    col.update([_P("d--GitHub-TCER"), _P("c--GitHub-TCER")])
+    root.update_idletasks()
+    assert project_drive(_P("d--GitHub-TCER")) == "D"
+    assert project_drive(_P("c--GitHub-TCER")) == "C"
+
+    def labels_of(card):
+        out = []
+        for w in card.frame.winfo_children():
+            for c in w.winfo_children():
+                if isinstance(c, tk.Label) and c.cget("text"):
+                    out.append(c.cget("text"))
+        return out
+
+    assert any(t == "D:" for t in labels_of(col._cards[0]))
+    assert any(t == "C:" for t in labels_of(col._cards[1]))
+    frame.destroy()
+
+
+def test_clamp_geometry_cross_resolution():
+    """跨分辨率/跨机器迁移：恢复的窗口几何须钳进当前屏幕。"""
+    from tcer.gui.app import clamp_geometry as cg
+    # 1920×1080 存的窗口搬到 1366×768：尺寸收进屏幕
+    assert cg("1600x900+169+40", 1366, 768) == "1366x708+169+40"
+    # 多显示器拔掉：+3000 落在屏外 → 拉回可视区（标题栏可拖）
+    out = cg("1600x900+3000+200", 1920, 1080)
+    assert out.startswith("1600x900+") and "+3000" not in out
+    # 负偏移（副屏在左）拉回 0
+    assert cg("1600x900+-500+-100", 1920, 1080) == "1600x900+0+0"
+    # 合法几何原样保留
+    assert cg("1555x904+169+40", 1920, 1080) == "1555x904+169+40"
+    # 非法输入 → None（走默认居中）
+    assert cg("garbage", 1920, 1080) is None
+    assert cg("", 1920, 1080) is None
