@@ -101,6 +101,23 @@ def test_table_key_distinguishes_default():
     assert pricing.table_key("") is None
 
 
+def test_note_for_multitrack_annotations():
+    """``_note`` carries the non-primary price tracks (promo/peak/batch/tiered)
+    a single rate set can't express; surfaced by the GUI price tooltip."""
+    # 峰谷条目：闲时档为主价，备注含峰时价与时段
+    assert pricing.note_for("deepseek-v4-flash") == (
+        "峰谷分时（2026-08-16 起）：本价为闲时档；"
+        "峰时（01:00-04:00 与 06:00-10:00 UTC，即北京 09-12/14-18 点）加倍："
+        "输入 0.44 / 输出 1.32 / 缓存命中 0.014")
+    # 别名条目跟随主条目（resolve 路径不同，note 同样命中）
+    assert "legacy 别名" in pricing.note_for("deepseek-chat")
+    # 无备注条目 / 未知模型 / 空值 → None
+    assert pricing.note_for("claude-opus-4-8") is None
+    assert pricing.note_for("totally-made-up-model") is None
+    assert pricing.note_for(None) is None
+    assert pricing.note_for("") is None
+
+
 def test_thinking_suffix_maps_to_base_opus():
     """Claude Code / proxies append ``-thinking``; must not fall back to default."""
     base = pricing.table_key("claude-opus-4-6")

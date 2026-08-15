@@ -231,6 +231,23 @@ def model_count() -> int:
     return len(_load()["models"])
 
 
+@lru_cache(maxsize=512)
+def note_for(model: str | None) -> str | None:
+    """The table entry's ``_note`` pricing annotation, or ``None``.
+
+    Carries the non-primary price tracks a single rate set can't express —
+    promo/intro prices, peak-hour rates, batch/priority tiers, context-length
+    tiers, alias-follows relationships. Surfaced by the GUI price tooltip so
+    the four displayed rates always explain which track they represent.
+    """
+    if not model:
+        return None
+    mid = _match_id(model)
+    if mid is None:
+        return None
+    return _load()["models"][mid].get("_note") or None
+
+
 _SKIP_UNMATCHED = frozenset({"", "<synthetic>"})
 
 

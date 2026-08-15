@@ -2374,6 +2374,11 @@ def _model_price_tip(mc) -> str:
     known = pricing.table_key(mc.model_id) is not None
     title = "官方标价" if known else "默认配置价（未在价表中）"
     note = "" if known else "\n⚠️ 该模型未在价表中，按 Anthropic 通用 list 价回退，非其厂商官方价。"
+    # 价表条目备注（_note）：多轨价（促销/峰时/Batch）、分段计费、别名跟随等，
+    # 与四个展示单价同源，悬浮可见，让用户知道这套价取的是哪一轨。
+    extra = pricing.note_for(mc.model_id)
+    if extra:
+        note += f"\nℹ️ {extra}"
     return (
         f"{mc.display_name} · {title}（$/百万 Token）\n"
         f"输入　　　{_rate(r['input'])}\n"
