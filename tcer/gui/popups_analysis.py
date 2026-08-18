@@ -13,7 +13,7 @@ from tcer.core import format as fmt
 from . import theme
 from .platform import CLICK_CURSOR
 from .metric_defs import GROUPS
-from .widgets import ScrollFrame, Tooltip, flat_button, new_window as _new_window
+from .widgets import ScrollFrame, SelectableLabel, Tooltip, flat_button, new_window as _new_window
 
 
 class SessionComparePopup:
@@ -909,3 +909,104 @@ class ProjectProfilePopup:
     def _empty(self, parent, text) -> None:
         tk.Label(parent, text=text, bg=theme.PANEL, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL, pady=8).pack(fill="x")
+
+
+class CrossSourceModelsPopup:
+    """同模型跨源对照 — 同一底层模型在不同 agent 框架里的效率对比。
+
+    fixed model, vary harness：按价表归一化后的主模型 × 数据源分桶，只显示
+    出现于 ≥2 个源、每源 ≥ CROSS_SOURCE_MIN_CELL 个有产出会话的组合；数值为
+    会话级中位数（数据来自 ``analyze.cross_source_models``）。归因线索见窗底
+    说明：TCER 差=行为 · p̄/CPE 差=价格组合 · 净产差=任务组合。
+    """
+
+    _COLS = [
+        ("n", "会话", 50),
+        ("tcer", "TCER", 70),
+        ("cpe", "CPE", 78),
+        ("pbar", "p̄ $/Mt", 76),
+        ("chr", "缓存命中", 76),
+        ("score", "综合分", 66),
+        ("net", "净产中位", 76),
+        ("tpc", "工具/百行", 78),
+    ]
+
+    def __init__(self, parent, models: list[dict]) -> None:
+        from .views import source_label
+        from tcer.core.analyze import CROSS_SOURCE_MIN_CELL
+
+        win = _new_window(parent, "同模型跨源对照", "980x560")
+        n_cells = sum(len(m["sources"]) for m in models)
+        head = tk.Frame(win, bg=theme.BG, padx=10, pady=8)
+        head.pack(fill="x")
+        tk.Label(head, text="同模型跨源对照", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING).pack(side="left")
+        tk.Label(head,
+                 text=(f"{len(models)} 个模型 · {n_cells} 个对照格 · "
+                       "同一个模型在不同 agent 里的会话级中位数 · 仅统计有产出会话"),
+                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
+                     side="left", padx=12)
+
+        if not models:
+            tk.Label(win,
+                     text="未找到同模型跨 ≥2 个数据源的对照组合\n"
+                          f"（每个源至少需要 {CROSS_SOURCE_MIN_CELL} 个有产出会话）",
+                     bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
+                     justify="left", pady=24).pack()
+            return
+
+        frame = tk.Frame(win, bg=theme.BG)
+        frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        cols = [c[0] for c in self._COLS]
+        self.tree = ttk.Treeview(frame, columns=cols, show="tree headings")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.tree.pack(fill="both", expand=True)
+        self.tree.heading("#0", text="模型 / 来源")
+        self.tree.column("#0", width=260, anchor="w")
+        for key, label, width in self._COLS:
+            self.tree.heading(key, text=label)
+            self.tree.column(key, width=width, anchor="e")
+        self.tree.tag_configure("best", foreground=theme.SUCCESS)
+
+        for m in models:
+            self.tree.insert(
+                "", "end", text=m["label"], open=True,
+                values=(sum(s["n"] for s in m["sources"]), "", "", "", "", "", "", ""))
+            best = max((s for s in m["sources"] if s.get("score") is not None),
+                       key=lambda s: s["score"], default=None)
+            for s in m["sources"]:
+                tags = ("best",) if best is not None and s is best else ()
+                self.tree.insert(
+                    "", "end", text=f"    {source_label(s['source'])}", tags=tags,
+                    values=(s["n"], self._f(s.get("tcer"), "0.0"),
+                            self._usd(s.get("cpe"), 1), self._usd(s.get("pbar"), 2),
+                            self._pct(s.get("chr")), self._f(s.get("score"), "0.0"),
+                            self._int(s.get("net_loc")),
+                            self._f(s.get("tools_per_100loc"), "0.0")))
+
+        SelectableLabel(
+            win,
+            text="怎么读差距来自哪：TCER / 工具每百行 差 = 行为差异（每行代码的往返与 token 消耗）；"
+                 "p̄（混合单价）/ CPE 差 = 价格组合差异（缓存结构 + 单价）；净产中位差 = 任务组合差异"
+                 "（你在不同 agent 里干的活不同）。绿色 = 该模型各源中综合分最高。"
+                 "想按源公平比较分数，可先在「计算个人基准 → 按数据源」写入逐源基准。",
+            bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+            justify="left").pack(fill="x", padx=10, pady=(0, 8))
+
+    @staticmethod
+    def _f(v, spec):
+        return "-" if v is None else fmt.fmt_float(v, spec)
+
+    @staticmethod
+    def _usd(v, nd):
+        return "-" if v is None else f"${v:.{nd}f}"
+
+    @staticmethod
+    def _pct(v):
+        return "-" if v is None else fmt.fmt_pct(v)
+
+    @staticmethod
+    def _int(v):
+        return "-" if v is None else fmt.fmt_int(v)

@@ -45,6 +45,9 @@
     "cpe": 13.619017038539553,
     "_note": "参照线：TCER（产出轴）与 CPE（成本轴）的中位数（框架 16 会话参照集）。综合效率分的产出/成本两轴半饱和都以此为中性点(0.5)。用本项目数据生成个人基准可覆盖。"
   },
+  "baselines_per_source": {
+    "_note": "逐数据源基准（跨源公平比较）：{source: {tcer, cpe}}，如 {\"claude\": {...}, \"codex\": {...}}。解析优先级 逐项目 > 逐源 > 全局。不同 agent 的 token 口径/缓存结构天然不同（同模型跨源 p̄ 可差 3 倍），写入后各源分数回到「相对该源自己的中位水平」，跨源比较才公平；不写入则所有源共用全局基准（系统分口径，保留 harness 真实差异）。用 GUI「计算个人基准 → 按数据源」生成；样本不足 MIN_BASELINE_SESSIONS 的源不会写入。"
+  },
   "chr_weight": 0.5,
   "_chr_note": "CHR reward factor = 1 + CHR * chr_weight（旧 CTEI 遗留；综合效率分 v2 不再单列缓存因子）。",
   "score_model": {
@@ -54,8 +57,8 @@
     "quality_weights": {"low_rework": 0.4, "low_tool_error": 0.35, "read_before_write": 0.25}
   },
   "score_tiers": {
-    "_note": "综合效率分(0–100)评级带，best→worst：(名称, 下界)。顶档为严格大于，其余为≥。tier() 与 GUI 排名条/趋势带均从此派生。",
-    "bands": [["优秀", 75.0], ["良好", 60.0], ["中等", 45.0], ["待改进", 25.0], ["低效", 0.0]]
+    "_note": "综合效率分(0–100)评级带，best→worst：(名称, 下界)。顶档为严格大于，其余为≥。tier() 与 GUI 排名条/趋势带均从此派生。v1.7.1 起零/负净产会话不评分（评分人群 = net_loc>0），本带按 133 个真实已评分会话的分位重划：优秀≈前10%(P90) · 良好≈前30%(P70) · 中等≈P20–P70 · 低效≈末7%。旧带 75/60/45/25 在证据收缩结构下把 ~87% 的会话压进「中等」（P25=P50=P75=50）。分数绝对值还受基准（全局/逐源/逐项目）影响。",
+    "bands": [["优秀", 68.0], ["良好", 57.0], ["中等", 47.0], ["待改进", 42.0], ["低效", 0.0]]
   },
   "task_inference": {
     "_note": "Optional thresholds for metrics.infer_task_type (GUI「自动」). Omit a key to keep the code default.",

@@ -226,15 +226,21 @@ class TcerGui:
         tab_b = tk.Frame(nb, bg=theme.PANEL)
         tab_t = tk.Frame(nb, bg=theme.PANEL)
         tab_c = tk.Frame(nb, bg=theme.PANEL)
+        tab_r = tk.Frame(nb, bg=theme.PANEL)
         nb.add(tab_m, text="指标分类", image=views.ui_icon(nb, "grid"), compound="left")
         nb.add(tab_c, text="模型对比", image=views.ui_icon(nb, "compare"), compound="left")
         nb.add(tab_b, text="效率榜", image=views.ui_icon(nb, "rank"), compound="left")
         nb.add(tab_t, text="趋势", image=views.ui_icon(nb, "trend"), compound="left")
+        nb.add(tab_r, text="项目聚合", image=views.ui_icon(nb, "layers"), compound="left")
 
         self.metric_panel = MetricPanel(tab_m, self)
         self.ranking_view = ScoreRankingView(tab_b, controller=self)
         self.trend_chart = TrendChart(tab_t, controller=self)
         self.model_compare = ModelCompareView(tab_c, controller=self)
+        self.real_projects_view = views.RealProjectsView(tab_r, controller=self)
+        # 项目聚合页签独立于当前分析（后台扫全部项目），首次切入加载。
+        self._realproj_loaded = False
+        self._realproj_scanning = False
 
         self._paned = paned
         root.update_idletasks()
@@ -354,8 +360,8 @@ class TcerGui:
         self._analysis_generation += 1
         generation = self._analysis_generation
         params = self.filter.get_params()
-        # 逐项目基准（若已为该项目单独校准）在打分时生效；否则回退全局基准。
-        pb = metrics.resolve_baselines(views.ref_uid(proj))
+        # 基准解析链与 analyze/audit 一致：逐项目 > 逐数据源 > 全局。
+        pb = metrics.resolve_baselines(views.ref_uid(proj), source=proj.source)
         args = dict(
             project=proj.key,
             source=proj.source,
@@ -407,6 +413,20 @@ class TcerGui:
                     note = f"（{errors} 个项目分析失败）" if errors else ""
                     self.filter.set_status(f"项目总览完成{note}")
                     popups.ProjectOverviewPopup(self.root, rows)
+                elif kind == "cross_source":
+                    _, models, errors = item
+                    note = f"（{errors} 个项目分析失败）" if errors else ""
+                    self.filter.set_status(
+                        f"跨源对照完成 · {len(models)} 个模型{note}")
+                    popups.CrossSourceModelsPopup(self.root, models)
+                elif kind == "realproj":
+                    _, rows, errors = item
+                    self._realproj_scanning = False
+                    self._realproj_loaded = True
+                    note = f"（{errors} 张项目卡分析失败）" if errors else ""
+                    self.filter.set_status(
+                        f"项目聚合完成 · {len(rows)} 个真实项目{note}")
+                    self.real_projects_view.set_rows(rows)
                 elif kind == "baselines":
                     _, mode, min_loc, method, per_project, errors, callback = item
                     self._on_baselines_computed(mode, min_loc, method, per_project, errors, callback)
@@ -600,6 +620,10 @@ class TcerGui:
 
     def _render_tab(self, idx: int) -> None:
         """渲染指定页签（未标脏则跳过）。补渲染时按脏标记决定是否重灌数据。"""
+        if idx == 4:
+            # 项目聚合页签不依赖 self._current（自扫全部项目），首次切入加载。
+            self.real_projects_view.on_show()
+            return
         if not self._current or idx not in self._dirty_tabs:
             return
         full = self._dirty_tabs.pop(idx)
@@ -921,6 +945,26 @@ class TcerGui:
                        f"{len(eligible)} 个。样本过少时波动大，暂不建议写入。")
             self.filter.set_status("个人基准校准完成" if values else "个人基准：样本不足")
             callback({"values": values, "n": len(eligible), "note": note, "msg": msg})
+        elif mode == "per_source":   # 按数据源 —— 跨源公平比较用的逐源基准
+            all_reports = [r for _, _, reps in per_project for r in reps]
+            by_src = metrics.compute_baselines_per_source(
+                all_reports, min_net_loc=min_loc, method=method)
+            out = []
+            for src in sorted(by_src):
+                n = len(metrics.baseline_eligible_reports(
+                    [r for r in all_reports if r.meta.source == src],
+                    min_net_loc=min_loc))
+                vals = by_src[src]
+                item = {"source": src, "label": views.source_label(src), "n": n,
+                        "values": vals}
+                if vals is None:
+                    item["reason"] = f"有效会话 {n} 个 < 所需 {need}，跳过"
+                out.append(item)
+            n_ok = sum(1 for it in out if it["values"])
+            self.filter.set_status(
+                f"按源校准完成 · {n_ok}/{len(out)} 个源可校准" if n_ok else "按源校准：无源达标")
+            callback({"per_source": out, "note": note,
+                      "msg": "" if out else "没有可用于计算的会话。"})
         else:    # per_proj —— 列出**全部项目**，样本不足者也显示（values=None）
             out = []
             for uid, label, reps in per_project:
@@ -939,9 +983,12 @@ class TcerGui:
                       "msg": "" if out else "没有可用于计算的项目。"})
 
     def _baseline_apply(self, mode: str, payload) -> None:
-        """应用基准：全局 或 逐项目写入 config，然后重算当前项目。"""
+        """应用基准：全局 / 逐项目 / 逐数据源写入 config，然后重算当前项目。"""
         if mode == "all":
             metrics.save_baselines(payload)  # 写全局
+        elif mode == "per_source":
+            for src, vals in payload.items():
+                metrics.save_baselines(vals, source=src)  # 逐源写入
         else:
             for uid, vals in payload.items():
                 metrics.save_baselines(vals, project_uid=uid)  # 逐项目写入
@@ -955,6 +1002,146 @@ class TcerGui:
         suffix = (" · 项目汇总" if report.meta.session_id == "(aggregate)"
                   else f" · {(report.meta.session_id or '')[:16]}…")
         popups.ToolSequencePopup(self.root, report.usage, suffix)
+
+    def show_cross_source_compare(self) -> None:
+        """同模型跨源对照：后台分析全部项目，同一模型在不同 agent 里的中位数对比。"""
+        if not self._projects:
+            self.filter.set_status("无项目可汇总")
+            return
+        params = self.filter.get_params()
+        projects = list(self._projects)
+        self.filter.set_status(f"跨源对照计算中…（{len(projects)} 个项目）")
+
+        def _work() -> None:
+            reports = []
+            errors = 0
+            for p in projects:
+                try:
+                    a = analyze.analyze_project(
+                        p.key, source=getattr(p, "source", "claude"),
+                        project_ref=p if hasattr(p, "session_paths") else None,
+                        task_type=params["task_type"],
+                        since=params["since"], until=params["until"],
+                        no_loc=self._no_loc,
+                    )
+                except Exception:  # noqa: BLE001 — 单项目失败不拦对照
+                    errors += 1
+                    continue
+                reports.extend(a.reports)
+            models = analyze.cross_source_models(reports)
+            self._q.put(("cross_source", models, errors))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def real_projects_scan(self, *, force: bool = False) -> None:
+        """项目聚合页签数据：后台扫全部项目 → 按真实工作目录分组 + 逐 ref 聚合。
+
+        聚合口径：Token/成本/净增行/缓存token 求和；TCER/CPE/缓存命中按合计重算
+        （非各卡均值——避免 Simpson 悖论）；效率分从聚合轴输入重算（与 server
+        ``_agg_metrics`` 同一处理：聚合 TCER 作产出轴代理、质量轴用求和比率）。
+        首次切入自动扫（force=False 且未加载过）；工具栏「刷新」强制重扫。
+        """
+        if self._realproj_scanning or (self._realproj_loaded and not force):
+            return
+        if not self._projects:
+            self.real_projects_view.set_rows([])
+            return
+        self._realproj_scanning = True
+        params = self.filter.get_params()
+        projects = list(self._projects)
+        self.filter.set_status(f"项目聚合计算中…（{len(projects)} 张项目卡）")
+
+        def _work() -> None:
+            import statistics
+            from collections import Counter
+
+            from tcer.core.paths import project_has_sessions
+
+            refs = [p for p in projects if project_has_sessions(p)]
+            groups = analyze.real_projects(refs)
+            rows = []
+            errors = 0
+            for g in groups:
+                ref_rows = []
+                tot = {"n": 0, "tokens": 0, "cost": 0.0, "net": 0,
+                       "requests": 0, "user_msgs": 0}
+                sums = {"cr": 0, "inp": 0, "cw": 0, "added": 0, "reworked": 0,
+                        "tools": 0, "tool_errors": 0}
+                rbws = []
+                for ref in g.refs:
+                    try:
+                        a = analyze.analyze_project(
+                            ref.key, source=ref.source, project_ref=ref,
+                            task_type=params["task_type"],
+                            since=params["since"], until=params["until"],
+                            no_loc=self._no_loc,
+                        )
+                    except Exception:  # noqa: BLE001 — 单卡失败不拦聚合
+                        errors += 1
+                        continue
+                    agg = a.aggregate
+                    u = agg.usage
+                    tot["n"] += a.n_sessions
+                    tot["tokens"] += u.total
+                    tot["cost"] += agg.cost or 0.0
+                    tot["net"] += agg.net_loc or 0
+                    # 请求数口径同指标 SSOT（Grok 按 API 调用数，其余按助手响应数）。
+                    tot["requests"] += (u.api_calls or u.assistant_msgs)
+                    tot["user_msgs"] += u.user_msgs
+                    sums["cr"] += u.cache_read_input_tokens
+                    sums["inp"] += u.input_tokens
+                    sums["cw"] += u.cache_creation_input_tokens
+                    sums["added"] += agg.code_added or 0
+                    sums["reworked"] += (agg.code_reworked
+                                         if agg.code_reworked is not None
+                                         else agg.code_deleted) or 0
+                    sums["tools"] += sum(u.tool_calls.values())
+                    sums["tool_errors"] += u.tool_errors
+                    if agg.read_before_write is not None:
+                        rbws.append(agg.read_before_write)
+                    ref_rows.append({
+                        "source": ref.source,
+                        "icon": views.project_icon_key(ref),
+                        "sub": (ref.config_root.name if ref.source == "claude"
+                                and ref.config_root is not None else ref.key),
+                        "n": a.n_sessions,
+                        "requests": (u.api_calls or u.assistant_msgs),
+                        "user_msgs": u.user_msgs,
+                        "tokens": u.total,
+                        "cost": agg.cost,
+                        "net": agg.net_loc,
+                        "tcer": agg.tcer,
+                        "cpe": agg.cpe,
+                        "chr": agg.chr,
+                        "score": agg.score,
+                        "tier": agg.tier,
+                    })
+                if not ref_rows:
+                    continue
+                # 同组同源多卡（Claude 多配置根）在标签后标注所属根，便于区分。
+                src_count = Counter(r["source"] for r in ref_rows)
+                for r in ref_rows:
+                    label = views.source_label(r["source"])
+                    if src_count[r["source"]] > 1:
+                        label += f"（{r['sub']}）"
+                    r["label"] = label
+                # 聚合口径：比率一律「分子和 ÷ 分母和」重算，不取各卡平均。
+                denom_in = sums["inp"] + sums["cw"] + sums["cr"]
+                tot["chr"] = (sums["cr"] / denom_in) if denom_in else None
+                tot["tcer"] = (tot["net"] / (tot["tokens"] / 1e6)) if tot["tokens"] else None
+                tot["cpe"] = (tot["cost"] / tot["net"] * 1000) if tot["net"] > 0 else None
+                churn = (sums["reworked"] / sums["added"]) if sums["added"] else None
+                err = (sums["tool_errors"] / sums["tools"]) if sums["tools"] else None
+                rbw = statistics.median(rbws) if rbws else None
+                score = metrics.efficiency_score(
+                    tot["tcer"], tot["cpe"], churn, err, rbw, net_loc=tot["net"])
+                tot["score"] = score
+                tot["tier"] = metrics.tier(score)
+                rows.append({"key": g.key, "display": g.display,
+                             "refs": ref_rows, "totals": tot})
+            self._q.put(("realproj", rows, errors))
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def show_project_profile(self) -> None:
         """项目画像：跨会话热点文件 / 模型混用策略 / 技能·MCP 复用。"""

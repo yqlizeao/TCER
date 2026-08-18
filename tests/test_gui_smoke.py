@@ -1180,3 +1180,63 @@ def test_clamp_geometry_cross_resolution():
     # 非法输入 → None（走默认居中）
     assert cg("garbage", 1920, 1080) is None
     assert cg("", 1920, 1080) is None
+
+
+def test_cross_source_models_popup(root):
+    from tcer.gui.popups import CrossSourceModelsPopup
+
+    models = [{
+        "model": "zz-unlisted-model", "label": "Zz Unlisted", "tokens": 42_000,
+        "sources": [
+            {"source": "claude", "n": 6, "tcer": 13.9, "cpe": 380.7, "pbar": 5.06,
+             "chr": 0.0, "score": 48.7, "net_loc": 120.0, "tools_per_100loc": 40.0},
+            {"source": "omp", "n": 19, "tcer": 17.1, "cpe": 77.6, "pbar": 1.14,
+             "chr": 0.91, "score": 49.4, "net_loc": 300.0, "tools_per_100loc": None},
+        ],
+    }]
+    CrossSourceModelsPopup(root, models)
+    root.update_idletasks()
+    # 空数据走「未找到组合」分支，不崩。
+    CrossSourceModelsPopup(root, [])
+    root.update_idletasks()
+
+
+def test_real_projects_view(root):
+    from tcer.gui.views import RealProjectsView
+
+    scanned = []
+
+    class _Ctl:
+        def real_projects_scan(self, *, force=False):
+            scanned.append(force)
+
+    v = RealProjectsView(root, controller=_Ctl())
+    root.update_idletasks()
+    v.on_show()                      # 首次切入 → 触发扫描
+    assert scanned == [False]
+    rows = [{
+        "key": r"c:\github\tcer", "display": "C:\\GitHub\\TCER",
+        "totals": {"n": 30, "tokens": 2_000_000_000, "cost": 12.5, "net": 4000,
+                   "tcer": 2.0, "cpe": 3.1, "chr": 0.9, "score": 55.0, "tier": "中等"},
+        "refs": [
+            {"label": "Claude（.claude）", "source": "claude", "icon": "claude",
+             "n": 10, "requests": 120, "user_msgs": 30,
+             "tokens": 1_500_000_000, "cost": 5.0, "net": 1500,
+             "tcer": 1.5, "cpe": 3.3, "chr": 0.95, "score": 54.0, "tier": "中等"},
+            {"label": "Grok", "source": "grok", "icon": "grok", "n": 20,
+             "requests": 210, "user_msgs": 45, "tokens": 500_000_000,
+             "cost": 7.5, "net": 2500, "tcer": 2.5,
+             "cpe": 3.0, "chr": 0.8, "score": 56.0, "tier": "良好"},
+        ],
+    }]
+    v.set_rows(rows)
+    root.update_idletasks()
+    v.set_sort("tcer")               # 排序菜单命令不崩（数值列）
+    v.set_sort("display")            # 名称列（字母序分支）
+    v._expanded.add(rows[0]["key"])  # 展开态渲染各源明细行（含图标）
+    v._render()
+    root.update_idletasks()
+    assert v._tok(1_500_000_000) == "15.00亿"   # 大数中文量级
+    assert v._tok(999) == "999"                 # 不足万位回落千分位
+    v.set_rows([])                   # 空数据走占位分支
+    root.update_idletasks()

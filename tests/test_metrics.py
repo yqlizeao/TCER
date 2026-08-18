@@ -212,12 +212,28 @@ def test_score_shrinks_small_sessions_toward_center():
 
 
 def test_tier_thresholds():
+    # v1.7.1 带值按真实已评分人群分位重划（优秀≈P90 · 良好≈P70 · 中等≈P20）。
     assert metrics.tier(80.0) == "优秀"
-    assert metrics.tier(65.0) == "良好"
+    assert metrics.tier(68.5) == "优秀"   # 顶档严格大于
+    assert metrics.tier(68.0) == "良好"
     assert metrics.tier(50.0) == "中等"
-    assert metrics.tier(30.0) == "待改进"
-    assert metrics.tier(10.0) == "低效"
+    assert metrics.tier(44.0) == "待改进"
+    assert metrics.tier(30.0) == "低效"
     assert metrics.tier(None) is None
+
+
+def test_score_gates_zero_and_negative_net_loc():
+    """零/负净产 = 无产出证据 → 不评分（此前收缩恒 50 分，伪装成「中等」）。"""
+    assert metrics.efficiency_score(80.0, 8.0, 0.05, 0.02, 0.8, net_loc=0, **_FW) is None
+    assert metrics.efficiency_score(80.0, 8.0, 0.05, 0.02, 0.8, net_loc=-10, **_FW) is None
+    ax = metrics.score_axes(80.0, 8.0, 0.05, 0.02, 0.8, net_loc=0, **_FW)
+    assert ax == {"output": None, "cost": None, "quality": None}
+    # compute() 端到端：零净产会话 TCER=0 仍展示，但无分无档。
+    u = _u(i=400_000, cw=100_000, o=500_000)
+    r = metrics.compute(META, u, net_loc=0, task_type="code_creation")
+    assert r.tcer == pytest_approx(0.0)
+    assert r.score is None and r.tier is None
+    assert r.score_output_axis is None
 
 
 def test_ttaf_table_matches_report():

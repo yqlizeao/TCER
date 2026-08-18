@@ -150,3 +150,47 @@ def test_score_tracks_refreshed_baseline(tmp_path):
         metrics._COMPOSITE_CONFIG_PATH = real_path
         metrics._load_composite_config.cache_clear()
         metrics._refresh_composite_globals()
+
+
+def test_save_and_resolve_per_source_baseline(tmp_path):
+    """逐源基准：写入只影响该源；解析优先级 逐项目 > 逐源 > 全局。"""
+    real_path = metrics._COMPOSITE_CONFIG_PATH
+    tmp = tmp_path / "composite_baselines.json"
+    tmp.write_text(real_path.read_text(encoding="utf-8"), encoding="utf-8")
+    metrics._COMPOSITE_CONFIG_PATH = tmp
+    try:
+        metrics._load_composite_config.cache_clear()
+        metrics._refresh_composite_globals()
+        glob_tcer = metrics.TCER_BASELINE
+        metrics.save_baselines({"tcer": 51.0, "cpe": 5.0}, source="codex")
+        # 该源取逐源值；其它源回退全局
+        assert metrics.resolve_baselines(None, source="codex")["tcer"] == 51.0
+        assert metrics.resolve_baselines(None, source="codex")["cpe"] == 5.0
+        assert metrics.resolve_baselines(None, source="claude")["tcer"] == glob_tcer
+        assert metrics.TCER_BASELINE == glob_tcer  # 全局常量不受逐源写入影响
+        # 逐项目仍压过逐源
+        metrics.save_baselines({"tcer": 77.0}, project_uid="u1")
+        assert metrics.resolve_baselines("u1", source="codex")["tcer"] == 77.0
+        cfg = json.loads(tmp.read_text(encoding="utf-8"))
+        assert cfg["baselines_per_source"]["codex"] == {"tcer": 51.0, "cpe": 5.0}
+    finally:
+        metrics._COMPOSITE_CONFIG_PATH = real_path
+        metrics._load_composite_config.cache_clear()
+        metrics._refresh_composite_globals()
+
+
+def test_compute_baselines_per_source_buckets_and_gate():
+    """按源分桶：每源独立过 MIN_BASELINE_SESSIONS 门槛；不足的源为 None 但仍列出。"""
+    n = metrics.MIN_BASELINE_SESSIONS
+    claude = [_report(400 + i) for i in range(n)]
+    codex = [_report(200 + i) for i in range(n)]
+    few = [_report(600)]
+    for r in codex:
+        r.meta.source = "codex"
+    for r in few:
+        r.meta.source = "grok"
+    out = metrics.compute_baselines_per_source(claude + codex + few)
+    assert set(out) == {"claude", "codex", "grok"}
+    assert out["claude"] is not None and out["codex"] is not None
+    assert out["grok"] is None  # 样本不足 → None（GUI 标注「跳过」）
+    assert out["codex"] == metrics.compute_baselines(codex)

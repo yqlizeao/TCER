@@ -69,14 +69,31 @@ def _get_baselines_per_project() -> dict[str, dict]:
     return _load_composite_config().get("baselines_per_project", {}) or {}
 
 
-def resolve_baselines(project_uid: str | None = None) -> dict[str, float]:
-    """解析某项目实际生效的 TCER/CPE 基准：优先逐项目基准，否则回退全局。
+def _get_baselines_per_source() -> dict[str, dict]:
+    """逐数据源个人基准（可选）。键为 source（claude/codex/grok/opencode/omp/pi），
+    值 {tcer,cpe}。缺失时返回空 dict——回退到全局 baselines。"""
+    return _load_composite_config().get("baselines_per_source", {}) or {}
 
-    project_uid=None 或该项目无逐项目基准 → 全局 baselines。供 GUI reanalyze
-    按当前项目取 override，让「逐项目基准」在打分时真正生效。
+
+def resolve_baselines(project_uid: str | None = None,
+                      source: str | None = None) -> dict[str, float]:
+    """解析某会话/项目实际生效的 TCER/CPE 基准：逐项目 > 逐数据源 > 全局。
+
+    逐源基准用于跨源公平比较——不同 agent 的 token 口径/缓存结构天然不同
+    （CLAUDE.md #36 诊断：p̄ 0.37~1.14、工具/百行 16.9~46.5），锚在「该源自己
+    的中位水平」后，分数回到「相对该源人群的位置」。project_uid=None 或无该
+    项目基准 → 看 source；都无 → 全局 baselines。供 GUI reanalyze 与 analyze
+    回退路径共用同一条解析链。
     """
     glob = _get_baselines()
     out = {"tcer": glob["tcer"], "cpe": glob["cpe"]}
+    if source:
+        ps = _get_baselines_per_source().get(source)
+        if isinstance(ps, dict):
+            if ps.get("tcer") is not None:
+                out["tcer"] = float(ps["tcer"])
+            if ps.get("cpe") is not None:
+                out["cpe"] = float(ps["cpe"])
     if project_uid:
         pp = _get_baselines_per_project().get(project_uid)
         if isinstance(pp, dict):
@@ -456,11 +473,38 @@ def compute_baselines(
     }
 
 
-def save_baselines(values: dict, *, project_uid: str | None = None) -> None:
+def compute_baselines_per_source(
+    reports,
+    *,
+    min_net_loc: int | None = None,
+    method: str = "median",
+) -> dict[str, dict | None]:
+    """按数据源分桶的个人基准：``{source: {tcer, cpe} | None}``。
+
+    None = 该源有效会话不足 :data:`MIN_BASELINE_SESSIONS`（小样本尺度会漂移，
+    不写入）。写入后经 ``baselines_per_source`` 生效，跨源分数可比（见
+    :func:`resolve_baselines`）。返回包含**全部出现过的源**（含样本不足者，
+    供 GUI 标注「跳过」），按源名排序稳定输出。
+    """
+    buckets: dict[str, list] = {}
+    for r in reports:
+        src = getattr(getattr(r, "meta", None), "source", None)
+        if src:
+            buckets.setdefault(src, []).append(r)
+    out: dict[str, dict | None] = {}
+    for src in sorted(buckets):
+        out[src] = compute_baselines(buckets[src], min_net_loc=min_net_loc, method=method)
+    return out
+
+
+def save_baselines(values: dict, *, project_uid: str | None = None,
+                   source: str | None = None) -> None:
     """Write personal baselines into ``composite_baselines.json`` and refresh.
 
-    project_uid=None → 写全局 ``baselines`` 块（影响所有无逐项目基准的项目）。
-    project_uid 给定 → 写 ``baselines_per_project[uid]``（只影响该项目，全局不变）。
+    project_uid/source 均未给 → 写全局 ``baselines`` 块（影响所有无覆盖的项目）。
+    project_uid 给定 → 写 ``baselines_per_project[uid]``（只影响该项目）。
+    source 给定 → 写 ``baselines_per_source[source]``（跨源公平比较）。
+    解析优先级见 :func:`resolve_baselines`：逐项目 > 逐源 > 全局。
 
     Merges into the target block, clears the config cache, and refreshes the
     module-level constants. Writes atomically (temp file + ``os.replace``) on a
@@ -472,6 +516,10 @@ def save_baselines(values: dict, *, project_uid: str | None = None) -> None:
         pp = {**cfg.get("baselines_per_project", {})}
         pp[project_uid] = {**pp.get(project_uid, {}), **values}
         cfg["baselines_per_project"] = pp
+    elif source:
+        ps = {**cfg.get("baselines_per_source", {})}
+        ps[source] = {**ps.get(source, {}), **values}
+        cfg["baselines_per_source"] = ps
     else:
         cfg["baselines"] = {**cfg.get("baselines", {}), **values}
     # Atomic write: write to a sibling temp file, then replace.
@@ -1306,9 +1354,10 @@ def efficiency_score(
 ) -> float | None:
     """综合效率分 ∈[0,100]：三正交轴半饱和 → 证据收缩 → 加权合成。
 
-    产出轴缺失（无 ntcer/loc）→ None（无从评效率）。成本或质量轴缺失时，把其
-    权重重分配给可用轴（优雅降级）。返回 None 表示该会话不参与效率排名。
-    tcer_baseline/cpe_baseline 未给时读实时全局（个人基准 save 后即生效）。
+    产出轴缺失（无 ntcer/loc）或净产 ≤ 0（无产出证据）→ None（无从评效率）。
+    成本或质量轴缺失时，把其权重重分配给可用轴（优雅降级）。返回 None 表示
+    该会话不参与效率排名。tcer_baseline/cpe_baseline 未给时读实时全局
+    （个人基准 save 后即生效）。
     """
     a = score_axes(ntcer, cpe, churn_ratio_, tool_error_rate, read_before_write,
                    net_loc=net_loc, tcer_baseline=tcer_baseline,
@@ -1334,7 +1383,14 @@ def score_axes(
     tcer_baseline: float | None = None,
     cpe_baseline: float | None = None,
 ) -> dict[str, float | None]:
-    """三轴收缩后的分值（0–1），供 GUI 分解展示 / audit 重算校验。"""
+    """三轴收缩后的分值（0–1），供 GUI 分解展示 / audit 重算校验。
+
+    零/负净产（net_loc ≤ 0）= 无产出证据，三轴一律 None（→ 效率分不评分）。
+    实测 ~65% 的真实会话零净产，证据收缩会把它们全部钉在恰好 50 分的
+    「中等」——常数分伪装成信息，不如明确显示未评分（与「不适用」同观感）。
+    """
+    if net_loc is None or net_loc <= 0:
+        return {"output": None, "cost": None, "quality": None}
     return {
         "output": _shrink(output_axis(ntcer, tcer_baseline), net_loc),
         "cost": _shrink(cost_axis(cpe, cpe_baseline), net_loc),

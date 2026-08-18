@@ -253,6 +253,9 @@ class Card:
                  bg: str = theme.PANEL_2, padx: int = 2, pady: int = 2) -> None:
         self.frame = tk.Frame(parent, bg=bg, relief="flat", borderwidth=1,
                               highlightthickness=1, highlightbackground=theme.BORDER,
+                              # 防御性封死聚焦态：即使卡片经 Tab 遍历拿到焦点，
+                              # 聚焦环也画成边框色（视觉不可见）——规范⑥聚焦环全局消除。
+                              highlightcolor=theme.BORDER,
                               cursor=CLICK_CURSOR)
         self.frame.pack(fill="x", padx=padx, pady=pady)
         self._on_click = on_click
@@ -559,7 +562,12 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, pady=No
     btn = tk.Button(parent, text=text, command=command, relief="flat",  # style-exempt: flat_button 本体
                     bg=base_bg, fg=fg, bd=0, cursor=CLICK_CURSOR,
                     activebackground=hover_bg, activeforeground=fg,
-                    padx=pad_x, pady=pad_y, font=theme.FONT_UI, **kw)
+                    padx=pad_x, pady=pad_y, font=theme.FONT_UI,
+                    highlightthickness=0,  # tk 层聚焦带（mac 分支同款，规范⑥）
+                    takefocus=0,           # Windows 经典按钮持焦时的 DrawFocusRect
+                                          # 蚂蚁线无法用 highlight 选项关闭，只能
+                                          # 不抢焦点（点击后焦点留在原处，规范⑥）
+                    **kw)
     btn.bind("<Enter>", lambda _e: btn.config(bg=hover_bg), add="+")
     btn.bind("<Leave>", lambda _e: btn.config(bg=base_bg), add="+")
     return btn

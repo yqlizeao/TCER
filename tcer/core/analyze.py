@@ -8,8 +8,9 @@ per-session + aggregate reports. The CLI and Tkinter GUI both call ``analyze_pro
 """
 from __future__ import annotations
 
+import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import reduce
 from pathlib import Path
 from typing import Callable
@@ -135,6 +136,165 @@ def tool_profile(reports: list[SessionReport]) -> dict:
         "skills_sessions": skill_sessions,
         "mcp_sessions": mcp_sessions,
     }
+
+
+# 同模型跨源对照：每个 (模型, 源) 格子的最小会话数——中位数需要样本量，
+# 更少则该格子不展示（比较本身就不稳定）。
+CROSS_SOURCE_MIN_CELL = 3
+
+
+# --------------------------------------------------------------------------- #
+# 真实项目聚合：同一工作目录的多个 agent 项目卡 → 一个「真实项目」
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class RealProject:
+    """跨源聚合后的「真实项目」：同一工作目录（规范化 cwd）下的全部 ref。
+
+    用户常在同一目录混用多个 agent——每个 agent 在自己的存储里各产生一张
+    项目卡（如 codex/grok/omp 的 ``C--GitHub-TCER`` + claude 两个配置根的同
+    hash 项目），其实都是同一个工程。``key`` 是规范化 cwd（normcase+normpath，
+    Windows 盘符大小写/分隔符差异折叠），``display`` 保留原始大小写供展示；
+    无 cwd 的 ref（读不到会话头）各自独立成组（``key="ref:<source>:<key>"``），
+    宁可不合并也不错合并。
+    """
+    key: str
+    display: str
+    refs: list[ProjectRef] = field(default_factory=list)
+
+
+def _claude_ref_cwd(ref: ProjectRef) -> str | None:
+    """Claude ref 的工作目录：首会话 meta 的 cwd（read_session_meta 走 file_cache）。
+
+    ref 层不落 cwd（``list_project_refs`` 只列目录名）；key 反解不可靠——Claude
+    的编码把 ``.``/空格等一并折叠成 ``-``，有损。读不到（空项目/头损坏）→ None，
+    该 ref 独立成组。
+    """
+    try:
+        files = reader.discover_jsonl(
+            ref.key, roots=[ref_root(ref)] if ref_root(ref) is not None else None)
+        main = next((f for f in files if not reader.is_subagent(f)), None)
+        if main is None:
+            return None
+        return reader.read_session_meta(main).cwd
+    except Exception:  # noqa: BLE001 — 头读失败不拦聚合，退独立成组
+        return None
+
+
+def _display_cwd(cwd: str) -> str:
+    """展示用 cwd：盘符统一大写（会话元数据里常见小写 ``c:\\...``，观感凌乱）。"""
+    if len(cwd) >= 2 and cwd[1] == ":" and cwd[0].isalpha():
+        return cwd[0].upper() + cwd[1:]
+    return cwd
+
+
+def real_projects(refs: list[ProjectRef]) -> list[RealProject]:
+    """把 (source, key) 粒度的 ref 按「真实工作目录」聚合。
+
+    规范化用 ``os.path.normcase + normpath``：Windows 下折叠盘符大小写与
+    斜杠方向（``C:\GitHub\TCER`` == ``c:/github/tcer``）；展示名盘符统一
+    大写（``_display_cwd``）。**父子路径不合并**（``c:\playground`` 与
+    ``c:\playground\langfuse`` 是不同的工作目录语义）。
+    """
+    groups: dict[str, RealProject] = {}
+    singles: list[RealProject] = []
+    for ref in refs:
+        cwd = ref.cwd
+        if cwd is None and ref.source == "claude":
+            cwd = _claude_ref_cwd(ref)
+        if not cwd:
+            singles.append(RealProject(
+                key=f"ref:{ref.source}:{ref.key}",
+                display=ref.display_name or ref.key, refs=[ref]))
+            continue
+        key = os.path.normcase(os.path.normpath(cwd))
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = RealProject(key=key, display=_display_cwd(cwd))
+        g.refs.append(ref)
+    out = list(groups.values()) + singles
+    out.sort(key=lambda g: (-len(g.refs), g.display.lower()))
+    return out
+
+
+def _dominant_model_key(u: TokenUsage) -> str | None:
+    """会话主模型（``per_model`` 中 token 量最大者），归一化到价表规范 key。"""
+    if not u.per_model:
+        return None
+    best = max(
+        u.per_model.items(),
+        key=lambda kv: (
+            kv[1].input_tokens + kv[1].output_tokens
+            + kv[1].cache_creation_input_tokens + kv[1].cache_read_input_tokens
+        ),
+    )
+    return pricing.normalize(best[0]) or best[0] or None
+
+
+def cross_source_models(reports: list[SessionReport]) -> list[dict]:
+    """同一模型 × 不同数据源的对照矩阵（fixed model, vary harness）。
+
+    回答「同一个底层 LLM 在不同 agent 框架里效率差多少、差在哪」：按
+    ``pricing.normalize`` 归一化后的**主模型**（每会话取 token 量最大者）×
+    ``meta.source`` 分桶，只保留出现于 ≥2 个源、且每源 ≥ :data:`CROSS_SOURCE_MIN_CELL`
+    个有产出会话的组合。只统计有产出（net_loc>0）会话——与评分门控同口径
+    （零净产 tcer=0.0 非 None，不过滤会把格子中位数拖到 0、混入纯聊天会话）。
+
+    返回按模型总 token 降序的 ``list[dict]``：
+    ``{"model": key, "label": 显示名, "tokens": Σ, "sources": [{"source", "n",
+    "tcer", "cpe", "pbar", "chr", "score", "net_loc", "tools_per_100loc"}]}``，
+    除 ``n`` 外均为会话级中位数（None = 该源无可用样本；``pbar`` = 混合单价
+    $/Mt，``tools_per_100loc`` = 每百净增行的工具调用数）。GUI「同模型跨源
+    对照」弹窗消费。
+    """
+    import statistics
+
+    def _med(xs: list) -> float | None:
+        xs = [x for x in xs if x is not None]
+        return statistics.median(xs) if xs else None
+
+    buckets: dict[str, dict[str, list[SessionReport]]] = {}
+    for r in reports:
+        if r.tcer is None or not r.net_loc or r.net_loc <= 0:
+            continue
+        key = _dominant_model_key(r.usage)
+        if not key:
+            continue
+        buckets.setdefault(key, {}).setdefault(
+            r.meta.source or "claude", []).append(r)
+
+    out: list[dict] = []
+    for key, by_src in buckets.items():
+        cells = {s: rs for s, rs in by_src.items() if len(rs) >= CROSS_SOURCE_MIN_CELL}
+        if len(cells) < 2:
+            continue
+        srcs = []
+        for src in sorted(cells, key=lambda s: -sum(r.usage.total for r in cells[s])):
+            rs = cells[src]
+            srcs.append({
+                "source": src,
+                "n": len(rs),
+                "tcer": _med([r.tcer for r in rs]),
+                "cpe": _med([r.cpe for r in rs]),
+                "pbar": _med([r.cost / (r.usage.total / 1e6)
+                              for r in rs if r.cost and r.usage.total]),
+                "chr": _med([r.chr for r in rs]),
+                "score": _med([r.score for r in rs]),
+                "net_loc": _med([r.net_loc for r in rs if r.net_loc]),
+                "tools_per_100loc": _med([
+                    sum(r.usage.tool_calls.values()) / (r.net_loc / 100)
+                    for r in rs
+                    if r.net_loc and r.net_loc > 0
+                    and sum(r.usage.tool_calls.values()) > 0]),
+            })
+        out.append({
+            "model": key,
+            "label": pricing.label(key),
+            "tokens": sum(r.usage.total for rs in cells.values() for r in rs),
+            "sources": srcs,
+        })
+    out.sort(key=lambda d: -d["tokens"])
+    return out
 
 
 @dataclass(frozen=True)
@@ -359,10 +519,12 @@ def analyze_project(
     """
     # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
     # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
+    # CLI/audit 未显式传基准时走与 GUI reanalyze 同一条解析链（逐项目 > 逐源 > 全局）。
+    _pb = metrics.resolve_baselines(None, source=project_ref.source if project_ref is not None else source)
     if baseline_tcer is None:
-        baseline_tcer = metrics.TCER_BASELINE
+        baseline_tcer = _pb["tcer"]
     if baseline_cpe is None:
-        baseline_cpe = metrics.CPE_BASELINE
+        baseline_cpe = _pb["cpe"]
     auto_infer = metrics.is_auto_task_type(task_type)
     if not auto_infer:
         task_type = metrics.resolve_task_type(task_type)
@@ -600,10 +762,12 @@ def _analyze_source_project(
     """Shared per-session pipeline for Codex / OpenCode / Grok / omp projects."""
     # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
     # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
+    # CLI/audit 未显式传基准时走与 GUI reanalyze 同一条解析链（逐项目 > 逐源 > 全局）。
+    _pb = metrics.resolve_baselines(None, source=adapter.source)
     if baseline_tcer is None:
-        baseline_tcer = metrics.TCER_BASELINE
+        baseline_tcer = _pb["tcer"]
     if baseline_cpe is None:
-        baseline_cpe = metrics.CPE_BASELINE
+        baseline_cpe = _pb["cpe"]
     ref = project if isinstance(project, ProjectRef) else adapter.resolve(project)
     if ref is None or (adapter.requires_path and ref.path is None):
         raise FileNotFoundError(adapter.not_found.format(project=project))

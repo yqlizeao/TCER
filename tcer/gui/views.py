@@ -18,6 +18,7 @@ from tcer.core.export import score_decompose, score_decompose_avg
 from tcer.core.insights import (session_insights, project_insights,
                                  activity_overview, claude_md_suggestions,
                                  feature_suggestions, horizon_suggestions)
+from tcer.core import format as fmt
 from tcer.core.format import FMT_SHORT_MINUTE, fmt_dt
 from . import theme
 from .metric_defs import (
@@ -80,19 +81,21 @@ def project_drive(project) -> str | None:
     return None
 
 
+_SOURCE_DISPLAY = {
+    "codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
+    "omp": "Oh My Pi", "pi": "Pi",
+}
+
+
+def source_label(source: str | None) -> str:
+    """source key → 界面显示名（Claude 兜底；未知源显示原始 key，不假装是 Claude）。"""
+    if not source or source == "claude":
+        return "Claude"
+    return _SOURCE_DISPLAY.get(source, source)
+
+
 def project_source_label(project) -> str:
-    source = getattr(project, "source", "claude")
-    if source == "codex":
-        return "Codex"
-    if source == "opencode":
-        return "OpenCode"
-    if source == "grok":
-        return "Grok"
-    if source == "omp":
-        return "Oh My Pi"
-    if source == "pi":
-        return "Pi"
-    return "Claude"
+    return source_label(getattr(project, "source", "claude"))
 
 
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
@@ -340,12 +343,13 @@ class FilterBar:
         btn = flat_button(parent, "工具 ▾", None, padx=6,
                           image=ui_icon(parent, "tools"), compound="left")
         btn.config(command=self._pop_below(btn, self._build_tool_menu))
-        Tooltip(btn, "项目总览 · 会话时间线 · 会话对比 · 工具序列 · 个人基准 · 任务类型 · 高级选项 · 检查更新 / 版本信息")
+        Tooltip(btn, "项目总览 · 同模型跨源对照 · 会话时间线 · 会话对比 · 工具序列 · 个人基准 · 任务类型 · 高级选项 · 检查更新 / 版本信息")
         return btn
 
     def _build_tool_menu(self, menu) -> None:
         c = self.controller
         menu.add_command(label="项目总览", command=c.show_project_overview)
+        menu.add_command(label="同模型跨源对照", command=c.show_cross_source_compare)
         menu.add_command(label="项目画像", command=c.show_project_profile)
         menu.add_command(label="工具序列", command=c.show_tool_sequence)
         menu.add_command(label="会话时间线", command=c.show_session_timeline)
@@ -2517,3 +2521,279 @@ def _model_price_tip(mc) -> str:
     )
 
 
+
+
+
+
+class RealProjectsView:
+    """项目聚合页签 — 卡片式：真实项目卡 + 各 agent 品牌图标条 + 可展开明细。
+
+    数据来自 ``analyze.real_projects``（规范化 cwd 分组）+ 逐 ref 分析的聚合
+    报告。每张卡：agent 图标条（悬停见来源名，图标优先于文字标注）+ 项目
+    路径 + 汇总行 + 评级；点卡展开各源明细行。排序经工具栏下拉菜单。视图
+    自身无分析状态，首次切入由控制器后台扫描（mtime 缓存），「刷新」强制重扫。
+    """
+
+    _SORTS = [
+        ("n", "总会话数"), ("cost", "总成本"), ("tokens", "总 Token"),
+        ("net", "总净增行"), ("display", "名称"),
+    ]
+    _SORT_LABEL = dict(_SORTS)
+    # 明细网格列头一律取指标 SSOT 名（中心指标守则，不自造相似名——
+    # 「效率分」≠「综合效率分」这类偏差就是这么来的）；TCER 按约定保留缩写。
+    _TOKENS_NAME = metric_name("total_tokens")   # 总 Token
+    _COST_NAME = metric_name("cost")             # 总成本
+    _CPE_NAME = metric_name("cpe")               # 千行代码成本
+    _CHR_NAME = metric_name("chr")               # 缓存命中率
+    _TURNS_NAME = metric_name("turns")           # 请求数
+    _MSGS_NAME = metric_name("user_msgs")        # 用户消息
+    _NET_NAME = metric_name("net_loc")           # 净增行
+    _SCORE_COL = f"项目{metric_name('score')}"   # 项目综合效率分（聚合级，
+                                                 # 与效率榜项目视角同名同派生）
+    # 列头口径前缀（用户约定，优先于「SSOT 全名」守则）：求和列冠「总」、
+    # 比率列冠「平均」（实为按合计重算 ≠ 会话算术平均——5k 与 2M token 的
+    # 会话等权平均会触发 Simpson 悖论；SSOT 全名与公式保留在表头悬浮里）。
+    _COL_TURNS = f"总{metric_name('turns')}"     # 总请求数
+    _COL_MSGS = f"总{metric_name('user_msgs')}"  # 总用户消息
+    _COL_NET = f"总{metric_name('net_loc')}"     # 总净增行
+    _COL_CPE = f"平均{metric_name('cpe')}"       # 平均千行代码成本
+    _COL_TCER = "平均TCER"
+    _COL_CHR = f"平均{metric_name('chr')}"       # 平均缓存命中率
+
+    def __init__(self, parent, controller=None) -> None:
+        self.controller = controller
+        self._rows: list[dict] = []
+        self._sort_col = "n"
+        self._expanded: set[str] = set()
+
+        head = tk.Frame(parent, bg=theme.PANEL)
+        head.pack(fill="x", padx=theme.PAD_M, pady=(theme.PAD_S, 0))
+        _hi = ui_icon(head, "layers")
+        if _hi is not None:
+            tk.Label(head, image=_hi, bg=theme.PANEL).pack(side="left")
+        tk.Label(head, text="项目聚合", bg=theme.PANEL, fg=theme.FG,
+                 font=theme.FONT_UI_BOLD).pack(side="left", padx=(theme.PAD_S, 0))
+        tk.Label(head,
+                 text="同一工作目录的各 agent 项目卡自动合并（父子路径不合并）",
+                 bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL).pack(side="left", padx=theme.PAD_M)
+        self._sort_btn = flat_button(head, "排序：总会话数", self._pop_sort,
+                                     image=ui_icon(head, "rank"),
+                                     compound="left")
+        self._sort_btn.pack(side="right")
+        flat_button(head, "刷新", self._refresh,
+                    image=ui_icon(head, "refresh"), compound="left").pack(
+                        side="right", padx=(0, theme.PAD_S))
+
+        self._hint = tk.Label(parent, text="首次进入自动扫描全部项目…",
+                              bg=theme.PANEL, fg=theme.MUTED,
+                              font=theme.FONT_UI, pady=24)
+        sf = ScrollFrame(parent, bg=theme.PANEL)
+        sf.canvas.pack(fill="both", expand=True,
+                       padx=theme.PAD_M, pady=(theme.PAD_S, theme.PAD_M))
+        self._sf = sf
+        self._container = sf.inner
+
+    # -- controller hooks -------------------------------------------------
+    def on_show(self) -> None:
+        """页签切入：未加载过则请控制器启动后台扫描（已加载/扫描中为 no-op）。"""
+        if self.controller is not None and not self._rows:
+            self.controller.real_projects_scan()
+
+    def _refresh(self) -> None:
+        if self.controller is not None:
+            self.controller.real_projects_scan(force=True)
+
+    def _pop_sort(self) -> None:
+        menu = FlatMenu(self._sort_btn)
+        for key, label in self._SORTS:
+            mark = "✓ " if key == self._sort_col else ""
+            menu.add_command(label=f"{mark}{label}",
+                             command=lambda k=key: self.set_sort(k))
+        self._sort_btn.update_idletasks()
+        menu.tk_popup(self._sort_btn.winfo_rootx(),
+                      self._sort_btn.winfo_rooty() + self._sort_btn.winfo_height())
+
+    def set_sort(self, key: str) -> None:
+        if key not in self._SORT_LABEL:
+            return
+        self._sort_col = key
+        self._sort_btn.config(text=f"排序：{self._SORT_LABEL[key]}")
+        self._render()
+
+    # -- data -------------------------------------------------------------
+    def set_rows(self, rows: list[dict]) -> None:
+        self._rows = rows
+        self._expanded &= {g["key"] for g in rows}
+        self._hint.pack_forget()
+        if not rows:
+            self._hint.config(text="没有可聚合的项目（各数据源均无会话）。")
+            self._hint.pack(expand=True)
+            return
+        self._render()
+
+    def _render(self) -> None:
+        for w in self._container.winfo_children():
+            w.destroy()
+        for g in self._ordered():
+            self._make_card(g)
+        self._sf.update_scroll(reset=True)
+
+    def _ordered(self) -> list[dict]:
+        key = self._sort_col
+        if key == "display":
+            return sorted(self._rows, key=lambda g: g["display"].lower())
+
+        def rk(g):
+            v = g["totals"].get(key)
+            return v if isinstance(v, (int, float)) else 0.0
+
+        return sorted(self._rows, key=lambda g: (-rk(g), g["display"].lower()))
+
+    def _make_card(self, g: dict) -> None:
+        t = g["totals"]
+        expanded = g["key"] in self._expanded
+
+        def _toggle(_card, _key=g["key"]):
+            if _key in self._expanded:
+                self._expanded.discard(_key)
+            else:
+                self._expanded.add(_key)
+            self._render()
+
+        card = Card(self._container, on_click=_toggle, padx=1, pady=1)
+
+        # 第 1 行：项目路径（盘符统一大写，来自 _display_cwd）+ 右侧成本金额
+        # （与会话卡片同款：$两位小数、方向着色——成本>0 红、$0 绿、FONT_VALUE）。
+        row1 = tk.Frame(card.frame, bg=theme.PANEL_2)
+        row1.pack(fill="x", padx=theme.PAD_S, pady=(theme.PAD_S, 0))
+        arrow = tk.Label(row1, text="▾" if expanded else "▸", bg=theme.PANEL_2,
+                         fg=theme.MUTED, font=theme.FONT_UI_SMALL)
+        arrow.pack(side="left", padx=(2, 4))
+        card.bind_to(arrow)
+        cost = t.get("cost") or 0.0
+        cost_fg = theme.VALUE_BAD if cost > 0 else theme.VALUE_GOOD
+        cost_lbl = tk.Label(row1, bg=theme.PANEL_2, fg=cost_fg,
+                            font=theme.FONT_VALUE, anchor="e",
+                            text=f"${cost:.2f}")
+        cost_lbl.pack(side="right", padx=(4, 0))
+        card.bind_to(cost_lbl)
+        name_lbl = tk.Label(row1, text=g["display"], bg=theme.PANEL_2,
+                            fg=theme.FG, font=theme.FONT_UI_BOLD, anchor="w")
+        name_lbl.pack(side="left", fill="x", expand=True)
+        card.bind_to(name_lbl)
+
+        # 第 2 行：agent 品牌图标条（悬停见来源名；图标取代文字标注——
+        # 与项目卡同款 source_icon，Claude 自定义根自动用 ccswitch 图标）。
+        row2 = tk.Frame(card.frame, bg=theme.PANEL_2)
+        row2.pack(fill="x", padx=theme.PAD_S, pady=(2, 0))
+        for r in g["refs"]:
+            self._icon_chip(row2, card, r)
+
+        # 第 3 行：摘要（会话/请求/用户消息/Token，空格分隔；效率与成本细节在展开明细里）。
+        stat = tk.Label(
+            card.frame, bg=theme.PANEL_2, fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL, anchor="w",
+            text=(f"{t.get('n', 0)} 会话  {fmt.fmt_int(t.get('requests'))} 请求  "
+                  f"{fmt.fmt_int(t.get('user_msgs'))} 用户消息  "
+                  f"{self._tok(t.get('tokens'))} Token"))
+        stat.pack(fill="x", padx=theme.PAD_S,
+                  pady=(2, theme.PAD_S if not expanded else 0))
+        card.bind_to(stat)
+        Tooltip(stat, "会话数 / 请求数（向模型 API 的请求；Grok 按回合内调用次数，"
+                      "其余源按助手响应数）/ 用户消息数 / 消耗总 Token")
+
+        if expanded:
+            # 各源明细 = 固定列网格（每指标一列 + 表头），跨行严格对齐——
+            # 此前每行一条右对齐长文本，数值宽度不同导致列天然不齐，无法对比。
+            detail = tk.Frame(card.frame, bg=theme.PANEL)
+            detail.pack(fill="x", padx=theme.PAD_S, pady=(2, theme.PAD_S))
+            # (列名, 最小宽, 对齐, 口径键, 悬浮说明)；来源列 weight=1 拉伸，
+            # 数值列定宽右对齐。列序按语义分组：活动量(会话/请求/消息) →
+            # 消耗(Token/成本/千行成本) → 产出(净增行/TCER) → 缓存 → 总分。
+            # 列名口径前缀见类常量注释；SSOT 全名与公式在悬浮里。
+            cols = [
+                ("来源", 130, "w", "src", "该工作目录下此 agent 的项目卡"),
+                ("总会话", 50, "e", "n", "跨会话求和"),
+                (self._COL_TURNS, 62, "e", "turns",
+                 "跨会话求和（Grok 按 API 调用数，其余按助手响应数）"),
+                (self._COL_MSGS, 76, "e", "msgs", "跨会话求和"),
+                (self._TOKENS_NAME, 68, "e", "tokens", "跨会话求和"),
+                (self._COST_NAME, 74, "e", "cost", "跨会话求和（价表计价）"),
+                (self._COL_CPE, 100, "e", "cpe",
+                 "总成本 ÷ 总净增行 × 1000（按合计重算，非会话算术平均）"),
+                (self._COL_NET, 64, "e", "net", "跨会话求和"),
+                (self._COL_TCER, 62, "e", "tcer",
+                 "总净增行 ÷ 总 Token（按合计重算，非会话算术平均）"),
+                (self._COL_CHR, 92, "e", "chr",
+                 "缓存读 ÷ 总输入（按合计重算，非会话算术平均）"),
+                (self._SCORE_COL, 94, "e", "score",
+                 "项目级评分：从该源聚合轴输入重算（非会话平均）"),
+            ]
+            for ci, (_name, minw, _anchor, _key, _tip) in enumerate(cols):
+                detail.columnconfigure(ci, minsize=minw,
+                                       weight=1 if ci == 0 else 0)
+            for ci, (name, _minw, anchor, _key, tip) in enumerate(cols):
+                hdr = tk.Label(detail, text=name, bg=theme.PANEL, fg=theme.MUTED,
+                               font=theme.FONT_UI_SMALL_BOLD, anchor=anchor)
+                hdr.grid(row=0, column=ci, sticky="ew", padx=2, pady=(0, 1))
+                Tooltip(hdr, tip)
+            for ri, r in enumerate(g["refs"], start=1):
+                cell0 = tk.Frame(detail, bg=theme.PANEL)
+                cell0.grid(row=ri, column=0, sticky="ew", padx=2, pady=1)
+                icon = source_icon(cell0, self._icon_key(r))
+                if icon is not None:
+                    il = tk.Label(cell0, image=icon, bg=theme.PANEL)
+                    il.pack(side="left", padx=(0, 4))
+                    Tooltip(il, r["label"])
+                tk.Label(cell0, text=r["label"], bg=theme.PANEL, fg=theme.FG,
+                         font=theme.FONT_UI_SMALL, anchor="w"
+                         ).pack(side="left")
+                score_txt = (f"{self._f(r.get('score'))} {r.get('tier') or '-'}"
+                             if r.get("score") is not None else "-")
+                values = [
+                    fmt.fmt_int(r.get("n")), fmt.fmt_int(r.get("requests")),
+                    fmt.fmt_int(r.get("user_msgs")), self._tok(r.get("tokens")),
+                    fmt.fmt_money(r.get("cost")), self._usd(r.get("cpe")),
+                    fmt.fmt_int(r.get("net")), self._f(r.get("tcer")),
+                    fmt.fmt_pct(r.get("chr")), score_txt,
+                ]
+                for ci, (txt, (_name, _minw, anchor, _key, _tip)) in enumerate(
+                        zip(values, cols[1:]), start=1):
+                    tk.Label(detail, text=txt, bg=theme.PANEL, fg=theme.MUTED,
+                             font=theme.FONT_UI_SMALL, anchor=anchor
+                             ).grid(row=ri, column=ci, sticky="e", padx=2, pady=1)
+
+    def _icon_chip(self, parent, card, r: dict) -> None:
+        """卡片头的 agent 图标（16px，与项目卡同款）；无资源回退小字来源名。"""
+        icon = source_icon(parent, self._icon_key(r))
+        if icon is not None:
+            il = tk.Label(parent, image=icon, bg=theme.PANEL_2)
+            il.pack(side="left", padx=1)
+            Tooltip(il, r["label"])
+            card.bind_to(il)
+        else:
+            sl = tk.Label(parent, text=f"[{r['label']}]", bg=theme.PANEL_2,
+                          fg=theme.MUTED, font=theme.FONT_UI_SMALL)
+            sl.pack(side="left", padx=1)
+            card.bind_to(sl)
+
+    @staticmethod
+    def _icon_key(r: dict) -> str:
+        return r.get("icon") or r.get("source") or "claude"
+
+    @staticmethod
+    def _tok(v) -> str:
+        """Token 大数中文量级（21.6亿），不足万位回落千分位整数。"""
+        if v is None:
+            return "-"
+        approx = fmt.fmt_approx_cn(v)
+        return approx.replace("≈ ", "") if approx else fmt.fmt_int(v)
+
+    @staticmethod
+    def _f(v, spec="0.0"):
+        return "-" if v is None else fmt.fmt_float(v, spec)
+
+    @staticmethod
+    def _usd(v):
+        return "-" if v is None else f"${v:.1f}"

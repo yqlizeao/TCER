@@ -491,3 +491,83 @@ def test_model_switch_unknown_model_skips_direction():
     m = model_switch_stats(reports)
     assert m["switch_count"] == 1
     assert m["delegations"] == 0 and m["escalations"] == 0
+
+
+def test_cross_source_models_groups_and_gates():
+    """同模型×源分组：只保留出现于 ≥2 源、每源 ≥CROSS_SOURCE_MIN_CELL 的组合；
+    无产出（tcer=None）会话不参与。"""
+    from types import SimpleNamespace
+    import statistics
+
+    from tcer.core import analyze
+
+    def _rep(source, model, tcer, tokens=1000, cost=1.0, net=100, score=50.0):
+        return SimpleNamespace(
+            meta=SimpleNamespace(source=source),
+            usage=SimpleNamespace(
+                per_model={model: SimpleNamespace(
+                    input_tokens=tokens, output_tokens=10,
+                    cache_creation_input_tokens=0, cache_read_input_tokens=0)},
+                total=tokens + 10,
+                tool_calls={"Read": 4},
+            ),
+            tcer=tcer, cpe=(cost / net * 1000) if net else None, cost=cost,
+            chr=None, score=score, net_loc=net,
+        )
+
+    m = analyze.CROSS_SOURCE_MIN_CELL
+    rs = ([_rep("claude", "zz-unlisted-model", 10.0 + i) for i in range(m)]
+          + [_rep("omp", "zz-unlisted-model", 20.0 + i) for i in range(m)]
+          + [_rep("grok", "zz-unlisted-model", 30.0 + i) for i in range(m - 1)]  # 不足
+          + [_rep("claude", "zz-other-model", 5.0)])                             # 单源
+    out = analyze.cross_source_models(rs)
+    assert len(out) == 1
+    entry = out[0]
+    assert entry["model"] == "zz-unlisted-model"
+    assert {s["source"] for s in entry["sources"]} == {"claude", "omp"}
+    by_src = {s["source"]: s for s in entry["sources"]}
+    assert by_src["claude"]["n"] == m and by_src["omp"]["n"] == m
+    assert by_src["claude"]["tcer"] == statistics.median(10.0 + i for i in range(m))
+    # 无产出会话不参与：net_loc=0（tcer=0.0 非 None）与 tcer=None 都剔除。
+    r0 = _rep("omp", "zz-unlisted-model", 0.0, net=0)
+    r0.tcer = None
+    r1 = _rep("omp", "zz-unlisted-model", 0.0, net=0)
+    assert analyze.cross_source_models([r0, r1]) == []
+    assert analyze.cross_source_models([r1] * m) == []
+
+
+def test_real_projects_grouping(monkeypatch):
+    """真实项目聚合：规范化 cwd 合并（盘符大小写/斜杠）；无 cwd 独立成组；
+    父子路径不合并；Claude ref 经首会话 meta 补 cwd。"""
+    from pathlib import Path
+
+    from tcer.core import analyze
+    from tcer.core.models import ProjectRef
+
+    codex = ProjectRef(source="codex", key="C--GitHub-TCER",
+                       display_name="TCER", cwd="C:\GitHub\TCER")
+    grok = ProjectRef(source="grok", key="C--github-tcer",
+                      display_name="TCER", cwd="c:/github/TCER")   # 大小写+斜杠差异
+    omp = ProjectRef(source="omp", key="C--GitHub-TCER",
+                     display_name="TCER", cwd="C:\GitHub\TCER\\")  # 尾斜杠
+    child = ProjectRef(source="codex", key="C--GitHub-TCER-sub",
+                       display_name="sub", cwd="C:\GitHub\TCER\sub")  # 子路径
+    nocwd = ProjectRef(source="opencode", key="X", display_name="X", cwd=None)
+    claude = ProjectRef(source="claude", key="c--GitHub-TCER",
+                        display_name="c--GitHub-TCER", cwd=None,
+                        config_root=Path("C:/Users/u/.claude"))
+    # Claude 的 cwd 来自首会话 meta——桩掉 IO，验证聚合层确实消费它。
+    monkeypatch.setattr(analyze, "_claude_ref_cwd",
+                        lambda ref: "C:\GitHub\TCER" if "tcer" in ref.key.lower() else None)
+
+    out = analyze.real_projects([codex, grok, omp, child, nocwd, claude])
+    by_n_refs = sorted(out, key=lambda g: len(g.refs))
+    main = by_n_refs[-1]
+    assert len(main.refs) == 4            # codex + grok + omp + claude 聚成一组
+    assert {r.source for r in main.refs} == {"codex", "grok", "omp", "claude"}
+    others = by_n_refs[:-1]
+    assert len(others) == 2               # 子路径 + 无 cwd 各自独立
+    assert all(len(g.refs) == 1 for g in others)
+    # 尾斜杠/大小写/斜杠方向归一后 key 一致；展示名盘符统一大写。
+    assert main.key == r"c:\github\tcer"
+    assert main.display.startswith("C:") and main.display[0].isupper()

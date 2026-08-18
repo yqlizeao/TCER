@@ -57,6 +57,20 @@ def _subgrouped(gid: str, name: str, subgroups: list[Subgroup]) -> Group:
 APPROX_KEYS = frozenset({"total_tokens"})
 
 
+def _tier_band_hint() -> str:
+    """评级带速览串（从 metrics.SCORE_TIER_BANDS 派生，避免与 config 漂移）。"""
+    bands = _metrics.SCORE_TIER_BANDS
+    parts: list[str] = []
+    for i, (name, lo) in enumerate(bands):
+        if i == 0:
+            parts.append(f"{name}>{lo:g}")
+        elif i == len(bands) - 1:
+            parts.append(f"{name}<{bands[i - 1][1]:g}")
+        else:
+            parts.append(f"{name}{lo:g}–{bands[i - 1][1]:g}")
+    return " · ".join(parts)
+
+
 GROUPS: list[Group] = [
     Group("G1", "会话概况", [
         Metric("turns", "请求数", "",
@@ -345,9 +359,9 @@ GROUPS: list[Group] = [
         Metric("score", "综合效率分", "",
                "0–100 的总分：把「产出效率 · 成本 · 质量」三件正交的事各自和参考线比、\n"
                "按会话规模收缩后加权平均得来。分越高越好。\n"
-               "怎么看：>75 优秀 · 60–75 良好 · 45–60 中等 · 25–45 待改进 · <25 低效。\n"
+               f"怎么看：{_tier_band_hint()}。\n"
                "三条轴：产出效率(每百万 token 的任务归一产出) · 成本(每千行花费，已含缓存省的钱) · 质量(少返工/少工具报错/先读后写；无质量信号时其权重重分给产出/成本轴)。\n"
-               "小会话会被拉向中间分，避免「写 5 行就登顶」；全部来自会话数据，单会话与项目聚合均有效。", "compound", "up"),
+               "小会话会被拉向中间分，避免「写 5 行就登顶」；零净产会话（纯聊天/调研）不评分。", "compound", "up"),
         Metric("tier", "评级", "",
                "上面「综合效率分」对应的等级标签：优秀/良好/中等/待改进/低效，"
                "颜色和排名页的条形图一致。", "basic"),
@@ -364,9 +378,10 @@ GROUPS: list[Group] = [
                "例：调试 TCER=30，但调试本就难，还原后 ≈75，其实不差。", "compound", "up"),
         Metric("bl_tcer", "TCER 基准", "行/百万",
                "一条「参考线」，不是你的成绩——「综合效率分」拿你的 TCER 跟它比来打分。上方数值即当前生效基准（默认来自框架自带的 16 个样本会话）。\n"
-               "想改成「跟你自己的历史平均」比，可用本项目数据生成个人基准来替换。", "basic"),
+               "想改成「跟你自己的历史平均」比，可用本项目数据生成个人基准来替换。\n"
+               "生效优先级：逐项目基准 > 逐数据源基准（跨源公平比较用，「计算个人基准 → 按数据源」生成）> 全局。", "basic"),
         Metric("bl_cpe", "成本基准", "美元/千行",
-               "「综合效率分」里给每千行成本打分用的参考线，不是你的成绩。上方数值即当前生效基准（默认来自框架样本），可用个人基准替换。", "basic"),
+               "「综合效率分」里给每千行成本打分用的参考线，不是你的成绩。上方数值即当前生效基准（默认来自框架样本），可用个人基准替换（逐项目/逐数据源/全局，优先级同 TCER 基准）。", "basic"),
     ]),
 ]
 

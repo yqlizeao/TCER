@@ -552,7 +552,7 @@ class CostBreakdownPopup:
 
 
 class BaselinesPopup:
-    """个人基准校准 —— 上下布局、先开窗后校准、可选全部会话 / 逐项目。
+    """个人基准校准 —— 上下布局、先开窗后校准、可选全部会话 / 逐项目 / 按数据源。
 
     交互：开窗即在（不预先计算）→ 用户选模式 + 是否过滤离群 → 点「开始校准」→
     后台计算完成回填结果 → 「应用为基准」写入。无「取消」按钮（标题栏 × / Esc 关闭）。
@@ -560,12 +560,15 @@ class BaselinesPopup:
     回调契约（均由控制器提供，弹窗不碰数据）：
       on_compute(mode, filter_outliers, callback) —— 后台按模式汇总会话（忽略时间
         范围），完成后在主线程调 callback(result)。result:
-          mode=="all"      → {"values": {...}, "n": int, "note": str}
-          mode=="per_proj" → {"per_project": {uid: {"values":{...}, "n":int, "label":str}},
-                              "note": str}
+          mode=="all"         → {"values": {...}, "n": int, "note": str}
+          mode=="per_proj"    → {"per_project": {uid: {"values":{...}, "n":int, "label":str}},
+                                 "note": str}
+          mode=="per_source"  → {"per_source": [{"source": str, "label": str,
+                                 "values": {...}|None, "n": int}], "note": str}
         任一模式 values 为 None 表示样本不足（result 带 "msg" 说明）。
       on_apply(mode, payload) —— mode=="all": payload={tcer,cpe} 写全局；
-        mode=="per_proj": payload={uid: {tcer,cpe}} 写逐项目。
+        mode=="per_proj": payload={uid: {tcer,cpe}} 写逐项目；
+        mode=="per_source": payload={source: {tcer,cpe}} 写逐源（跨源公平比较）。
     """
 
     _COLOR = theme.BASELINE_ACCENT
@@ -604,6 +607,7 @@ class BaselinesPopup:
         for val, text, hint in [
             ("all", "基于全部会话", "跨所有项目汇总一个统一基准"),
             ("per_proj", "逐项目分别校准", "为每个项目单独生成基准"),
+            ("per_source", "按数据源分别校准", "跨源公平比较：每个 agent 用自己的中位水平做基准"),
         ]:
             var = tk.BooleanVar(value=(val == "all"))
             row = CheckRow(inner, text, var, on_toggle=lambda v=val: self._pick_mode(v),
@@ -723,6 +727,8 @@ class BaselinesPopup:
         mode = self._mode.get()
         if mode == "all":
             self._render_all(result)
+        elif mode == "per_source":
+            self._render_per_source(result)
         else:
             self._render_per_project(result)
 
@@ -787,6 +793,54 @@ class BaselinesPopup:
         if n_ok:
             self._set_apply_enabled(True)
 
+    def _render_per_source(self, result: dict) -> None:
+        note = result.get("note") or ""
+        per = result.get("per_source") or []
+        if not per:
+            SelectableLabel(self._result_frame, text=result.get("msg", "没有可用于计算的会话。"),
+                            bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
+                            justify="left").pack(fill="x", padx=10, pady=8)
+            return
+        n_ok = sum(1 for it in per if it.get("values"))
+        head = tk.Frame(self._result_frame, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
+        head.pack(fill="x", pady=(2, 0))
+        tk.Label(head,
+                 text=f"共 {len(per)} 个数据源 · {n_ok} 个可校准 · {note}".rstrip(" ·"),
+                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD,
+                 wraplength=440, justify="left").pack(anchor="w")
+        SelectableLabel(self._result_frame,
+                        text="逐源基准写入后，各源分数回到「相对该源自己的中位水平」——"
+                             "跨源比较才公平；不写入则所有源共用全局基准。",
+                        bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(fill="x", padx=10, pady=(4, 0))
+        for info in per:
+            vals = info.get("values")
+            ok = bool(vals)
+            tk.Frame(self._result_frame, bg=theme.PANEL, height=6).pack(fill="x")
+            title = tk.Frame(self._result_frame, bg=theme.PANEL)
+            title.pack(fill="x", padx=10)
+            tk.Label(title, text=info.get("label", info.get("source", "")),
+                     bg=theme.PANEL, fg=theme.FG if ok else theme.MUTED,
+                     font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
+            tk.Label(title, text=f"{info.get('n', 0)} 会话", bg=theme.PANEL,
+                     fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e").pack(side="right")
+            if ok:
+                line = tk.Frame(self._result_frame, bg=theme.PANEL)
+                line.pack(fill="x", padx=10)
+                tk.Label(line, text=f"{self._metric_short('tcer')} {vals.get('tcer', 0):.2f}",
+                         bg=theme.PANEL, fg=self._COLOR, font=theme.FONT_MONO,
+                         anchor="w").pack(side="left")
+                tk.Label(line, text=f"{self._metric_short('cpe')} {vals.get('cpe', 0):.2f}",
+                         bg=theme.PANEL, fg=self._COLOR, font=theme.FONT_MONO,
+                         anchor="e").pack(side="right")
+            else:
+                SelectableLabel(self._result_frame,
+                                text=info.get("reason", "样本不足，跳过"),
+                                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL
+                                ).pack(fill="x", padx=10)
+        if n_ok:
+            self._set_apply_enabled(True)
+
     def _value_card(self, parent, key, val, cur) -> None:
         tk.Frame(parent, bg=theme.PANEL, height=6).pack(fill="x")
         card = tk.Frame(parent, bg=theme.PANEL, padx=10, pady=8)
@@ -817,6 +871,13 @@ class BaselinesPopup:
             if not values:
                 return
             self._on_apply("all", values)
+        elif mode == "per_source":
+            per = self._result.get("per_source") or []
+            payload = {info["source"]: info["values"]
+                       for info in per if info.get("values")}
+            if not payload:
+                return
+            self._on_apply("per_source", payload)
         else:
             per = self._result.get("per_project") or []
             payload = {info["uid"]: info["values"] for info in per if info.get("values")}
@@ -1562,6 +1623,6 @@ def _copy(win, text: str) -> None:
 
 # 分析类弹窗已拆分至 popups_analysis.py；re-export 保持既有 import 路径。
 from .popups_analysis import (  # noqa: E402,F401
-    ProjectOverviewPopup, ProjectProfilePopup, SessionComparePopup,
-    SessionTimelinePopup, ToolSequencePopup,
+    CrossSourceModelsPopup, ProjectOverviewPopup, ProjectProfilePopup,
+    SessionComparePopup, SessionTimelinePopup, ToolSequencePopup,
 )
