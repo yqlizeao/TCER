@@ -540,7 +540,8 @@ def _format_native(fmt_spec: str, v) -> str:
     identical to the old hand-written ``report_values``.
     """
     if fmt_spec == "int":
-        return fmt.fmt_int(v)
+        # fmt_int 对 float 原样透传小数（latency 均值可达 54321.095…），int 规格先取整
+        return fmt.fmt_int(round(v) if isinstance(v, float) else v)
     if fmt_spec == "pct":
         return fmt.fmt_pct(v)
     if fmt_spec == "pct4":
