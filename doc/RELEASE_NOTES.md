@@ -1,3 +1,45 @@
+# TCER v1.7.2
+
+价表同步专项（v1.7.1 以来两次同步合集，195 → 215 个模型）：Gemini Flash 系改录当前介绍价、四处官方页裁决修正、新增 20 个模型。所有价差均经厂商官方页（Google / OpenAI / DeepSeek / 智谱 / MiniMax / 阿里百炼）逐项裁决，不单信任何聚合数据源。567 项测试通过，真实数据闭环审计 PASS。
+
+## Gemini Flash：改录当前实付价（定价口径增补例外）
+
+Google 官方页确认 gemini-3.7-flash 与 gemini-3.6-flash 价格**完全同构**：介绍价 **$0.75 / $3.75 / 缓存读 $0.075**（至 2026-12-31），2027-01-01 起标准价 $1.50 / $7.50 / $0.15。
+
+- 此前口径一律录标准价、介绍价只进悬浮备注；本次按用户决策增补例外——**介绍期长且覆盖当前计费期的模型录当前生效价**（介绍期长达 4 个月、覆盖当前全部待分析会话，按实际计费口径才能反映真实成本），恢复后的标准价记入 `_note`。
+- 影响：Gemini Flash 系会话（本机 omp 源实测 4000+ 次）的成本估算**直接减半**；悬浮备注同时列全 Batch/Flex 半价、Priority 档与缓存存储价的多轨完整表。
+
+## 官方页裁决的修正
+
+- **minimax-m2 / m2.1 / m2.5 → 官方 legacy 价 $0.3 / $1.2 / 缓存读 $0.03 / 缓存写 $0.375**：旧值 0.27/0.95、0.15/0.95 为发布期价/存疑价，且缓存写价此前整体缺失（m2.7 系早有、其余漏记）。
+- **gpt-5.6 / gpt-5.6-sol 缓存写 6.25 → 0**：OpenAI 无缓存写计费，原误录值按 Anthropic 风格计价会虚增成本；官方页当前显示 sol 促销价 $4/$20/缓存读 $0.4（至少至 2026-11-21）、长上下文（>272k）约 2×/1.5×，均已记入 `_note`，主价保持标准价口径。
+- **复核确认 TCER 正确、models.dev 误录**（维持不动）：deepseek-v4 全系（官方闲时档 0.22/0.66/0.007 与 0.66/1.98/0.022 逐字核对；models.dev 的 0.14/0.28、0.435/0.87 为误录）、glm-5v-turbo（官方 1.2/4/0.24；models.dev 5/22 误录）、kimi-k2-thinking 与 o3-mini（上轮已修正的 cc-switch 误录）。
+- **glm-5.3 占位转正式**：官方定价已发布（docs.z.ai），与同基座 GLM-5.2 同价。
+
+## 新增 20 个模型
+
+- **OpenAI**：gpt-5-pro（15/120）、gpt-5.2-pro（21/168）、gpt-5.4-pro 与 gpt-5.5-pro（30/180，>272k 翻倍）——官方页核实
+- **Gemini**：gemini-flash-latest / flash-lite-latest（CLI 常用别名，跟随当前指向）、**gemini-3-1-pro-thinking**（omp 上报的 dash 拼写 id，本机实测 6 次此前回退 Anthropic 默认价 3/15 计价，现按 gemini-3.1-pro 同价 2/12 命中）
+- **智谱**：glm-5.3-flash（list 价 0.15/0.5/0.03，限时促销 0.075/0.25 至 2026-09-09 进 `_note`）、glm-4.7-flash（官方免费）、glm-4.7-flashx
+- **MiniMax**：m2.5-highspeed（0.6/2.4，官方 legacy 高速档）
+- **小米**：mimo-v2.5-pro-ultraspeed、mimo-v2-omni
+- **xAI**：grok-4.20-multi-agent-0309
+- **Moonshot**：kimi-k2-thinking-turbo
+- **DeepSeek**：deepseek-v4-flash-vision-exp（官方确认同 v4-flash 闲时价，图片按尺寸转 token）
+- **Mistral**：mistral-medium-2604 与 -latest（1.5/7.5）
+- **Cohere**：command-a-plus-05-2026；**Thinking Machines**：inkling（1.87/4.68）
+
+## 悬浮计价备注（_note）丰富
+
+- 上一批（2026-08-18）：gpt-5 / gemini / grok / minimax 系 12+ 模型补齐上下文 >200k 分段计费；收录 gemini-3.7-flash、DeepSeek V4 全系（闲时档口径）、glm-5.3 占位。
+- 本批：gemini 3.6/3.7 多轨全档（含 2027 年恢复价）、gpt-5.6 促销与长上下文、minimax legacy 价来源与 lightning 旧命名说明、glm-5.3-flash 促销期限、deepseek 峰谷时段明细（北京时间 09-12/14-18 点高峰加倍）。
+
+## 已知边界：qwen 全系双轨刊例搁置
+
+阿里国内/国际**双轨刊例** + 限时折扣 + 上下文分段三重并存（官方 qwen3.7-plus 刊例 ¥2/¥8、qwen3.7-max ¥12/¥36 限时 5 折），cc-switch / models.dev / TCER 三方数据无法对齐同一口径。本版维持 cc-switch 口径不动，`_meta.ref` 已记录，待专项同步处理。
+
+---
+
 # TCER v1.7.1
 
 评分体系校准与跨源公平性专项：基于本机 391 会话 / 42 项目 / 4 数据源的实证诊断，重修综合效率分的分布与评级带，落地「逐数据源基准」与两组跨源对照视图，并新增**项目聚合页签**——同一工作目录下各 agent 的项目卡合并为一个「真实项目」（本机实测 42 卡 → 22 个真实项目）。全部 568 项测试通过，真实数据闭环审计 42/42 PASS。
