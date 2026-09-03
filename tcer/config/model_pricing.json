@@ -4,8 +4,8 @@
     "source": "farion1231/cc-switch — seed_model_pricing()",
     "source_url": "https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/database/schema.rs",
     "source_raw": "https://raw.githubusercontent.com/farion1231/cc-switch/main/src-tauri/src/database/schema.rs",
-    "fetched_at": "2026-08-27",
-    "ref": "main @ 2026-08-27（cc-switch v3.20.0 无新增模型）+ models.dev 审计 + 官方页裁决：gemini-3.7/3.6-flash 按用户决策改录当前介绍价 0.75/3.75/0.075（至 2026-12-31，标准价入 _note）；minimax-m2/m2.1/m2.5 修至官方 legacy 价 0.3/1.2；gpt-5.6(-sol) 缓存写 6.25 为误录改 0（OpenAI 无缓存写计价）；deepseek-v4 系/glm-5v-turbo/minimax-m2.7 系官方页复核无误（models.dev 0.14/0.28、5/22 等为误录）；kimi-k2-thinking、o3-mini 上轮修正维持；qwen 系国内/国际双轨刊例+限时折扣+分段并存（官方 qwen3.7-plus ¥2/¥8 刊例），三方数据源均无法对齐单一口径，维持 cc-switch 口径待专项同步；新增 20 条（gemini-latest 别名、gpt-*-pro、glm-5.3-flash、minimax-m2.5-highspeed、grok-4.20-multi-agent、kimi-k2-thinking-turbo、deepseek-v4-flash-vision-exp、mistral-medium-2604/-latest、command-a-plus、inkling、mimo×2、gemini-3-1-pro-thinking 等）",
+    "fetched_at": "2026-09-03",
+    "ref": "main @ 2026-09-03（cc-switch v3.20.1 + models.dev 审计 + 官方页裁决）：新增 claude-fable-5-1 / claude-mythos-5-1（官方确认缓存读新倍率 0.025× = $0.25，其余 Claude 模型 0.1×；1h 缓存写 20、Batch 5/25）、gemini-3.8-flash（官方页与 3.6/3.7 完全同构，介绍价 0.75/3.75/0.075 至 2026-12-31，依例外口径录当前价）、qwen3.8-flash（国际站 0.15/0.47 与价表 qwen 系口径一致，国内刊例 ¥0.8/¥2.7 记 _note）；**claude-sonnet-5 官方宣布介绍价 2/10 转永久标准价、原定 9-01 涨至 3/15 取消**，主价改 2/10/0.2/2.5；其余价差均为上轮已裁决口径（deepseek 闲时档/gemini 3.6-3.8 介绍价/gpt-5.6 标准价+促销 note/qwen 双轨搁置/models.dev 对 deepseek-v4 与 glm-5v-turbo 的误录），复核维持",
     "unit": "USD per 1,000,000 tokens (厂商官方 list 价；CNY 按官方汇率折算)",
     "pricing_policy": "默认录标准价（非限时促销/介绍价）；峰谷分时录闲时档；促销价/峰时价/Batch 等多轨与分段计费记入条目 _note（GUI 价表悬浮可见）。例外（2026-08-27 用户决策）：介绍期长且覆盖当前计费期的模型录当前生效价（如 gemini-3.6/3.7-flash 介绍价至 2026-12-31），恢复后的标准价记入 _note",
     "fields": {
@@ -15,7 +15,7 @@
       "cache_write": "缓存写入/创建 (cache_creation_cost_per_million)；0 表示该模型无独立缓存写入计价",
       "_note": "（可选）计价备注：多轨价、峰谷时段、分段计费、别名跟随关系等，GUI 悬浮展示"
     },
-    "model_count": 215,
+    "model_count": 219,
     "note": "可自由增删 models 条目；未匹配到的模型回退到 default（Anthropic 通用 list 价）。"
   },
   "default": {
@@ -26,6 +26,22 @@
     "cache_write": 3.75
   },
   "models": {
+    "claude-fable-5-1": {
+      "display_name": "Claude Fable 5.1",
+      "input": 10,
+      "output": 50,
+      "cache_read": 0.25,
+      "cache_write": 12.5,
+      "_note": "缓存读新倍率 0.025×（其余 Claude 模型 0.1×，$0.25/MTok）；1h 缓存写 $20（2×，5m 写 12.5 为本表 cache_write）；Batch 5/25；数据 residency（inference_geo=us）全类 1.1×"
+    },
+    "claude-mythos-5-1": {
+      "display_name": "Claude Mythos 5.1",
+      "input": 10,
+      "output": 50,
+      "cache_read": 0.25,
+      "cache_write": 12.5,
+      "_note": "与 Claude Fable 5.1 同价（limited availability）；缓存读 0.025× 倍率、1h 缓存写 $20、Batch 5/25 同其 _note"
+    },
     "claude-fable-5": {
       "display_name": "Claude Fable 5",
       "input": 10,
@@ -56,11 +72,11 @@
     },
     "claude-sonnet-5": {
       "display_name": "Claude Sonnet 5",
-      "input": 3,
-      "output": 15,
-      "cache_read": 0.3,
-      "cache_write": 3.75,
-      "_note": "官方介绍价 2/10/0.2/2.5（缓存写 2.5）至 2026-08-31，此后恢复本标准价"
+      "input": 2,
+      "output": 10,
+      "cache_read": 0.2,
+      "cache_write": 2.5,
+      "_note": "官方宣布上市介绍价 2/10 转为永久标准价（原定 2026-09-01 恢复 3/15 已取消，2026-09-03 核对）；1h 缓存写 $4（2×）；Batch 1/5"
     },
     "claude-opus-4-7": {
       "display_name": "Claude Opus 4.7",
@@ -618,6 +634,14 @@
       "cache_read": 0.025,
       "cache_write": 0
     },
+    "gemini-3.8-flash": {
+      "display_name": "Gemini 3.8 Flash",
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
+      "cache_write": 0,
+      "_note": "官方页确认与 3.6/3.7-flash 完全同构：介绍价至 2026-12-31（依例外口径录当前价），2027-01-01 起标准价 1.5/7.5/0.15；Batch/Flex 0.375/1.875/0.0375（2027 起 0.75/3.75/0.075）、Priority 1.35/6.75/0.135（2027 起 2.7/13.5/0.27）；缓存存储 $0.5/百万token/小时（2027 起 $1）"
+    },
     "gemini-3.7-flash": {
       "display_name": "Gemini 3.7 Flash",
       "input": 0.75,
@@ -719,7 +743,7 @@
       "output": 3.75,
       "cache_read": 0.075,
       "cache_write": 0,
-      "_note": "官方 latest 别名（Gemini CLI 常用），当前指向 gemini-3.7-flash 介绍价档，跟随其价"
+      "_note": "官方 latest 别名（Gemini CLI 常用），当前指向 gemini-3.8-flash 介绍价档，跟随其价"
     },
     "gemini-flash-lite-latest": {
       "display_name": "Gemini Flash Lite (latest)",
@@ -1170,6 +1194,14 @@
       "output": 6,
       "cache_read": 0.25,
       "cache_write": 2.5
+    },
+    "qwen3.8-flash": {
+      "display_name": "Qwen3.8 Flash",
+      "input": 0.15,
+      "output": 0.47,
+      "cache_read": 0,
+      "cache_write": 0,
+      "_note": "国际站口径（与价表 qwen 系一致）；国内百炼刊例 ¥0.8/¥2.7（≈$0.11/$0.38，0-1M 单档无分段无促销）显著更低，qwen 双轨问题详见 _meta.ref"
     },
     "qwen3.7-max": {
       "display_name": "Qwen3.7 Max",
