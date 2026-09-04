@@ -2995,7 +2995,7 @@ class PhasePortraitWidget:
         if not self._pts:
             self._tooltip.hide()
             return
-        best_pt = None
+        best_item = None
         min_d2 = 24 * 24  # 扩大圆心检测半径至 24px (原 16px 过于严苛)
         for item in self._pts:
             px, py, pt = item[0], item[1], item[2]
@@ -3008,13 +3008,13 @@ class PhasePortraitWidget:
             text_hit = abs(event.x - tx) <= 30 and abs(event.y - ty) <= 18
             if text_hit:
                 min_d2 = 0
-                best_pt = (px, py, pt)
+                best_item = item
                 break
             elif d2 < min_d2:
                 min_d2 = d2
-                best_pt = (px, py, pt)
-        if best_pt:
-            _, _, pt = best_pt[:3]
+                best_item = item
+        if best_item:
+            px, py, pt = best_item[:3]
             t = pt.get("turn", "-")
             u = pt.get("user_turn") or pt.get("u")
             ds = pt.get("semantic_distance", 0.5)
@@ -3043,8 +3043,8 @@ class PhasePortraitWidget:
             ]
             colors = [theme.FG_WHITE, status_col]
             # 若包含相速度数据（len >= 5），展示运动学速度与态势
-            if len(item) > 4:
-                v_val = item[4]
+            if len(best_item) > 4:
+                v_val = best_item[4]
                 if v_val < -0.01:
                     v_desc = "高速向心冲刺"
                 elif v_val < 0:
