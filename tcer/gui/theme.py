@@ -59,7 +59,8 @@ PHASE_GRID_DIRAC = "#273831"         # 目标收敛区参考虚线
 PHASE_GRID_TRAP = "#3d2c25"          # 吸引子危险区参考虚线
 PHASE_ZONE_DIRAC = "#3fb950"         # 收敛目标域提示文字绿
 PHASE_ZONE_TRAP = "#d29922"          # 高熵危险域提示文字橙
-# Metric semantic levels → display color.
+PHASE_START_HALO = "#e0b341"         # 相空间起点光晕金
+PHASE_IMPULSE = "#4ec9b0"            # 向心推力做功脉冲绿
 # basic (white): absolute baseline values and direct calculations.
 # compound (yellow): contains magic numbers / coefficients, reference only.
 LEVEL_BASIC = "#e0e0e0"

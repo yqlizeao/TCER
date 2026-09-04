@@ -2853,7 +2853,7 @@ class PhasePortraitWidget:
         self.caps_frame = tk.Frame(self.head, bg=theme.CARD_HEADER_BG)
         self.caps_frame.pack(side="right")
 
-        self.canvas = tk.Canvas(self.container, bg=theme.BG, height=240,
+        self.canvas = tk.Canvas(self.container, bg=theme.BG, height=380,
                                 highlightthickness=0, cursor=CLICK_CURSOR)
         self.canvas.pack(fill="x", padx=4, pady=4)
         self._tooltip = _ChartTooltip(self.canvas)
@@ -3089,26 +3089,33 @@ class PhasePortraitWidget:
         if w < 100:
             w = max(w, c.winfo_reqwidth(), 600)
         if h < 50:
-            h = max(h, c.winfo_reqheight(), 240)
-        pad_l, pad_r, pad_t, pad_b = 65, 45, 34, 30
+            h = max(h, c.winfo_reqheight(), 380)
+        pad_l, pad_r, pad_t, pad_b = 68, 55, 38, 34
         plot_w = w - pad_l - pad_r
         plot_h = h - pad_t - pad_b
         if plot_w <= 10 or plot_h <= 10:
             return
 
-        # 1. 物理成本 Y 轴刻度与横向虚线背景 (Layer 0: 最底层 Canvas 原生虚线)
+        # 1. 双轴参考系 (Layer 0: 左侧物理成本 $ / 右侧会话推进进度 %)
         cost_str = str(self._report.get("cost_display") or "")
         m_cost = re.search(r"(\d+(?:\.\d+)?)", cost_str)
         max_cost_val = float(m_cost.group(1)) if m_cost else 10.0
         if max_cost_val <= 0:
             max_cost_val = 10.0
         y_ticks = []
-        for frac, val in ((1.0, max_cost_val), (0.5, max_cost_val * 0.5), (0.0, 0.0)):
+        for frac, prog_lbl in (
+            (1.0, "100% (终态)"),
+            (0.75, "75%"),
+            (0.50, "50%"),
+            (0.25, "25%"),
+            (0.0, "0% (起始)"),
+        ):
             gy = pad_t + (1.0 - frac) * plot_h
-            if frac > 0:
+            if 0.0 < frac < 1.0:
                 c.create_line(pad_l, gy, pad_l + plot_w, gy, fill=theme.BORDER, dash=(2, 4))
+            val = max_cost_val * frac
             val_txt = f"${val:.1f}" if max_cost_val >= 1 else f"${val:.2f}"
-            y_ticks.append((gy, val_txt))
+            y_ticks.append((gy, val_txt, prog_lbl))
 
         # 关键状态分界线（收敛目标域推至最左侧 0.10，高熵危险域推至最右侧 0.90）
         line_target_x = pad_l + 0.10 * plot_w
@@ -3118,18 +3125,17 @@ class PhasePortraitWidget:
 
         # X 轴底线
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
-
         # 2. 收集抗锯齿图层 items (Layer 1: PIL 2× 超采样高清图层，线/多边形/圆点纯图元)
         aa_items: list = []
 
-        # (A) 相平面速度流场微线段 (Phase Streamlines)：向心微导向场
+        # (A) 相平面速度流场微线段网格 (Phase Streamlines Field)：向心流动趋势
         streamline_col = theme.PHASE_STREAMLINE
-        for row_idx, gy_frac in enumerate((0.25, 0.55, 0.85)):
+        for row_idx, gy_frac in enumerate((0.20, 0.40, 0.60, 0.80)):
             sy = pad_t + gy_frac * plot_h
-            for col_idx, gx_frac in enumerate((0.35, 0.52, 0.68)):
+            for col_idx, gx_frac in enumerate((0.25, 0.40, 0.55, 0.70)):
                 sx = pad_l + gx_frac * plot_w
-                aa_items.append(("line", [(sx + 8, sy - 4), (sx - 8, sy + 3)], streamline_col, 1))
-                aa_items.append(("line", [(sx - 8, sy + 3), (sx - 4, sy + 1)], streamline_col, 1))
+                aa_items.append(("line", [(sx + 9, sy - 5), (sx - 9, sy + 4)], streamline_col, 1))
+                aa_items.append(("line", [(sx - 9, sy + 4), (sx - 4, sy + 2)], streamline_col, 1))
 
         # (B) 理想向心收敛走廊参考线 (Convergence Corridor)
         corridor_pts = [
@@ -3140,23 +3146,25 @@ class PhasePortraitWidget:
         ]
         aa_items.append(("line", corridor_pts, theme.PHASE_CORRIDOR, 1))
 
-        # (C) 平庸代码吸引子引力势阱与黑洞同心圆
+        # (C) 平庸代码吸引子引力势阱与黑洞同心圆 (Equipotential Basin)
         att_x = pad_l + plot_w * 0.86
-        att_y = pad_t + 62
+        att_y = pad_t + 90
         self._att_pos = (att_x, att_y)
         self._pad_t = pad_t
-        # 外层吸引盆 (Basin of Attraction) 等势圈
-        aa_items.append(("dot", att_x, att_y, 52, None, theme.ATTRACTOR_BASIN_BORDER, 1))
+        # 外层引力漏斗势阱等势环
+        for r, col in zip((76, 56, 40), (theme.ATTRACTOR_BASIN_BORDER, theme.ATTRACTOR_BASIN_BORDER, theme.ATTRACTOR_RINGS[0])):
+            aa_items.append(("dot", att_x, att_y, r, None, col, 1))
         # 核心吸引子同心圆
-        for r, col in zip((36, 24, 12), theme.ATTRACTOR_RINGS):
+        for r, col in zip((28, 18, 10), theme.ATTRACTOR_RINGS):
             aa_items.append(("dot", att_x, att_y, r, col, theme.ATTRACTOR_RINGS[1], 1))
         aa_items.append(("dot", att_x, att_y, 4, theme.ERROR, theme.ERROR, 1))
 
-        # (D) 狄拉克目标点（外层低能势阱 + 双层发光圆）
+        # (D) 狄拉克目标点（低能势阱保护圈 + 双层发光圆）
         tgt_x = pad_l + plot_w * 0.05
         tgt_y = pad_t + plot_h * 0.88
         self._tgt_pos = (tgt_x, tgt_y)
-        aa_items.append(("dot", tgt_x, tgt_y, 26, None, theme.DIRAC_WELL_BORDER, 1))
+        for r in (36, 24):
+            aa_items.append(("dot", tgt_x, tgt_y, r, None, theme.DIRAC_WELL_BORDER, 1))
         aa_items.append(("dot", tgt_x, tgt_y, 16, theme.DIRAC_CORE_BG, theme.SUCCESS, 2))
         aa_items.append(("dot", tgt_x, tgt_y, 5, theme.SUCCESS, theme.SUCCESS, 1))
         # (E) 计算真实会话动力学轨迹节点（严格物理坐标映射与稳健兜底）
@@ -3202,14 +3210,26 @@ class PhasePortraitWidget:
                 poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
                 if poly:
                     aa_items.append(("polygon", poly, col, col))
-
+                # 大幅向心收敛推力做功脉冲微弧 (Control Impulse)
+                if delta_ds < -0.12:
+                    mx = (x0 + x1) / 2
+                    my = (y0 + y1) / 2
+                    aa_items.append(("line", [(mx - 9, my - 7), (mx - 3, my), (mx - 9, my + 7)], theme.PHASE_IMPULSE, 2))
+                    aa_items.append(("line", [(mx - 15, my - 11), (mx - 7, my), (mx - 15, my + 11)], theme.PHASE_CORRIDOR, 1))
             # (F) 质点多态化与动力学事件光晕
-            for item in self._pts:
+            n_pts = len(self._pts)
+            for i_pt, item in enumerate(self._pts):
                 x, y, pt = item[:3]
                 vec = str(pt.get("vector") or "neutral").lower()
                 event_tag = str(pt.get("event") or "normal").lower()
                 base_col = theme.ERROR if vec in ("negative", "divergent", "trapped") else (
                     theme.SUCCESS if vec in ("positive", "convergent") else theme.WARNING)
+                # 首节点起点金晕
+                if i_pt == 0:
+                    aa_items.append(("dot", x, y, 8, None, theme.PHASE_START_HALO, 1))
+                # 末节点终态双环
+                elif i_pt == n_pts - 1:
+                    aa_items.append(("dot", x, y, 8, None, theme.SUCCESS if vec in ("positive", "convergent") else theme.ERROR, 1))
                 # 事件脉冲光圈
                 if event_tag == "retry_loop":
                     aa_items.append(("dot", x, y, 9, None, theme.ERROR, 1))
@@ -3221,7 +3241,6 @@ class PhasePortraitWidget:
                     aa_items.append(("dot", x, y, 8, None, theme.ERROR, 1))
                 # 质点主体
                 aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
-
         # 提交抗锯齿图层贴图（彻底消除折线、漏斗圆环与节点锯齿）
         self._aa_layer(c, aa_items, self._aa_imgs)
 
@@ -3237,8 +3256,25 @@ class PhasePortraitWidget:
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         c.create_text(tgt_x + 22, tgt_y + 8, text="[零熵理想代码态]",
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        # 双轴刻度文本（左：物理成本 $，右：生命周期推进 %）
+        for gy, val_txt, prog_lbl in y_ticks:
+            c.create_text(pad_l - 6, gy, text=val_txt, fill=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="e")
+            c.create_text(pad_l + plot_w + 6, gy, text=prog_lbl, fill=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="w")
 
-        # 顶层极值域界标（推至两极，平实质朴）
+        # 内置动力学微图例栏（右侧开阔安全区，自解释）
+        leg_x = pad_l + plot_w * 0.40
+        leg_y = pad_t + plot_h - 10
+        c.create_line(leg_x, leg_y, leg_x + 14, leg_y, fill=theme.SUCCESS, width=2)
+        c.create_text(leg_x + 18, leg_y, text="向心推进", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_line(leg_x + 75, leg_y, leg_x + 89, leg_y, fill=theme.ERROR, width=2)
+        c.create_text(leg_x + 93, leg_y, text="离心偏离", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 150, leg_y - 4, leg_x + 158, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
+        c.create_text(leg_x + 162, leg_y, text="目标态", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 210, leg_y - 4, leg_x + 218, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
+        c.create_text(leg_x + 222, leg_y, text="吸引子势阱", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        # 顶层极值域界标（推至两极，平实质朴，杜绝文字重叠）
         c.create_text(pad_l + 6, pad_t - 16, text="← 目标收敛区 (偏离 ≤ 0.10)",
                       fill=theme.PHASE_ZONE_DIRAC, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_text(pad_l + plot_w - 6, pad_t - 16, text="高熵偏离区 (偏离 ≥ 0.90) →",
@@ -3252,10 +3288,6 @@ class PhasePortraitWidget:
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
         c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离需求)",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
-        # Y 轴刻度文本
-        for gy, val_txt in y_ticks:
-            c.create_text(pad_l - 6, gy, text=val_txt, fill=theme.MUTED,
-                          font=theme.FONT_UI_SMALL, anchor="e")
 
         # 质点回合标签与事件微标（错开避让，在最顶层）
         for i, item in enumerate(self._pts):

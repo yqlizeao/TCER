@@ -229,12 +229,19 @@ class TcerGui:
         tab_c = tk.Frame(nb, bg=theme.PANEL)
         tab_r = tk.Frame(nb, bg=theme.PANEL)
         tab_l = tk.Frame(nb, bg=theme.BG)
-        nb.add(tab_m, text="指标分类", image=views.ui_icon(nb, "grid"), compound="left")
-        nb.add(tab_c, text="模型对比", image=views.ui_icon(nb, "compare"), compound="left")
-        nb.add(tab_b, text="效率榜", image=views.ui_icon(nb, "rank"), compound="left")
-        nb.add(tab_t, text="趋势", image=views.ui_icon(nb, "trend"), compound="left")
-        nb.add(tab_r, text="项目聚合", image=views.ui_icon(nb, "layers"), compound="left")
-        nb.add(tab_l, text="LLM 报告", image=views.ui_icon(nb, "chat"), compound="left")
+        def _add_tab(child, text, icon_key):
+            img = views.ui_icon(nb, icon_key)
+            if img is not None:
+                nb.add(child, text=text, image=img, compound="left")
+            else:
+                nb.add(child, text=text)
+
+        _add_tab(tab_m, "指标分类", "grid")
+        _add_tab(tab_c, "模型对比", "compare")
+        _add_tab(tab_b, "效率榜", "rank")
+        _add_tab(tab_t, "趋势", "trend")
+        _add_tab(tab_r, "项目聚合", "layers")
+        _add_tab(tab_l, "LLM 报告", "chat")
 
         self.metric_panel = MetricPanel(tab_m, self)
         self.ranking_view = ScoreRankingView(tab_b, controller=self)
