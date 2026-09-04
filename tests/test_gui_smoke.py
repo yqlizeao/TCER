@@ -1337,9 +1337,9 @@ def test_llm_reports_view(root, monkeypatch, tmp_path):
         "attractor_trapped": True,
         "capabilities": {"intent_formalization": 30, "drift_sensitivity": 35, "feedback_mutual_info": 45},
         "trajectory": [
-            {"turn": 1, "semantic_distance": 0.85, "vector": "neutral"},
-            {"turn": 200, "semantic_distance": 0.82, "vector": "trapped", "event": "retry_loop"},
-            {"turn": 500, "semantic_distance": 0.35, "vector": "positive", "event": "breakthrough"},
+            {"turn": 1, "user_turn": 1, "semantic_distance": 0.85, "vector": "neutral"},
+            {"turn": 200, "user_turn": 1, "semantic_distance": 0.82, "vector": "trapped", "event": "retry_loop"},
+            {"turn": 500, "user_turn": 2, "semantic_distance": 0.35, "vector": "positive", "event": "breakthrough"},
         ]
     }
     v._phase_portrait.render(dyn_escaped, {"cost_display": "$10.00", "turns": 500})
@@ -1354,8 +1354,8 @@ def test_llm_reports_view(root, monkeypatch, tmp_path):
             self.y = int(round(y))
     v._phase_portrait._on_motion(FakeEvent(px, py + offset_y))
     assert v._phase_portrait._tooltip._win is not None
+    assert "用户消息 U1" in v._phase_portrait._tooltip._sig[0][0]
     v._phase_portrait._tooltip.hide()
-
     # 验证鼠标移动到狄拉克目标点位置时触发目标点专属释义 Tooltip
     tgt_x, tgt_y = v._phase_portrait._tgt_pos
     v._phase_portrait._on_motion(FakeEvent(tgt_x, tgt_y))

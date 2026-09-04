@@ -2989,6 +2989,7 @@ class PhasePortraitWidget:
         if best_pt:
             _, _, pt = best_pt[:3]
             t = pt.get("turn", "-")
+            u = pt.get("user_turn") or pt.get("u")
             ds = pt.get("semantic_distance", 0.5)
             vec = str(pt.get("vector") or "neutral").lower()
             event_tag = str(pt.get("event") or "normal").lower()
@@ -3008,8 +3009,9 @@ class PhasePortraitWidget:
                 "breakthrough": "向心关键突破",
             }
             status_str, status_col = status_map.get(vec, ("状态未定", theme.MUTED))
+            turn_desc = f"助手回合 T{t} · 用户消息 U{u}" if u is not None else f"回合 T{t}"
             lines = [
-                f"回合 T{t} · 代码偏离度: {ds:.2f}",
+                f"{turn_desc} · 代码偏离度: {ds:.2f}",
                 f"推进矢量: {status_str}",
             ]
             colors = [theme.FG_WHITE, status_col]
@@ -3211,29 +3213,6 @@ class PhasePortraitWidget:
                 poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
                 if poly:
                     aa_items.append(("polygon", poly, col, col))
-                # 大幅向心收敛推力做功脉冲微弧 (Control Impulse，严格顺向波前)
-                if delta_ds < -0.12:
-                    dx = x1 - x0
-                    dy = y1 - y0
-                    dist = math.hypot(dx, dy)
-                    if dist > 12.0:
-                        ux = dx / dist
-                        uy = dy / dist
-                        nx = -uy
-                        ny = ux
-                        mx = (x0 + x1) / 2
-                        my = (y0 + y1) / 2
-                        tip1 = (mx + ux * 6, my + uy * 6)
-                        w1_1 = (mx - ux * 5 + nx * 9, my - uy * 5 + ny * 9)
-                        w1_2 = (mx - ux * 5 - nx * 9, my - uy * 5 - ny * 9)
-                        aa_items.append(("line", [w1_1, tip1, w1_2], theme.PHASE_IMPULSE, 2))
-                        # 第二道推力后波
-                        m2x = mx - ux * 8
-                        m2y = my - uy * 8
-                        tip2 = (m2x + ux * 5, m2y + uy * 5)
-                        w2_1 = (m2x - ux * 5 + nx * 13, m2y - uy * 5 + ny * 13)
-                        w2_2 = (m2x - ux * 5 - nx * 13, m2y - uy * 5 - ny * 13)
-                        aa_items.append(("line", [w2_1, tip2, w2_2], theme.PHASE_CORRIDOR, 1))
             # (F) 质点多态化与动力学事件光晕
             n_pts = len(self._pts)
             for i_pt, item in enumerate(self._pts):
@@ -3281,8 +3260,9 @@ class PhasePortraitWidget:
             c.create_text(pad_l + plot_w + 6, gy, text=prog_lbl, fill=theme.MUTED,
                           font=theme.FONT_UI_SMALL, anchor="w")
 
-        # 内置动力学微图例栏（置于最上方开阔安全区，自解释且一览无余）
-        leg_x = pad_l + 8
+        # 内置动力学微图例栏（置于最上方开阔安全区，居中对齐）
+        leg_w = 470
+        leg_x = max(pad_l + 8, pad_l + (plot_w - leg_w) / 2)
         leg_y = pad_t - 16
         c.create_line(leg_x, leg_y, leg_x + 14, leg_y, fill=theme.SUCCESS, width=2)
         c.create_text(leg_x + 18, leg_y, text="向心推进 (做正功)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
@@ -3308,7 +3288,13 @@ class PhasePortraitWidget:
             offset_y = item[3] if len(item) > 3 else (-14 if (i % 2 == 0 and y > pad_t + 28) else 14)
             t_val = pt.get("turn")
             event_tag = str(pt.get("event") or "normal").lower()
-            t_str = f"T{t_val}" if t_val is not None else ""
+            u_val = pt.get("user_turn") or pt.get("u")
+            if t_val is not None and u_val is not None:
+                t_str = f"T{t_val}·U{u_val}"
+            elif t_val is not None:
+                t_str = f"T{t_val}"
+            else:
+                t_str = ""
             c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
                           font=theme.FONT_UI_SMALL_BOLD)
             if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
