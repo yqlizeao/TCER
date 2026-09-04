@@ -1422,6 +1422,40 @@ def test_llm_config_popup(root, monkeypatch, tmp_path):
     assert llm_prefs.scopes() == ["metrics", "tools"]
 
 
+def test_app_session_llm_analysis_dispatch(root, reports, monkeypatch, tmp_path):
+    """验证从右键菜单直接调用控制器派发 LLM 任务（自持独立线程池，无 AttributeError）。"""
+    import time
+    from tcer.core import llm_prefs, llm_reports, llm_client
+    from tcer.gui.app import TcerGui
+
+    monkeypatch.setattr(llm_prefs, "_prefs_path", lambda: tmp_path / "tcer_llm.json")
+    monkeypatch.setattr(llm_reports, "_path", lambda: tmp_path / "llm_reports.json")
+    llm_prefs.save({"base_url": "http://mock", "model": "mock-llm", "api_key": "k"})
+
+    chat_calls = []
+
+    def mock_chat(**kw):
+        chat_calls.append(kw)
+        return "1.【业务意图还原】测试会话。\n\n```json\n{\"convergence_type\": \"dirac\"}\n```"
+
+    monkeypatch.setattr(llm_client, "chat", mock_chat)
+
+    app = TcerGui(root)
+    r = reports[0]
+
+    # 直接发起常规解读与动力学分析（验证多任务并发且不会抛 AttributeError）
+    app.run_session_llm_interpret(r)
+    app.run_session_dynamics_analysis(r)
+
+    # 等待后台 worker 线程完成
+    deadline = time.time() + 3.0
+    while time.time() < deadline and len(chat_calls) < 2:
+        root.update()
+        time.sleep(0.02)
+
+    assert len(chat_calls) == 2
+    assert "mock-llm" in chat_calls[0]["model"]
+
 def test_project_profile_popup(root, reports):
     """项目画像弹窗：热点文件/模型混用/技能 MCP 三节渲染不炸。"""
     from types import SimpleNamespace

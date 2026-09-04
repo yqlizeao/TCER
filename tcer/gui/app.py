@@ -1256,10 +1256,10 @@ class TcerGui:
         self._llm_tasks[task_id] = task_desc
         n_running = len(self._llm_tasks)
         if n_running == 1:
-            self.filter_bar.status.config(
+            self.filter.status.config(
                 text=f"正在请求 {llm_prefs.model()} 生成: {session_title}…", fg=theme.ACCENT)
         else:
-            self.filter_bar.status.config(
+            self.filter.status.config(
                 text=f"正在并发生成 {n_running} 项 LLM 报告…", fg=theme.ACCENT)
 
         print(f"[LLM Task] Started: {task_desc} (Target: {llm_prefs.model()} @ {llm_prefs.base_url()})")
@@ -1329,11 +1329,11 @@ class TcerGui:
                     self._llm_tasks.pop(task_id, None)
                     remain = len(self._llm_tasks)
                     if remain > 0:
-                        self.filter_bar.status.config(
+                        self.filter.status.config(
                             text=f"✓ 入库: {title}（还有 {remain} 项生成中…）",
                             fg=theme.ACCENT)
                     else:
-                        self.filter_bar.status.config(
+                        self.filter.status.config(
                             text=f"✓ 已入库: {title}", fg=theme.SUCCESS)
                     # 刷新收信箱列表
                     try:
@@ -1351,8 +1351,7 @@ class TcerGui:
                     self._llm_tasks.pop(task_id, None)
                     remain = len(self._llm_tasks)
                     tip = f"× 生成失败: {err_text[:25]}" + (f"（余 {remain} 项）" if remain > 0 else "")
-                    self.filter_bar.status.config(text=tip, fg=theme.ERROR)
-                self.root.after(0, on_err)
+                    self.filter.status.config(text=tip, fg=theme.ERROR)
 
         Thread(target=worker, daemon=True).start()
     def show_llm_config(self) -> None:
