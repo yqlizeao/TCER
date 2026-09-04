@@ -2984,6 +2984,55 @@ class PhasePortraitWidget:
                 fg=theme.FG_WHITE if active else theme.FG,
                 font=theme.FONT_UI_SMALL_BOLD if active else theme.FONT_UI_SMALL)
 
+    @staticmethod
+    def _derive_flux_and_snr(node: dict, prev_node: dict | None = None) -> tuple[float, dict | None]:
+        """推算/提取当前节点的信噪比 (SNR) 与人类外部控制冲量 (user_impulse)。"""
+        snr = node.get("snr")
+        if snr is None:
+            evt = str(node.get("event") or "normal").lower()
+            vec = str(node.get("vector") or "neutral").lower()
+            if evt == "retry_loop":
+                snr = 0.15
+            elif evt == "test_fail":
+                snr = 0.30
+            elif evt == "breakthrough":
+                snr = 0.90
+            elif vec in ("negative", "divergent", "trapped"):
+                snr = 0.25
+            elif vec in ("positive", "convergent"):
+                snr = 0.80
+            else:
+                snr = 0.55
+        try:
+            snr = max(0.1, min(1.0, float(snr)))
+        except (ValueError, TypeError):
+            snr = 0.55
+
+        impulse = node.get("user_impulse")
+        u_cur = node.get("user_turn") or node.get("u")
+        u_prev = (prev_node.get("user_turn") or prev_node.get("u")) if prev_node else None
+
+        is_user_entry = False
+        if isinstance(impulse, dict) and impulse:
+            is_user_entry = True
+        elif u_cur is not None and (u_prev is None or u_cur != u_prev):
+            is_user_entry = True
+
+        if is_user_entry and not (isinstance(impulse, dict) and impulse):
+            evt = str(node.get("event") or "normal").lower()
+            vec = str(node.get("vector") or "neutral").lower()
+            if evt == "breakthrough" or vec in ("positive", "convergent"):
+                flux = "high"
+                note = "强负熵向心制导"
+            elif vec in ("negative", "divergent", "trapped"):
+                flux = "low"
+                note = "低互信息扰动"
+            else:
+                flux = "mid"
+                note = "常规意图微调"
+            impulse = {"flux": flux, "note": note}
+
+        return snr, impulse if isinstance(impulse, dict) else None
     def pack(self, **kw):
         self.container.pack(**kw)
 
@@ -3058,6 +3107,15 @@ class PhasePortraitWidget:
                 v_col = theme.SUCCESS if v_val < 0 else (theme.ERROR if v_val > 0 else theme.MUTED)
                 lines.append(f"相速度: {v_val:+.4f}/步 ({v_desc})")
                 colors.append(v_col)
+
+            # 双信源信息流：信噪比与外部控制冲量
+            snr, impulse = self._derive_flux_and_snr(pt)
+            lines.append(f"信噪比: {snr:.0%} ({'高信噪比/高内聚' if snr >= 0.7 else ('低信噪比/高熵噪声' if snr < 0.35 else '中等')})")
+            colors.append(theme.SUCCESS if snr >= 0.7 else (theme.ERROR if snr < 0.35 else theme.MUTED))
+            if impulse:
+                flux_lbl = {"high": "强负熵向心制导", "mid": "常规微调", "low": "微弱扰动"}.get(impulse.get("flux"), "外部干预")
+                lines.append(f"人类控制冲量: {flux_lbl} · {impulse.get('note', '')}")
+                colors.append(theme.PHASE_IMPULSE if impulse.get("flux") == "high" else theme.MUTED)
 
             if event_tag in event_map:
                 lines.append(f"动力学事件: {event_map[event_tag]}")
@@ -3255,6 +3313,19 @@ class PhasePortraitWidget:
                 offset_y = -14 if (idx % 2 == 0 and py > pad_t + 28) else 14
                 self._pts.append((px, py, pt, offset_y))
 
+            # (1) 渐变信噪比光晕管径 (Variable SNR Conduit)
+            for i in range(1, len(self._pts)):
+                x0, y0, prev_pt = self._pts[i - 1][:3]
+                x1, y1, cur_pt = self._pts[i][:3]
+                snr_prev, _ = self._derive_flux_and_snr(prev_pt)
+                snr_cur, _ = self._derive_flux_and_snr(cur_pt, prev_pt)
+                avg_snr = (snr_prev + snr_cur) / 2.0
+                if avg_snr >= 0.60:
+                    glow_lw = max(4, int(round(avg_snr * 8)))
+                    aa_items.append(("line", [(x0, y0), (x1, y1)], theme.DIRAC_WELL_BORDER, glow_lw))
+                elif avg_snr < 0.35:
+                    aa_items.append(("line", [(x0, y0), (x1, y1)], theme.ATTRACTOR_BASIN_BORDER, 3))
+
             for i in range(1, len(self._pts)):
                 x0, y0, prev_pt = self._pts[i - 1][:3]
                 x1, y1, cur_pt = self._pts[i][:3]
@@ -3276,6 +3347,24 @@ class PhasePortraitWidget:
                 poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
                 if poly:
                     aa_items.append(("polygon", poly, col, col))
+
+            # (2) 人类信源信息注入冲量矢量 (User Impulse Vector)
+            for i_pt, item in enumerate(self._pts):
+                x, y, pt = item[:3]
+                prev_pt = self._pts[i_pt - 1][2] if i_pt > 0 else None
+                _snr, impulse = self._derive_flux_and_snr(pt, prev_pt)
+                if impulse:
+                    flux = impulse.get("flux", "mid")
+                    arr_len = 32 if flux == "high" else (22 if flux == "mid" else 15)
+                    arr_lw = 3 if flux == "high" else (2 if flux == "mid" else 1)
+                    arr_col = theme.PHASE_IMPULSE if flux == "high" else (theme.MUTED if flux == "mid" else theme.WARNING)
+                    ix0 = x - arr_len * 0.7
+                    iy0 = y - arr_len * 0.7
+                    aa_items.append(("line", [(ix0, iy0), (x - 4, y - 4)], arr_col, arr_lw))
+                    poly_imp = self._get_arrowhead_poly(ix0, iy0, x - 1, y - 1, length=8, half_width=4, setback=1)
+                    if poly_imp:
+                        aa_items.append(("polygon", poly_imp, arr_col, arr_col))
+                    aa_items.append(("dot", ix0, iy0, 3, arr_col, theme.FG_WHITE, 1))
 
             n_pts = len(self._pts)
             for i_pt, item in enumerate(self._pts):
@@ -3335,9 +3424,19 @@ class PhasePortraitWidget:
             t_val = pt.get("turn")
             event_tag = str(pt.get("event") or "normal").lower()
             u_val = pt.get("user_turn") or pt.get("u")
+            prev_pt = self._pts[i - 1][2] if i > 0 else None
+            _snr, impulse = self._derive_flux_and_snr(pt, prev_pt)
             t_str = f"T{t_val}·U{u_val}" if (t_val is not None and u_val is not None) else (f"T{t_val}" if t_val is not None else "")
             c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
                           font=theme.FONT_UI_SMALL_BOLD)
+            # 若该点为人类外部信息注入点，标注推力徽标
+            if impulse and impulse.get("flux") == "high":
+                c.create_text(x - 28, y - 26, text=f"⚡ U{u_val} 强负熵制导", fill=theme.PHASE_IMPULSE,
+                              font=theme.FONT_UI_SMALL_BOLD, anchor="e")
+            elif impulse and impulse.get("flux") == "mid":
+                c.create_text(x - 22, y - 20, text=f"U{u_val} 初始需求", fill=theme.MUTED,
+                              font=theme.FONT_UI_SMALL, anchor="e")
+
             if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
                 evt_labels = {
                     "retry_loop": "重试",

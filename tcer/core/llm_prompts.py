@@ -276,7 +276,7 @@ _DYNAMICS_SYSTEM = (
     "  \"attractor_turn\": null,\n"
     "  \"convergence_type\": \"dirac\" | \"wandering\" | \"trapped\" | \"escaped\",\n"
     "  \"trajectory\": [\n"
-    "    {\"turn\": 1, \"user_turn\": 1, \"semantic_distance\": 0.85, \"vector\": \"positive\", \"event\": \"normal\", \"note\": \"首次按需求生成骨架\"}\n"
+    "    {\"turn\": 1, \"user_turn\": 1, \"semantic_distance\": 0.85, \"snr\": 0.60, \"vector\": \"positive\", \"event\": \"normal\", \"user_impulse\": {\"flux\": \"mid\", \"note\": \"初始意图形式化\"}, \"note\": \"首次按需求生成骨架\"}\n"
     "  ],\n"
     "  \"capabilities\": {\n"
     "    \"intent_formalization\": 80,\n"
@@ -289,6 +289,8 @@ _DYNAMICS_SYSTEM = (
     "- convergence_type 取值：\"dirac\"(全面收敛至狄拉克目标) / \"escaped\"(虽曾受困但最终成功逃逸突破) / \"trapped\"(深陷平庸吸引子死锁未逃逸) / \"wandering\"(高熵漫游未收敛)；\n"
     "- trajectory 节点格式：turn 为真实助手回合号（数字），user_turn 为对应发生时的用户消息轮次序号（如 U1、U2，整数数字）；\n"
     "- event 取值：\"normal\" / \"retry_loop\"(连续重试) / \"test_fail\"(测试报错打乱) / \"compaction\"(上下文压缩) / \"breakthrough\"(突破收敛)；\n"
+    "- snr 取值：当前阶段有效业务信号与面条代码/死试噪声之比（0.0~1.0 浮点数，驱动轨迹流体管径粗细）；\n"
+    "- user_impulse: 若该节点存在用户外部消息介入，输出该对象（flux 为 \"high\"(强向心制导) | \"mid\"(常规微调) | \"low\"(低效催促/模糊反馈)，note 为干预摘要）；\n"
     "- capabilities 三项得分区间为 0~100 整数（>=65 优秀向心控制，<40 严重失控）。\n"
     f"(prompt {DYNAMICS_PROMPT_VERSION})"
 )
