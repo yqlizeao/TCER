@@ -3459,14 +3459,15 @@ class PhasePortraitWidget:
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
         # 止损视界拦截状态文本
+        # 止损视界拦截状态文本（专业工程文本，严禁 emoji）
         if horizon_status == "intercepted":
-            c.create_text(line_horizon_x - 8, pad_t + 28, text="🛡️ 视界内强纠偏拦截 (阻断不可逆发散)",
+            c.create_text(line_horizon_x - 8, pad_t + 28, text="[视界拦截成功 · 阻断不可逆发散]",
                           fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="e")
         elif horizon_status == "breached":
-            c.create_text(line_horizon_x + 8, pad_t + 28, text="🛑 越过不可逆视界 (建议止损重开)",
+            c.create_text(line_horizon_x + 8, pad_t + 28, text="[越过不可逆视界 · 建议止损重开]",
                           fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="w")
         else:
-            c.create_text(line_horizon_x, pad_t + 28, text="🛑 不可逆止损视界 (Ds=0.82)",
+            c.create_text(line_horizon_x, pad_t + 28, text="不可逆止损视界 (Ds=0.82)",
                           fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
         for gy, val_txt in y_ticks:
             c.create_text(pad_l - 6, gy, text=val_txt, fill=theme.MUTED,
@@ -3504,11 +3505,12 @@ class PhasePortraitWidget:
             c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
                           font=theme.FONT_UI_SMALL_BOLD)
             # 若该点为人类外部信息注入点，标注推力徽标
+            # 若该点为人类外部信息注入点，标注推力徽标（工程规范文本）
             if impulse and impulse.get("flux") == "high":
-                c.create_text(x - 28, y - 26, text=f"⚡ U{u_val} 强负熵制导", fill=theme.PHASE_IMPULSE,
+                c.create_text(x - 28, y - 26, text=f"[U{u_val} 强负熵制导]", fill=theme.PHASE_IMPULSE,
                               font=theme.FONT_UI_SMALL_BOLD, anchor="e")
             elif impulse and impulse.get("flux") == "mid":
-                c.create_text(x - 22, y - 20, text=f"U{u_val} 初始需求", fill=theme.MUTED,
+                c.create_text(x - 22, y - 20, text=f"[U{u_val} 初始需求]", fill=theme.MUTED,
                               font=theme.FONT_UI_SMALL, anchor="e")
 
             if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
@@ -3583,10 +3585,9 @@ class PhasePortraitWidget:
         line_horizon_x = pad_l + 0.82 * plot_w
         c.create_line(line_horizon_x, pad_t + 18, line_horizon_x, pad_t + plot_h - 18, fill=theme.ERROR, dash=(3, 5), width=2)
         if horizon_status_p == "intercepted":
-            c.create_text(line_horizon_x - 8, pad_t + 28, text="🛡️ 视界内强纠偏拦截", fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="e")
+            c.create_text(line_horizon_x - 8, pad_t + 28, text="[视界拦截成功]", fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="e")
         elif horizon_status_p == "breached":
-            c.create_text(line_horizon_x + 8, pad_t + 28, text="🛑 越过不可逆视界", fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="w")
-
+            c.create_text(line_horizon_x + 8, pad_t + 28, text="[越过不可逆视界]", fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="w")
         # 底部 X 轴底线与文字
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
         c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
