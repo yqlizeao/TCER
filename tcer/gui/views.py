@@ -3509,15 +3509,29 @@ class PhasePortraitWidget:
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
         # 止损视界拦截状态文本
-        # 止损视界拦截状态文本（专业工程文本，严禁 emoji）
+        # 止损视界拦截状态徽章胶囊（无生硬括号，精致底衬与状态微光）
         if horizon_status == "intercepted":
-            c.create_text(line_horizon_x - 8, pad_t + 28, text="[视界拦截成功 · 阻断不可逆发散]",
-                          fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="e")
+            lbl_txt = "视界拦截成功 · 阻断不可逆发散"
+            bw = len(lbl_txt) * 11 + 24
+            bx0, by0, bx1, by1 = line_horizon_x - bw - 10, pad_t + 18, line_horizon_x - 10, pad_t + 38
+            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.DIRAC_CORE_BG, outline=theme.DIRAC_WELL_BORDER, width=1)
+            c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.SUCCESS, outline="")
+            c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt,
+                          fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         elif horizon_status == "breached":
-            c.create_text(line_horizon_x + 8, pad_t + 28, text="[越过不可逆视界 · 建议止损重开]",
-                          fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="w")
+            lbl_txt = "越过不可逆视界 · 建议止损重开"
+            bw = len(lbl_txt) * 11 + 24
+            bx0, by0, bx1, by1 = line_horizon_x + 10, pad_t + 18, line_horizon_x + bw + 10, pad_t + 38
+            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.ATTRACTOR_RINGS[0], outline=theme.ATTRACTOR_BASIN_BORDER, width=1)
+            c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.ERROR, outline="")
+            c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt,
+                          fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         else:
-            c.create_text(line_horizon_x, pad_t + 28, text="不可逆止损视界 (Ds=0.82)",
+            lbl_txt = "不可逆止损视界 Ds=0.82"
+            bw = len(lbl_txt) * 7.5 + 16
+            bx0, by0, bx1, by1 = line_horizon_x - bw / 2, pad_t + 18, line_horizon_x + bw / 2, pad_t + 38
+            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.CARD_HEADER_BG, outline=theme.BORDER, width=1)
+            c.create_text(line_horizon_x, (by0 + by1) / 2, text=lbl_txt,
                           fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
         for gy, val_txt in y_ticks:
             c.create_text(pad_l - 6, gy, text=val_txt, fill=theme.MUTED,
@@ -3557,10 +3571,10 @@ class PhasePortraitWidget:
             # 若该点为人类外部信息注入点，标注推力徽标
             # 若该点为人类外部信息注入点，标注推力徽标（工程规范文本）
             if impulse and impulse.get("flux") == "high":
-                c.create_text(x - 28, y - 26, text=f"[U{u_val} 强负熵制导]", fill=theme.PHASE_IMPULSE,
+                c.create_text(x - 24, y - 24, text=f"U{u_val} 强负熵制导", fill=theme.PHASE_IMPULSE,
                               font=theme.FONT_UI_SMALL_BOLD, anchor="e")
             elif impulse and impulse.get("flux") == "mid":
-                c.create_text(x - 22, y - 20, text=f"[U{u_val} 初始需求]", fill=theme.MUTED,
+                c.create_text(x - 20, y - 18, text=f"U{u_val} 初始需求", fill=theme.MUTED,
                               font=theme.FONT_UI_SMALL, anchor="e")
             # 卫星标签标注
             subs = self._calc_subagents(pt)
@@ -3573,8 +3587,8 @@ class PhasePortraitWidget:
                     sy = y + orbit_r * math.sin(angle)
                     s_name = sub.get("name", "Sub")
                     s_col = theme.SUCCESS if str(sub.get("status") or "").lower() == "convergent" else theme.ERROR
-                    c.create_text(sx + 5, sy, text=f"[{s_name}]", fill=s_col,
-                                  font=theme.FONT_UI_SMALL, anchor="w")
+                    c.create_text(sx + 5, sy, text=s_name, fill=s_col,
+                                  font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
             if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
                 evt_labels = {
@@ -3647,10 +3661,21 @@ class PhasePortraitWidget:
         _lams_p, _avg_lam_p, horizon_status_p = self._compute_lyapunov_stats(traj, self._data.get("lyapunov_exponent"))
         line_horizon_x = pad_l + 0.82 * plot_w
         c.create_line(line_horizon_x, pad_t + 18, line_horizon_x, pad_t + plot_h - 18, fill=theme.ERROR, dash=(3, 5), width=2)
+        # 止损视界拦截状态徽章胶囊（对偶相平面）
         if horizon_status_p == "intercepted":
-            c.create_text(line_horizon_x - 8, pad_t + 28, text="[视界拦截成功]", fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="e")
+            lbl_txt = "视界拦截成功"
+            bw = len(lbl_txt) * 12 + 24
+            bx0, by0, bx1, by1 = line_horizon_x - bw - 10, pad_t + 18, line_horizon_x - 10, pad_t + 38
+            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.DIRAC_CORE_BG, outline=theme.DIRAC_WELL_BORDER, width=1)
+            c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.SUCCESS, outline="")
+            c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt, fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         elif horizon_status_p == "breached":
-            c.create_text(line_horizon_x + 8, pad_t + 28, text="[越过不可逆视界]", fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="w")
+            lbl_txt = "越过不可逆视界"
+            bw = len(lbl_txt) * 12 + 24
+            bx0, by0, bx1, by1 = line_horizon_x + 10, pad_t + 18, line_horizon_x + bw + 10, pad_t + 38
+            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.ATTRACTOR_RINGS[0], outline=theme.ATTRACTOR_BASIN_BORDER, width=1)
+            c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.ERROR, outline="")
+            c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt, fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         # 底部 X 轴底线与文字
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
         c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
@@ -3764,8 +3789,8 @@ class PhasePortraitWidget:
                     sy = y + orbit_r * math.sin(angle)
                     s_name = sub.get("name", "Sub")
                     s_col = theme.SUCCESS if str(sub.get("status") or "").lower() == "convergent" else theme.ERROR
-                    c.create_text(sx + 5, sy, text=f"[{s_name}]", fill=s_col,
-                                  font=theme.FONT_UI_SMALL, anchor="w")
+                    c.create_text(sx + 5, sy, text=s_name, fill=s_col,
+                                  font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
             t_str = f"T{t_val}·U{u_val}" if (t_val is not None and u_val is not None) else (f"T{t_val}" if t_val is not None else "")
             c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
