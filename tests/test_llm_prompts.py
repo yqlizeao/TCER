@@ -219,3 +219,45 @@ def test_dynamics_prompt_and_payload_parsing():
     _, user_feedback = convergence_prompt(_report(), _derived(), ["metrics", "tools"],
                                           dialogue=["[工具] Bash pytest", "[工具反馈:报错] FAILED test_x"])
     assert "[工具反馈:报错] FAILED test_x" in user_feedback
+
+def test_dynamics_subagents_and_multi_agent_manifold():
+    from tcer.core.llm_prompts import _DYNAMICS_SYSTEM, parse_dynamics_payload
+    from tcer.gui.views import PhasePortraitWidget
+
+    # 1. 遥测协议规范包含 subagents
+    assert "subagents" in _DYNAMICS_SYSTEM
+    assert "卫星质点" in _DYNAMICS_SYSTEM
+
+    # 2. 结构化 JSON 解析能够完整保留 subagents 卫星列表
+    reply = (
+        "正文分析\n\n"
+        "```json\n"
+        "{\n"
+        '  "convergence_type": "escaped",\n'
+        '  "trajectory": [\n'
+        '    {"turn": 1, "semantic_distance": 0.85, "subagents": [{"name": "Scout", "role": "架构探查", "semantic_delta": -0.05, "status": "convergent"}]},\n'
+        '    {"turn": 10, "semantic_distance": 0.30, "note": "子任务并行探查与改动"}\n'
+        '  ]\n'
+        "}\n"
+        "```"
+    )
+    text, payload = parse_dynamics_payload(reply)
+    assert "正文分析" in text
+    assert payload is not None
+    traj = payload.get("trajectory", [])
+    assert len(traj) == 2
+
+    # 3. 验证 PhasePortraitWidget._calc_subagents 解析与本地确定性兜底
+    subs_explicit = PhasePortraitWidget._calc_subagents(traj[0])
+    assert len(subs_explicit) == 1
+    assert subs_explicit[0]["name"] == "Scout"
+    assert subs_explicit[0]["semantic_delta"] == -0.05
+
+    subs_inferred = PhasePortraitWidget._calc_subagents(traj[1])
+    assert len(subs_inferred) == 2
+    assert subs_inferred[0]["name"] == "Scout"
+    assert subs_inferred[1]["name"] == "Worker"
+
+    # 无子代理注记的常规节点返回空列表
+    subs_none = PhasePortraitWidget._calc_subagents({"turn": 2, "note": "常规单行修改"})
+    assert subs_none == []
