@@ -2849,8 +2849,14 @@ class PhasePortraitWidget:
         self.state_badge = tk.Label(left_h, text="", bg=theme.CARD_HEADER_BG,
                                     font=theme.FONT_UI_SMALL, padx=6, pady=1)
         self.state_badge.pack(side="left", padx=(8, 0))
+        self.lyapunov_badge = tk.Label(left_h, text="", bg=theme.CARD_HEADER_BG,
+                                       font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self.lyapunov_badge.pack(side="left", padx=(6, 0))
+        Tooltip(self.lyapunov_badge,
+                "李雅普诺夫指数 λ：非线性动力学混沌发散度量。\n"
+                "λ < 0 代表系统耗散渐近稳定，微小扰动会被负反馈吸收，向目标收敛；\n"
+                "λ > 0 代表系统处于混沌态，局部误解会被多轮工具链指数级放大，越改越乱。")
         self.cap_lbl = tk.Label(self.head, text="")  # 兼容测试与标量文本读取
-
         # 增加视图模式切换胶囊（时序流形 vs 相速度极限环对偶相平面）
         self.mode_frame = tk.Frame(left_h, bg=theme.CARD_HEADER_BG)
         self.mode_frame.pack(side="left", padx=(14, 0))
@@ -2912,6 +2918,14 @@ class PhasePortraitWidget:
         else:
             self.state_badge.config(text="[高熵漫游未收敛]", fg=theme.WARNING, bg=theme.WARN_TINT_BG)
 
+        # 1.1 李雅普诺夫稳定性徽标
+        _, avg_lam, _ = self._compute_lyapunov_stats(traj, self._data.get("lyapunov_exponent"))
+        if avg_lam < 0:
+            self.lyapunov_badge.config(
+                text=f"[耗散稳定 λ = {avg_lam:+.2f}]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+        else:
+            self.lyapunov_badge.config(
+                text=f"[混沌发散 λ = {avg_lam:+.2f}]", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
         # 2. 三能力胶囊条（显示名称、分数与评级 Tooltip）
         for w in self.caps_frame.winfo_children():
             w.destroy()
@@ -2984,6 +2998,51 @@ class PhasePortraitWidget:
                 fg=theme.FG_WHITE if active else theme.FG,
                 font=theme.FONT_UI_SMALL_BOLD if active else theme.FONT_UI_SMALL)
 
+    @staticmethod
+    def _compute_lyapunov_stats(traj: list, global_lam_val=None) -> tuple[list[float], float, str]:
+        """计算逐节点局部李雅普诺夫指数与整场会话全局指数及视界拦截状态。"""
+        if not traj:
+            return [], -0.10, "safe"
+        lam_list = []
+        for i, n in enumerate(traj):
+            if i == 0:
+                lam = -0.05
+            else:
+                prev = traj[i - 1]
+                ds_cur = max(0.0, min(1.0, float(n.get("semantic_distance", 0.5))))
+                ds_prev = max(0.0, min(1.0, float(prev.get("semantic_distance", 0.5))))
+                delta_ds = ds_cur - ds_prev
+                evt = str(n.get("event") or "").lower()
+                vec = str(n.get("vector") or "").lower()
+                if evt == "breakthrough":
+                    lam = -0.65
+                elif delta_ds < -0.05:
+                    lam = -0.35
+                elif delta_ds < 0:
+                    lam = -0.15
+                elif evt == "retry_loop":
+                    lam = +0.25
+                elif delta_ds > 0.05:
+                    lam = +0.55
+                else:
+                    lam = +0.10
+            lam_list.append(lam)
+
+        if isinstance(global_lam_val, (int, float)):
+            avg_lam = float(global_lam_val)
+        else:
+            avg_lam = sum(lam_list) / len(lam_list) if lam_list else -0.10
+
+        max_ds = max((float(pt.get("semantic_distance", 0.5)) for pt in traj), default=0.5)
+        last_ds = float(traj[-1].get("semantic_distance", 0.5)) if traj else 0.5
+        if max_ds >= 0.78 and last_ds <= 0.45:
+            horizon_status = "intercepted"
+        elif last_ds >= 0.82 and avg_lam >= 0:
+            horizon_status = "breached"
+        else:
+            horizon_status = "safe"
+
+        return lam_list, avg_lam, horizon_status
     @staticmethod
     def _derive_flux_and_snr(node: dict, prev_node: dict | None = None) -> tuple[float, dict | None]:
         """推算/提取当前节点的信噪比 (SNR) 与人类外部控制冲量 (user_impulse)。"""
@@ -3249,6 +3308,11 @@ class PhasePortraitWidget:
         c.create_line(line_target_x, pad_t, line_target_x, pad_t + plot_h, fill=theme.PHASE_GRID_DIRAC, dash=(1, 4))
         c.create_line(line_danger_x, pad_t, line_danger_x, pad_t + plot_h, fill=theme.PHASE_GRID_TRAP, dash=(1, 4))
 
+        # 止损红线与不可逆视界 (Ds=0.82)
+        _lams, _avg_lam, horizon_status = self._compute_lyapunov_stats(traj, self._data.get("lyapunov_exponent"))
+        line_horizon_x = pad_l + 0.82 * plot_w
+        c.create_line(line_horizon_x, pad_t + 18, line_horizon_x, pad_t + plot_h - 18, fill=theme.ERROR, dash=(3, 5), width=2)
+
         # X 轴底线
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
 
@@ -3394,6 +3458,16 @@ class PhasePortraitWidget:
         c.create_text(tgt_x + 22, tgt_y, text="狄拉克目标点",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
+        # 止损视界拦截状态文本
+        if horizon_status == "intercepted":
+            c.create_text(line_horizon_x - 8, pad_t + 28, text="🛡️ 视界内强纠偏拦截 (阻断不可逆发散)",
+                          fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="e")
+        elif horizon_status == "breached":
+            c.create_text(line_horizon_x + 8, pad_t + 28, text="🛑 越过不可逆视界 (建议止损重开)",
+                          fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="w")
+        else:
+            c.create_text(line_horizon_x, pad_t + 28, text="🛑 不可逆止损视界 (Ds=0.82)",
+                          fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
         for gy, val_txt in y_ticks:
             c.create_text(pad_l - 6, gy, text=val_txt, fill=theme.MUTED,
                           font=theme.FONT_UI_SMALL, anchor="e")
@@ -3504,7 +3578,16 @@ class PhasePortraitWidget:
                       font=theme.FONT_UI_SMALL, anchor="e")
         c.create_text(pad_l + 12, pad_t + plot_h - 12, text="↓ 向心收敛区 (dDs/dt < 0 · 逼近目标达成)",
                       fill=theme.PHASE_ZONE_DIRAC, font=theme.FONT_UI_SMALL, anchor="w")
+        # 止损红线与视界判定
+        _lams_p, _avg_lam_p, horizon_status_p = self._compute_lyapunov_stats(traj, self._data.get("lyapunov_exponent"))
+        line_horizon_x = pad_l + 0.82 * plot_w
+        c.create_line(line_horizon_x, pad_t + 18, line_horizon_x, pad_t + plot_h - 18, fill=theme.ERROR, dash=(3, 5), width=2)
+        if horizon_status_p == "intercepted":
+            c.create_text(line_horizon_x - 8, pad_t + 28, text="🛡️ 视界内强纠偏拦截", fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="e")
+        elif horizon_status_p == "breached":
+            c.create_text(line_horizon_x + 8, pad_t + 28, text="🛑 越过不可逆视界", fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="w")
 
+        # 底部 X 轴底线与文字
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
         c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
@@ -3513,7 +3596,6 @@ class PhasePortraitWidget:
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
         c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
-
         # 3. 抗锯齿图层 items (Layer 1)
         aa_items: list = []
 

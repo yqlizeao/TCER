@@ -282,7 +282,8 @@ _DYNAMICS_SYSTEM = (
     "    \"intent_formalization\": 80,\n"
     "    \"drift_sensitivity\": 70,\n"
     "    \"feedback_mutual_info\": 75\n"
-    "  }\n"
+    "  },\n"
+    "  \"lyapunov_exponent\": -0.25\n"
     "}\n"
     "```\n"
     "遥测协议规范说明：\n"
@@ -291,7 +292,8 @@ _DYNAMICS_SYSTEM = (
     "- event 取值：\"normal\" / \"retry_loop\"(连续重试) / \"test_fail\"(测试报错打乱) / \"compaction\"(上下文压缩) / \"breakthrough\"(突破收敛)；\n"
     "- snr 取值：当前阶段有效业务信号与面条代码/死试噪声之比（0.0~1.0 浮点数，驱动轨迹流体管径粗细）；\n"
     "- user_impulse: 若该节点存在用户外部消息介入，输出该对象（flux 为 \"high\"(强向心制导) | \"mid\"(常规微调) | \"low\"(低效催促/模糊反馈)，note 为干预摘要）；\n"
-    "- capabilities 三项得分区间为 0~100 整数（>=65 优秀向心控制，<40 严重失控）。\n"
+    "- capabilities 三项得分区间为 0~100 整数（>=65 优秀向心控制，<40 严重失控）；\n"
+    "- lyapunov_exponent 取值：全局李雅普诺夫指数（浮点数，<0 代表系统耗散渐近稳定，>0 代表混沌敏感发散，跨越止损视界）。\n"
     f"(prompt {DYNAMICS_PROMPT_VERSION})"
 )
 
