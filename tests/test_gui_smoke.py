@@ -1363,6 +1363,19 @@ def test_llm_reports_view(root, monkeypatch, tmp_path):
     assert "狄拉克目标点" in v._phase_portrait._tooltip._sig[0][0]
     v._phase_portrait._tooltip.hide()
 
+    # 验证 P1 相速度对偶极限环模式切换与悬停相速度解析
+    v._phase_portrait._set_mode("phase_plane")
+    assert v._phase_portrait._view_mode == "phase_plane"
+    assert len(v._phase_portrait._pts) == 3
+    # 验证节点相速度数据存在且悬停能触发速度描述
+    new_px, new_py, _, new_off, new_v = v._phase_portrait._pts[1]
+    v._phase_portrait._on_motion(FakeEvent(new_px, new_py + new_off))
+    assert v._phase_portrait._tooltip._win is not None
+    v._phase_portrait._tooltip.hide()
+    # 切回时序流形
+    v._phase_portrait._set_mode("manifold")
+    assert v._phase_portrait._view_mode == "manifold"
+
     v._set_kind_filter("all")
     v._search_var.set("DeepSeek 对比")
     v._on_search_changed()

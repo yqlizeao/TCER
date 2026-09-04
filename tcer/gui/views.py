@@ -2851,6 +2851,18 @@ class PhasePortraitWidget:
         self.state_badge.pack(side="left", padx=(8, 0))
         self.cap_lbl = tk.Label(self.head, text="")  # 兼容测试与标量文本读取
 
+        # 增加视图模式切换胶囊（时序流形 vs 相速度极限环对偶相平面）
+        self.mode_frame = tk.Frame(left_h, bg=theme.CARD_HEADER_BG)
+        self.mode_frame.pack(side="left", padx=(14, 0))
+        self._view_mode = "manifold"
+        self._mode_btns = {}
+        for m_key, m_name in (("manifold", "时序流形"), ("phase_plane", "相速度极限环")):
+            btn = tk.Label(self.mode_frame, text=m_name, bg=theme.PANEL_2,
+                           fg=theme.FG, font=theme.FONT_UI_SMALL, padx=8, pady=2, cursor=CLICK_CURSOR)
+            btn.pack(side="left", padx=2)
+            btn.bind("<Button-1>", lambda _e, m=m_key: self._set_mode(m))
+            self._mode_btns[m_key] = btn
+        self._update_mode_btns()
         self.caps_frame = tk.Frame(self.head, bg=theme.CARD_HEADER_BG)
         self.caps_frame.pack(side="right")
 
@@ -2957,6 +2969,21 @@ class PhasePortraitWidget:
             self.cap_lbl.config(text="")
         self._redraw()
 
+    def _set_mode(self, mode: str) -> None:
+        if self._view_mode == mode:
+            return
+        self._view_mode = mode
+        self._update_mode_btns()
+        self._redraw()
+
+    def _update_mode_btns(self) -> None:
+        for m, btn in self._mode_btns.items():
+            active = (self._view_mode == m)
+            btn.config(
+                bg=theme.HOVER_ACCENT if active else theme.PANEL_2,
+                fg=theme.FG_WHITE if active else theme.FG,
+                font=theme.FONT_UI_SMALL_BOLD if active else theme.FONT_UI_SMALL)
+
     def pack(self, **kw):
         self.container.pack(**kw)
 
@@ -3015,6 +3042,23 @@ class PhasePortraitWidget:
                 f"推进矢量: {status_str}",
             ]
             colors = [theme.FG_WHITE, status_col]
+            # 若包含相速度数据（len >= 5），展示运动学速度与态势
+            if len(item) > 4:
+                v_val = item[4]
+                if v_val < -0.01:
+                    v_desc = "高速向心冲刺"
+                elif v_val < 0:
+                    v_desc = "向心逼近"
+                elif v_val > 0.01:
+                    v_desc = "快速离心发散"
+                elif v_val > 0:
+                    v_desc = "离心漂移"
+                else:
+                    v_desc = "相对静止平衡"
+                v_col = theme.SUCCESS if v_val < 0 else (theme.ERROR if v_val > 0 else theme.MUTED)
+                lines.append(f"相速度: {v_val:+.4f}/步 ({v_desc})")
+                colors.append(v_col)
+
             if event_tag in event_map:
                 lines.append(f"动力学事件: {event_map[event_tag]}")
                 colors.append(theme.WARNING if event_tag != "breakthrough" else theme.SUCCESS)
@@ -3098,8 +3142,14 @@ class PhasePortraitWidget:
         plot_h = h - pad_t - pad_b
         if plot_w <= 10 or plot_h <= 10:
             return
+        traj = self._data.get("trajectory") or []
+        if getattr(self, "_view_mode", "manifold") == "phase_plane":
+            self._draw_phase_plane(c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj)
+        else:
+            self._draw_manifold(c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj)
 
-        # 1. 双轴参考系 (Layer 0: 左侧物理成本 $ / 右侧会话推进进度 %)
+    def _draw_manifold(self, c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj) -> None:
+        """经典状态-代价时序流形视图：横轴语义距离 Ds × 纵轴物理成本 $。"""
         cost_str = str(self._report.get("cost_display") or "")
         m_cost = re.search(r"(\d+(?:\.\d+)?)", cost_str)
         max_cost_val = float(m_cost.group(1)) if m_cost else 10.0
@@ -3114,7 +3164,7 @@ class PhasePortraitWidget:
             val_txt = f"${val:.1f}" if max_cost_val >= 1 else f"${val:.2f}"
             y_ticks.append((gy, val_txt))
 
-        # 关键状态分界线（收敛目标域推至最左侧 0.10，高熵危险域推至最右侧 0.90）
+        # 关键状态分界线
         line_target_x = pad_l + 0.10 * plot_w
         line_danger_x = pad_l + 0.90 * plot_w
         c.create_line(line_target_x, pad_t, line_target_x, pad_t + plot_h, fill=theme.PHASE_GRID_DIRAC, dash=(1, 4))
@@ -3122,10 +3172,10 @@ class PhasePortraitWidget:
 
         # X 轴底线
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
-        # 2. 收集抗锯齿图层 items (Layer 1: PIL 2× 超采样高清图层，线/多边形/圆点纯图元)
+
         aa_items: list = []
 
-        # (A) 相平面速度流场微线段网格 (Phase Streamlines Field)：向心流动趋势
+        # (A) 相平面速度流场微线段网格
         streamline_col = theme.PHASE_STREAMLINE
         for row_idx, gy_frac in enumerate((0.20, 0.40, 0.60, 0.80)):
             sy = pad_t + gy_frac * plot_h
@@ -3134,7 +3184,7 @@ class PhasePortraitWidget:
                 aa_items.append(("line", [(sx + 9, sy - 5), (sx - 9, sy + 4)], streamline_col, 1))
                 aa_items.append(("line", [(sx - 9, sy + 4), (sx - 4, sy + 2)], streamline_col, 1))
 
-        # (B) 理想向心收敛走廊参考线 (Convergence Corridor)
+        # (B) 理想向心收敛走廊参考线
         corridor_pts = [
             (pad_l + 0.85 * plot_w, pad_t + plot_h * 0.95),
             (pad_l + 0.50 * plot_w, pad_t + plot_h * 0.92),
@@ -3143,20 +3193,18 @@ class PhasePortraitWidget:
         ]
         aa_items.append(("line", corridor_pts, theme.PHASE_CORRIDOR, 1))
 
-        # (C) 平庸代码吸引子引力势阱与黑洞同心圆 (Equipotential Basin)
+        # (C) 平庸代码吸引子引力势阱与黑洞同心圆
         att_x = pad_l + plot_w * 0.86
         att_y = pad_t + 90
         self._att_pos = (att_x, att_y)
         self._pad_t = pad_t
-        # 外层引力漏斗势阱等势环
         for r, col in zip((76, 56, 40), (theme.ATTRACTOR_BASIN_BORDER, theme.ATTRACTOR_BASIN_BORDER, theme.ATTRACTOR_RINGS[0])):
             aa_items.append(("dot", att_x, att_y, r, None, col, 1))
-        # 核心吸引子同心圆
         for r, col in zip((28, 18, 10), theme.ATTRACTOR_RINGS):
             aa_items.append(("dot", att_x, att_y, r, col, theme.ATTRACTOR_RINGS[1], 1))
         aa_items.append(("dot", att_x, att_y, 4, theme.ERROR, theme.ERROR, 1))
 
-        # (D) 狄拉克目标点（低能势阱保护圈 + 双层发光圆）
+        # (D) 狄拉克目标点
         tgt_x = pad_l + plot_w * 0.05
         tgt_y = pad_t + plot_h * 0.88
         self._tgt_pos = (tgt_x, tgt_y)
@@ -3164,8 +3212,8 @@ class PhasePortraitWidget:
             aa_items.append(("dot", tgt_x, tgt_y, r, None, theme.DIRAC_WELL_BORDER, 1))
         aa_items.append(("dot", tgt_x, tgt_y, 16, theme.DIRAC_CORE_BG, theme.SUCCESS, 2))
         aa_items.append(("dot", tgt_x, tgt_y, 5, theme.SUCCESS, theme.SUCCESS, 1))
-        # (E) 计算真实会话动力学轨迹节点（严格物理坐标映射与稳健兜底）
-        traj = self._data.get("trajectory") or []
+
+        # (E) 计算真实会话动力学轨迹节点
         n = len(traj)
         total_turns = self._report.get("turns")
         if not isinstance(total_turns, (int, float)) or total_turns <= 1:
@@ -3185,7 +3233,7 @@ class PhasePortraitWidget:
                 py = (pad_t + plot_h) - frac * plot_h * 0.82 - 8
                 offset_y = -14 if (idx % 2 == 0 and py > pad_t + 28) else 14
                 self._pts.append((px, py, pt, offset_y))
-            # 全抗锯齿矢量推进折线与箭头
+
             for i in range(1, len(self._pts)):
                 x0, y0, prev_pt = self._pts[i - 1][:3]
                 x1, y1, cur_pt = self._pts[i][:3]
@@ -3207,7 +3255,7 @@ class PhasePortraitWidget:
                 poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
                 if poly:
                     aa_items.append(("polygon", poly, col, col))
-            # (F) 质点多态化与动力学事件光晕
+
             n_pts = len(self._pts)
             for i_pt, item in enumerate(self._pts):
                 x, y, pt = item[:3]
@@ -3215,13 +3263,10 @@ class PhasePortraitWidget:
                 event_tag = str(pt.get("event") or "normal").lower()
                 base_col = theme.ERROR if vec in ("negative", "divergent", "trapped") else (
                     theme.SUCCESS if vec in ("positive", "convergent") else theme.WARNING)
-                # 首节点起点金晕
                 if i_pt == 0:
                     aa_items.append(("dot", x, y, 8, None, theme.PHASE_START_HALO, 1))
-                # 末节点终态双环
                 elif i_pt == n_pts - 1:
                     aa_items.append(("dot", x, y, 8, None, theme.SUCCESS if vec in ("positive", "convergent") else theme.ERROR, 1))
-                # 事件脉冲光圈
                 if event_tag == "retry_loop":
                     aa_items.append(("dot", x, y, 9, None, theme.ERROR, 1))
                 elif event_tag == "breakthrough":
@@ -3230,26 +3275,19 @@ class PhasePortraitWidget:
                     aa_items.append(("dot", x, y, 8, None, theme.CHART_PALETTE[0], 1))
                 elif vec in ("negative", "divergent", "trapped"):
                     aa_items.append(("dot", x, y, 8, None, theme.ERROR, 1))
-                # 质点主体
                 aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
-        # 提交抗锯齿图层贴图（彻底消除折线、漏斗圆环与节点锯齿）
+
         self._aa_layer(c, aa_items, self._aa_imgs)
 
-        # 3. 上层锐利文本标签 (Layer 2: 最顶层 Canvas 原生文本，绝对不被底图遮挡)
-        # 吸引子标签（单行精炼，详尽定义由 hover 展示）
         c.create_text(att_x, pad_t + 10, text="平庸代码吸引子",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
-
-        # 狄拉克目标点标签（单行精炼，详尽定义由 hover 展示）
         c.create_text(tgt_x + 22, tgt_y, text="狄拉克目标点",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
-        # 左侧物理成本刻度文本（右侧彻底清空，杜绝截断）
         for gy, val_txt in y_ticks:
             c.create_text(pad_l - 6, gy, text=val_txt, fill=theme.MUTED,
                           font=theme.FONT_UI_SMALL, anchor="e")
 
-        # 内置动力学微图例栏（置于最上方开阔安全区，居中对齐）
         leg_w = 460
         leg_x = max(pad_l + 8, pad_l + (plot_w - leg_w) / 2)
         leg_y = pad_t - 16
@@ -3262,7 +3300,6 @@ class PhasePortraitWidget:
         c.create_oval(leg_x + 365, leg_y - 4, leg_x + 373, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
         c.create_text(leg_x + 377, leg_y, text="平庸代码吸引子", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
 
-        # X 轴刻度文本（语义距离维度，贴合业务意图形式化收敛模型）
         c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_text(pad_l + plot_w / 2, pad_t + plot_h + 12,
@@ -3270,19 +3307,14 @@ class PhasePortraitWidget:
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
         c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
-        # 质点回合标签与事件微标（错开避让，在最顶层）
+
         for i, item in enumerate(self._pts):
             x, y, pt = item[:3]
             offset_y = item[3] if len(item) > 3 else (-14 if (i % 2 == 0 and y > pad_t + 28) else 14)
             t_val = pt.get("turn")
             event_tag = str(pt.get("event") or "normal").lower()
             u_val = pt.get("user_turn") or pt.get("u")
-            if t_val is not None and u_val is not None:
-                t_str = f"T{t_val}·U{u_val}"
-            elif t_val is not None:
-                t_str = f"T{t_val}"
-            else:
-                t_str = ""
+            t_str = f"T{t_val}·U{u_val}" if (t_val is not None and u_val is not None) else (f"T{t_val}" if t_val is not None else "")
             c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
                           font=theme.FONT_UI_SMALL_BOLD)
             if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
@@ -3297,7 +3329,164 @@ class PhasePortraitWidget:
                 c.create_text(x, y + offset_y + (10 if offset_y > 0 else -10),
                               text=f"({lbl_text})", fill=evt_col,
                               font=theme.FONT_UI_SMALL)
+        if not traj:
+            c.create_text(pad_l + plot_w / 2, pad_t + plot_h / 2,
+                          text="（本动力学报告无细分轨迹采样数据）", fill=theme.MUTED)
 
+    def _draw_phase_plane(self, c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj) -> None:
+        """P1 相速度极限环对偶相平面：横轴语义距离 Ds × 纵轴相速度 dDs/dt。"""
+        zero_y = pad_t + 0.5 * plot_h
+
+        # 1. 计算相速度与非线性缩放坐标
+        raw_nodes = []
+        for i, pt in enumerate(traj):
+            ds = max(0.0, min(1.0, float(pt.get("semantic_distance", 0.5))))
+            t = pt.get("turn", i + 1)
+            if i == 0:
+                v = 0.0
+            else:
+                prev = traj[i - 1]
+                prev_ds = max(0.0, min(1.0, float(prev.get("semantic_distance", 0.5))))
+                prev_t = prev.get("turn", i)
+                dt = max(1, t - prev_t)
+                v = (ds - prev_ds) / dt
+            raw_nodes.append({"pt": pt, "turn": t, "u": pt.get("user_turn") or pt.get("u"), "ds": ds, "v": v, "evt": pt.get("event")})
+
+        v_vals = [abs(n["v"]) for n in raw_nodes if n["v"] != 0]
+        v_max = max(v_vals) if v_vals else 0.05
+        v_max = max(0.005, v_max)
+
+        for idx, n in enumerate(raw_nodes):
+            ds = n["ds"]
+            px = pad_l + ds * plot_w
+            v = n["v"]
+            ratio = (abs(v) / v_max) ** 0.55 if v_max > 0 else 0
+            sign = 1 if v > 0 else (-1 if v < 0 else 0)
+            py = zero_y - sign * ratio * (plot_h * 0.40)
+            offset_y = -14 if (idx % 2 == 0 and py > pad_t + 28) else 14
+            self._pts.append((px, py, n["pt"], offset_y, v))
+
+        # 2. 背景参考系 (Layer 0)
+        c.create_line(pad_l, zero_y, pad_l + plot_w, zero_y, fill=theme.BORDER, width=2)
+        c.create_text(pad_l - 6, zero_y, text="0 (平衡)", fill=theme.MUTED,
+                      font=theme.FONT_UI_SMALL, anchor="e")
+
+        div_y = pad_t + 0.18 * plot_h
+        c.create_line(pad_l, div_y, pad_l + plot_w, div_y, fill=theme.PHASE_GRID_TRAP, dash=(2, 4))
+        c.create_text(pad_l - 6, div_y, text="+发散", fill=theme.ERROR,
+                      font=theme.FONT_UI_SMALL, anchor="e")
+        c.create_text(pad_l + 12, pad_t + 12, text="↑ 离心发散区 (dDs/dt > 0 · 偏离真实意图)",
+                      fill=theme.PHASE_ZONE_TRAP, font=theme.FONT_UI_SMALL, anchor="w")
+
+        conv_y = pad_t + 0.82 * plot_h
+        c.create_line(pad_l, conv_y, pad_l + plot_w, conv_y, fill=theme.PHASE_GRID_DIRAC, dash=(2, 4))
+        c.create_text(pad_l - 6, conv_y, text="-收敛", fill=theme.SUCCESS,
+                      font=theme.FONT_UI_SMALL, anchor="e")
+        c.create_text(pad_l + 12, pad_t + plot_h - 12, text="↓ 向心收敛区 (dDs/dt < 0 · 逼近目标达成)",
+                      fill=theme.PHASE_ZONE_DIRAC, font=theme.FONT_UI_SMALL, anchor="w")
+
+        c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
+        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
+                      fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(pad_l + plot_w / 2, pad_t + plot_h + 12,
+                      text="语义距离：向左逼近目标达成 · 向右偏离真实意图",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
+        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
+                      fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
+
+        # 3. 抗锯齿图层 items (Layer 1)
+        aa_items: list = []
+
+        tgt_x = pad_l + plot_w * 0.05
+        tgt_y = zero_y
+        self._tgt_pos = (tgt_x, tgt_y)
+        for r in (30, 20):
+            aa_items.append(("dot", tgt_x, tgt_y, r, None, theme.DIRAC_WELL_BORDER, 1))
+        aa_items.append(("dot", tgt_x, tgt_y, 14, theme.DIRAC_CORE_BG, theme.SUCCESS, 2))
+        aa_items.append(("dot", tgt_x, tgt_y, 5, theme.SUCCESS, theme.SUCCESS, 1))
+
+        att_x = pad_l + plot_w * 0.86
+        att_y = zero_y
+        self._att_pos = (att_x, att_y)
+        for r, col in zip((48, 34, 22), (theme.ATTRACTOR_BASIN_BORDER, theme.ATTRACTOR_RINGS[0], theme.ATTRACTOR_RINGS[1])):
+            aa_items.append(("dot", att_x, att_y, r, None, col, 1))
+        aa_items.append(("dot", att_x, att_y, 4, theme.ERROR, theme.ERROR, 1))
+
+        cycle_pts = [item for item in self._pts if str(item[2].get("event") or "").lower() == "retry_loop"]
+        if cycle_pts:
+            for c_pt in cycle_pts:
+                cx, cy = c_pt[0], c_pt[1]
+                aa_items.append(("dot", cx, cy, 32, None, theme.ATTRACTOR_BASIN_BORDER, 2))
+                aa_items.append(("dot", cx, cy, 20, None, theme.ERROR, 1))
+
+        for i in range(1, len(self._pts)):
+            x0, y0, prev_pt = self._pts[i - 1][:3]
+            x1, y1, cur_pt = self._pts[i][:3]
+            v_cur = self._pts[i][4]
+            col = theme.SUCCESS if v_cur < 0 else (theme.ERROR if v_cur > 0 else theme.WARNING)
+            lw = 3 if abs(v_cur) > 0.01 else 2
+            aa_items.append(("line", [(x0, y0), (x1, y1)], col, lw))
+            poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
+            if poly:
+                aa_items.append(("polygon", poly, col, col))
+
+        n_pts = len(self._pts)
+        for i_pt, item in enumerate(self._pts):
+            x, y, pt = item[:3]
+            v_pt = item[4]
+            event_tag = str(pt.get("event") or "normal").lower()
+            base_col = theme.SUCCESS if v_pt < 0 else (theme.ERROR if v_pt > 0 else theme.WARNING)
+            if i_pt == 0:
+                aa_items.append(("dot", x, y, 8, None, theme.PHASE_START_HALO, 1))
+            elif i_pt == n_pts - 1:
+                aa_items.append(("dot", x, y, 8, None, theme.SUCCESS if v_pt < 0 else theme.ERROR, 1))
+            if event_tag == "retry_loop":
+                aa_items.append(("dot", x, y, 10, None, theme.ERROR, 1))
+            elif event_tag == "breakthrough":
+                aa_items.append(("dot", x, y, 9, None, theme.SUCCESS, 1))
+            aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
+
+        self._aa_layer(c, aa_items, self._aa_imgs)
+
+        # 4. 上层文本标签 (Layer 2)
+        c.create_text(tgt_x + 22, tgt_y, text="狄拉克不动点",
+                      fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+        c.create_text(att_x, att_y - 36, text="平庸代码吸引子",
+                      fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
+
+        leg_w = 460
+        leg_x = max(pad_l + 8, pad_l + (plot_w - leg_w) / 2)
+        leg_y = pad_t - 16
+        c.create_line(leg_x, leg_y, leg_x + 14, leg_y, fill=theme.SUCCESS, width=2)
+        c.create_text(leg_x + 18, leg_y, text="向心收敛 (下半区)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_line(leg_x + 130, leg_y, leg_x + 144, leg_y, fill=theme.ERROR, width=2)
+        c.create_text(leg_x + 148, leg_y, text="离心发散 (上半区)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 260, leg_y - 4, leg_x + 268, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
+        c.create_text(leg_x + 272, leg_y, text="狄拉克目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 365, leg_y - 4, leg_x + 373, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
+        c.create_text(leg_x + 377, leg_y, text="平庸代码吸引子", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+
+        for i, item in enumerate(self._pts):
+            x, y, pt = item[:3]
+            offset_y = item[3] if len(item) > 3 else (-14 if (i % 2 == 0 and y > pad_t + 28) else 14)
+            t_val = pt.get("turn")
+            event_tag = str(pt.get("event") or "normal").lower()
+            u_val = pt.get("user_turn") or pt.get("u")
+            t_str = f"T{t_val}·U{u_val}" if (t_val is not None and u_val is not None) else (f"T{t_val}" if t_val is not None else "")
+            c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
+                          font=theme.FONT_UI_SMALL_BOLD)
+            if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
+                evt_labels = {
+                    "retry_loop": "极限环死锁",
+                    "breakthrough": "向心冲刺",
+                    "compaction": "压缩",
+                    "test_fail": "报错",
+                }
+                lbl_text = evt_labels.get(event_tag, "")
+                evt_col = theme.SUCCESS if event_tag == "breakthrough" else theme.ERROR
+                c.create_text(x, y + offset_y + (10 if offset_y > 0 else -10),
+                              text=f"({lbl_text})", fill=evt_col,
+                              font=theme.FONT_UI_SMALL)
         if not traj:
             c.create_text(pad_l + plot_w / 2, pad_t + plot_h / 2,
                           text="（本动力学报告无细分轨迹采样数据）", fill=theme.MUTED)
