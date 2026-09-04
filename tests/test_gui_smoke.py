@@ -1343,7 +1343,7 @@ def test_llm_reports_view(root, monkeypatch, tmp_path):
         ]
     }
     v._phase_portrait.render(dyn_escaped, {"cost_display": "$10.00", "turns": 500})
-    assert "吸引子逃逸 / 向心突破" in v._phase_portrait.state_badge.cget("text")
+    assert "成功破局 · 达成收敛" in v._phase_portrait.state_badge.cget("text")
 
     # 验证鼠标移动到质点文本标签位置时依然能灵敏触发 Tooltip
     pt_t200 = v._phase_portrait._pts[1]

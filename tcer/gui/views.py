@@ -2853,9 +2853,9 @@ class PhasePortraitWidget:
                                        font=theme.FONT_UI_SMALL, padx=6, pady=1)
         self.lyapunov_badge.pack(side="left", padx=(6, 0))
         Tooltip(self.lyapunov_badge,
-                "李雅普诺夫指数 λ：非线性动力学混沌发散度量。\n"
-                "λ < 0 代表系统耗散渐近稳定，微小扰动会被负反馈吸收，向目标收敛；\n"
-                "λ > 0 代表系统处于混沌态，局部误解会被多轮工具链指数级放大，越改越乱。")
+                "李雅普诺夫指数 λ：代码演化稳定性度量。\n"
+                "λ < 0 代表系统收敛稳定，微小改动瑕疵会被负反馈吸收，向目标达成收敛；\n"
+                "λ > 0 代表系统失控发散，局部误解会被多轮工具链连锁放大，越改越乱。")
         self.cap_lbl = tk.Label(self.head, text="")  # 兼容测试与标量文本读取
         # 增加视图模式切换胶囊（时序流形 vs 相速度极限环对偶相平面）
         self.mode_frame = tk.Frame(left_h, bg=theme.CARD_HEADER_BG)
@@ -2872,7 +2872,7 @@ class PhasePortraitWidget:
         self.caps_frame = tk.Frame(self.head, bg=theme.CARD_HEADER_BG)
         self.caps_frame.pack(side="right")
 
-        self.canvas = tk.Canvas(self.container, bg=theme.BG, height=380,
+        self.canvas = tk.Canvas(self.container, bg=theme.BG, height=480,
                                 highlightthickness=0, cursor=CLICK_CURSOR)
         self.canvas.pack(fill="x", padx=4, pady=4)
         self._tooltip = _ChartTooltip(self.canvas)
@@ -2910,22 +2910,22 @@ class PhasePortraitWidget:
         )
 
         if ctype == "dirac" or (last_ds <= 0.15 and not is_trapped):
-            self.state_badge.config(text="[狄拉克向心收敛]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+            self.state_badge.config(text="[精准收敛 · 达成目标]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
         elif is_escaped:
-            self.state_badge.config(text="[吸引子逃逸 / 向心突破]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+            self.state_badge.config(text="[成功破局 · 达成收敛]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
         elif ctype == "trapped" or is_trapped:
-            self.state_badge.config(text="[平庸吸引子捕获]", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
+            self.state_badge.config(text="[陷入泥潭 · 循环死锁]", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
         else:
-            self.state_badge.config(text="[高熵漫游未收敛]", fg=theme.WARNING, bg=theme.WARN_TINT_BG)
+            self.state_badge.config(text="[方向发散 · 未收敛]", fg=theme.WARNING, bg=theme.WARN_TINT_BG)
 
         # 1.1 李雅普诺夫稳定性徽标
         _, avg_lam, _ = self._compute_lyapunov_stats(traj, self._data.get("lyapunov_exponent"))
         if avg_lam < 0:
             self.lyapunov_badge.config(
-                text=f"[耗散稳定 λ = {avg_lam:+.2f}]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+                text=f"[收敛稳定 λ = {avg_lam:+.2f}]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
         else:
             self.lyapunov_badge.config(
-                text=f"[混沌发散 λ = {avg_lam:+.2f}]", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
+                text=f"[失控发散 λ = {avg_lam:+.2f}]", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
         # 2. 三能力胶囊条（显示名称、分数与评级 Tooltip）
         for w in self.caps_frame.winfo_children():
             w.destroy()
@@ -3185,13 +3185,13 @@ class PhasePortraitWidget:
             lines.append(f"信噪比: {snr:.0%} ({'高信噪比/高内聚' if snr >= 0.7 else ('低信噪比/高熵噪声' if snr < 0.35 else '中等')})")
             colors.append(theme.SUCCESS if snr >= 0.7 else (theme.ERROR if snr < 0.35 else theme.MUTED))
             if impulse:
-                flux_lbl = {"high": "强负熵向心制导", "mid": "常规微调", "low": "微弱扰动"}.get(impulse.get("flux"), "外部干预")
+                flux_lbl = {"high": "关键纠偏", "mid": "常规指令", "low": "微弱扰动"}.get(impulse.get("flux"), "外部干预")
                 lines.append(f"人类控制冲量: {flux_lbl} · {impulse.get('note', '')}")
                 colors.append(theme.PHASE_IMPULSE if impulse.get("flux") == "high" else theme.MUTED)
 
             # 混沌动力学：局部李雅普诺夫指数
             lam_val = -0.65 if event_tag == "breakthrough" else (-0.35 if vec in ("positive", "convergent") else (+0.25 if event_tag == "retry_loop" else 0.10))
-            lam_desc = "强耗散收敛" if lam_val <= -0.4 else ("耗散渐近稳定" if lam_val < 0 else "混沌发散风险")
+            lam_desc = "强力收敛" if lam_val <= -0.4 else ("渐近稳定" if lam_val < 0 else "发散风险")
             lam_col = theme.SUCCESS if lam_val < 0 else theme.ERROR
             lines.append(f"局部李雅普诺夫: λ = {lam_val:+.2f} ({lam_desc})")
             colors.append(lam_col)
@@ -3287,7 +3287,7 @@ class PhasePortraitWidget:
         if w < 100:
             w = max(w, c.winfo_reqwidth(), 600)
         if h < 50:
-            h = max(h, c.winfo_reqheight(), 380)
+            h = max(h, c.winfo_reqheight(), 480)
         pad_l, pad_r, pad_t, pad_b = 68, 55, 38, 34
         plot_w = w - pad_l - pad_r
         plot_h = h - pad_t - pad_b
@@ -3446,23 +3446,26 @@ class PhasePortraitWidget:
                 if poly:
                     aa_items.append(("polygon", poly, col, col))
 
-            # (2) 人类信源信息注入冲量矢量 (User Impulse Vector)
+            # (2) 人类信源信息注入冲量引导线 (User Impulse Lines)
+            impulse_dashed_lines: list[tuple[float, float, float, float, str, tuple, int]] = []
             for i_pt, item in enumerate(self._pts):
                 x, y, pt = item[:3]
                 prev_pt = self._pts[i_pt - 1][2] if i_pt > 0 else None
                 _snr, impulse = self._derive_flux_and_snr(pt, prev_pt)
                 if impulse:
                     flux = impulse.get("flux", "mid")
-                    arr_len = 32 if flux == "high" else (22 if flux == "mid" else 15)
-                    arr_lw = 3 if flux == "high" else (2 if flux == "mid" else 1)
-                    arr_col = theme.PHASE_IMPULSE if flux == "high" else (theme.MUTED if flux == "mid" else theme.WARNING)
-                    ix0 = x - arr_len * 0.7
-                    iy0 = y - arr_len * 0.7
-                    aa_items.append(("line", [(ix0, iy0), (x - 4, y - 4)], arr_col, arr_lw))
-                    poly_imp = self._get_arrowhead_poly(ix0, iy0, x - 1, y - 1, length=8, half_width=4, setback=1)
-                    if poly_imp:
-                        aa_items.append(("polygon", poly_imp, arr_col, arr_col))
-                    aa_items.append(("dot", ix0, iy0, 3, arr_col, theme.FG_WHITE, 1))
+                    if flux == "high":
+                        # 关键纠偏：绿色/青色清晰虚线引导线（向右上方舒展引出，长度充裕）
+                        arr_len = 42
+                        ix0 = x + arr_len * 0.75
+                        iy0 = y - arr_len * 0.45
+                        impulse_dashed_lines.append((x + 4, y - 2, ix0, iy0, theme.PHASE_IMPULSE, (3, 2), 1))
+                    else:
+                        # 初始需求/迭代要求：纤细灰色虚线（向右上方舒展引出，长度充裕）
+                        arr_len = 38
+                        ix0 = x + arr_len * 0.75
+                        iy0 = y - arr_len * 0.45
+                        impulse_dashed_lines.append((x + 4, y - 2, ix0, iy0, theme.BORDER_HOVER, (2, 3), 1))
             # (3) 多体系统卫星微质点群 (Subagent Satellites)
             for item in self._pts:
                 x, y, pt = item[:3]
@@ -3502,7 +3505,9 @@ class PhasePortraitWidget:
                 aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
 
         self._aa_layer(c, aa_items, self._aa_imgs)
-
+        # 人类信源外部冲量引导线（纯虚线辅助对齐，无任何箭头侵入主轨迹）
+        for lx0, ly0, lx1, ly1, col, d_pat, lw in impulse_dashed_lines:
+            c.create_line(lx0, ly0, lx1, ly1, fill=col, dash=d_pat, width=lw)
         c.create_text(att_x, pad_t + 10, text="平庸代码吸引子",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
         c.create_text(tgt_x + 22, tgt_y, text="狄拉克目标点",
@@ -3511,7 +3516,7 @@ class PhasePortraitWidget:
         # 止损视界拦截状态文本
         # 止损视界拦截状态徽章胶囊（无生硬括号，精致底衬与状态微光）
         if horizon_status == "intercepted":
-            lbl_txt = "视界拦截成功 · 阻断不可逆发散"
+            lbl_txt = "成功纠偏 · 挽回失控"
             bw = len(lbl_txt) * 11 + 24
             bx0, by0, bx1, by1 = line_horizon_x - bw - 10, pad_t + 18, line_horizon_x - 10, pad_t + 38
             c.create_rectangle(bx0, by0, bx1, by1, fill=theme.DIRAC_CORE_BG, outline=theme.DIRAC_WELL_BORDER, width=1)
@@ -3519,7 +3524,7 @@ class PhasePortraitWidget:
             c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt,
                           fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         elif horizon_status == "breached":
-            lbl_txt = "越过不可逆视界 · 建议止损重开"
+            lbl_txt = "偏离过大 · 建议推翻重开"
             bw = len(lbl_txt) * 11 + 24
             bx0, by0, bx1, by1 = line_horizon_x + 10, pad_t + 18, line_horizon_x + bw + 10, pad_t + 38
             c.create_rectangle(bx0, by0, bx1, by1, fill=theme.ATTRACTOR_RINGS[0], outline=theme.ATTRACTOR_BASIN_BORDER, width=1)
@@ -3527,8 +3532,8 @@ class PhasePortraitWidget:
             c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt,
                           fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         else:
-            lbl_txt = "不可逆止损视界 Ds=0.82"
-            bw = len(lbl_txt) * 7.5 + 16
+            lbl_txt = "失控临界红线 (Ds=0.82)"
+            bw = len(lbl_txt) * 8.5 + 16
             bx0, by0, bx1, by1 = line_horizon_x - bw / 2, pad_t + 18, line_horizon_x + bw / 2, pad_t + 38
             c.create_rectangle(bx0, by0, bx1, by1, fill=theme.CARD_HEADER_BG, outline=theme.BORDER, width=1)
             c.create_text(line_horizon_x, (by0 + by1) / 2, text=lbl_txt,
@@ -3541,9 +3546,9 @@ class PhasePortraitWidget:
         leg_x = max(pad_l + 8, pad_l + (plot_w - leg_w) / 2)
         leg_y = pad_t - 16
         c.create_line(leg_x, leg_y, leg_x + 14, leg_y, fill=theme.SUCCESS, width=2)
-        c.create_text(leg_x + 18, leg_y, text="向心推进 (做正功)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(leg_x + 18, leg_y, text="向心推进 (贴近目标)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_line(leg_x + 130, leg_y, leg_x + 144, leg_y, fill=theme.ERROR, width=2)
-        c.create_text(leg_x + 148, leg_y, text="离心偏离 (做负功)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(leg_x + 148, leg_y, text="离心偏离 (偏离需求)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_oval(leg_x + 260, leg_y - 4, leg_x + 268, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
         c.create_text(leg_x + 272, leg_y, text="狄拉克目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_oval(leg_x + 365, leg_y - 4, leg_x + 373, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
@@ -3568,14 +3573,14 @@ class PhasePortraitWidget:
             t_str = f"T{t_val}·U{u_val}" if (t_val is not None and u_val is not None) else (f"T{t_val}" if t_val is not None else "")
             c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
                           font=theme.FONT_UI_SMALL_BOLD)
-            # 若该点为人类外部信息注入点，标注推力徽标
-            # 若该点为人类外部信息注入点，标注推力徽标（工程规范文本）
+            # 若该点为人类外部信息注入点，标注推力徽标（放置在点右侧开阔区，避免遮挡前进轨迹）
             if impulse and impulse.get("flux") == "high":
-                c.create_text(x - 24, y - 24, text=f"U{u_val} 强负熵制导", fill=theme.PHASE_IMPULSE,
-                              font=theme.FONT_UI_SMALL_BOLD, anchor="e")
+                c.create_text(x + 36, y - 19, text=f"U{u_val} 关键纠偏", fill=theme.PHASE_IMPULSE,
+                              font=theme.FONT_UI_SMALL_BOLD, anchor="w")
             elif impulse and impulse.get("flux") == "mid":
-                c.create_text(x - 20, y - 18, text=f"U{u_val} 初始需求", fill=theme.MUTED,
-                              font=theme.FONT_UI_SMALL, anchor="e")
+                req_lbl = "初始需求" if (u_val in (1, "1") or i == 0) else "迭代要求"
+                c.create_text(x + 33, y - 17, text=f"U{u_val} {req_lbl}", fill=theme.MUTED,
+                              font=theme.FONT_UI_SMALL, anchor="w")
             # 卫星标签标注
             subs = self._calc_subagents(pt)
             if subs:
@@ -3663,14 +3668,14 @@ class PhasePortraitWidget:
         c.create_line(line_horizon_x, pad_t + 18, line_horizon_x, pad_t + plot_h - 18, fill=theme.ERROR, dash=(3, 5), width=2)
         # 止损视界拦截状态徽章胶囊（对偶相平面）
         if horizon_status_p == "intercepted":
-            lbl_txt = "视界拦截成功"
+            lbl_txt = "成功纠偏"
             bw = len(lbl_txt) * 12 + 24
             bx0, by0, bx1, by1 = line_horizon_x - bw - 10, pad_t + 18, line_horizon_x - 10, pad_t + 38
             c.create_rectangle(bx0, by0, bx1, by1, fill=theme.DIRAC_CORE_BG, outline=theme.DIRAC_WELL_BORDER, width=1)
             c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.SUCCESS, outline="")
             c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt, fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         elif horizon_status_p == "breached":
-            lbl_txt = "越过不可逆视界"
+            lbl_txt = "偏离过大"
             bw = len(lbl_txt) * 12 + 24
             bx0, by0, bx1, by1 = line_horizon_x + 10, pad_t + 18, line_horizon_x + bw + 10, pad_t + 38
             c.create_rectangle(bx0, by0, bx1, by1, fill=theme.ATTRACTOR_RINGS[0], outline=theme.ATTRACTOR_BASIN_BORDER, width=1)
