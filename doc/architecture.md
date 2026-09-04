@@ -20,7 +20,8 @@
 | `tcer/core/format.py` | 纯值格式化器（千分位/百分比/时间戳/模型名） |
 | `tcer/core/export.py` | JSON/CSV/Markdown 序列化 + CTEI 排名数据 + 文本条形图（`_CSV_FIELDS`/`_CSV_EXCLUDED` 有漂移护栏测试） |
 | `tcer/core/audit.py` | 闭环审计：`analyze` 结果对照原始会话文件重算（`python -m tcer.audit`） |
-| `tcer/core/upload_client.py` / `upload_prefs.py` | 显式 opt-in 的上传（纯离线原则的唯一例外，另有负责人） |
+| `tcer/core/upload_client.py` / `upload_prefs.py` | 显式 opt-in 的上传（纯离线原则的例外之一，另有负责人） |
+| `tcer/core/llm_client.py` / `llm_prefs.py` / `llm_prompts.py` | 显式 opt-in 的 LLM 语义解读（纯 urllib 调 OpenAI-compatible 端点；数据出境三档 metrics/dialog/full；结果仅展示不参与指标计算；未配置零联网零入口） |
 | `tcer/gui/` | Tkinter 图形界面（MVC 架构） |
 
 ### 非 Claude 源的 SourceAdapter

@@ -227,17 +227,21 @@ class TcerGui:
         tab_t = tk.Frame(nb, bg=theme.PANEL)
         tab_c = tk.Frame(nb, bg=theme.PANEL)
         tab_r = tk.Frame(nb, bg=theme.PANEL)
+        tab_l = tk.Frame(nb, bg=theme.BG)
         nb.add(tab_m, text="指标分类", image=views.ui_icon(nb, "grid"), compound="left")
         nb.add(tab_c, text="模型对比", image=views.ui_icon(nb, "compare"), compound="left")
         nb.add(tab_b, text="效率榜", image=views.ui_icon(nb, "rank"), compound="left")
         nb.add(tab_t, text="趋势", image=views.ui_icon(nb, "trend"), compound="left")
         nb.add(tab_r, text="项目聚合", image=views.ui_icon(nb, "layers"), compound="left")
+        nb.add(tab_l, text="LLM 报告", image=views.ui_icon(nb, "chat"), compound="left")
 
         self.metric_panel = MetricPanel(tab_m, self)
         self.ranking_view = ScoreRankingView(tab_b, controller=self)
         self.trend_chart = TrendChart(tab_t, controller=self)
         self.model_compare = ModelCompareView(tab_c, controller=self)
         self.real_projects_view = views.RealProjectsView(tab_r, controller=self)
+        self.llm_reports_view = views.LlmReportsView(tab_l, controller=self)
+        self._llm_tab = tab_l
         # 项目聚合页签独立于当前分析（后台扫全部项目），首次切入加载。
         self._realproj_loaded = False
         self._realproj_scanning = False
@@ -620,6 +624,10 @@ class TcerGui:
 
     def _render_tab(self, idx: int) -> None:
         """渲染指定页签（未标脏则跳过）。补渲染时按脏标记决定是否重灌数据。"""
+        if idx == 5:
+            # LLM 报告页签不依赖 self._current（读持久化文件），每次切入重载。
+            self.llm_reports_view.on_show()
+            return
         if idx == 4:
             # 项目聚合页签不依赖 self._current（自扫全部项目），首次切入加载。
             self.real_projects_view.on_show()
@@ -1192,7 +1200,43 @@ class TcerGui:
         if not report.usage.turn_stats:
             self.filter.set_status("该会话未记录逐回合数据")
             return
-        popups.SessionTimelinePopup(self.root, report)
+        # LLM 解读的数据懒加载器（弹窗 worker 线程内调用，主线程零 IO）：
+        # dialogue=完整对话时间线（Claude 源专属——其余源无 assistant 文本
+        # 读取，弹窗内回退到用户消息采样）；user_texts=各源 read_user_messages。
+        load_dialogue = None
+        if (report.meta.source or "claude") == "claude":
+            from tcer.core import reader
+            load_dialogue = lambda: reader.read_dialogue(report.meta.path)
+        popups.SessionTimelinePopup(
+            self.root, report,
+            load_user_texts=lambda: TcerGui._load_user_messages(report, [])[0],
+            load_dialogue=load_dialogue,
+            on_report_saved=self._on_llm_report_saved)
+
+    def _on_llm_report_saved(self, report_id: str) -> None:
+        """解读生成落盘后：切到「LLM 报告」页签并选中该条（大区阅读）。"""
+        self._nb.select(self._llm_tab)
+        self.llm_reports_view.select_report(report_id)
+
+    def show_llm_config(self) -> None:
+        """LLM 设置弹窗（本地表单零联网；连接测试为用户显式点击）。"""
+        from tcer.core import llm_prefs
+        popups.LlmConfigPopup(self.root, config=llm_prefs.stored_config(),
+                              on_save=self._save_llm_config)
+
+    def _save_llm_config(self, *, base_url: str, api_key: str, model: str,
+                         scope: str, scopes: list[str] | None = None,
+                         **_extra) -> None:
+        from tcer.core import llm_prefs
+        cfg = {
+            "base_url": base_url,
+            "api_key": api_key,
+            "model": model,
+            "scope": scope,
+        }
+        if scopes is not None:
+            cfg["scopes"] = scopes
+        llm_prefs.save(cfg)
 
     def show_session_compare(self) -> None:
         if not self._current or len(self._current.reports) < 2:

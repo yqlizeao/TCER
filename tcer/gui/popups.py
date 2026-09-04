@@ -1611,6 +1611,263 @@ class UploadDialog:
         self.set_status("上传中…")
         self._on_upload(prefs, self)
 
+class LlmConfigPopup:
+    """LLM 语义解读设置 — OpenAI-compatible 端点 + 数据出境三档。
+
+    「测试连接」在后台线程用**表单当前值**（未保存）发最小 chat ping，一次
+    验证端点/模型名/鉴权（不用 GET /v1/models——部分兼容服务不实现）。
+    api_key 明文存本机 ``tcer_llm.json``（本地单用户信任模型，同上传 token，
+    便于用户核对/更换）。保存后由 controller 的 on_save 回调刷新工具栏入口
+    显隐。两个文本框**同时留空保存 = 清除配置**（GUI 回退到无 LLM 入口）。
+    """
+
+    def __init__(self, parent, *, config: dict, on_save) -> None:
+        from tcer.core import llm_client, llm_prefs
+        self._llm_client = llm_client
+        self._llm_prefs = llm_prefs
+        self._on_save = on_save
+
+        win = _new_window(parent, "LLM 设置", "500x560")
+        self._win = win
+        import queue as _queue
+        self._ui_queue: _queue.Queue = _queue.Queue()
+        self._poll_ui_queue()
+        tk.Label(win, text="LLM 语义解读", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_HEADING, pady=10).pack(side="top", fill="x")
+
+        # 底部操作栏先行 pack(side="bottom")，确保中间滚动区获得准确剩余高度
+        action = tk.Frame(win, bg=theme.BG)
+        action.pack(side="bottom", fill="x", padx=16, pady=(4, 10))
+        self._action_frame = action
+        self._test_btn = flat_button(action, "测试连接", self._do_test)
+        self._test_btn.pack(side="left")
+        flat_button(action, "保存", self._do_save, primary=True).pack(side="right")
+
+        self._status = tk.Label(win, text="", bg=theme.BG, fg=theme.MUTED,
+                                font=theme.FONT_UI, wraplength=440, justify="left")
+        self._status.pack(side="bottom", fill="x", padx=12, pady=(0, 2))
+
+        # 中间内容滚动容器：独立 body_frame 容纳 ScrollFrame
+        body_frame = tk.Frame(win, bg=theme.BG)
+        body_frame.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 4))
+        sf = ScrollFrame(body_frame, bg=theme.BG)
+        self._sf = sf
+        inner = sf.inner
+        svc = self._card(inner, "服务（OpenAI-compatible 端点）")
+        self._url_var = tk.StringVar(value=str(config.get("base_url") or ""))
+        self._key_var = tk.StringVar(value=str(config.get("api_key") or ""))
+        self._model_var = tk.StringVar(value=str(config.get("model") or ""))
+        self._labeled_entry(
+            svc, "服务地址", self._url_var,
+            placeholder="http://localhost:11434/v1 或 https://api.x.ai/v1（可省略 /v1）")
+        self._labeled_entry(
+            svc, "API Key", self._key_var,
+            placeholder="留空 = 无鉴权（本地 Ollama）；明文存本机")
+        self._labeled_entry(
+            svc, "模型", self._model_var,
+            placeholder="如 qwen3:8b / claude-sonnet-5")
+
+        scope_card = self._card(inner, "数据出境范围（可多选）")
+        stored_scopes = set(self._llm_prefs.normalize_scopes(
+            config.get("scopes") if "scopes" in config else config.get("scope")))
+        self._scope_vars: dict[str, tk.BooleanVar] = {}
+        self._scope_var = tk.StringVar(
+            value=self._llm_prefs.scopes_summary(list(stored_scopes)))
+        for s in ("metrics", "dialog", "tools"):
+            var = tk.BooleanVar(value=(s in stored_scopes))
+            self._scope_vars[s] = var
+
+            # 独立条目卡片：轻量抬升底色 + 边框 + 左右两列排版
+            item = tk.Frame(scope_card, bg=theme.PANEL_2, relief="flat",
+                            highlightthickness=1, highlightbackground=theme.BORDER,
+                            padx=10, pady=8, cursor=CLICK_CURSOR)
+            item.pack(fill="x", pady=(0, 6))
+
+            # 左列：自定义复选框（纯白对勾 + 强调色底色，彻底消除 Windows 灰色模糊暗纹）
+            cb_canvas = tk.Canvas(item, width=16, height=16, bg=theme.PANEL_2,
+                                  highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
+            def _draw_cb(_c=cb_canvas, _v=var):
+                _c.delete("all")
+                if _v.get():
+                    _c.create_rectangle(1, 1, 15, 15, outline=theme.ACCENT,
+                                       fill=theme.ACCENT, width=1)
+                    _c.create_line(4, 8, 7, 11, 12, 4, fill=theme.FG_WHITE, width=2,
+                                   capstyle="round", joinstyle="round")
+                else:
+                    _c.create_rectangle(1, 1, 15, 15, outline=theme.BORDER_HOVER,
+                                       fill=theme.BG, width=1)
+            _draw_cb()
+            var.trace_add("write", lambda *_, c=cb_canvas, v=var: _draw_cb(c, v))
+            cb_canvas.pack(side="left", anchor="nw", padx=(0, 8), pady=(2, 0))
+            # 右列：独立的文本容器，使标题与描述绝对物理左对齐
+            text_col = tk.Frame(item, bg=theme.PANEL_2, cursor=CLICK_CURSOR)
+            text_col.pack(side="left", fill="both", expand=True)
+
+            title_lbl = tk.Label(
+                text_col, text=self._llm_prefs.SCOPE_LABELS[s],
+                bg=theme.PANEL_2, fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
+                anchor="w", justify="left", cursor=CLICK_CURSOR)
+            title_lbl.pack(fill="x")
+
+            desc_lbl = tk.Label(
+                text_col, text=self._llm_prefs.SCOPE_DESCRIPTIONS[s],
+                bg=theme.PANEL_2, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                wraplength=380, anchor="w", justify="left", cursor=CLICK_CURSOR)
+            desc_lbl.pack(fill="x", pady=(2, 0))
+
+            # 交互增强：点击条目卡片任意区域均可直接切换勾选状态
+            def _make_toggle(target_var=var):
+                def _toggle(_event=None):
+                    target_var.set(not target_var.get())
+                    self._on_scope_changed()
+                return _toggle
+
+            toggle_fn = _make_toggle(var)
+            for w_elem in (item, cb_canvas, text_col, title_lbl, desc_lbl):
+                w_elem.bind("<Button-1>", toggle_fn)
+
+            # 悬停轻微高亮反馈
+            def _make_hover(target_frame=item):
+                def _enter(_e):
+                    try:
+                        target_frame.config(highlightbackground=theme.BORDER_HOVER)
+                    except tk.TclError:
+                        pass
+                def _leave(_e):
+                    try:
+                        target_frame.config(highlightbackground=theme.BORDER)
+                    except tk.TclError:
+                        pass
+                return _enter, _leave
+
+            _hover_enter, _hover_leave = _make_hover(item)
+            for w_elem in (item, cb_canvas, text_col, title_lbl, desc_lbl):
+                w_elem.bind("<Enter>", _hover_enter)
+                w_elem.bind("<Leave>", _hover_leave)
+        win.bind("<Escape>", lambda e: win.destroy())
+        self._fit_window()
+
+    # -- small builders（UploadDialog 同款）--
+    def _card(self, inner, title: str) -> tk.Frame:
+        wrap = tk.Frame(inner, bg=theme.PANEL, highlightthickness=1,
+                        highlightbackground=theme.BORDER)
+        wrap.pack(fill="x", padx=2, pady=(0, 10))
+        head = tk.Frame(wrap, bg=theme.CARD_HEADER_BG, padx=12, pady=6)
+        head.pack(fill="x")
+        tk.Label(head, text=title, bg=theme.CARD_HEADER_BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_UI_BOLD).pack(anchor="w")
+        card = tk.Frame(wrap, bg=theme.PANEL, padx=12, pady=10)
+        card.pack(fill="x")
+        return card
+
+    def _labeled_entry(self, card, label: str, var, *, placeholder: str = "") -> None:
+        row = tk.Frame(card, bg=theme.PANEL)
+        row.pack(fill="x", pady=(3, 3))
+        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL, width=10, anchor="w").pack(side="left")
+        e = tk.Entry(row, textvariable=var, bg=theme.PANEL_2, fg=theme.FG,
+                     insertbackground=theme.FG, relief="flat", highlightthickness=1,
+                     highlightbackground=theme.BORDER, highlightcolor=theme.ACCENT,
+                     font=theme.FONT_UI)
+        e.pack(side="left", fill="x", expand=True, ipady=3)
+        if placeholder:
+            Tooltip(e, placeholder)
+
+    def _fit_window(self) -> None:
+        win = self._win
+        win.update_idletasks()
+        inner_h = self._sf.inner.winfo_reqheight()
+        status_h = self._status.winfo_reqheight()
+        action_h = self._action_frame.winfo_reqheight()
+        needed_h = 45 + inner_h + status_h + action_h + 30
+        win_h = max(420, min(needed_h, 720))
+        win.geometry(f"500x{int(win_h)}+{int(win.winfo_x())}+{int(win.winfo_y())}")
+        win.update_idletasks()
+        self._sf._apply_scrollregion()
+    def _poll_ui_queue(self) -> None:
+        import queue as _queue
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except _queue.Empty:
+            pass
+        except Exception:
+            pass
+        try:
+            if self._win.winfo_exists():
+                self._win.after(60, self._poll_ui_queue)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def set_status(self, text: str, *, error: bool = False) -> None:
+        try:
+            if not self._status.winfo_exists():
+                return
+            self._status.config(text=text,
+                                fg=theme.ERROR if error else theme.SUCCESS)
+        except tk.TclError:
+            pass
+
+    # -- actions --
+    def _on_scope_changed(self) -> None:
+        sel = [s for s in ("metrics", "dialog", "tools")
+               if self._scope_vars.get(s, tk.BooleanVar()).get()]
+        self._scope_var.set(self._llm_prefs.scopes_summary(sel))
+    def _do_test(self) -> None:
+        from threading import Thread
+        url = self._url_var.get().strip()
+        model = self._model_var.get().strip()
+        if not url or not model:
+            self.set_status("请先填写服务地址与模型", error=True)
+            return
+        key = self._key_var.get().strip() or None
+        self._test_btn.config(state="disabled", text="测试中…")
+        self.set_status("连接中…")
+        def work():
+            try:
+                self._llm_client.test_connection(base_url=url, api_key=key,
+                                                 model=model)
+                ok, msg = True, "连接成功"
+            except self._llm_client.LlmError as e:
+                ok, msg = False, str(e)
+            self._ui_queue.put(lambda: self._on_test_done(ok, msg))
+            try:
+                self._win.after(0, lambda: None)
+            except Exception:
+                pass
+        Thread(target=work, daemon=True).start()
+
+    def _on_test_done(self, ok: bool, msg: str) -> None:
+        try:
+            if not self._win.winfo_exists():
+                return
+            self._test_btn.config(state="normal", text="测试连接")
+            self.set_status(msg, error=not ok)
+        except tk.TclError:
+            pass
+
+    def _do_save(self) -> None:
+        sel_scopes = [s for s in ("metrics", "dialog", "tools")
+                      if self._scope_vars.get(s, tk.BooleanVar()).get()]
+        cfg = {
+            "base_url": self._url_var.get().strip(),
+            "api_key": self._key_var.get().strip(),
+            "model": self._model_var.get().strip(),
+            "scopes": sel_scopes,
+            "scope": self._llm_prefs.scopes_summary(sel_scopes),
+        }
+        if bool(cfg["base_url"]) != bool(cfg["model"]):
+            self.set_status("服务地址与模型需同时填写（或同时留空以清除配置）",
+                            error=True)
+            return
+        self._on_save(**cfg)
+        self.set_status("已保存" + ("" if cfg["base_url"] else "（配置已清除，界面入口隐藏）"))
+
+
 def _copy(win, text: str) -> None:
     win.clipboard_clear()
     win.clipboard_append(text)

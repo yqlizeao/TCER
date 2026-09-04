@@ -294,6 +294,138 @@ def read_user_messages(path: Path) -> list[str]:
     return messages
 
 
+def read_dialogue(path: Path) -> list[str]:
+    """交织对话时间线（LLM 解读专用；与 read_user_messages 同样的懒加载边界）。
+
+    用户消息全文（完整保留无截断）、assistant 文本（完整保留方案与总结，跳过
+    纯 thinking 块）、工具调用明细与代码编辑（Edit 的 old/new 差异、Write 内容、
+    Bash 命令全量）。按 message.id 与 tool_use id 去重（防 rewind 重发双计）。
+    返回行列表（``[用户] …`` / ``[AI] …`` / ``[工具] …``）。
+    """
+    lines: list[str] = []
+    seen_texts: set[str] = set()
+    seen_tools: set[str] = set()
+    for obj in iter_messages(path):
+        msg = obj.get("message")
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "user":
+            if isinstance(content, str) and content.strip():
+                is_real_user = True
+            else:
+                is_real_user = isinstance(content, list) and any(
+                    isinstance(it, dict) and it.get("type") == "text"
+                    for it in content
+                )
+            if is_real_user:
+                txt = _strip_tags(extract_text(content).strip())
+                if txt and not _is_user_noise(txt):
+                    lines.append(f"[用户] {txt}")
+            elif isinstance(content, list):
+                # 捕获工具执行反馈（报错、异常、测试未通过），为 LLM 提供环境因果证据
+                for it in content:
+                    if isinstance(it, dict) and it.get("type") == "tool_result":
+                        is_err = it.get("is_error") is True
+                        raw_c = it.get("content")
+                        c_text = ""
+                        if isinstance(raw_c, str):
+                            c_text = raw_c
+                        elif isinstance(raw_c, list):
+                            c_text = " ".join(
+                                str(x.get("text", "")) for x in raw_c
+                                if isinstance(x, dict) and x.get("text")
+                            )
+                        c_text = c_text.strip()
+                        is_fail = is_err or any(
+                            kw in c_text.lower()
+                            for kw in ("error:", "failed", "traceback", "command failed",
+                                       "exit code", "exception:", "tool_use_error")
+                        )
+                        if is_fail and c_text:
+                            err_summary = c_text[:250].replace("\r", "").strip()
+                            if len(c_text) > 250:
+                                err_summary += "…"
+                            lines.append(f"[工具反馈:报错] {err_summary}")
+        elif role == "assistant" and isinstance(content, list):
+            mid = msg.get("id")
+            has_id = isinstance(mid, str) and mid
+            texts: list[str] = []
+
+            def _flush_text():
+                nonlocal texts
+                if texts:
+                    joined = "\n".join(texts).strip()
+                    if joined:
+                        lines.append(f"[AI] {joined}")
+                    texts = []
+
+            for it in content:
+                if not isinstance(it, dict):
+                    continue
+                btype = it.get("type")
+                if btype == "text":
+                    if has_id and mid in seen_texts:
+                        continue
+                    t = str(it.get("text") or "").strip()
+                    if t:
+                        texts.append(t)
+                elif btype == "tool_use":
+                    _flush_text()
+                    tid = it.get("id")
+                    if isinstance(tid, str) and tid:
+                        if tid in seen_tools:
+                            continue
+                        seen_tools.add(tid)
+                    inp = it.get("input") if isinstance(it.get("input"), dict) else {}
+                    tname = str(it.get("name") or "")
+                    arg = (inp.get("file_path") or inp.get("path")
+                           or inp.get("notebook_path") or "")
+                    if tname == "Edit":
+                        old_s = inp.get("old_string")
+                        new_s = inp.get("new_string")
+                        if old_s is not None or new_s is not None:
+                            diff_parts = [f"[工具] Edit {arg}:"]
+                            if old_s:
+                                diff_parts.append(f"  - 原代码:\n{old_s}")
+                            if new_s:
+                                diff_parts.append(f"  + 新代码:\n{new_s}")
+                            lines.append("\n".join(diff_parts))
+                        else:
+                            lines.append(f"[工具] Edit" + (f" {arg}" if arg else ""))
+                    elif tname == "Write":
+                        cnt = inp.get("content")
+                        if cnt is not None:
+                            lines.append(f"[工具] Write {arg}:\n{cnt}")
+                        else:
+                            lines.append(f"[工具] Write" + (f" {arg}" if arg else ""))
+                    elif tname == "MultiEdit":
+                        edits = inp.get("edits")
+                        if isinstance(edits, list) and edits:
+                            diff_parts = [f"[工具] MultiEdit {arg}:"]
+                            for ed in edits:
+                                if isinstance(ed, dict):
+                                    if ed.get("old_string"):
+                                        diff_parts.append(f"  - 原代码:\n{ed['old_string']}")
+                                    if ed.get("new_string"):
+                                        diff_parts.append(f"  + 新代码:\n{ed['new_string']}")
+                            lines.append("\n".join(diff_parts))
+                        else:
+                            lines.append(f"[工具] MultiEdit" + (f" {arg}" if arg else ""))
+                    elif tname == "Bash":
+                        cmd = inp.get("command")
+                        if cmd:
+                            lines.append(f"[工具] Bash {cmd}")
+                        else:
+                            lines.append("[工具] Bash")
+                    else:
+                        lines.append(f"[工具] {tname}" + (f" {arg}" if arg else ""))
+            _flush_text()
+            if has_id:
+                seen_texts.add(mid)
+    return lines
+
 def scan_session(
     path: Path,
     *,

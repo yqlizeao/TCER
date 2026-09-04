@@ -8,6 +8,7 @@ Chart classes draw on a ``tk.Canvas``; ``ScoreRankingView`` consumes the shared
 from __future__ import annotations
 
 import os
+import re
 import tkinter as tk
 from pathlib import Path
 from dataclasses import dataclass
@@ -305,6 +306,8 @@ class FilterBar:
         ]
         if upload_config.upload_enabled():
             factories.append(lambda: self._make_upload_button(bar))
+        # LLM 按钮常驻（同上传；点击打开设置弹窗，未配置时本身零联网）。
+        factories.append(lambda: self._make_llm_button(bar))
         for factory in factories:
             factory().pack(side="right", padx=2)
 
@@ -392,6 +395,15 @@ class FilterBar:
         btn = flat_button(parent, "上传…", self.controller.show_upload,
                           padx=theme.PAD_M, image=ui_icon(parent, "upload"), compound="left")
         Tooltip(btn, "上传当前项目的效率报告到 TCER Server")
+        return btn
+
+    def _make_llm_button(self, parent) -> tk.Button:
+        # ui-sparkle.png 素材暂缺时 ui_icon 返回 None → 纯文字降级，素材后补。
+        btn = flat_button(parent, "LLM设置", self.controller.show_llm_config,
+                          padx=theme.PAD_M, image=ui_icon(parent, "sparkle"),
+                          compound="left")
+        Tooltip(btn, "LLM 语义解读配置（OpenAI-compatible 端点，可选本地 Ollama；"
+                     "解读入口在会话时间线弹窗）")
         return btn
 
     def _date_entry(self, bar, var, tip):
@@ -2797,3 +2809,1213 @@ class RealProjectsView:
     @staticmethod
     def _usd(v):
         return "-" if v is None else f"${v:.1f}"
+
+
+class PhasePortraitWidget:
+    """相空间收敛动力学相图（专属 dynamics 类型报告，其余报告自动隐藏）。
+
+    横轴：语义偏离距离 Ds（0.0 狄拉克目标点 ← 1.0 初始偏离态）
+    纵轴：回合推进进度
+    要素：左下角高亮狄拉克目标点、右侧平庸代码吸引子引力漏斗、关键回合轨迹粒子与推进矢量箭头。
+    """
+    def __init__(self, parent) -> None:
+        from .charts import _ChartTooltip, _aa_layer
+        self._aa_layer = _aa_layer
+        self.container = tk.Frame(parent, bg=theme.PANEL_2, highlightthickness=1,
+                                  highlightbackground=theme.BORDER)
+        self.head = tk.Frame(self.container, bg=theme.CARD_HEADER_BG, padx=10, pady=5)
+        self.head.pack(fill="x")
+
+        left_h = tk.Frame(self.head, bg=theme.CARD_HEADER_BG)
+        left_h.pack(side="left")
+        tk.Label(left_h, text="相空间收敛动力学相图", bg=theme.CARD_HEADER_BG,
+                 fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD).pack(side="left")
+        self.state_badge = tk.Label(left_h, text="", bg=theme.CARD_HEADER_BG,
+                                    font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self.state_badge.pack(side="left", padx=(8, 0))
+        self.cap_lbl = tk.Label(self.head, text="")  # 兼容测试与标量文本读取
+
+        self.caps_frame = tk.Frame(self.head, bg=theme.CARD_HEADER_BG)
+        self.caps_frame.pack(side="right")
+
+        self.canvas = tk.Canvas(self.container, bg=theme.BG, height=240,
+                                highlightthickness=0, cursor=CLICK_CURSOR)
+        self.canvas.pack(fill="x", padx=4, pady=4)
+        self._tooltip = _ChartTooltip(self.canvas)
+        self.canvas.bind("<Configure>", lambda _e: self._redraw())
+        self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Leave>", lambda _e: self._tooltip.hide())
+        self.canvas.bind("<Destroy>", lambda _e: self._tooltip.hide())
+        self._data: dict = {}
+        self._report: dict = {}
+        self._pts: list = []
+        self._aa_imgs: list = []  # 抗锯齿 PhotoImage 引用防 GC
+        self._tgt_pos: tuple[float, float] | None = None
+        self._att_pos: tuple[float, float] | None = None
+        self._pad_t: int = 34
+    def render(self, dynamics_data: dict, report: dict) -> None:
+        self._data = dynamics_data or {}
+        self._report = report or {}
+        # 1. 态势徽章（终态感知，自洽反映吸引子逃逸与向心突破）
+        ctype = str(self._data.get("convergence_type") or "").lower()
+        is_trapped = bool(self._data.get("attractor_trapped"))
+        traj = self._data.get("trajectory") or []
+        last_pt = traj[-1] if traj else {}
+        last_evt = str(last_pt.get("event") or "").lower()
+        last_vec = str(last_pt.get("vector") or "").lower()
+        last_ds = float(last_pt.get("semantic_distance", 0.5)) if last_pt else 0.5
+
+        # 检查是否达成逃逸或向心突破：
+        # (A) 显式标为 escaped/breakthrough
+        # (B) 末点带有 breakthrough 事件
+        # (C) 虽曾受困但末尾向心大幅推进且偏离显著消减 (Ds <= 0.45 且 vector 推进)
+        is_escaped = (
+            ctype in ("escaped", "breakthrough")
+            or last_evt == "breakthrough"
+            or (is_trapped and last_vec in ("positive", "convergent") and last_ds <= 0.45)
+        )
+
+        if ctype == "dirac" or (last_ds <= 0.15 and not is_trapped):
+            self.state_badge.config(text="[狄拉克向心收敛]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+        elif is_escaped:
+            self.state_badge.config(text="[吸引子逃逸 / 向心突破]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+        elif ctype == "trapped" or is_trapped:
+            self.state_badge.config(text="[平庸吸引子捕获]", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
+        else:
+            self.state_badge.config(text="[高熵漫游未收敛]", fg=theme.WARNING, bg=theme.WARN_TINT_BG)
+
+        # 2. 三能力胶囊条（显示名称、分数与评级 Tooltip）
+        for w in self.caps_frame.winfo_children():
+            w.destroy()
+        caps = self._data.get("capabilities") or {}
+        if isinstance(caps, dict) and caps:
+            items = [
+                ("意图降熵", "意图降熵力", caps.get("intent_formalization"),
+                 "衡量首轮需求形式化与边界把控能力。\n高分代表约束严谨清晰，前置消减不确定性；低分代表需求模糊宽泛。"),
+                ("偏离敏锐", "偏离感知敏锐度", caps.get("drift_sensitivity"),
+                 "衡量对代码架构违背与局部死修的嗅觉。\n高分代表敏锐察觉偏离并主动挂起；低分代表盲目打补丁或侵入底层资产。"),
+                ("反馈收敛", "反馈收敛效率", caps.get("feedback_mutual_info"),
+                 "衡量纠偏指令的互信息密度与介入时机。\n高分代表反馈精准向心制导；低分代表盲目试探或止损严重滞后。"),
+            ]
+            for short_name, full_name, score, desc in items:
+                if score is None:
+                    continue
+                try:
+                    s_val = int(score)
+                except (ValueError, TypeError):
+                    s_val = 50
+                if s_val >= 65:
+                    col = theme.SUCCESS
+                    tier_desc = "优秀 / 敏锐向心"
+                elif s_val < 40:
+                    col = theme.ERROR
+                    tier_desc = "严重受困 / 偏离失控"
+                else:
+                    col = theme.WARNING
+                    tier_desc = "迟缓中等 / 震荡游走"
+
+                chip = tk.Frame(self.caps_frame, bg=theme.PANEL_2, highlightthickness=1,
+                                highlightbackground=theme.BORDER, padx=6, pady=2)
+                chip.pack(side="left", padx=3)
+                l_name = tk.Label(chip, text=f"{short_name} ", bg=theme.PANEL_2, fg=theme.MUTED,
+                                  font=theme.FONT_UI_SMALL)
+                l_name.pack(side="left")
+                l_score = tk.Label(chip, text=str(score), bg=theme.PANEL_2, fg=col,
+                                   font=theme.FONT_UI_SMALL_BOLD)
+                l_score.pack(side="left")
+
+                tip_text = (
+                    f"{full_name}：{score} 分（{tier_desc}）\n"
+                    f"{desc}\n"
+                    "评分参考：≥65 敏锐向心 · 40-64 迟缓游走 · <40 严重受困"
+                )
+                tip = Tooltip(chip, tip_text)
+                tip.bind_widget(l_name)
+                tip.bind_widget(l_score)
+
+            self.cap_lbl.config(
+                text=f"意图降熵力 {caps.get('intent_formalization', '-')} · "
+                     f"偏离敏锐度 {caps.get('drift_sensitivity', '-')} · "
+                     f"反馈收敛效率 {caps.get('feedback_mutual_info', '-')}")
+        else:
+            self.cap_lbl.config(text="")
+        self._redraw()
+
+    def pack(self, **kw):
+        self.container.pack(**kw)
+
+    def pack_forget(self):
+        self.container.pack_forget()
+        self._tooltip.hide()
+
+    def _on_motion(self, event) -> None:
+        if not self._pts:
+            self._tooltip.hide()
+            return
+        best_pt = None
+        min_d2 = 24 * 24  # 扩大圆心检测半径至 24px (原 16px 过于严苛)
+        for item in self._pts:
+            px, py, pt = item[0], item[1], item[2]
+            offset_y = item[3] if len(item) > 3 else -14
+            # 1. 质点圆心欧氏距离
+            d2 = (px - event.x) ** 2 + (py - event.y) ** 2
+            # 2. 文本标签包围盒区域检测 (覆盖 T{turn} 与 ({event}) 文本)
+            tx = px
+            ty = py + offset_y
+            text_hit = abs(event.x - tx) <= 30 and abs(event.y - ty) <= 18
+            if text_hit:
+                min_d2 = 0
+                best_pt = (px, py, pt)
+                break
+            elif d2 < min_d2:
+                min_d2 = d2
+                best_pt = (px, py, pt)
+        if best_pt:
+            _, _, pt = best_pt[:3]
+            t = pt.get("turn", "-")
+            ds = pt.get("semantic_distance", 0.5)
+            vec = str(pt.get("vector") or "neutral").lower()
+            event_tag = str(pt.get("event") or "normal").lower()
+            note = pt.get("note", "")
+            status_map = {
+                "positive": ("向心推进 (做正功/逼近目标)", theme.SUCCESS),
+                "convergent": ("向心推进 (做正功/逼近目标)", theme.SUCCESS),
+                "negative": ("离心发散 (偏离目标)", theme.ERROR),
+                "divergent": ("严重发散 (偏离意图)", theme.ERROR),
+                "trapped": ("死锁陷阱 (被平庸吸引子捕获)", theme.ERROR),
+                "neutral": ("中性微调 / 震荡游走", theme.WARNING),
+            }
+            event_map = {
+                "retry_loop": "连续重试死循环",
+                "test_fail": "测试/环境报错干扰",
+                "compaction": "上下文窗口压缩",
+                "breakthrough": "向心关键突破",
+            }
+            status_str, status_col = status_map.get(vec, ("状态未定", theme.MUTED))
+            lines = [
+                f"回合 T{t} · 代码偏离度: {ds:.2f}",
+                f"推进矢量: {status_str}",
+            ]
+            colors = [theme.FG_WHITE, status_col]
+            if event_tag in event_map:
+                lines.append(f"动力学事件: {event_map[event_tag]}")
+                colors.append(theme.WARNING if event_tag != "breakthrough" else theme.SUCCESS)
+            if note:
+                lines.append(f"说明: {note}")
+                colors.append(theme.MUTED)
+            self._tooltip.show(event.x, event.y, lines, colors)
+            return
+
+        # 2. 检测狄拉克目标点 C_expert (外层势阱圆或标签文字)
+        if self._tgt_pos:
+            tgt_x, tgt_y = self._tgt_pos
+            d_circle = ((tgt_x - event.x) ** 2 + (tgt_y - event.y) ** 2) ** 0.5
+            text_hit = (tgt_x + 15 <= event.x <= tgt_x + 190) and abs(event.y - tgt_y) <= 18
+            if d_circle <= 28 or text_hit:
+                lines = [
+                    "狄拉克目标点 · C_expert",
+                    "状态特征: 零熵理想代码态 · 目标偏离 0.00",
+                    "动力学定义: 完美契合业务意图的向心终点",
+                    "工程含义: 逻辑精炼紧凑，无防御性样板与多余面条代码",
+                ]
+                colors = [theme.SUCCESS, theme.FG_WHITE, theme.MUTED, theme.MUTED]
+                self._tooltip.show(event.x, event.y, lines, colors)
+                return
+
+        # 3. 检测平庸代码吸引子 P(C_mediocre) (核心同心圆或标题文字)
+        if self._att_pos:
+            att_x, att_y = self._att_pos
+            d_circle = ((att_x - event.x) ** 2 + (att_y - event.y) ** 2) ** 0.5
+            ty_mid = getattr(self, "_pad_t", 34) + 11
+            text_hit = abs(event.x - att_x) <= 110 and abs(event.y - ty_mid) <= 18
+            if d_circle <= 54 or text_hit:
+                lines = [
+                    "平庸代码吸引子 · P(C_mediocre)",
+                    "状态特征: 高熵先验势阱 · 偏离危险区 (Ds ≈ 0.86)",
+                    "动力学定义: 预训练面条代码的强大惯性黑洞",
+                    "工程含义: 机械打补丁、过度封装、局部重试死锁",
+                ]
+                colors = [theme.ERROR, theme.FG_WHITE, theme.MUTED, theme.MUTED]
+                self._tooltip.show(event.x, event.y, lines, colors)
+                return
+
+        # 均未命中
+        self._tooltip.hide()
+
+    @staticmethod
+    def _get_arrowhead_poly(x0: float, y0: float, x1: float, y1: float,
+                            length: float = 10, half_width: float = 5,
+                            setback: float = 6) -> list[tuple[float, float]]:
+        import math
+        dx = x1 - x0
+        dy = y1 - y0
+        dist = math.hypot(dx, dy)
+        if dist < 1.0:
+            return []
+        ux = dx / dist
+        uy = dy / dist
+        tip_x = x1 - ux * setback
+        tip_y = y1 - uy * setback
+        bx = tip_x - ux * length
+        by = tip_y - uy * length
+        lx = bx - uy * half_width
+        ly = by + ux * half_width
+        rx = bx + uy * half_width
+        ry = by - ux * half_width
+        return [(tip_x, tip_y), (lx, ly), (rx, ry)]
+
+    def _redraw(self):
+        c = self.canvas
+        c.delete("all")
+        self._pts.clear()
+        self._aa_imgs.clear()
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w < 100:
+            w = max(w, c.winfo_reqwidth(), 600)
+        if h < 50:
+            h = max(h, c.winfo_reqheight(), 240)
+        pad_l, pad_r, pad_t, pad_b = 65, 45, 34, 30
+        plot_w = w - pad_l - pad_r
+        plot_h = h - pad_t - pad_b
+        if plot_w <= 10 or plot_h <= 10:
+            return
+
+        # 1. 物理成本 Y 轴刻度与横向虚线背景 (Layer 0: 最底层 Canvas 原生虚线)
+        cost_str = str(self._report.get("cost_display") or "")
+        m_cost = re.search(r"(\d+(?:\.\d+)?)", cost_str)
+        max_cost_val = float(m_cost.group(1)) if m_cost else 10.0
+        if max_cost_val <= 0:
+            max_cost_val = 10.0
+        y_ticks = []
+        for frac, val in ((1.0, max_cost_val), (0.5, max_cost_val * 0.5), (0.0, 0.0)):
+            gy = pad_t + (1.0 - frac) * plot_h
+            if frac > 0:
+                c.create_line(pad_l, gy, pad_l + plot_w, gy, fill=theme.BORDER, dash=(2, 4))
+            val_txt = f"${val:.1f}" if max_cost_val >= 1 else f"${val:.2f}"
+            y_ticks.append((gy, val_txt))
+
+        # 关键状态分界线（收敛目标域推至最左侧 0.10，高熵危险域推至最右侧 0.90）
+        line_target_x = pad_l + 0.10 * plot_w
+        line_danger_x = pad_l + 0.90 * plot_w
+        c.create_line(line_target_x, pad_t, line_target_x, pad_t + plot_h, fill=theme.PHASE_GRID_DIRAC, dash=(1, 4))
+        c.create_line(line_danger_x, pad_t, line_danger_x, pad_t + plot_h, fill=theme.PHASE_GRID_TRAP, dash=(1, 4))
+
+        # X 轴底线
+        c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
+
+        # 2. 收集抗锯齿图层 items (Layer 1: PIL 2× 超采样高清图层，线/多边形/圆点纯图元)
+        aa_items: list = []
+
+        # (A) 相平面速度流场微线段 (Phase Streamlines)：向心微导向场
+        streamline_col = theme.PHASE_STREAMLINE
+        for row_idx, gy_frac in enumerate((0.25, 0.55, 0.85)):
+            sy = pad_t + gy_frac * plot_h
+            for col_idx, gx_frac in enumerate((0.35, 0.52, 0.68)):
+                sx = pad_l + gx_frac * plot_w
+                aa_items.append(("line", [(sx + 8, sy - 4), (sx - 8, sy + 3)], streamline_col, 1))
+                aa_items.append(("line", [(sx - 8, sy + 3), (sx - 4, sy + 1)], streamline_col, 1))
+
+        # (B) 理想向心收敛走廊参考线 (Convergence Corridor)
+        corridor_pts = [
+            (pad_l + 0.85 * plot_w, pad_t + plot_h * 0.95),
+            (pad_l + 0.50 * plot_w, pad_t + plot_h * 0.92),
+            (pad_l + 0.22 * plot_w, pad_t + plot_h * 0.90),
+            (pad_l + 0.05 * plot_w, pad_t + plot_h * 0.88),
+        ]
+        aa_items.append(("line", corridor_pts, theme.PHASE_CORRIDOR, 1))
+
+        # (C) 平庸代码吸引子引力势阱与黑洞同心圆
+        att_x = pad_l + plot_w * 0.86
+        att_y = pad_t + 62
+        self._att_pos = (att_x, att_y)
+        self._pad_t = pad_t
+        # 外层吸引盆 (Basin of Attraction) 等势圈
+        aa_items.append(("dot", att_x, att_y, 52, None, theme.ATTRACTOR_BASIN_BORDER, 1))
+        # 核心吸引子同心圆
+        for r, col in zip((36, 24, 12), theme.ATTRACTOR_RINGS):
+            aa_items.append(("dot", att_x, att_y, r, col, theme.ATTRACTOR_RINGS[1], 1))
+        aa_items.append(("dot", att_x, att_y, 4, theme.ERROR, theme.ERROR, 1))
+
+        # (D) 狄拉克目标点（外层低能势阱 + 双层发光圆）
+        tgt_x = pad_l + plot_w * 0.05
+        tgt_y = pad_t + plot_h * 0.88
+        self._tgt_pos = (tgt_x, tgt_y)
+        aa_items.append(("dot", tgt_x, tgt_y, 26, None, theme.DIRAC_WELL_BORDER, 1))
+        aa_items.append(("dot", tgt_x, tgt_y, 16, theme.DIRAC_CORE_BG, theme.SUCCESS, 2))
+        aa_items.append(("dot", tgt_x, tgt_y, 5, theme.SUCCESS, theme.SUCCESS, 1))
+        # (E) 计算真实会话动力学轨迹节点（严格物理坐标映射与稳健兜底）
+        traj = self._data.get("trajectory") or []
+        n = len(traj)
+        total_turns = self._report.get("turns")
+        if not isinstance(total_turns, (int, float)) or total_turns <= 1:
+            valid_turns = [pt.get("turn") for pt in traj if isinstance(pt.get("turn"), (int, float))]
+            total_turns = max(valid_turns, default=1)
+        total_turns = max(1, int(total_turns))
+
+        if traj:
+            for idx, pt in enumerate(traj):
+                ds = max(0.0, min(1.0, float(pt.get("semantic_distance", 0.5))))
+                px = pad_l + ds * plot_w
+                t_val = pt.get("turn")
+                if isinstance(t_val, (int, float)) and total_turns > 1:
+                    frac = max(0.0, min(1.0, (float(t_val) - 1.0) / (float(total_turns) - 1.0)))
+                else:
+                    frac = idx / (n - 1) if n > 1 else 0.5
+                py = (pad_t + plot_h) - frac * plot_h * 0.82 - 8
+                offset_y = -14 if (idx % 2 == 0 and py > pad_t + 28) else 14
+                self._pts.append((px, py, pt, offset_y))
+            # 全抗锯齿矢量推进折线与箭头
+            for i in range(1, len(self._pts)):
+                x0, y0, prev_pt = self._pts[i - 1][:3]
+                x1, y1, cur_pt = self._pts[i][:3]
+                prev_ds = prev_pt.get("semantic_distance", 0.5)
+                cur_ds = cur_pt.get("semantic_distance", 0.5)
+                delta_ds = cur_ds - prev_ds
+                vec = str(cur_pt.get("vector") or "neutral").lower()
+
+                if vec in ("negative", "divergent", "trapped") or delta_ds > 0.02:
+                    col = theme.ERROR
+                    lw = 3
+                elif vec in ("positive", "convergent") or delta_ds < -0.02:
+                    col = theme.SUCCESS
+                    lw = 3
+                else:
+                    col = theme.WARNING
+                    lw = 2
+                aa_items.append(("line", [(x0, y0), (x1, y1)], col, lw))
+                poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
+                if poly:
+                    aa_items.append(("polygon", poly, col, col))
+
+            # (F) 质点多态化与动力学事件光晕
+            for item in self._pts:
+                x, y, pt = item[:3]
+                vec = str(pt.get("vector") or "neutral").lower()
+                event_tag = str(pt.get("event") or "normal").lower()
+                base_col = theme.ERROR if vec in ("negative", "divergent", "trapped") else (
+                    theme.SUCCESS if vec in ("positive", "convergent") else theme.WARNING)
+                # 事件脉冲光圈
+                if event_tag == "retry_loop":
+                    aa_items.append(("dot", x, y, 9, None, theme.ERROR, 1))
+                elif event_tag == "breakthrough":
+                    aa_items.append(("dot", x, y, 9, None, theme.SUCCESS, 1))
+                elif event_tag == "compaction":
+                    aa_items.append(("dot", x, y, 8, None, theme.CHART_PALETTE[0], 1))
+                elif vec in ("negative", "divergent", "trapped"):
+                    aa_items.append(("dot", x, y, 8, None, theme.ERROR, 1))
+                # 质点主体
+                aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
+
+        # 提交抗锯齿图层贴图（彻底消除折线、漏斗圆环与节点锯齿）
+        self._aa_layer(c, aa_items, self._aa_imgs)
+
+        # 3. 上层锐利文本标签 (Layer 2: 最顶层 Canvas 原生文本，绝对不被底图遮挡)
+        # 吸引子标签与副标（置于圆环上方开阔安全区，与顶部域界标严格垂直错开）
+        c.create_text(att_x, pad_t + 4, text="平庸代码吸引子 P(C_mediocre)",
+                      fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
+        c.create_text(att_x, pad_t + 18, text="[引力势阱 / 预训练惯性漏斗]",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
+
+        # 狄拉克目标点标签与副标
+        c.create_text(tgt_x + 22, tgt_y - 6, text="狄拉克目标点 C_expert",
+                      fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+        c.create_text(tgt_x + 22, tgt_y + 8, text="[零熵理想代码态]",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+
+        # 顶层极值域界标（推至两极，平实质朴）
+        c.create_text(pad_l + 6, pad_t - 16, text="← 目标收敛区 (偏离 ≤ 0.10)",
+                      fill=theme.PHASE_ZONE_DIRAC, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(pad_l + plot_w - 6, pad_t - 16, text="高熵偏离区 (偏离 ≥ 0.90) →",
+                      fill=theme.PHASE_ZONE_TRAP, font=theme.FONT_UI_SMALL, anchor="e")
+
+        # X 轴刻度文本（通俗自然，指明代码与意图的对齐程度）
+        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (精准达成目标)",
+                      fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(pad_l + plot_w / 2, pad_t + plot_h + 12,
+                      text="代码偏离度：向左贴近目标代码 · 向右偏离业务需求",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
+        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离需求)",
+                      fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
+        # Y 轴刻度文本
+        for gy, val_txt in y_ticks:
+            c.create_text(pad_l - 6, gy, text=val_txt, fill=theme.MUTED,
+                          font=theme.FONT_UI_SMALL, anchor="e")
+
+        # 质点回合标签与事件微标（错开避让，在最顶层）
+        for i, item in enumerate(self._pts):
+            x, y, pt = item[:3]
+            offset_y = item[3] if len(item) > 3 else (-14 if (i % 2 == 0 and y > pad_t + 28) else 14)
+            t_val = pt.get("turn")
+            event_tag = str(pt.get("event") or "normal").lower()
+            t_str = f"T{t_val}" if t_val is not None else ""
+            c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
+                          font=theme.FONT_UI_SMALL_BOLD)
+            if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
+                evt_labels = {
+                    "retry_loop": "重试",
+                    "breakthrough": "突破",
+                    "compaction": "压缩",
+                    "test_fail": "报错",
+                }
+                lbl_text = evt_labels.get(event_tag, "")
+                evt_col = theme.SUCCESS if event_tag == "breakthrough" else theme.ERROR
+                c.create_text(x, y + offset_y + (10 if offset_y > 0 else -10),
+                              text=f"({lbl_text})", fill=evt_col,
+                              font=theme.FONT_UI_SMALL)
+
+        if not traj:
+            c.create_text(pad_l + plot_w / 2, pad_t + plot_h / 2,
+                          text="（本动力学报告无细分轨迹采样数据）", fill=theme.MUTED)
+class LlmReportsView:
+    """「LLM 报告」页签 — 会话/项目/多源解读的持久化回看（左列表 + 右全高阅读区）。
+
+    支持多来源扩展（会话收敛、相空间动力学、项目全局、模型对比等）；左侧带类型筛选与实时搜索；
+    右侧为结构化卡片头（标题/来源/模型/档位/指标徽标 + 一键复制全文）与
+    原生平滑滚动的排版阅读器（段落行距、悬挂缩进、层级标题与 Markdown 标签）。
+    """
+
+    _BODY_FONT = (theme.FONT_CJK, 10)
+
+    REPORT_KINDS = {
+        "session":  {"label": "会话", "color": theme.CHART_PALETTE[2], "desc": "会话过程收敛解读"},
+        "dynamics": {"label": "相空间", "color": theme.CHART_PALETTE[4], "desc": "相空间收敛动力学分析"},
+        "project":  {"label": "项目", "color": theme.CHART_PALETTE[0], "desc": "项目全局架构解读"},
+        "compare":  {"label": "对比", "color": theme.CHART_PALETTE[3], "desc": "多模型/跨源对比解读"},
+        "anomaly":  {"label": "诊断", "color": theme.WARNING, "desc": "异常卡死/返工诊断"},
+        "general":  {"label": "通用", "color": theme.MUTED, "desc": "综合解读报告"},
+    }
+
+    def __init__(self, parent, controller=None) -> None:
+        from .widgets import flat_button, FlatMenu
+        self.controller = controller
+        self._reports: list[dict] = []
+        self._selected_id: str | None = None
+        self._sort_col = "time"
+        self._sort_desc = True
+        self._kind_filter = "all"
+        self._search_keyword = ""
+
+        # 分栏：左列表 + 右阅读区，支持用户拖拽调整宽度（参考 ScoreRankingView）
+        paned = tk.PanedWindow(parent, orient="horizontal", bg=theme.BG, sashwidth=3)
+        paned.pack(fill="both", expand=True, padx=theme.PAD_S, pady=theme.PAD_S)
+        self._paned_ref = paned
+        self._sash_target = 330
+
+        # 左：报告列表（类型 / 解读对象 / 模型 / 时间）— 仅用于点选定位，保持紧凑
+        left = tk.Frame(paned, bg=theme.BG)
+        paned.add(left, minsize=200)
+        # 左顶部：标题栏 + 数量 + 清空按钮
+        bar = tk.Frame(left, bg=theme.BG)
+        bar.pack(fill="x", pady=(0, theme.PAD_XS))
+        _icon = ui_icon(bar, "session")
+        if _icon is not None:
+            tk.Label(bar, image=_icon, bg=theme.BG).pack(side="left", padx=(0, 4))
+        tk.Label(bar, text="LLM 报告", bg=theme.BG, fg=theme.FG,
+                 font=theme.FONT_HEADING).pack(side="left")
+        self._count_lbl = tk.Label(bar, text="", bg=theme.BG, fg=theme.MUTED,
+                                   font=theme.FONT_UI_SMALL)
+        self._count_lbl.pack(side="left", padx=8)
+        flat_button(bar, "清空", self._clear_all, padx=theme.PAD_S).pack(side="right", padx=2)
+
+        # 搜索与类型过滤工具条
+        filter_box = tk.Frame(left, bg=theme.BG)
+        filter_box.pack(fill="x", pady=(0, 6))
+
+        # 第一行：类型切换胶囊
+        self._pill_frame = tk.Frame(filter_box, bg=theme.BG)
+        self._pill_frame.pack(fill="x", pady=(0, 4))
+        self._pill_btns: dict[str, tk.Widget] = {}
+        for k, lbl in (("all", "全部"), ("session", "会话"), ("dynamics", "相空间"),
+                       ("project", "项目"), ("compare", "对比"), ("other", "其他")):
+            btn = tk.Label(self._pill_frame, text=lbl, bg=theme.PANEL_2,
+                           fg=theme.FG, font=theme.FONT_UI_SMALL,
+                           padx=6, pady=2, cursor=CLICK_CURSOR)
+            btn.pack(side="left", padx=(0, 4))
+            btn.bind("<Button-1>", lambda _e, kind=k: self._set_kind_filter(kind))
+            self._pill_btns[k] = btn
+
+        # 第二行：实时搜索框
+        search_wrap = tk.Frame(filter_box, bg=theme.PANEL_2, highlightthickness=1,
+                               highlightbackground=theme.BORDER)
+        search_wrap.pack(fill="x", pady=(2, 0))
+        _si = ui_icon(search_wrap, "search")
+        if _si is not None:
+            tk.Label(search_wrap, image=_si, bg=theme.PANEL_2).pack(
+                side="left", padx=(4, 2), pady=2)
+        self._search_var = tk.StringVar(value="")
+        self._search_entry = tk.Entry(
+            search_wrap, textvariable=self._search_var, bg=theme.PANEL_2,
+            fg=theme.FG, insertbackground=theme.FG, relief="flat",
+            borderwidth=0, highlightthickness=0, font=theme.FONT_UI_SMALL)
+        self._search_entry.pack(side="left", fill="x", expand=True, padx=4, pady=2)
+        self._search_entry.bind("<KeyRelease>", lambda _e: self._on_search_changed())
+        Tooltip(self._search_entry, "按标题 / 解读对象 / 模型 / 内容 实时过滤")
+
+        # 列表 Treeview
+        tree_container = tk.Frame(left, bg=theme.PANEL)
+        tree_container.pack(fill="both", expand=True)
+        cols = ("kind", "title", "time")
+        self._tree = ttk.Treeview(tree_container, columns=cols, show="headings",
+                                  selectmode="browse")
+        for col, text, w, mw, anchor, stretch in (
+                ("kind", "类型", 46, 40, "center", False),
+                ("title", "解读对象 / 标题", 180, 100, "w", True),
+                ("time", "时间", 90, 82, "center", False)):
+            self._tree.heading(col, text=text, anchor=anchor,
+                               command=lambda c=col: self._sort_by(c))
+            self._tree.column(col, width=w, minwidth=mw, stretch=stretch,
+                              anchor=anchor)
+
+        sb = ttk.Scrollbar(tree_container, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self._tree.pack(side="left", fill="both", expand=True)
+        self._tree.bind("<<TreeviewSelect>>", self._on_select)
+        self._unbind_wheel = None
+        self._tree.bind("<Enter>", self._on_tree_enter)
+        self._tree.bind("<Leave>", self._on_tree_leave)
+
+        # 右键上下文菜单
+        self._ctx_menu = FlatMenu(self._tree)
+        self._ctx_menu.add_command(label="复制全文 Markdown", command=self._copy_markdown)
+        self._ctx_menu.add_command(label="删除本条报告", command=self._delete_selected)
+        self._tree.bind("<Button-3>", self._on_tree_context_menu)
+
+        # 列表标签着色
+        for k, meta in self.REPORT_KINDS.items():
+            self._tree.tag_configure(f"kind_{k}", foreground=meta["color"])
+
+        # 右：全高阅读区 — 作为报告展示主核心
+        right = tk.Frame(paned, bg=theme.PANEL)
+        paned.add(right, minsize=380)
+
+        # 右顶部：结构化元数据 Hero 卡片
+        self._header_card = tk.Frame(
+            right, bg=theme.PANEL_2, relief="flat", highlightthickness=1,
+            highlightbackground=theme.BORDER)
+        self._header_card.pack(fill="x", padx=10, pady=(4, 6))
+
+        # 卡片第一行：标题 + 操作按钮
+        top_row = tk.Frame(self._header_card, bg=theme.PANEL_2)
+        top_row.pack(fill="x", padx=10, pady=(8, 4))
+        self._title_lbl = tk.Label(
+            top_row, text="", bg=theme.PANEL_2, fg=theme.FG_WHITE,
+            font=(theme.FONT_CJK, 12, "bold"), anchor="w", justify="left")
+        self._title_lbl.pack(side="left", fill="x", expand=True)
+
+        self._copy_btn = flat_button(
+            top_row, "复制全文", self._copy_markdown, padx=theme.PAD_S)
+        self._copy_btn.pack(side="right", padx=(4, 0))
+        flat_button(top_row, "删除", self._delete_selected,
+                    padx=theme.PAD_S).pack(side="right")
+
+        # 卡片第二行：徽标与关键指标
+        self._badge_row = tk.Frame(self._header_card, bg=theme.PANEL_2)
+        self._badge_row.pack(fill="x", padx=10, pady=(0, 8))
+
+        self._kind_badge = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL, fg=theme.ACCENT,
+            font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self._kind_badge.pack(side="left", padx=(0, 6))
+
+        self._source_badge = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL, fg=theme.FG,
+            font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self._source_badge.pack(side="left", padx=(0, 6))
+
+        self._model_badge = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL, fg=theme.FG,
+            font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self._model_badge.pack(side="left", padx=(0, 6))
+
+        self._scope_badge = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL, fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self._scope_badge.pack(side="left", padx=(0, 6))
+
+        self._metrics_lbl = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL)
+        self._metrics_lbl.pack(side="left", padx=4)
+
+        self._time_lbl = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL)
+        self._time_lbl.pack(side="right", padx=(4, 0))
+
+        # 兼容旧代码引用的 _meta_lbl 属性（指向标题文本或空桩）
+        self._meta_lbl = self._title_lbl
+
+        # 正文阅读器（原生平滑滚动 Text + 自定义排版标签）
+        # 专属相空间动力学相图组件（仅在选中 dynamics 报告时挂载显示）
+        self._phase_portrait = PhasePortraitWidget(right)
+
+        # 正文阅读器（原生平滑滚动 Text + 自定义排版标签）
+        self._text_frame = text_frame = tk.Frame(right, bg=theme.PANEL)
+        text_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        text_sb = ttk.Scrollbar(text_frame, orient="vertical")
+        self._body_lbl = tk.Text(
+            text_frame, wrap="char", bg=theme.PANEL, fg=theme.FG_WHITE,
+            font=self._BODY_FONT, relief="flat", bd=0, highlightthickness=0,
+            padx=20, pady=16, yscrollcommand=text_sb.set,
+            selectbackground=theme.HOVER_ACCENT, selectforeground=theme.FG_WHITE,
+            inactiveselectbackground=theme.HOVER_ACCENT, cursor="arrow")
+        text_sb.config(command=self._body_lbl.yview)
+        text_sb.pack(side="right", fill="y")
+        self._body_lbl.pack(side="left", fill="both", expand=True)
+        self._body_lbl.bind("<Button-3>", self._on_body_context_menu)
+
+        # 排版 Tag 配置
+        self._body_lbl.tag_configure(
+            "sec_head", font=(theme.FONT_CJK, 12, "bold"),
+            foreground=theme.ACCENT, spacing1=18, spacing3=6)
+        self._body_lbl.tag_configure(
+            "md_head", font=(theme.FONT_CJK, 11, "bold"),
+            foreground=theme.FG_WHITE, spacing1=12, spacing3=4)
+        self._body_lbl.tag_configure(
+            "md_h1", font=(theme.FONT_CJK, 13, "bold"),
+            foreground=theme.FG_WHITE, spacing1=16, spacing3=6)
+        self._body_lbl.tag_configure(
+            "md_h2", font=(theme.FONT_CJK, 11, "bold"),
+            foreground=theme.FG_WHITE, spacing1=12, spacing3=4)
+        self._body_lbl.tag_configure(
+            "md_h3", font=(theme.FONT_CJK, 10, "bold"),
+            foreground=theme.CHART_PALETTE[1], spacing1=10, spacing3=3)
+        self._body_lbl.tag_configure(
+            "body", font=self._BODY_FONT, foreground=theme.FG,
+            spacing1=3, spacing2=4, spacing3=3)
+        self._body_lbl.tag_configure(
+            "list_item", font=self._BODY_FONT, foreground=theme.FG,
+            lmargin1=16, lmargin2=32, spacing1=3, spacing3=3)
+        self._body_lbl.tag_configure(
+            "sub_list_item", font=self._BODY_FONT, foreground=theme.FG,
+            lmargin1=36, lmargin2=52, spacing1=2, spacing3=2)
+        self._body_lbl.tag_configure(
+            "sub2_list_item", font=self._BODY_FONT, foreground=theme.FG,
+            lmargin1=56, lmargin2=72, spacing1=2, spacing3=2)
+        self._body_lbl.tag_configure(
+            "quote", font=(theme.FONT_CJK, 10, "italic"), foreground=theme.MUTED,
+            lmargin1=24, lmargin2=24, spacing1=4, spacing3=4)
+        self._body_lbl.tag_configure(
+            "md_bold", font=(theme.FONT_CJK, 10, "bold"), foreground=theme.FG_WHITE)
+        self._body_lbl.tag_configure(
+            "md_italic", font=(theme.FONT_CJK, 10, "italic"))
+        self._body_lbl.tag_configure(
+            "md_mono", font=theme.FONT_MONO, background=theme.CONTROL_BG,
+            foreground=theme.CHART_PALETTE[1])
+        self._body_lbl.tag_configure(
+            "code_block", font=theme.FONT_MONO, background=theme.BG,
+            foreground=theme.FG_WHITE, lmargin1=20, lmargin2=20,
+            spacing1=1, spacing2=2, spacing3=1)
+        self._apply_sash()
+
+    def _apply_sash(self) -> None:
+        target = self._sash_target
+
+        def _place():
+            try:
+                if self._paned_ref.winfo_width() > target + 40:
+                    self._paned_ref.sash_place(0, target, 0)
+            except tk.TclError:
+                pass
+        self._paned_ref.after_idle(_place)
+
+    # -- 辅助解析 --
+    @classmethod
+    def _resolve_kind(cls, r: dict) -> str:
+        k = r.get("kind")
+        if k in cls.REPORT_KINDS:
+            return k
+        if r.get("session_id") or r.get("session_title"):
+            return "session"
+        if r.get("project_name") or r.get("project_cwd"):
+            return "project"
+        return "general"
+
+    @classmethod
+    def _resolve_title(cls, r: dict) -> str:
+        t = str(r.get("title") or r.get("session_title") or
+                r.get("project_name") or r.get("session_id") or "未命名报告")
+        return t.strip().replace("\r", " ").replace("\n", " ")
+
+    # -- 数据加载与过滤 --
+    def on_show(self) -> None:
+        """页签切入 / 报告新增后重载列表（保持当前选中）。"""
+        from tcer.core import llm_reports, llm_prefs
+        self._apply_sash()
+        self._reports = llm_reports.load()
+        self._refresh_list()
+
+    def _set_kind_filter(self, kind: str) -> None:
+        if self._kind_filter == kind:
+            return
+        self._kind_filter = kind
+        self._refresh_list()
+
+    def _on_search_changed(self) -> None:
+        self._search_keyword = self._search_var.get().strip().lower()
+        self._refresh_list()
+
+    def _matches_filter(self, r: dict) -> bool:
+        kind = self._resolve_kind(r)
+        if self._kind_filter != "all":
+            if self._kind_filter == "other":
+                if kind in ("session", "dynamics", "project", "compare"):
+                    return False
+            elif kind != self._kind_filter:
+                return False
+        if self._search_keyword:
+            kw = self._search_keyword
+            title = self._resolve_title(r).lower()
+            model = str(r.get("model") or "").lower()
+            text = str(r.get("text") or "").lower()
+            if kw not in title and kw not in model and kw not in text:
+                return False
+        return True
+
+    def _refresh_list(self) -> None:
+        # 更新过滤胶囊样式与计数
+        counts: dict[str, int] = {"all": len(self._reports), "session": 0,
+                                  "dynamics": 0, "project": 0, "compare": 0, "other": 0}
+        for r in self._reports:
+            k = self._resolve_kind(r)
+            if k in counts:
+                counts[k] += 1
+            else:
+                counts["other"] += 1
+        for k, btn in self._pill_btns.items():
+            active = (self._kind_filter == k)
+            bg = theme.HOVER_ACCENT if active else theme.PANEL_2
+            fg = theme.FG_WHITE if active else theme.FG
+            label = {"all": "全部", "session": "会话", "dynamics": "相空间",
+                     "project": "项目", "compare": "对比", "other": "其他"}.get(k, k)
+            btn.config(text=f"{label} {counts.get(k, 0)}", bg=bg, fg=fg)
+
+        # 过滤报告集合
+        filtered = [r for r in self._reports if self._matches_filter(r)]
+
+        # 排序
+        key_fn = {
+            "time": lambda r: r.get("created_at") or 0,
+            "title": lambda r: self._resolve_title(r).lower(),
+            "model": lambda r: str(r.get("model") or "").lower(),
+            "kind": lambda r: self._resolve_kind(r),
+        }.get(self._sort_col, lambda r: r.get("created_at") or 0)
+        filtered.sort(key=key_fn, reverse=self._sort_desc)
+
+        sel = self._selected_id
+        self._tree.delete(*self._tree.get_children())
+
+        if not filtered:
+            from tcer.core import llm_prefs
+            if not self._reports:
+                note = "（暂无报告——在会话时间线弹窗点「LLM 解读」生成）"
+                if not llm_prefs.enabled():
+                    note += "\n\n尚未配置 LLM 服务：工具栏「LLM设置」完成配置后即可使用。"
+            else:
+                note = "（没有匹配当前筛选条件的 LLM 报告）"
+            self._clear_header()
+            self._body_lbl.configure(state="normal")
+            self._body_lbl.delete("1.0", "end")
+            self._body_lbl.insert("end", note, ("quote",))
+            self._body_lbl.configure(state="disabled")
+            self._count_lbl.config(text=f"0 / {len(self._reports)} 条")
+            return
+
+        for r in filtered:
+            kind = self._resolve_kind(r)
+            kind_lbl = self.REPORT_KINDS.get(kind, {}).get("label", "报告")
+            self._tree.insert(
+                "", "end", iid=r.get("id"),
+                tags=(f"kind_{kind}",),
+                values=(kind_lbl,
+                        self._fmt_title(self._resolve_title(r)),
+                        self._fmt_time(r.get("created_at"))))
+
+        self._count_lbl.config(text=f"{len(filtered)} / {len(self._reports)} 条")
+        if sel and self._tree.exists(sel):
+            self._tree.selection_set(sel)
+            self._tree.see(sel)
+        elif filtered:
+            first = self._tree.get_children()[0]
+            self._tree.selection_set(first)
+            self._tree.see(first)
+
+        if self._tree.selection():
+            self._on_select()
+
+    def _clear_header(self) -> None:
+        self._title_lbl.config(text="无选中的报告")
+        self._kind_badge.config(text="")
+        self._source_badge.config(text="")
+        self._model_badge.config(text="")
+        self._scope_badge.config(text="")
+        self._metrics_lbl.config(text="")
+        self._time_lbl.config(text="")
+
+    def _sort_by(self, col: str) -> None:
+        if self._sort_col == col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col = col
+            self._sort_desc = (col in ("time",))
+        self._refresh_list()
+
+    def _on_tree_enter(self, _event=None) -> None:
+        from .platform import bind_mousewheel
+        self._unbind_wheel = bind_mousewheel(
+            self._tree, lambda units: self._tree.yview_scroll(units, "units"))
+
+    def _on_tree_leave(self, _event=None) -> None:
+        if self._unbind_wheel:
+            self._unbind_wheel()
+            self._unbind_wheel = None
+
+    def select_report(self, report_id: str) -> None:
+        """报告生成保存后由 controller 调用：选中并展示。"""
+        self.on_show()
+        if report_id and self._tree.exists(report_id):
+            self._tree.selection_set(report_id)
+            self._tree.see(report_id)
+            self._on_select()
+
+    # -- 选中与展示 --
+    def _on_select(self, _event=None) -> None:
+        sel = self._tree.selection()
+        if not sel:
+            return
+        rid = sel[0]
+        r = next((x for x in self._reports if x.get("id") == rid), None)
+        if r is None:
+            return
+        self._selected_id = rid
+
+        # 刷新 Header Hero 卡片
+        kind = self._resolve_kind(r)
+        kind_meta = self.REPORT_KINDS.get(kind, self.REPORT_KINDS["general"])
+        title = self._resolve_title(r)
+
+        self._title_lbl.config(text=title)
+        self._kind_badge.config(
+            text=f"[{kind_meta['label']}解读]", fg=kind_meta["color"])
+        self._source_badge.config(text=f"源: {r.get('source') or 'claude'}")
+        self._model_badge.config(text=f"模型: {r.get('model') or '-'}")
+        self._scope_badge.config(text=f"档位: {r.get('scope') or '-'}")
+
+        # 构造关键指标摘要
+        metrics_parts = []
+        if r.get("turns"):
+            metrics_parts.append(f"{r['turns']} 回合")
+        if r.get("net_loc") is not None:
+            nl = r["net_loc"]
+            metrics_parts.append(f"净增 {nl:+d} 行" if isinstance(nl, int) else f"净增 {nl} 行")
+        if r.get("cost_display"):
+            metrics_parts.append(f"{r['cost_display']}")
+        self._metrics_lbl.config(text=" · ".join(metrics_parts))
+        self._time_lbl.config(text=self._fmt_time(r.get("created_at")))
+
+        # 动力学相图视口联动（仅 dynamics 类型显示，其余报告完全隐藏）
+        if kind == "dynamics":
+            self._phase_portrait.render(r.get("dynamics_data") or {}, r)
+            self._phase_portrait.pack(fill="x", padx=10, pady=(0, 6), before=self._text_frame)
+        else:
+            self._phase_portrait.pack_forget()
+
+        # 渲染正文
+        self._fill_body(str(r.get("text") or ""))
+    def _copy_markdown(self) -> None:
+        """一键复制当前报告全文到系统剪贴板。"""
+        sel = self._tree.selection()
+        if not sel:
+            return
+        r = next((x for x in self._reports if x.get("id") == sel[0]), None)
+        if not r or not r.get("text"):
+            return
+        try:
+            top = getattr(self.controller, "root", None) or self._tree.winfo_toplevel()
+            top.clipboard_clear()
+            top.clipboard_append(str(r["text"]))
+            self._copy_btn.config(text="已复制 ✓")
+            self._copy_btn.after(1500, lambda: self._copy_btn.config(text="复制全文"))
+        except Exception:
+            pass
+
+    def _on_tree_context_menu(self, event) -> None:
+        item = self._tree.identify_row(event.y)
+        if item:
+            self._tree.selection_set(item)
+            self._on_select()
+            self._ctx_menu.tk_popup(event.x_root, event.y_root)
+
+    def _on_body_context_menu(self, event) -> None:
+        from .widgets import FlatMenu
+        m = FlatMenu(self._body_lbl)
+        try:
+            sel = self._body_lbl.get("sel.first", "sel.last")
+        except tk.TclError:
+            sel = ""
+        if sel:
+            m.add_command(label="复制所选内容", command=lambda: (
+                self.controller.root.clipboard_clear(),
+                self.controller.root.clipboard_append(sel)))
+        m.add_command(label="复制全文 Markdown", command=self._copy_markdown)
+        m.tk_popup(event.x_root, event.y_root)
+
+    # -- 正文渲染：reflow + 结构化 Markdown ---------------------------------
+    _SECTION_SPLIT_RE = re.compile(r"^(?:(\d+)[\.、\s]*)?【([^】]+)】(?:\s*(.*))?$")
+    _MD_BOLD = re.compile(r"(?:\*\*|__)(.+?)(?:\*\*|__)")
+    _MD_ITALIC = re.compile(r"\*([^*\n]+?)\*")
+    _MD_CODE = re.compile(r"`([^`]+)`")
+    _MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+    _HEADING_RE = re.compile(r"^(?:(?:(\d+)[\.、\s]*)?【[^】]+】|#{1,4}\s|>|▎|```|---|===)")
+    _LIST_RE = re.compile(r"^([-*•·]|\d+[.、)])\s*")
+
+    @classmethod
+    def _reflow_lines(cls, text: str) -> list[str]:
+        """段内硬换行合并：空行分段；标题/【】行独立；保留列表缩进；代码块内部不合并。"""
+        out: list[str] = []
+        buf = ""
+        in_code = False
+
+        def _flush() -> None:
+            nonlocal buf
+            if buf:
+                out.append(buf)
+            buf = ""
+
+        for raw in text.replace("\r\n", "\n").split("\n"):
+            s_strip = raw.strip()
+            if s_strip.startswith("```"):
+                _flush()
+                out.append(s_strip)
+                in_code = not in_code
+                continue
+            if in_code:
+                out.append(raw.rstrip())
+                continue
+            if not s_strip:
+                _flush()
+                if out and out[-1] != "":
+                    out.append("")
+            elif cls._HEADING_RE.match(s_strip):
+                _flush()
+                m_sec = cls._SECTION_SPLIT_RE.match(s_strip)
+                if m_sec and m_sec.group(3):
+                    num, title, rest = m_sec.groups()
+                    prefix = f"{num}. " if num else ""
+                    out.append(f"{prefix}【{title}】")
+                    if rest.strip():
+                        buf = rest.strip()
+                else:
+                    out.append(s_strip)
+            elif cls._LIST_RE.match(s_strip):
+                _flush()
+                buf = raw.rstrip()
+            elif buf and buf[-1].isascii() and buf[-1].isalnum() \
+                    and s_strip and s_strip[0].isascii() and s_strip[0].isalnum():
+                buf += " " + s_strip
+            else:
+                buf += s_strip
+        _flush()
+        while out and out[-1] == "":
+            out.pop()
+        return out
+
+    @staticmethod
+    def _split_md(text: str, pattern) -> list[tuple[str, bool]]:
+        out = []
+        for i, part in enumerate(pattern.split(text)):
+            if part:
+                out.append((part, i % 2 == 1))
+        return out
+
+    def _insert_line(self, tb, ln: str, *, in_code_block: bool = False) -> None:
+        if in_code_block:
+            tb.insert("end", ln + "\n", ("code_block",))
+            return
+        if ln.startswith("```"):
+            return
+        s_strip = ln.strip()
+        m_sec = self._SECTION_SPLIT_RE.match(s_strip)
+        if m_sec:
+            num, title, _ = m_sec.groups()
+            prefix = f"{num}. " if num else ""
+            tb.insert("end", f"{prefix}【{title}】\n", ("sec_head",))
+            return
+        m_head = re.match(r"^(#{1,4})\s+(.+)$", s_strip)
+        if m_head:
+            lvl = len(m_head.group(1))
+            tb.insert("end", m_head.group(2) + "\n", ("md_head", f"md_h{lvl}"))
+            return
+
+        indent = len(ln) - len(ln.lstrip(" "))
+
+        # 无序列表处理（支持多级嵌套与键值加粗）
+        if re.match(r"^[-*•·]\s*", s_strip):
+            clean_content = re.sub(r"^[-*•·]\s*", "", s_strip)
+            if indent >= 4:
+                prefix = "▪ "
+                line_tag = "sub2_list_item"
+            elif indent >= 2:
+                prefix = "◦ "
+                line_tag = "sub_list_item"
+            else:
+                prefix = "• "
+                line_tag = "list_item"
+
+            m_kv = re.match(r"^([^：:\n]{2,14}[：:])\s*(.*)$", clean_content)
+            if m_kv and not clean_content.startswith("**"):
+                k, v = m_kv.groups()
+                tb.insert("end", prefix, (line_tag,))
+                tb.insert("end", k + " ", (line_tag, "md_bold"))
+                self._insert_inline(tb, v, line_tag=line_tag)
+            else:
+                self._insert_inline(tb, prefix + clean_content, line_tag=line_tag)
+            tb.insert("end", "\n")
+            return
+
+        # 有序列表
+        m_num_list = re.match(r"^(\d+[.、)])\s*(.+)$", s_strip)
+        if m_num_list:
+            clean_content = m_num_list.group(2)
+            prefix = f"{m_num_list.group(1)} "
+            line_tag = "sub_list_item" if indent >= 2 else "list_item"
+            m_kv = re.match(r"^([^：:\n]{2,14}[：:])\s*(.*)$", clean_content)
+            if m_kv and not clean_content.startswith("**"):
+                k, v = m_kv.groups()
+                tb.insert("end", prefix, (line_tag,))
+                tb.insert("end", k + " ", (line_tag, "md_bold"))
+                self._insert_inline(tb, v, line_tag=line_tag)
+            else:
+                self._insert_inline(tb, prefix + clean_content, line_tag=line_tag)
+            tb.insert("end", "\n")
+            return
+
+        # 引用块
+        if re.match(r"^(?:>|▎)\s*", s_strip):
+            clean_ln = "▎ " + re.sub(r"^(?:>|▎)\s*", "", s_strip)
+            self._insert_inline(tb, clean_ln, line_tag="quote")
+            tb.insert("end", "\n")
+            return
+
+        # 分割线
+        if s_strip and set(s_strip) <= set("-=*―—─") and len(s_strip) >= 3:
+            tb.insert("end", "─" * 48 + "\n", ("divider",))
+            return
+
+        # 普通段落
+        self._insert_inline(tb, s_strip, line_tag="body")
+        tb.insert("end", "\n")
+    def _insert_inline(self, tb, text: str, line_tag: str = "body") -> None:
+        """行内样式管线：链接展开 → 粗体 → 斜体 → 行内代码（与行级 tag 叠加）。"""
+        text = self._MD_LINK.sub(r"\1", text)
+        parts = [(text, False, False, False)]
+        for rx, flag in ((self._MD_BOLD, 0), (self._MD_ITALIC, 1),
+                         (self._MD_CODE, 2)):
+            nxt = []
+            for seg, b, i, c in parts:
+                for sub, hit in self._split_md(seg, rx):
+                    nxt.append((sub,
+                                b or (hit and flag == 0),
+                                i or (hit and flag == 1),
+                                c or (hit and flag == 2)))
+            parts = nxt
+        for seg, b, i, c in parts:
+            if not seg:
+                continue
+            tags = [line_tag]
+            if b:
+                tags.append("md_bold")
+            if i:
+                tags.append("md_italic")
+            if c:
+                tags.append("md_mono")
+            tb.insert("end", seg, tuple(tags))
+
+    @staticmethod
+    def clean_math_syntax(text: str) -> str:
+        """清洗 LLM 输出中的 LaTeX 数学公式代码，转为通俗易懂的工程师自然文本。"""
+        if not text or ("$" not in text and "\\" not in text):
+            return text
+        import re
+        # 1. 常见领域名词与模型表达式直观化
+        text = re.sub(r"\$P_?\{?model\}?\(C_?\{?mediocre\}?\)\$", "平庸代码吸引子", text)
+        text = re.sub(r"\$C_?\{?expert\}?\$", "目标代码 C_expert", text)
+        text = re.sub(r"\$I\(C_?\{?t\+1\}?;\s*F_?\{?t\}?\)\$", "反馈互信息", text)
+        # 2. 移除常见 LaTeX 命令
+        text = re.sub(r"\\mathcal\{I\}", "业务意图", text)
+        text = re.sub(r"\\text\{([^}]+)\}", r"\1", text)
+        text = re.sub(r"\\approx", "≈", text)
+        text = re.sub(r"\\max", "最大值", text)
+        text = re.sub(r"\\delta", "δ", text)
+        # 3. 简化常见字母下标：D_s -> Ds, X_1 -> X1
+        text = re.sub(r"([A-Za-z])_\{?([A-Za-z0-9]+)\}?", r"\1_\2", text)
+        # 4. 剥离剩余的 $ ... $ 数学符号
+        text = re.sub(r"\$([^$\n]+)\$", r"\1", text)
+        # 5. 清理残留反斜杠
+        text = re.sub(r"\\([A-Za-z]+)", r"\1", text)
+        return text
+
+    @staticmethod
+    def _pad_cjk_ascii(text: str) -> str:
+        text = re.sub(r"(?<=[一-鿿（【“]) ?(?=[A-Za-z0-9])", " ", text)
+        return re.sub(r"(?<=[A-Za-z0-9]) ?(?=[一-鿿])", " ", text)
+
+    def _fill_body(self, text: str) -> None:
+        tb = self._body_lbl
+        tb.configure(state="normal")
+        tb.delete("1.0", "end")
+        in_code_block = False
+        text = self.clean_math_syntax(text)
+        for ln in self._reflow_lines(text):
+            if ln.strip().startswith("```"):
+                in_code_block = not in_code_block
+                continue
+            if not ln.strip() and not in_code_block:
+                tb.insert("end", "\n")
+                continue
+            self._insert_line(tb, ln, in_code_block=in_code_block)
+        tb.configure(state="disabled")
+    def _delete_selected(self) -> None:
+        import tkinter.messagebox as mb
+        from tcer.core import llm_reports
+        sel = self._tree.selection()
+        if not sel:
+            return
+        r = next((x for x in self._reports if x.get("id") == sel[0]), None)
+        title = self._resolve_title(r or {})[:24]
+        if not mb.askyesno("删除报告",
+                           f"确定删除「{title}…」这条 LLM 报告？（不可恢复）",
+                           parent=self._tree):
+            return
+        self._selected_id = None
+        llm_reports.delete(sel[0])
+        self.on_show()
+
+    def _clear_all(self) -> None:
+        import tkinter.messagebox as mb
+        from tcer.core import llm_reports
+        if not self._reports:
+            return
+        if mb.askyesno("清空 LLM 报告", f"确定删除全部 {len(self._reports)} 条报告？"
+                       "（不可恢复）", parent=self._tree):
+            self._selected_id = None
+            llm_reports.clear()
+            self.on_show()
+
+    # -- fmt --
+    @staticmethod
+    def _fmt_time(ts) -> str:
+        if not ts:
+            return "-"
+        return fmt.fmt_dt(int(ts), "%m-%d %H:%M")
+
+    @staticmethod
+    def _fmt_title(title: str) -> str:
+        return str(title or "-").strip().replace("\r", " ").replace("\n", " ")
+
+    @classmethod
+    def _fmt_session(cls, r: dict) -> str:
+        return cls._fmt_title(cls._resolve_title(r))

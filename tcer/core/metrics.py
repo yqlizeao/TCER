@@ -849,13 +849,18 @@ def retry_loop_metrics(u: TokenUsage, *, min_run: int = 3) -> dict:
     等无路径工具不参与，避免把任意 3 连 Bash 误判成循环。
 
     Returns: {"count": 循环次数, "max_len": 最长循环长度,
-              "details": {"Tool:path": 最长 run} 或 None}
+              "details": {"Tool:path": 最长 run} 或 None,
+              "spans": [(首回合, 末回合)] —— 每个循环的回合区间（ToolOp.turn，
+              与 turn_stats 同号空间），供会话时间线收敛视图画横带}
     """
     loops = 0
     max_len = 0
     details: dict[str, int] = {}
+    spans: list[tuple[int, int]] = []
     run_key: tuple[str, str] | None = None
     run_len = 0
+    run_start_turn = 0
+    run_end_turn = 0
 
     def _flush() -> None:
         nonlocal loops, max_len
@@ -864,17 +869,21 @@ def retry_loop_metrics(u: TokenUsage, *, min_run: int = 3) -> dict:
             label = f"{run_key[0]}:{run_key[1]}"
             details[label] = max(details.get(label, 0), run_len)
             max_len = max(max_len, run_len)
+            spans.append((run_start_turn, run_end_turn))
 
     for op in u.tool_ops:
         key = (op.tool, op.path) if op.path else None
         if key is not None and key == run_key:
             run_len += 1
+            run_end_turn = op.turn
             continue
         _flush()
         run_key = key
         run_len = 1 if key is not None else 0
+        run_start_turn = run_end_turn = op.turn
     _flush()
-    return {"count": loops, "max_len": max_len, "details": details or None}
+    return {"count": loops, "max_len": max_len, "details": details or None,
+            "spans": spans}
 
 
 def turn_cost_analysis(u: TokenUsage) -> dict:
@@ -886,12 +895,17 @@ def turn_cost_analysis(u: TokenUsage) -> dict:
     - ``cache_invalidation_events``：cache_write 环比翻倍且 cache_read 回落
       的回合数（前缀被改动作废缓存）——比整体 CHR 更能定位哪个回合破坏了
       缓存。首轮 cache 建立不计（正常冷启动）。
+    - ``turn_costs``：逐回合成本序列 ``[(回合号, 成本)]``（``TurnStat.turn``
+      号空间）——会话时间线收敛视图的累计成本曲线数据源。
+    - ``cache_invalidation_turns``：缓存失效发生的回合号列表（events 的
+      位置版）。
 
     近似口径：逐回合计价不含 1h 缓存写分档（TurnStat 无该子集）；回合成本
       合计与 ``cost_usd`` 可能略有出入，仅用于回合间的相对比较。
     """
     empty = {"max_turn_cost": None, "max_turn_share": None, "spike_turn": None,
-             "cache_invalidation_events": 0}
+             "cache_invalidation_events": 0, "turn_costs": [],
+             "cache_invalidation_turns": []}
     stats = u.turn_stats
     if not stats:
         return empty
@@ -914,16 +928,20 @@ def turn_cost_analysis(u: TokenUsage) -> dict:
         return empty
     idx = max(range(len(costs)), key=lambda i: costs[i])
     events = 0
+    inv_turns: list[int] = []
     for i in range(1, len(stats)):
         prev, cur = stats[i - 1], stats[i]
         if (cur.cache_write > prev.cache_write * 2 and cur.cache_write >= 2000
                 and cur.cache_read < prev.cache_read):
             events += 1
+            inv_turns.append(cur.turn)
     return {
         "max_turn_cost": costs[idx],
         "max_turn_share": costs[idx] / total,
         "spike_turn": stats[idx].turn,
         "cache_invalidation_events": events,
+        "turn_costs": [(t.turn, c) for t, c in zip(stats, costs)],
+        "cache_invalidation_turns": inv_turns,
     }
 
 

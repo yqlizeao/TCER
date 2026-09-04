@@ -1051,6 +1051,341 @@ def test_session_timeline_drill_and_overlays(root, reports):
     assert len(p._detail.winfo_children()) == 0
 
 
+def test_session_timeline_convergence_view(root, reports):
+    """收敛诊断视图：剪刀差/重试横带/标记绘制不炸；降级与往返切换。"""
+    from tcer.gui.popups import SessionTimelinePopup
+
+    r = reports[0]
+    r.usage.compaction_turns = [1]
+    r.usage.turn_net_locs = [(0, 10, 0), (1, -2, 0), (2, 30, 0)]
+    # 同文件 3 连 Edit（turn 1-3）→ 重试循环 span；turn 3 无 TurnStat
+    # （回合号空洞）恰好覆盖 span 端点钳边。
+    r.usage.tool_ops = [ToolOp(0, "Read", "a.py"),
+                        ToolOp(1, "Edit", "a.py"), ToolOp(2, "Edit", "a.py"),
+                        ToolOp(3, "Edit", "a.py"), ToolOp(4, "Edit", "b.py")]
+    r.usage.turn_stats = [
+        TurnStat(0, ts=1_770_000_000_000, input_tokens=1000, cache_read=5000,
+                 output_tokens=800, duration_ms=4000, tool_calls=2),
+        TurnStat(1, ts=1_770_000_600_000, input_tokens=1200, cache_read=6000,
+                 output_tokens=900, errors=1),
+        TurnStat(2, ts=1_770_001_200_000, input_tokens=50_000, cache_write=6000,
+                 cache_read=1000, output_tokens=5000),
+    ]
+    p = SessionTimelinePopup(root, r)
+    root.update_idletasks()
+    p._set_view("converge")
+    root.update_idletasks()
+    p._draw()
+    assert len(p.canvas.find_all()) > 0
+    assert p._retry_idx_spans  # 3 连 Edit → 横带（端点 turn3 钳到 stats 内）
+    assert p._cum_net is not None and p._cum_net[-1] == 38  # +10 -2 +30
+    assert p._cum_cost  # 空 model 走默认价表，成本仍有数
+    assert p._spike_idx == 2  # 大户回合（50k input）
+    # 悬浮 + 点击钻取（converge 视图追加字段）。event.x 取整——真实 Tk
+    # 鼠标事件的 x 恒为 int，浮点会让 tooltip 的 wm_geometry 炸。
+    x0, x1, i = p._bar_x[0]
+    ev = type("E", (), {"x": int((x0 + x1) / 2), "y": 100})()
+    p._on_motion(ev)
+    p._on_click(ev)
+    assert len(p._detail.winfo_children()) == 1
+    # 降级：无逐回合 LOC 的源（非 Claude）净增线不画、不炸
+    r2 = reports[1]
+    r2.usage.turn_net_locs = []
+    p2 = SessionTimelinePopup(root, r2)
+    p2._set_view("converge")
+    p2._draw()
+    assert p2._cum_net is None
+    # 往返切换（flat_button 销毁重建路径）
+    p2._set_view("timeline")
+    p2._draw()
+    assert p2._view == "timeline"
+
+
+def test_llm_timeline_button_and_interpret(root, reports, monkeypatch, tmp_path):
+    """LLM 解读：按钮常驻；未配置点击提示零请求；成功后落盘并回调跳页签。"""
+    from tcer.core import llm_client, llm_prefs, llm_reports
+    from tcer.gui.popups import SessionTimelinePopup
+
+    monkeypatch.setattr(llm_reports, "_path",
+                        lambda: tmp_path / "llm_reports.json")
+    r = reports[0]
+    import tkinter.messagebox as mb
+    called = []
+    monkeypatch.setattr(llm_client, "chat",
+                        lambda **kw: called.append(kw) or "解读内容")
+
+    # 按钮常驻：未配置也在，点击 → showinfo 提示，零请求
+    monkeypatch.setattr(llm_prefs, "enabled", lambda: False)
+    p = SessionTimelinePopup(root, r)
+    root.update_idletasks()
+    assert p._llm_btn is not None
+    infos = []
+    monkeypatch.setattr(mb, "showinfo",
+                        lambda *a, **k: infos.append(a) or "ok")
+    p._on_llm_interpret()
+    assert called == [] and infos
+
+    monkeypatch.setattr(llm_prefs, "enabled", lambda: True)
+    monkeypatch.setattr(llm_prefs, "scope", lambda: "dialog")
+    monkeypatch.setattr(llm_prefs, "model", lambda: "test-model")
+    monkeypatch.setattr(llm_prefs, "base_url", lambda: "http://localhost:1")
+    monkeypatch.setattr(llm_prefs, "api_key", lambda: None)
+    saved_ids = []
+    p2 = SessionTimelinePopup(root, r, load_user_texts=lambda: ["用户意图消息"],
+                              on_report_saved=saved_ids.append)
+    root.update_idletasks()
+    monkeypatch.setattr(mb, "askyesno", lambda *a, **k: False)
+    p2._on_llm_interpret()
+    assert called == [] and p2._llm_busy is False   # 拒绝确认 → 零请求
+
+    monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
+    p2._on_llm_interpret()   # 占位提示已 pack、busy 置位（也起了真 daemon 线程）
+    assert p2._llm_busy is True
+    # 同意路径：同步直调 worker（测试 root 无 mainloop，跨线程 after 注册不了，
+    # _on_llm_interpret 的线程包装由生产 mainloop 保证；上面的 daemon 线程与本
+    # 次调用都会进 called——故下方断言用 any）。
+    p2._llm_work("dialog", p2._llm_derived())
+    root.update()  # 处理 after 回调 → _llm_done 落盘 + 回调
+
+    assert called and all(c["model"] == "test-model" for c in called)
+    assert any("用户意图消息" in c["user"] for c in called)  # loader 在 worker 内生效
+    assert p2._llm_busy is False   # _llm_done 复位
+    # 报告已持久化 + controller 回调收到 id
+    stored = llm_reports.load()
+    assert stored and stored[0]["text"] == "解读内容"
+    assert stored[0]["model"] == "test-model" and stored[0]["turns"] > 0
+    assert saved_ids and stored[0]["id"] in saved_ids
+
+    def _walk_labels(w):
+        out = []
+        for c in w.winfo_children():
+            if isinstance(c, tk.Label):
+                out.append(c.cget("text"))
+            else:
+                out.extend(_walk_labels(c))
+        return out
+    labels = _walk_labels(p2._llm_panel)
+    assert any("已生成并保存" in t for t in labels)      # 成功提示（非全文）
+
+    # dialogue 优先于用户消息采样（Claude 源完整对话时间线）
+    p3 = SessionTimelinePopup(root, r,
+                              load_user_texts=lambda: ["回退消息"],
+                              load_dialogue=lambda: ["[用户] 完整对话意图"])
+    p3._llm_work("dialog", p3._llm_derived())
+    root.update()
+    assert any("完整对话意图" in c["user"] for c in called)
+    assert all("回退消息" not in c["user"] for c in called)
+
+
+def test_llm_reports_view(root, monkeypatch, tmp_path):
+    """LLM 报告页签：空状态、加载列表、选中阅读、删除。"""
+    from tcer.core import llm_reports
+    from tcer.gui.views import LlmReportsView
+
+    monkeypatch.setattr(llm_reports, "_path",
+                        lambda: tmp_path / "llm_reports.json")
+    v = LlmReportsView(root)
+    assert isinstance(v._paned_ref, tk.PanedWindow)
+    assert v._sash_target == 330
+    v.on_show()
+    assert "暂无报告" in v._body_lbl.get("1.0", "end")
+
+    llm_reports.append({"id": "r1", "created_at": 1_770_000_000_000,
+                        "session_title": "会话A", "source": "claude",
+                        "model": "claude-sonnet-5", "scope": "dialog",
+                        "turns": 12, "net_loc": 340, "cost_display": "$1.20",
+                        "text": "【业务意图还原】做一个工具。\n"
+                                "这个会话的意图是构建 TCER 的图表功能，覆盖趋势\n"
+                                "与散点两个视图。详见[设计文档](http://x)。\n\n"
+                                "- 要点一：**反馈有效**\n"
+                                "  - 二级嵌套要点：细化分析\n"
+                                "- 要点二：用 `turn_stats` 对齐\n"
+                                "> 引用：*收敛良好*\n"
+                                "```python\n代码围栏\n```\n"
+                                "## 小结\n"
+                                "收尾。"})
+    v.on_show()
+    assert v._tree.exists("r1")
+    v.select_report("r1")
+    body = v._body_lbl.get("1.0", "end")
+    # 段内硬换行合并成整段（跨显示行也连续：去掉渲染换行后是完整句子）
+    flat = body.replace("\n", "")
+    assert "覆盖趋势与散点两个视图" in flat
+    assert "• 要点一：" in flat and "- " not in flat
+    assert "◦ 二级嵌套要点：" in flat
+    assert "小结" in flat and "##" not in flat
+    # 行内 markdown 剥记号 + tag 生效
+    assert "**" not in body and "`" not in body
+    assert "详见设计文档。" in flat and "[" not in body and "http" not in body
+    assert "▎ 引用：收敛良好" in flat          # 引用前缀 + 斜体剥星号
+    assert "代码围栏" in flat and "```" not in body
+    assert v._body_lbl.tag_ranges("md_bold")
+    assert v._body_lbl.tag_ranges("md_italic")
+    assert v._body_lbl.tag_ranges("md_mono")
+    assert v._body_lbl.tag_ranges("md_head")
+    assert v._body_lbl.tag_ranges("md_h2")
+    assert v._body_lbl.tag_ranges("sub_list_item")
+    assert v._body_lbl.tag_ranges("code_block")
+    # 中英文边界补空格（word wrap 的断点提示）；闭标点前后不插
+    assert "构建 TCER 的" in body or "构建 TCER" in flat
+    assert "用 turn_stats 对齐" in body or "用 turn_stats" in flat
+    assert "UMG、" not in body.replace("UMG 、", "UMG、")  # 标点前无空格污染
+    pad = LlmReportsView._pad_cjk_ascii
+    assert pad("包括UMG、") == "包括 UMG、"
+    assert pad("用turn_stats对齐") == "用 turn_stats 对齐"
+    assert pad("问题,请") == "问题,请"      # 半角标点边界不动
+    # 多来源多类型支持测试（项目级、模型对比级、会话级）
+    llm_reports.append({"id": "r_proj", "created_at": 1_770_000_100_000,
+                        "kind": "project", "title": "TCER 项目全局解读",
+                        "project_name": "TCER", "model": "deepseek-chat",
+                        "scope": "metrics", "text": "1.【业务意图还原】全局评估项目健康度。\n"})
+    long_title = "Claude vs DeepSeek 对比分析完整的图表呈现与多视图联动模块"
+    llm_reports.append({"id": "r_comp", "created_at": 1_770_000_200_000,
+                        "kind": "compare", "title": long_title,
+                        "model": "claude-3-7-sonnet", "scope": "full",
+                        "text": "对比分析两个模型的产出与收敛。"})
+    llm_reports.append({"id": "r_dyn", "created_at": 1_770_000_300_000,
+                        "kind": "dynamics", "title": "会话A · 相空间分析",
+                        "model": "deepseek-reasoner", "scope": "full",
+                        "text": "1.【初始意图降熵评估】质点向狄拉克核心收敛。",
+                        "dynamics_data": {
+                            "capabilities": {"intent_formalization": 92, "drift_sensitivity": 80, "feedback_mutual_info": 85},
+                            "trajectory": [{"turn": 1, "semantic_distance": 0.8, "vector": "positive"}],
+                        }})
+    v.on_show()
+    assert len(v._tree.get_children()) == 4
+    # 验证三列布局（去掉模型，由标题和时间占据）且长标题完整保留
+    assert tuple(v._tree.cget("columns")) == ("kind", "title", "time")
+    assert v._tree.column("time", "width") == 90
+    assert str(v._tree.column("time", "anchor")) == "center"
+    comp_vals = v._tree.item("r_comp", "values")
+    assert len(comp_vals) == 3
+    assert comp_vals[1] == long_title
+    assert "…" not in comp_vals[1]
+
+    # 类型胶囊过滤
+    v._set_kind_filter("project")
+    assert len(v._tree.get_children()) == 1
+    v.select_report("r_proj")
+    assert "全局评估项目健康度" in v._body_lbl.get("1.0", "end")
+    assert v._body_lbl.tag_ranges("sec_head")
+    assert not v._phase_portrait.container.winfo_manager()  # 普通报告隐藏相图
+
+    # 动力学报告：相图挂载与三能力徽标
+    v._set_kind_filter("dynamics")
+    assert len(v._tree.get_children()) == 1
+    v.select_report("r_dyn")
+    assert "意图降熵力 92" in v._phase_portrait.cap_lbl.cget("text")
+    assert v._phase_portrait.container.winfo_manager() == "pack"
+    # 丰富化相图图元与真实回合映射验证
+    dyn_rich = {
+        "convergence_type": "dirac",
+        "capabilities": {"intent_formalization": 88, "drift_sensitivity": 75, "feedback_mutual_info": 80},
+        "trajectory": [
+            {"turn": 1, "semantic_distance": 0.85, "vector": "positive", "event": "normal"},
+            {"turn": 4, "semantic_distance": 0.70, "vector": "positive", "event": "breakthrough"},
+            {"turn": 8, "semantic_distance": 0.78, "vector": "negative", "event": "retry_loop"},
+            {"turn": 12, "semantic_distance": 0.35, "vector": "positive", "event": "compaction"},
+            {"turn": 15, "semantic_distance": 0.05, "vector": "positive", "event": "normal"},
+        ]
+    }
+    v._phase_portrait.render(dyn_rich, {"cost_display": "$2.50", "turns": 15})
+    v._phase_portrait._redraw()
+    assert len(v._phase_portrait._pts) == 5
+    # 验证真实物理回合严格自底向上推进：T1 的 y 显著大于 T15 的 y（底到顶）
+    assert v._phase_portrait._pts[0][1] > v._phase_portrait._pts[-1][1]
+
+    # 验证末端突破时态势徽标自洽转为「吸引子逃逸 / 向心突破」
+    dyn_escaped = {
+        "convergence_type": "trapped",
+        "attractor_trapped": True,
+        "capabilities": {"intent_formalization": 30, "drift_sensitivity": 35, "feedback_mutual_info": 45},
+        "trajectory": [
+            {"turn": 1, "semantic_distance": 0.85, "vector": "neutral"},
+            {"turn": 200, "semantic_distance": 0.82, "vector": "trapped", "event": "retry_loop"},
+            {"turn": 500, "semantic_distance": 0.35, "vector": "positive", "event": "breakthrough"},
+        ]
+    }
+    v._phase_portrait.render(dyn_escaped, {"cost_display": "$10.00", "turns": 500})
+    assert "吸引子逃逸 / 向心突破" in v._phase_portrait.state_badge.cget("text")
+
+    # 验证鼠标移动到质点文本标签位置时依然能灵敏触发 Tooltip
+    pt_t200 = v._phase_portrait._pts[1]
+    px, py, _, offset_y = pt_t200
+    class FakeEvent:
+        def __init__(self, x, y):
+            self.x = int(round(x))
+            self.y = int(round(y))
+    v._phase_portrait._on_motion(FakeEvent(px, py + offset_y))
+    assert v._phase_portrait._tooltip._win is not None
+    v._phase_portrait._tooltip.hide()
+
+    # 验证鼠标移动到狄拉克目标点位置时触发目标点专属释义 Tooltip
+    tgt_x, tgt_y = v._phase_portrait._tgt_pos
+    v._phase_portrait._on_motion(FakeEvent(tgt_x, tgt_y))
+    assert v._phase_portrait._tooltip._win is not None
+    assert "狄拉克目标点" in v._phase_portrait._tooltip._sig[0][0]
+    v._phase_portrait._tooltip.hide()
+
+    v._set_kind_filter("all")
+    v._search_var.set("DeepSeek 对比")
+    v._on_search_changed()
+    assert len(v._tree.get_children()) == 1
+    v._search_var.set("")
+    v._on_search_changed()
+    assert len(v._tree.get_children()) == 4
+
+    # 复制全文功能测试
+    v.select_report("r_proj")
+    v._copy_markdown()
+    assert v._copy_btn.cget("text") == "已复制 ✓"
+    import tkinter.messagebox as mb
+    monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
+    v._delete_selected()   # 二次确认（mock 放行）
+    assert len(v._tree.get_children()) == 3
+    v._clear_all()
+    assert not v._tree.get_children()
+
+def test_llm_config_popup(root, monkeypatch, tmp_path):
+    """LLM 设置弹窗：构建/状态行/半填校验零保存/测试连接入口校验。"""
+    from tcer.core import llm_prefs
+    from tcer.gui.popups import LlmConfigPopup
+
+    monkeypatch.setattr(llm_prefs, "_prefs_path",
+                        lambda: tmp_path / "tcer_llm.json")
+    saved = []
+    p = LlmConfigPopup(root, config={}, on_save=lambda **kw: saved.append(kw))
+    root.update_idletasks()
+    p.set_status("正常")
+    p.set_status("出错", error=True)
+
+    p._url_var.set("")          # 半填（url 空、model 有）→ 校验失败零保存
+    p._model_var.set("m")
+    p._do_save()
+    assert saved == []
+    p._do_test()                # 空 url → 状态行报错，零线程零请求
+    assert p._status.cget("text") == "请先填写服务地址与模型"
+
+    p._url_var.set("http://x")  # 齐填 → on_save 收到全部字段
+    p._do_save()
+    assert saved and saved[0]["base_url"] == "http://x"
+    assert saved[0]["scopes"] == ["metrics", "dialog", "tools"]  # 验证默认全部勾选
+    assert saved[0]["scope"] == "full"
+    # 测试多选取消勾选联动
+    p._scope_vars["dialog"].set(False)
+    p._on_scope_changed()
+    p._do_save()
+    assert saved[1]["scopes"] == ["metrics", "tools"]
+    assert "对话" not in saved[1]["scope"]
+
+    # 验证 TcerGui._save_llm_config 接收 **cfg 正常工作且保存 scopes
+    from tcer.gui.app import TcerGui
+    from tcer.core import llm_prefs
+    dummy = object.__new__(TcerGui)
+    dummy._save_llm_config(**saved[1])
+    assert llm_prefs.scopes() == ["metrics", "tools"]
+
+
 def test_project_profile_popup(root, reports):
     """项目画像弹窗：热点文件/模型混用/技能 MCP 三节渲染不炸。"""
     from types import SimpleNamespace

@@ -695,10 +695,12 @@ def test_retry_loop_metrics_detects_runs():
     assert m["count"] == 2
     assert m["max_len"] == 4
     assert m["details"] == {"Edit:a.py": 4, "Read:b.py": 3}
+    assert m["spans"] == [(1, 4), (5, 7)]  # 循环的回合区间（Bash/Grep 不入）
     # 无循环
     u2 = TokenUsage()
     u2.tool_ops = [ToolOp(0, "Read", "x.py"), ToolOp(1, "Edit", "x.py")]
-    assert retry_loop_metrics(u2) == {"count": 0, "max_len": 0, "details": None}
+    assert retry_loop_metrics(u2) == {"count": 0, "max_len": 0, "details": None,
+                                      "spans": []}
 
 
 def test_compute_populates_retry_loop_fields():
@@ -748,8 +750,31 @@ def test_turn_cost_analysis_spike_and_invalidation():
     assert m["max_turn_share"] > 0.30
     assert m["max_turn_cost"] > 0
     assert m["cache_invalidation_events"] == 1
+    assert m["cache_invalidation_turns"] == [2]
+    assert [t for t, _ in m["turn_costs"]] == [0, 1, 2]
+    assert max(c for _, c in m["turn_costs"]) == m["max_turn_cost"]
     # 无数据
-    assert turn_cost_analysis(TokenUsage())["max_turn_share"] is None
+    empty = turn_cost_analysis(TokenUsage())
+    assert empty["max_turn_share"] is None
+    assert empty["turn_costs"] == []
+    assert empty["cache_invalidation_turns"] == []
+
+
+def test_turn_cost_analysis_default_pricing_model():
+    """空 model 的 TurnStat 走 pricing.default_pricing()，成本仍有数。"""
+    from tcer.core.metrics import turn_cost_analysis
+    from tcer.core.models import TokenUsage, TurnStat
+
+    u = TokenUsage()
+    u.turn_stats = [
+        TurnStat(0, ts=1, input_tokens=1000, cache_write=0, cache_read=0,
+                 output_tokens=100, model=""),
+        TurnStat(1, ts=2, input_tokens=2000, cache_write=0, cache_read=0,
+                 output_tokens=200, model=""),
+    ]
+    m = turn_cost_analysis(u)
+    assert [t for t, _ in m["turn_costs"]] == [0, 1]
+    assert all(c > 0 for _, c in m["turn_costs"])
 
 
 def test_compute_populates_turn_cost_fields():

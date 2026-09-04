@@ -651,3 +651,109 @@ def test_f1_correction_writes_back_to_turn_records(tmp_path):
         pa, pd = net_by_turn.get(turn, (0, 0))
         net_by_turn[turn] = (pa + a, pd + d)
     assert sum(a - d for a, d in net_by_turn.values()) == 2  # 流水与总量一致
+
+
+def test_read_dialogue_interleaves_and_dedupes(tmp_path: Path):
+    """对话时间线：用户/AI/工具交织；同 message.id 的 text 与 rewind 重发去重。"""
+    p = tmp_path / "s.jsonl"
+    lines = [
+        {"type": "user", "message": {"role": "user",
+         "content": [{"type": "text", "text": "帮我做个工具"}]}},
+        # 一个 assistant 响应拆两行（text 行 + tool_use 行，同 message.id）
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant",
+         "content": [{"type": "text", "text": "好的，开始实现。"}]}},
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant",
+         "content": [{"type": "tool_use", "id": "t1", "name": "Write",
+                      "input": {"file_path": "a.py"}}]}},
+        # rewind 重发同一段历史（同 id / 同 tool id）——不得双计
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant",
+         "content": [{"type": "text", "text": "好的，开始实现。"}]}},
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant",
+         "content": [{"type": "tool_use", "id": "t1", "name": "Write",
+                      "input": {"file_path": "a.py"}}]}},
+        {"type": "user", "message": {"role": "user",
+         "content": [{"type": "text", "text": "不对，重写"}]}},
+        # thinking 跳过；text 与 tool_use 可同行
+        {"type": "assistant", "message": {"id": "m2", "role": "assistant",
+         "content": [{"type": "thinking", "thinking": "内部推理"},
+                     {"type": "text", "text": "这次我找到根源了。"}]}},
+        {"type": "assistant", "message": {"id": "m2", "role": "assistant",
+         "content": [{"type": "tool_use", "id": "t2", "name": "Bash",
+                      "input": {"command": "pytest -q"}}]}},
+    ]
+    with p.open("w", encoding="utf-8") as fh:
+        for obj in lines:
+            fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    assert reader.read_dialogue(p) == [
+        "[用户] 帮我做个工具",
+        "[AI] 好的，开始实现。",
+        "[工具] Write a.py",
+        "[用户] 不对，重写",
+        "[AI] 这次我找到根源了。",
+        "[工具] Bash pytest -q",
+    ]
+
+
+def test_read_dialogue_includes_code_edits_and_diffs(tmp_path: Path):
+    """对话时间线包含具体代码变更：Edit 的 old/new diff 与 Write 的写入正文。"""
+    import json
+    from tcer.core import reader
+
+    p = tmp_path / "diff_session.jsonl"
+    lines = [
+        {"type": "user", "message": {"role": "user",
+         "content": [{"type": "text", "text": "把 old 函数改为 new 函数"}]}},
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant",
+         "content": [
+             {"type": "text", "text": "正在修改代码。"},
+             {"type": "tool_use", "id": "t1", "name": "Edit",
+              "input": {"file_path": "lib.py",
+                        "old_string": "def old():\n    pass",
+                        "new_string": "def new():\n    return 42"}},
+             {"type": "tool_use", "id": "t2", "name": "Write",
+              "input": {"file_path": "test_lib.py",
+                        "content": "def test_new(): assert new() == 42"}},
+         ]}},
+    ]
+    with p.open("w", encoding="utf-8") as fh:
+        for obj in lines:
+            fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    out = reader.read_dialogue(p)
+    assert len(out) == 4
+    assert out[0] == "[用户] 把 old 函数改为 new 函数"
+    assert out[1] == "[AI] 正在修改代码。"
+    assert "[工具] Edit lib.py:" in out[2]
+    assert "def old():\n    pass" in out[2]
+    assert "def new():\n    return 42" in out[2]
+    assert "[工具] Write test_lib.py:\ndef test_new(): assert new() == 42" == out[3]
+
+
+def test_read_dialogue_captures_tool_failure_feedback(tmp_path: Path):
+    """对话时间线捕获工具报错与测试失败，过滤普通正常输出。"""
+    import json
+    from tcer.core import reader
+
+    p = tmp_path / "feedback_session.jsonl"
+    lines = [
+        {"type": "user", "message": {"role": "user",
+         "content": [{"type": "text", "text": "运行测试"}]}},
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant",
+         "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                      "input": {"command": "pytest"}}]}},
+        # 失败的 tool_result（带有 FAILED / Traceback 错误特征）
+        {"type": "user", "message": {"role": "user",
+         "content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+                      "content": "FAILED tests/test_foo.py::test_bar - AssertionError: expected 42 but got 0"}]}},
+        # 成功的普通 tool_result（正常读取，无错误特征，应被过滤防噪声膨胀）
+        {"type": "user", "message": {"role": "user",
+         "content": [{"type": "tool_result", "tool_use_id": "t2", "is_error": False,
+                      "content": "File content read successfully without any problems."}]}},
+    ]
+    with p.open("w", encoding="utf-8") as fh:
+        for obj in lines:
+            fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    out = reader.read_dialogue(p)
+    assert len(out) == 3
+    assert out[0] == "[用户] 运行测试"
+    assert out[1] == "[工具] Bash pytest"
+    assert out[2].startswith("[工具反馈:报错] FAILED tests/test_foo.py::test_bar")

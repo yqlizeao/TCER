@@ -20,22 +20,43 @@ class Tooltip:
         self.widget = widget
         self.text = text
         self.tip = None
-        widget.bind("<Enter>", self._show, add="+")
-        widget.bind("<Leave>", self._hide, add="+")
+        self.bind_widget(widget)
+
+    def bind_widget(self, w) -> None:
+        """将同一个 Tooltip 实例绑定到多个子部件（如容器 Frame 与其内部 Label）。"""
+        w.bind("<Enter>", self._show, add="+")
+        w.bind("<Leave>", self._hide, add="+")
 
     def _show(self, _event=None) -> None:
         if self.tip or not self.text:
             return
-        x = self.widget.winfo_rootx() + 16
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
         self.tip.configure(bg=theme.BORDER)  # 外层露 1px 作边框（深色主题）
-        self.tip.wm_geometry(f"+{x}+{y}")
         lbl = tk.Label(self.tip, text=self.text, justify="left",
                        bg=theme.PANEL_2, fg=theme.FG,
                        wraplength=460, font=theme.FONT_UI, padx=8, pady=5)
         lbl.pack(padx=1, pady=1)  # 1px 边框 = Toplevel(bg=BORDER) 透出
+        self.tip.update_idletasks()
+        tip_w = max(160, self.tip.winfo_reqwidth())
+        tip_h = max(40, self.tip.winfo_reqheight())
+
+        x = self.widget.winfo_rootx() + 16
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        sw = self.widget.winfo_screenwidth()
+        sh = self.widget.winfo_screenheight()
+
+        # 屏幕右边缘避让：若向右展开越界，则翻转与 widget 右边缘对齐向左展开
+        if x + tip_w > sw - 10:
+            x = self.widget.winfo_rootx() + self.widget.winfo_width() - tip_w
+        if x < 4:
+            x = 4
+        # 屏幕下边缘避让：若向下展开越界，则翻转至 widget 上方
+        if y + tip_h > sh - 10:
+            y = self.widget.winfo_rooty() - tip_h - 6
+        if y < 4:
+            y = 4
+        self.tip.wm_geometry(f"+{x}+{y}")
 
     def _hide(self, _event=None) -> None:
         if self.tip:

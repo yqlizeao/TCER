@@ -144,18 +144,25 @@ def _aa_layer_flat(c, items, tag: str | None) -> None:
     """无 PIL 回退：canvas 原生绘制同一组 items（折线 smooth 近似抗锯齿）。"""
     tags = (tag,) if tag else ()
     for it in items:
-        if it[0] == "line":
+        kind = it[0]
+        if kind == "line":
             pts: list[float] = []
             for x, y in it[1]:
                 pts.extend((x, y))
             if len(pts) >= 4:
                 c.create_line(*pts, fill=it[2], width=it[3], smooth=True, tags=tags)
+        elif kind == "polygon":
+            _, poly_pts, fill, outline = it[:4]
+            flat_pts: list[float] = []
+            for x, y in poly_pts:
+                flat_pts.extend((x, y))
+            if len(flat_pts) >= 6:
+                c.create_polygon(*flat_pts, fill=fill, outline=outline or "", tags=tags)
         else:
             _, x, y, r, fill, outline = it[:6]
             lw = it[6] if len(it) > 6 else 1
             c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline=outline,
                           width=lw, tags=tags)
-
 
 def _aa_layer(c, items, store, ss: int = 2, pad: int = 3, tag: str | None = None):
     """抗锯齿数据层：把线/点渲染到透明图（ss× 超采样 + LANCZOS 缩回）贴回 canvas。
@@ -174,7 +181,11 @@ def _aa_layer(c, items, store, ss: int = 2, pad: int = 3, tag: str | None = None
         return
     xs, ys = [], []
     for it in items:
-        if it[0] == "line":
+        kind = it[0]
+        if kind == "line":
+            for x, y in it[1]:
+                xs.append(x); ys.append(y)
+        elif kind == "polygon":
             for x, y in it[1]:
                 xs.append(x); ys.append(y)
         else:  # dot
@@ -188,23 +199,29 @@ def _aa_layer(c, items, store, ss: int = 2, pad: int = 3, tag: str | None = None
     im = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     for it in items:
-        if it[0] == "line":
+        kind = it[0]
+        if kind == "line":
             pts = [(round((x - x0) * ss), round((y - y0) * ss)) for x, y in it[1]]
             if len(pts) >= 2:
                 d.line(pts, fill=it[2], width=max(1, it[3] * ss), joint="curve")
+        elif kind == "polygon":
+            _, poly_pts, fill, outline = it[:4]
+            scaled_poly = [(round((x - x0) * ss), round((y - y0) * ss)) for x, y in poly_pts]
+            d.polygon(scaled_poly, fill=fill or None, outline=outline or None)
         else:
             _, x, y, r, fill, outline = it[:6]
             lw = it[6] if len(it) > 6 else 1
             cx, cy = round((x - x0) * ss), round((y - y0) * ss)
             rr = max(1, r) * ss
-            d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=fill, outline=outline,
-                      width=max(1, lw * ss))
+            d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=fill or None,
+                      outline=outline or None, width=max(1, lw * ss))
     im = im.resize((w, h), Image.LANCZOS)
     # Tk 照片的 RGBA 转换成本随 alpha 值的种类数暴涨：LANCZOS 抗锯齿边缘会
     # 产生上千种渐变 alpha（实测全幅转换 ~107ms），量化到 16 档后 ~23ms、
     # 视觉不可辨。两层超采样贴图合计曾让趋势图一次重绘卡近半秒。
     im.putalpha(im.getchannel("A").point(lambda v: min(255, (v // 16) * 16)))
-    photo = ImageTk.PhotoImage(im)
+    master_win = getattr(c, "winfo_toplevel", lambda: None)() or c
+    photo = ImageTk.PhotoImage(im, master=master_win)
     store.append(photo)
     c.create_image(x0, y0, image=photo, anchor="nw", tags=(tag,) if tag else ())
 
@@ -340,21 +357,30 @@ class _ChartTooltip:
         self._canvas = canvas
         self._win: tk.Toplevel | None = None
         self._sig: tuple | None = None  # content signature last rendered
+        self._tw: int = 260
+        self._th: int = 80
 
     def _place(self, x: int, y: int) -> None:
-        """Compute a screen position with edge detection and move the window."""
-        cx = self._canvas.winfo_rootx() + x + 16
-        cy = self._canvas.winfo_rooty() + y - 10
-        # Edge detection: flip if near screen edge
+        """Compute a screen position with edge detection and move the window.
+
+        Avoids the mouse cursor completely: when flipping left, places the right
+        edge at x - 12 so the window never covers the cursor and never causes
+        a Leave/destroy loop.
+        """
+        rx = self._canvas.winfo_rootx()
+        ry = self._canvas.winfo_rooty()
+        cx = rx + x + 16
+        cy = ry + y - 10
         sw = self._canvas.winfo_screenwidth()
         sh = self._canvas.winfo_screenheight()
-        if cx + 260 > sw:
-            cx = self._canvas.winfo_rootx() + x - 270
-        if cy + 80 > sh:
-            cy = self._canvas.winfo_rooty() + y - 80
-        if cx < 0:
+        cw = self._canvas.winfo_width()
+        if (cx + self._tw > sw - 4) or (cw > 200 and x + 16 + self._tw > cw):
+            cx = rx + x - self._tw - 12
+        if cy + self._th > sh - 4:
+            cy = ry + y - self._th - 12
+        if cx < 4:
             cx = 4
-        if cy < 0:
+        if cy < 4:
             cy = 4
         self._win.wm_geometry(f"+{cx}+{cy}")
 
@@ -371,7 +397,6 @@ class _ChartTooltip:
         self.hide()
         self._win = tk.Toplevel(self._canvas)
         self._win.wm_overrideredirect(True)
-        self._place(x, y)
         fr = tk.Frame(self._win, bg=theme.PANEL_2, relief="solid",
                       borderwidth=1, padx=8, pady=5)
         fr.pack()
@@ -379,6 +404,10 @@ class _ChartTooltip:
             color = (colors[i] if colors and i < len(colors) else theme.FG)
             tk.Label(fr, text=line, bg=theme.PANEL_2, fg=color,
                      font=theme.FONT_UI, anchor="w").pack(anchor="w")
+        self._win.update_idletasks()
+        self._tw = max(160, self._win.winfo_reqwidth())
+        self._th = max(40, self._win.winfo_reqheight())
+        self._place(x, y)
         self._sig = sig
 
     def hide(self) -> None:
@@ -386,7 +415,6 @@ class _ChartTooltip:
             self._win.destroy()
             self._win = None
         self._sig = None
-
 
 @dataclass
 class _OverlayLine:

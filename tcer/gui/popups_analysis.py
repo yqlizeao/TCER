@@ -237,24 +237,38 @@ class SessionComparePopup:
 
 
 class SessionTimelinePopup:
-    """会话时间线 — 逐回合 token 堆叠条 + 权威耗时 + 错误标记。
+    """会话时间线 — 双视图：回合时间线（token 堆叠条 + 权威耗时 + 错误标记）/
+    收敛诊断（累计净增 × 累计成本剪刀差 + 重试/大户/缓存失效/压缩标记）。
 
     数据来自 TokenUsage.turn_stats（四源统一：Claude 逐响应、Codex 逐 token 步、
     Grok 逐 turn_completed、OpenCode 逐 step-finish）。耗时仅在源提供权威值时显示
     （Claude turn_duration / Codex task_complete / Grok apiDurationMs）。
+    收敛视图定位「会话在哪里发散」：净增走平而成本持续爬升的区段即发散，
+    重试循环横带 / 最贵回合▼ / 缓存失效× / 压缩竖线原位标注触发点。
     """
 
     _COLORS = theme.TOKEN_COLORS
     _PAD_L = 56
     _PAD_R = 16
+    _PAD_R_CONV = 64   # 收敛视图右轴（累计成本）标签留位
     _PAD_T = 34
     _PAD_B = 46
+    _VIEWS = (("timeline", "回合时间线"), ("converge", "收敛诊断"))
 
-    def __init__(self, parent, report) -> None:
+    def __init__(self, parent, report, load_user_texts=None,
+                 load_dialogue=None, on_report_saved=None) -> None:
         from .charts import _ChartTooltip
         self._report = report
         self._usage = report.usage
         self._stats = list(report.usage.turn_stats)
+        # LLM 解读：懒加载器（controller 注入，仅 dialog/full 档用——dialogue
+        # 为 Claude 源的完整对话时间线，user_texts 为各源回退）、报告保存回调
+        #（controller 切到「LLM 报告」页签）与线程状态。after_host=root（寿命
+        # 长于弹窗，worker 回主线程的挂载点）。
+        self._load_user_texts = load_user_texts
+        self._load_dialogue = load_dialogue
+        self._on_report_saved = on_report_saved
+        self._llm_busy = False
         # 逐回合工具调用 / 逐回合 LOC 流水 / 压缩位置（钻取与叠加曲线用）。
         self._ops_by_turn: dict[int, list] = {}
         for op in report.usage.tool_ops:
@@ -264,28 +278,82 @@ class SessionTimelinePopup:
             pa, pd = self._loc_by_turn.get(turn, (0, 0))
             self._loc_by_turn[turn] = (pa + a, pd + d)
         self._compaction_turns = list(report.usage.compaction_turns)
+        # 收敛视图派生数据（metrics 层现算；回合号→下标映射防空洞错位，
+        # 同压缩竖线的 turn_pos 先例）。弹窗生命周期内 usage 不变，一次算好。
+        from tcer.core import metrics as _metrics
+        turn_pos = {t.turn: i for i, t in enumerate(self._stats)}
+        n = len(self._stats)
+        self._tc = _metrics.turn_cost_analysis(self._usage)
+        self._rl = _metrics.retry_loop_metrics(self._usage)
+        cost_by_idx: dict[int, float] = {}
+        for turn, cost in self._tc["turn_costs"]:
+            i = turn_pos.get(turn)
+            if i is not None:
+                cost_by_idx[i] = cost_by_idx.get(i, 0.0) + cost
+        cum_cost, cc = [], 0.0
+        for i in range(n):
+            cc += cost_by_idx.get(i, 0.0)
+            cum_cost.append(cc)
+        self._cost_by_idx = cost_by_idx
+        self._cum_cost = cum_cost if self._tc["turn_costs"] else []
+        cum_net, cn = [], 0
+        for t in self._stats:
+            a, d = self._loc_by_turn.get(t.turn, (0, 0))
+            cn += a - d
+            cum_net.append(cn)
+        self._cum_net = cum_net if self._loc_by_turn else None  # 非 Claude 源无逐回合 LOC
+        retry_spans: list[tuple[int, int]] = []
+        retry_set: set[int] = set()
+        for t0, t1 in self._rl["spans"]:
+            idxs = [i for i, t in enumerate(self._stats) if t0 <= t.turn <= t1]
+            if idxs:
+                retry_spans.append((idxs[0], idxs[-1]))
+                retry_set.update(idxs)
+        self._retry_idx_spans = retry_spans
+        self._retry_idx_set = retry_set
+        self._spike_idx = turn_pos.get(self._tc["spike_turn"])
+        self._cinv_idx_set = {turn_pos[t] for t in self._tc["cache_invalidation_turns"]
+                              if t in turn_pos}
+        self._aa_imgs: list = []  # _aa_layer PhotoImage 防 GC（每帧重置）
+        self._view = "timeline"
+
         sid = (report.meta.session_id or report.meta.path.stem)[:16]
         win = _new_window(parent, f"会话时间线 · {sid}…", "900x560")
-
+        self._win = win
+        self._after_host = parent
+        import queue as _queue
+        self._ui_queue: _queue.Queue = _queue.Queue()
+        self._poll_ui_queue()
         head = tk.Frame(win, bg=theme.BG, padx=10, pady=6)
         head.pack(fill="x")
         tk.Label(head, text="会话时间线", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING).pack(side="left")
         n_dur = sum(1 for t in self._stats if t.duration_ms is not None)
-        tk.Label(head,
-                 text=f"{len(self._stats)} 回合 · {n_dur} 个有权威耗时 · "
-                      "悬停看明细，点击回合展开工具调用",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
-                     side="left", padx=10)
-        # 图例
-        legend = tk.Frame(head, bg=theme.BG)
-        legend.pack(side="right")
-        for label, key in (("输入", "input"), ("缓存写", "cache_write"),
-                           ("缓存读", "cache_read"), ("输出", "output")):
-            tk.Label(legend, text="■", bg=theme.BG, fg=self._COLORS[key],
-                     font=theme.FONT_UI_SMALL).pack(side="left")
-            tk.Label(legend, text=label, bg=theme.BG, fg=theme.MUTED,
-                     font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 6))
+        self._subtitle = tk.Label(
+            head, text=self._subtitle_text(n_dur), bg=theme.BG,
+            fg=theme.MUTED, font=theme.FONT_UI_SMALL)
+        self._subtitle.pack(side="left", padx=10)
+        self._view_bar = tk.Frame(head, bg=theme.BG)
+        self._view_bar.pack(side="left", padx=(4, 0))
+        self._render_view_buttons()
+        # LLM 解读按钮常驻（未配置点击弹提示引导去工具栏「LLM…」配置；
+        # 真正的网络调用在确认之后才发生——opt-in 语义保持不变）
+        from .views import ui_icon
+        self._llm_btn = flat_button(
+            head, "LLM 解读", self._on_llm_interpret,
+            image=ui_icon(head, "sparkle"), compound="left")
+        self._llm_btn.pack(side="left", padx=(8, 0))
+        Tooltip(self._llm_btn, "把会话数据发给配置的 LLM 生成收敛/发散归因"
+                                "（发送前确认；结果仅展示，不参与指标计算）")
+        self._dyn_btn = flat_button(
+            head, "相空间分析", self._on_dynamics_interpret,
+            compound="left")
+        self._dyn_btn.pack(side="left", padx=(4, 0))
+        Tooltip(self._dyn_btn, "生成专属《相空间收敛动力学报告》"
+                                "（含狄拉克目标坍缩相图与三能力雷达，作为单独报告入库）")
+        self._legend = tk.Frame(head, bg=theme.BG)
+        self._legend.pack(side="right")
+        self._render_legend()
 
         self.canvas = tk.Canvas(win, bg=theme.PANEL, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 4))
@@ -293,26 +361,111 @@ class SessionTimelinePopup:
         self._bar_x: list[tuple[float, float, int]] = []  # (x0, x1, idx)
         # 点击钻取的明细面板（默认隐藏，点击回合条展开）
         self._detail = tk.Frame(win, bg=theme.PANEL)
+        # LLM 解读结果面板（默认隐藏，同 _detail 的 pack/unpack 模式）
+        self._llm_panel = tk.Frame(win, bg=theme.PANEL)
         self.canvas.bind("<Configure>", lambda e: self._draw())
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", lambda e: self._tooltip.hide())
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<Destroy>", lambda e: self._tooltip.hide())
 
+    def _subtitle_text(self, n_dur: int) -> str:
+        if self._view == "converge":
+            return f"{len(self._stats)} 回合 · 净增走平+成本爬升=发散区"
+        return (f"{len(self._stats)} 回合 · {n_dur} 个有权威耗时 · "
+                "悬停看明细，点击回合展开工具调用")
+
+    def _render_view_buttons(self) -> None:
+        for w_ in self._view_bar.winfo_children():
+            w_.destroy()
+        for key, label in self._VIEWS:
+            flat_button(self._view_bar, label, lambda k=key: self._set_view(k),
+                        primary=(key == self._view)).pack(side="left", padx=(0, 4))
+
+    def _set_view(self, view: str) -> None:
+        if view == self._view:
+            return
+        self._view = view
+        # flat_button 的 hover 闭包捕获创建时的底色（widgets.py），只能销毁重建
+        self._render_view_buttons()
+        self._render_legend()
+        self._subtitle.config(text=self._subtitle_text(
+            sum(1 for t in self._stats if t.duration_ms is not None)))
+        self._draw()
+
+    def _render_legend(self) -> None:
+        for w_ in self._legend.winfo_children():
+            w_.destroy()
+        if self._view == "timeline":
+            entries = [("■", self._COLORS[key], label) for label, key in
+                       (("输入", "input"), ("缓存写", "cache_write"),
+                        ("缓存读", "cache_read"), ("输出", "output"))]
+        else:
+            entries = [("■", theme.CHART_PALETTE[2], "累计净增"),
+                       ("■", theme.ERROR, "累计成本"),
+                       ("▬", theme.WARNING, "重试区间"),
+                       ("×", theme.WARNING, "缓存失效"),
+                       ("▼", theme.ERROR, "最贵回合"),
+                       ("┆", theme.MUTED, "压缩")]
+        for sym, color, label in entries:
+            tk.Label(self._legend, text=sym, bg=theme.BG, fg=color,
+                     font=theme.FONT_UI_SMALL).pack(side="left")
+            tk.Label(self._legend, text=label, bg=theme.BG, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 6))
+
     def _draw(self) -> None:
         c = self.canvas
         if not c.winfo_exists():
             return
         c.delete("all")
+        self._aa_imgs = []  # _aa_layer 照片引用防 GC，每帧重置（charts.py 约定）
         w, h = c.winfo_width(), c.winfo_height()
         if w < 40 or h < 40 or not self._stats:
             return
-        stats = self._stats
-        plot_w = w - self._PAD_L - self._PAD_R
+        n = len(self._stats)
+        conv = self._view == "converge"
+        pad_r = self._PAD_R_CONV if conv else self._PAD_R
+        plot_w = w - self._PAD_L - pad_r
         plot_h = h - self._PAD_T - self._PAD_B
-        n = len(stats)
         bw = max(2.0, min(28.0, plot_w / n * 0.8))
         step = plot_w / n
+        base_y = self._PAD_T + plot_h
+        # 回合槽命中区（两视图同一套，随当帧 pad_r 自动对齐——motion/click 零感知）
+        self._bar_x = []
+        for idx in range(n):
+            x0 = self._PAD_L + idx * step + (step - bw) / 2
+            self._bar_x.append((x0, x0 + bw, idx))
+        # X 轴回合刻度（稀疏；两视图一致）
+        tick_every = max(1, n // 12)
+        for idx in range(0, n, tick_every):
+            c.create_text(self._turn_x(idx, step), base_y + 12, text=str(idx + 1),
+                          fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+        if conv:
+            self._draw_convergence(c, step, bw, plot_w, plot_h, base_y, w, pad_r, h)
+        else:
+            self._draw_timeline(c, step, bw, plot_w, plot_h, base_y, w, pad_r, h)
+
+    def _turn_x(self, idx: int, step: float) -> float:
+        """回合槽中心 x（两视图共用）。"""
+        return self._PAD_L + idx * step + step / 2
+
+    def _draw_compaction_lines(self, c, step: float, base_y: float) -> None:
+        """压缩事件竖线（灰虚线 + 「压缩」标签）：回合号经 turn→下标映射定位
+        （零 usage 桩使回合号有空洞，直接当 下标 用会错位——同 segment_metrics）。"""
+        turn_pos = {t.turn: i for i, t in enumerate(self._stats)}
+        for turn in self._compaction_turns:
+            pos = turn_pos.get(turn)
+            if pos is None:
+                continue
+            x = self._turn_x(pos, step)
+            c.create_line(x, self._PAD_T, x, base_y,
+                          fill=theme.MUTED, dash=(2, 4))
+            c.create_text(x, self._PAD_T - 2, text="压缩",
+                          fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+
+    def _draw_timeline(self, c, step, bw, plot_w, plot_h, base_y, w, pad_r, h) -> None:
+        """回合时间线视图：token 堆叠柱 + 权威耗时/CHR/累计净增叠加曲线。"""
+        stats = self._stats
         max_tok = max((t.input_tokens + t.cache_write + t.cache_read
                        + t.output_tokens) for t in stats) or 1
         durs = [t.duration_ms for t in stats if t.duration_ms is not None]
@@ -324,14 +477,11 @@ class SessionTimelinePopup:
         c.create_text(self._PAD_L - 6, self._PAD_T + plot_h, text="0",
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
         c.create_line(self._PAD_L, self._PAD_T + plot_h,
-                      w - self._PAD_R, self._PAD_T + plot_h, fill=theme.BORDER)
+                      w - pad_r, self._PAD_T + plot_h, fill=theme.BORDER)
 
-        self._bar_x = []
-        base_y = self._PAD_T + plot_h
         for idx, t in enumerate(stats):
             x0 = self._PAD_L + idx * step + (step - bw) / 2
             x1 = x0 + bw
-            self._bar_x.append((x0, x1, idx))
             y = base_y
             for key, val in (("input", t.input_tokens),
                              ("cache_write", t.cache_write),
@@ -353,7 +503,7 @@ class SessionTimelinePopup:
             for idx, t in enumerate(stats):
                 if t.duration_ms is None:
                     continue
-                x = self._PAD_L + idx * step + step / 2
+                x = self._turn_x(idx, step)
                 y = base_y - (t.duration_ms / max_dur) * plot_h * 0.9
                 pts.append((x, y))
             for i in range(1, len(pts)):
@@ -361,7 +511,7 @@ class SessionTimelinePopup:
             for x, y in pts:
                 c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=theme.CHART_PALETTE[4],
                               outline="")
-            c.create_text(w - self._PAD_R, self._PAD_T - 12,
+            c.create_text(w - pad_r, self._PAD_T - 12,
                           text=f"耗时（紫线，峰值 {fmt.fmt_duration_ms(max_dur, short=True)}）",
                           fill=theme.CHART_PALETTE[4], font=theme.FONT_UI_SMALL, anchor="e")
 
@@ -372,7 +522,7 @@ class SessionTimelinePopup:
             if denom <= 0:
                 continue
             ratio = t.cache_read / denom
-            x = self._PAD_L + idx * step + step / 2
+            x = self._turn_x(idx, step)
             y = base_y - ratio * plot_h * 0.9
             chr_pts.append((x, y))
         if len(chr_pts) >= 2:
@@ -391,7 +541,7 @@ class SessionTimelinePopup:
                 a, d = self._loc_by_turn.get(t.turn, (0, 0))
                 cum += a - d
                 max_cum = max(max_cum, abs(cum))
-                x = self._PAD_L + idx * step + step / 2
+                x = self._turn_x(idx, step)
                 y = base_y - (cum / max_cum if max_cum else 0) * plot_h * 0.9
                 loc_pts.append((x, y))
             if len(loc_pts) >= 2:
@@ -402,25 +552,7 @@ class SessionTimelinePopup:
                               text="累计净增行（橙线）",
                               fill=theme.CHART_PALETTE[2], font=theme.FONT_UI_SMALL)
 
-        # 压缩事件竖线（灰虚线 + 「压缩」标签）：回合号经 turn→下标映射定位
-        # （零 usage 桩使回合号有空洞，直接当 下标 用会错位——同 segment_metrics）。
-        turn_pos = {t.turn: i for i, t in enumerate(stats)}
-        for turn in self._compaction_turns:
-            pos = turn_pos.get(turn)
-            if pos is None:
-                continue
-            x = self._PAD_L + pos * step + step / 2
-            c.create_line(x, self._PAD_T, x, base_y,
-                          fill=theme.MUTED, dash=(2, 4))
-            c.create_text(x, self._PAD_T - 2, text="压缩",
-                          fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-
-        # X 轴回合刻度（稀疏）
-        tick_every = max(1, n // 12)
-        for idx in range(0, n, tick_every):
-            x = self._PAD_L + idx * step + step / 2
-            c.create_text(x, base_y + 12, text=str(idx + 1),
-                          fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+        self._draw_compaction_lines(c, step, base_y)
 
         # 混用多模型的会话：x 轴下方画逐回合模型色带 + 图例。
         distinct_models = sorted({t.model for t in stats if t.model})
@@ -447,6 +579,83 @@ class SessionTimelinePopup:
         else:
             c.create_text(self._PAD_L + plot_w / 2, h - 12, text="回合",
                           fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+
+    def _draw_convergence(self, c, step, bw, plot_w, plot_h, base_y, w, pad_r, h) -> None:
+        """收敛诊断视图：左轴累计净增（黄）× 右轴累计成本（红）剪刀差。
+
+        净增走平而成本爬升的区段即发散；重试循环横带 / 最贵回合▼ / 缓存失效× /
+        压缩竖线原位标注触发点。折线走 _aa_layer 抗锯齿（无逐点 dot——几百回合
+        会糊成带，数值归 tooltip）。"""
+        from .charts import _aa_layer
+        n = len(self._stats)
+
+        # 重试循环横带（暗橙底：tk canvas 无 alpha，实色横带会压双折线）
+        for i0, i1 in self._retry_idx_spans:
+            x0 = self._turn_x(i0, step) - step / 2
+            x1 = self._turn_x(i1, step) + step / 2
+            c.create_rectangle(x0, self._PAD_T, x1, base_y,
+                               fill=theme.WARN_TINT_BG, outline="")
+            c.create_line(x0, self._PAD_T, x1, self._PAD_T,
+                          fill=theme.WARNING, width=1)
+
+        items: list = []  # _aa_layer items 协议见 charts.py
+        # 左轴：累计净增（可负——零线自画；无逐回合 LOC 的源降级不画）
+        if self._cum_net is not None:
+            lo = min(0, min(self._cum_net))
+            hi = max(0, max(self._cum_net))
+            span = (hi - lo) or 1
+            zero_y = base_y - (0 - lo) / span * plot_h
+            c.create_line(self._PAD_L, zero_y, w - pad_r, zero_y,
+                          fill=theme.CHART_GRID)
+            c.create_text(self._PAD_L - 6, self._PAD_T, text=fmt.fmt_int(hi),
+                          fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
+            c.create_text(self._PAD_L - 6, base_y, text=fmt.fmt_int(lo),
+                          fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
+            pts = [(self._turn_x(i, step),
+                    base_y - (self._cum_net[i] - lo) / span * plot_h)
+                   for i in range(n)]
+            if len(pts) >= 2:
+                items.append(("line", pts, theme.CHART_PALETTE[2], 2))
+        else:
+            c.create_text(self._PAD_L + plot_w / 2, self._PAD_T + 6,
+                          text="该来源无逐回合 LOC 流水，净增线不可用（成本与重试信号仍有效）",
+                          fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+
+        # 右轴：累计成本（单调非负；ERROR 红=花钱方向）
+        if self._cum_cost:
+            max_cost = max(self._cum_cost) or 1.0
+            c.create_text(w - pad_r + 6, self._PAD_T, text=fmt.fmt_money(max_cost),
+                          fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="w")
+            c.create_text(w - pad_r + 6, base_y, text="$0",
+                          fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="w")
+            pts = [(self._turn_x(i, step),
+                    base_y - self._cum_cost[i] / max_cost * plot_h)
+                   for i in range(n)]
+            items.append(("line", pts, theme.ERROR, 2))
+        _aa_layer(c, items, self._aa_imgs)
+
+        # 底线 + 事件标记（▼ 与 × 两行错开防叠）
+        c.create_line(self._PAD_L, base_y, w - pad_r, base_y, fill=theme.BORDER)
+        if self._spike_idx is not None:
+            c.create_text(self._turn_x(self._spike_idx, step), self._PAD_T + 10,
+                          text="▼", fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD)
+        for i in sorted(self._cinv_idx_set):
+            c.create_text(self._turn_x(i, step), self._PAD_T + 24, text="×",
+                          fill=theme.WARNING, font=theme.FONT_UI_SMALL)
+        self._draw_compaction_lines(c, step, base_y)
+        c.create_text(self._PAD_L + plot_w / 2, h - 12, text="回合",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL)
+
+        # 顶部摘要（既有标量的叙事组合，零新阈值；None 经 fmt 显示 "-"）
+        r = self._report
+        summary = " · ".join((
+            f"末段/首段效率 {fmt.fmt_float(r.efficiency_decay_ratio)}",
+            f"最贵回合占 {fmt.fmt_pct(r.turn_cost_max_share)}",
+            f"重试循环 {r.retry_loop_count} 处（最长 {r.retry_loop_max_len}）",
+            f"缓存失效 {r.cache_invalidation_events} 回合",
+        ))
+        c.create_text(self._PAD_L, self._PAD_T - 18, text=summary,
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
 
     def _on_motion(self, event) -> None:
         idx = None
@@ -476,6 +685,23 @@ class SessionTimelinePopup:
             lines.append(f"工具调用 {t.tool_calls} 次")
         if t.errors:
             lines.append(f"⚠ 工具错误 {t.errors} 次")
+        if self._view == "converge":
+            colors = [theme.FG] * len(lines)
+            if self._cum_net is not None:
+                lines.append(f"累计净增 {self._cum_net[idx]:+,} 行")
+                colors.append(theme.CHART_PALETTE[2])
+            if self._cum_cost:
+                lines.append(f"累计成本 {fmt.fmt_money(self._cum_cost[idx])}")
+                colors.append(theme.ERROR)
+                cost = self._cost_by_idx.get(idx)
+                if cost:
+                    lines.append(f"本回合成本 {fmt.fmt_money(cost)}")
+                    colors.append(theme.ERROR)
+            if idx in self._retry_idx_set:
+                lines.append("⚠ 重试循环中")
+                colors.append(theme.WARNING)
+            self._tooltip.show(event.x, event.y, lines, colors)
+            return
         self._tooltip.show(event.x, event.y, lines)
 
     def _on_click(self, event) -> None:
@@ -503,6 +729,15 @@ class SessionTimelinePopup:
                          + (f" · ⚠ 错误 {t.errors}" if t.errors else ""))
         if a or d:
             lines.append(f"本回合净增 {a - d:+d} 行（+{a} / -{d}）")
+        if self._view == "converge":
+            if self._cum_net is not None:
+                lines.append(f"累计净增 {self._cum_net[idx]:+,} 行")
+            if self._cum_cost:
+                cost = self._cost_by_idx.get(idx)
+                lines.append(f"累计成本 {fmt.fmt_money(self._cum_cost[idx])}"
+                             + (f" · 本回合 {fmt.fmt_money(cost)}" if cost else ""))
+            if idx in self._retry_idx_set:
+                lines.append("⚠ 重试循环中")
         ops = self._ops_by_turn.get(t.turn, [])
         if ops:
             names = [f"{op.tool} {op.path}" if op.path else op.tool for op in ops]
@@ -514,7 +749,253 @@ class SessionTimelinePopup:
                  fg=theme.FG, font=theme.FONT_UI_SMALL, anchor="w",
                  justify="left", wraplength=820).pack(fill="x", padx=6, pady=4)
 
+    # -- LLM 解读（opt-in 联网；结果仅展示，不参与任何指标计算）--
+    def _llm_derived(self) -> dict:
+        """打包弹窗已算好的派生数据给 llm_prompts（纯内存，主线程调用）。"""
+        return {
+            "stats": self._stats,
+            "cum_net": self._cum_net,
+            "cum_cost": self._cum_cost,
+            "retry_spans": self._rl["spans"],
+            "retry_details": self._rl["details"],
+            "spike_turn": self._tc["spike_turn"],
+            "cinv_turns": self._tc["cache_invalidation_turns"],
+            "compaction_turns": self._compaction_turns,
+            "ops_by_turn": self._ops_by_turn,
+            "loc_by_turn": self._loc_by_turn,
+            "hot_files": self._report.files_touched_details or {},
+        }
 
+    def _on_llm_interpret(self) -> None:
+        if self._llm_busy:
+            return
+        from tkinter import messagebox
+        from tcer.core import llm_prefs
+        from tcer.core import llm_prompts
+        if not llm_prefs.enabled():
+            # parent=本弹窗：确认/提示框关闭后前台还给本弹窗（无 parent 时以
+            # 主窗为 owner，关闭后本弹窗会被主窗盖住——用户看着像「消失了」）。
+            messagebox.showinfo(
+                "LLM 解读", "请先点击工具栏「LLM设置」完成服务配置。",
+                parent=self._win)
+            return
+        scopes = llm_prefs.scopes()
+        derived = self._llm_derived()
+        est = llm_prompts.estimate_request_tokens(self._report, derived, scopes)
+        if llm_prefs.has_scope("dialog", scopes):
+            est += llm_prompts.estimate_tokens(
+                "消" * llm_prompts.MAX_DIALOGUE_CHARS)
+        scope_labels = " · ".join(
+            f"[{llm_prefs.SCOPE_LABELS.get(s, s)}]" for s in scopes
+        ) or "（未授权数据）"
+        if not messagebox.askyesno(
+                "LLM 解读",
+                f"将把本会话数据发送到：\n{llm_prefs.model()} @ "
+                f"{llm_prefs.base_url()}\n\n"
+                f"出境范围：{scope_labels}\n\n"
+                f"预估约 {est:,} tokens（粗估，用户消息按采样上限计）。"
+                "解读结果仅供参考，不参与任何指标计算。\n\n"
+                "生成可能需要数十秒，请保持本窗口开启（关闭则结果丢弃）。",
+                parent=self._win):
+            return
+        self._llm_busy = True
+        btn = getattr(self, "_llm_btn", None)
+        if btn is not None and btn.winfo_exists():
+            btn.config(text="解读中…", state="disabled")
+        for w_ in self._llm_panel.winfo_children():
+            w_.destroy()
+        target_lbl = f"{llm_prefs.model()} @ {llm_prefs.base_url()}"
+        tk.Label(self._llm_panel, text=f"正在请求 {target_lbl} 生成会话解读…（请稍候）",
+                 bg=theme.PANEL, fg=theme.FG_WHITE, font=theme.FONT_UI_SMALL).pack(
+                     fill="x", padx=6, pady=4)
+        self._llm_panel.pack(fill="x", padx=10, pady=(0, 6), before=self.canvas)
+        from threading import Thread
+        Thread(target=self._llm_work, args=(scopes, derived, False), daemon=True).start()
+
+    def _on_dynamics_interpret(self) -> None:
+        if self._llm_busy:
+            return
+        from tkinter import messagebox
+        from tcer.core import llm_prefs, llm_prompts
+        if not llm_prefs.enabled():
+            messagebox.showinfo(
+                "相空间分析", "请先点击工具栏「LLM设置」完成服务配置。",
+                parent=self._win)
+            return
+        scopes = llm_prefs.scopes()
+        derived = self._llm_derived()
+        est = llm_prompts.estimate_request_tokens(self._report, derived, scopes)
+        if llm_prefs.has_scope("dialog", scopes):
+            est += llm_prompts.estimate_tokens(
+                "消" * llm_prompts.MAX_DIALOGUE_CHARS)
+        scope_labels = " · ".join(
+            f"[{llm_prefs.SCOPE_LABELS.get(s, s)}]" for s in scopes
+        ) or "（未授权数据）"
+        if not messagebox.askyesno(
+                "相空间收敛动力学分析",
+                f"将生成专属《相空间动力学报告》并发送数据到：\n{llm_prefs.model()} @ "
+                f"{llm_prefs.base_url()}\n\n"
+                f"出境范围：{scope_labels}\n\n"
+                f"分析框架：初始语义熵降低、相空间游走、平庸代码吸引子俘获、狄拉克目标收敛。\n"
+                f"预估约 {est:,} tokens。报告将作为独立专属报告收入「LLM 报告」页签。\n\n"
+                "生成可能需要数十秒，请保持本窗口开启（关闭则结果丢弃）。",
+                parent=self._win):
+            return
+        self._llm_busy = True
+        btn = getattr(self, "_dyn_btn", None)
+        if btn is not None and btn.winfo_exists():
+            btn.config(text="分析中…", state="disabled")
+        for w_ in self._llm_panel.winfo_children():
+            w_.destroy()
+        target_lbl = f"{llm_prefs.model()} @ {llm_prefs.base_url()}"
+        tk.Label(self._llm_panel, text=f"正在向 {target_lbl} 发起相空间动力学推演…（请稍候）",
+                 bg=theme.PANEL, fg=theme.FG_WHITE, font=theme.FONT_UI_SMALL).pack(
+                     fill="x", padx=6, pady=4)
+        self._llm_panel.pack(fill="x", padx=10, pady=(0, 6), before=self.canvas)
+        from threading import Thread
+        Thread(target=self._llm_work, args=(scopes, derived, True), daemon=True).start()
+
+    def _llm_work(self, scope, derived: dict, is_dynamics: bool = False) -> None:
+        """worker 主体（同步方法，测试可直接调）：懒加载对话数据 → 组 prompt → 调 LLM → 回主线程。"""
+        from tcer.core import llm_client, llm_prefs, llm_prompts
+        try:
+            dialogue = None
+            texts: list[str] = []
+            if llm_prefs.has_scope("dialog", scope):
+                if self._load_dialogue:
+                    try:
+                        dialogue = self._load_dialogue()
+                    except Exception:
+                        dialogue = None
+                if dialogue is None and self._load_user_texts:
+                    try:
+                        texts = self._load_user_texts()
+                    except Exception:
+                        texts = []
+            if is_dynamics:
+                system, user = llm_prompts.dynamics_prompt(
+                    self._report, derived, scope, dialogue, texts)
+            else:
+                system, user = llm_prompts.convergence_prompt(
+                    self._report, derived, scope, dialogue, texts)
+            reply = llm_client.chat(base_url=llm_prefs.base_url() or "",
+                                    api_key=llm_prefs.api_key(),
+                                    model=llm_prefs.model() or "",
+                                    system=system, user=user)
+            ok, payload = True, reply
+        except llm_client.LlmError as e:
+            ok, payload = False, str(e)
+        except Exception as e:  # 网络栈意外异常同样落到错误展示
+            ok, payload = False, f"解读失败：{e}"
+        # 放入线程安全队列，由主线程 _poll_ui_queue 立即调度（彻底根除 Windows 跨线程 after 丢失）
+        self._ui_queue.put(lambda: self._llm_done(ok, payload, scope, is_dynamics))
+        try:
+            self._after_host.after(0, lambda: None)  # 尝试唤醒事件循环
+        except Exception:
+            pass
+    def _poll_ui_queue(self) -> None:
+        """主线程定时轮询队列，安全执行跨线程 UI 回调（防 Windows 跨线程 after 丢失）。"""
+        import queue as _queue
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except _queue.Empty:
+            pass
+        except Exception:
+            pass
+        try:
+            if self._win.winfo_exists():
+                self._win.after(60, self._poll_ui_queue)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _llm_done(self, ok: bool, payload: str, scope, is_dynamics: bool = False) -> None:
+        """主线程回填（setter 层兜底：弹窗刚销毁的窗口期不炸）。"""
+        import time as _time
+        from tcer.core import llm_prefs, llm_reports, llm_prompts
+        try:
+            self._llm_busy = False
+            btn = getattr(self, "_llm_btn", None)
+            if btn is not None and btn.winfo_exists():
+                btn.config(text="LLM 解读", state="normal")
+            d_btn = getattr(self, "_dyn_btn", None)
+            if d_btn is not None and d_btn.winfo_exists():
+                d_btn.config(text="相空间分析", state="normal")
+            if not ok:
+                if not self._win.winfo_exists():
+                    return
+                self._win.lift()
+                for w_ in self._llm_panel.winfo_children():
+                    w_.destroy()
+                tk.Label(self._llm_panel, text=f"× {payload}", bg=theme.PANEL,
+                         fg=theme.ERROR, font=theme.FONT_UI_SMALL,
+                         justify="left", wraplength=840).pack(
+                             fill="x", padx=6, pady=4)
+                self._llm_panel.pack(fill="x", padx=10, pady=(0, 6), before=self.canvas)
+                return
+            meta = self._report.meta
+            if is_dynamics:
+                text, dyn_data = llm_prompts.parse_dynamics_payload(payload)
+                kind = "dynamics"
+                title = f"{meta.title or meta.session_id or '会话'} · 相空间分析"
+            else:
+                text = payload
+                dyn_data = None
+                kind = "session"
+                title = meta.title or meta.session_id or "会话解读"
+
+            entry = {
+                "id": str(int(_time.time() * 1000)),
+                "created_at": int(_time.time() * 1000),
+                "kind": kind,
+                "title": title,
+                "session_id": meta.session_id,
+                "session_title": meta.title,
+                "source": meta.source or "claude",
+                "model": llm_prefs.model(),
+                "scope": llm_prefs.scopes_summary(scope) if isinstance(scope, list) else str(scope),
+                "turns": len(self._stats),
+                "net_loc": self._report.net_loc,
+                "cost_display": f"${self._report.cost:.2f}",
+                "text": text,
+                "dynamics_data": dyn_data,
+            }
+            llm_reports.append(entry)
+            if not self._win.winfo_exists():
+                return  # 弹窗已关：报告已保存，页签里仍可回看
+            for w_ in self._llm_panel.winfo_children():
+                w_.destroy()
+            label_text = "✓ 相空间动力学报告已生成并入库（主界面「LLM 报告」页签查看）" if is_dynamics else "✓ 解读已生成并保存（主界面「LLM 报告」页签查看）"
+            tk.Label(self._llm_panel,
+                     text=label_text,
+                     bg=theme.PANEL, fg=theme.SUCCESS,
+                     font=theme.FONT_UI_SMALL).pack(fill="x", padx=6, pady=4)
+            self._llm_panel.pack(fill="x", padx=10, pady=(0, 6), before=self.canvas)
+            if self._on_report_saved is not None:
+                try:
+                    self._on_report_saved(entry["id"])
+                except Exception:
+                    pass
+        except Exception as e:
+            self._llm_busy = False
+            try:
+                if getattr(self, "_llm_btn", None) and self._llm_btn.winfo_exists():
+                    self._llm_btn.config(text="LLM 解读", state="normal")
+                if getattr(self, "_dyn_btn", None) and self._dyn_btn.winfo_exists():
+                    self._dyn_btn.config(text="相空间分析", state="normal")
+                if getattr(self, "_llm_panel", None) and self._llm_panel.winfo_exists():
+                    for w_ in self._llm_panel.winfo_children():
+                        w_.destroy()
+                    tk.Label(self._llm_panel, text=f"× 处理响应失败：{e}", bg=theme.PANEL,
+                             fg=theme.ERROR, font=theme.FONT_UI_SMALL,
+                             justify="left", wraplength=840).pack(fill="x", padx=6, pady=4)
+                    self._llm_panel.pack(fill="x", padx=10, pady=(0, 6), before=self.canvas)
+            except Exception:
+                pass
 class ProjectOverviewPopup:
     """项目总览 — 全部项目并排对比（点击表头排序）。
 

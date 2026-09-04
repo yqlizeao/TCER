@@ -20,6 +20,7 @@ CONTROL_BG = "#333333"      # 控件底：分段控件容器/pill、进度条槽
 CARD_HEADER_BG = "#2a2a2e"  # 弹窗/卡片头部略抬升底（比 PANEL_2 更近 PANEL）
 SEL_ROW_BG = "#15324f"      # 选中行底色（CheckRow 淡蓝；多行高亮不刺眼）
 WARN_TINT_BG = "#3a2a1a"    # 警示提示条暗橙底（配 WARNING 前景字）
+ERROR_TINT_BG = "#3a1a1a"   # 错误/吸引子警示卡片暗红底（配 ERROR 前景字）
 FG_WHITE = "#ffffff"        # 选中态纯白字（比 FG 更亮一档）
 
 # 交互反馈色（hover 态），与 flat_button / Card 共用。
@@ -47,6 +48,17 @@ WARNING = "#ce9178"
 ERROR = "#f48771"
 VIEW_PROJECT = "#cc7a1e"   # 项目视角标识色（橙黄，与会话蓝 ACCENT 区分）
 
+# 相空间动力学相图色（平庸吸引子漏斗暗红光晕 + 狄拉克发光核底 + 流场与势阱边界）
+ATTRACTOR_RINGS = ("#2d1b1b", "#3d2222", "#522828")
+DIRAC_CORE_BG = "#1a3326"
+ATTRACTOR_BASIN_BORDER = "#422828"   # 平庸吸引盆外层等势圈
+DIRAC_WELL_BORDER = "#1a3b30"        # 狄拉克势阱保护圈
+PHASE_STREAMLINE = "#252b35"         # 相速度背景流线微矢量
+PHASE_CORRIDOR = "#1c3833"           # 理想收敛流形走廊参考线
+PHASE_GRID_DIRAC = "#273831"         # 目标收敛区参考虚线
+PHASE_GRID_TRAP = "#3d2c25"          # 吸引子危险区参考虚线
+PHASE_ZONE_DIRAC = "#3fb950"         # 收敛目标域提示文字绿
+PHASE_ZONE_TRAP = "#d29922"          # 高熵危险域提示文字橙
 # Metric semantic levels → display color.
 # basic (white): absolute baseline values and direct calculations.
 # compound (yellow): contains magic numbers / coefficients, reference only.
