@@ -3011,7 +3011,7 @@ class PhasePortraitWidget:
             status_str, status_col = status_map.get(vec, ("状态未定", theme.MUTED))
             turn_desc = f"助手回合 T{t} · 用户消息 U{u}" if u is not None else f"回合 T{t}"
             lines = [
-                f"{turn_desc} · 代码偏离度: {ds:.2f}",
+                f"{turn_desc} · 语义距离: {ds:.2f}",
                 f"推进矢量: {status_str}",
             ]
             colors = [theme.FG_WHITE, status_col]
@@ -3031,10 +3031,10 @@ class PhasePortraitWidget:
             text_hit = (tgt_x + 15 <= event.x <= tgt_x + 190) and abs(event.y - tgt_y) <= 18
             if d_circle <= 28 or text_hit:
                 lines = [
-                    "狄拉克目标点 · C_expert",
-                    "状态特征: 零熵理想代码态 · 目标偏离 0.00",
-                    "动力学定义: 完美契合业务意图的向心终点",
-                    "工程含义: 逻辑精炼紧凑，无防御性样板与多余面条代码",
+                    "狄拉克目标点 · 零熵理想态",
+                    "状态特征: 契合真实意图 · 语义距离 0.00",
+                    "动力学定义: 业务意图形式化收敛终点",
+                    "工程含义: 逻辑精炼紧凑，无多余冗余生成",
                 ]
                 colors = [theme.SUCCESS, theme.FG_WHITE, theme.MUTED, theme.MUTED]
                 self._tooltip.show(event.x, event.y, lines, colors)
@@ -3048,10 +3048,10 @@ class PhasePortraitWidget:
             text_hit = abs(event.x - att_x) <= 110 and abs(event.y - ty_mid) <= 18
             if d_circle <= 54 or text_hit:
                 lines = [
-                    "平庸代码吸引子 · P(C_mediocre)",
+                    "平庸代码吸引子 · 惯性势阱",
                     "状态特征: 高熵先验势阱 · 偏离危险区 (Ds ≈ 0.86)",
-                    "动力学定义: 预训练面条代码的强大惯性黑洞",
-                    "工程含义: 机械打补丁、过度封装、局部重试死锁",
+                    "动力学定义: 预训练模型的面条冗余惯性黑洞",
+                    "工程含义: 盲目机械修改、过度封装、局部重试死锁",
                 ]
                 colors = [theme.ERROR, theme.FG_WHITE, theme.MUTED, theme.MUTED]
                 self._tooltip.show(event.x, event.y, lines, colors)
@@ -3106,19 +3106,13 @@ class PhasePortraitWidget:
         if max_cost_val <= 0:
             max_cost_val = 10.0
         y_ticks = []
-        for frac, prog_lbl in (
-            (1.0, "100% (终态)"),
-            (0.75, "75%"),
-            (0.50, "50%"),
-            (0.25, "25%"),
-            (0.0, "0% (起始)"),
-        ):
+        for frac in (1.0, 0.75, 0.50, 0.25, 0.0):
             gy = pad_t + (1.0 - frac) * plot_h
             if 0.0 < frac < 1.0:
                 c.create_line(pad_l, gy, pad_l + plot_w, gy, fill=theme.BORDER, dash=(2, 4))
             val = max_cost_val * frac
             val_txt = f"${val:.1f}" if max_cost_val >= 1 else f"${val:.2f}"
-            y_ticks.append((gy, val_txt, prog_lbl))
+            y_ticks.append((gy, val_txt))
 
         # 关键状态分界线（收敛目标域推至最左侧 0.10，高熵危险域推至最右侧 0.90）
         line_target_x = pad_l + 0.10 * plot_w
@@ -3242,26 +3236,21 @@ class PhasePortraitWidget:
         self._aa_layer(c, aa_items, self._aa_imgs)
 
         # 3. 上层锐利文本标签 (Layer 2: 最顶层 Canvas 原生文本，绝对不被底图遮挡)
-        # 吸引子标签与副标（置于圆环上方开阔安全区，与顶部域界标严格垂直错开）
-        c.create_text(att_x, pad_t + 4, text="平庸代码吸引子 P(C_mediocre)",
+        # 吸引子标签（单行精炼，详尽定义由 hover 展示）
+        c.create_text(att_x, pad_t + 10, text="平庸代码吸引子",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
-        c.create_text(att_x, pad_t + 18, text="[引力势阱 / 预训练惯性漏斗]",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
 
-        # 狄拉克目标点标签与副标
-        c.create_text(tgt_x + 22, tgt_y - 6, text="狄拉克目标点 C_expert",
+        # 狄拉克目标点标签（单行精炼，详尽定义由 hover 展示）
+        c.create_text(tgt_x + 22, tgt_y, text="狄拉克目标点",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        c.create_text(tgt_x + 22, tgt_y + 8, text="[零熵理想代码态]",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        # 双轴刻度文本（左：物理成本 $，右：生命周期推进 %）
-        for gy, val_txt, prog_lbl in y_ticks:
+
+        # 左侧物理成本刻度文本（右侧彻底清空，杜绝截断）
+        for gy, val_txt in y_ticks:
             c.create_text(pad_l - 6, gy, text=val_txt, fill=theme.MUTED,
                           font=theme.FONT_UI_SMALL, anchor="e")
-            c.create_text(pad_l + plot_w + 6, gy, text=prog_lbl, fill=theme.MUTED,
-                          font=theme.FONT_UI_SMALL, anchor="w")
 
         # 内置动力学微图例栏（置于最上方开阔安全区，居中对齐）
-        leg_w = 470
+        leg_w = 460
         leg_x = max(pad_l + 8, pad_l + (plot_w - leg_w) / 2)
         leg_y = pad_t - 16
         c.create_line(leg_x, leg_y, leg_x + 14, leg_y, fill=theme.SUCCESS, width=2)
@@ -3269,19 +3258,18 @@ class PhasePortraitWidget:
         c.create_line(leg_x + 130, leg_y, leg_x + 144, leg_y, fill=theme.ERROR, width=2)
         c.create_text(leg_x + 148, leg_y, text="离心偏离 (做负功)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_oval(leg_x + 260, leg_y - 4, leg_x + 268, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
-        c.create_text(leg_x + 272, leg_y, text="狄拉克目标态", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(leg_x + 272, leg_y, text="狄拉克目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_oval(leg_x + 365, leg_y - 4, leg_x + 373, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
-        c.create_text(leg_x + 377, leg_y, text="平庸吸引子势阱", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(leg_x + 377, leg_y, text="平庸代码吸引子", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
 
-        # X 轴刻度文本（通俗自然，指明代码与意图的对齐程度）
-        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (精准达成目标)",
+        # X 轴刻度文本（语义距离维度，贴合业务意图形式化收敛模型）
+        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_text(pad_l + plot_w / 2, pad_t + plot_h + 12,
-                      text="代码偏离度：向左贴近目标代码 · 向右偏离业务需求",
+                      text="语义距离：向左逼近目标达成 · 向右偏离真实意图",
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
-        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离需求)",
+        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
-
         # 质点回合标签与事件微标（错开避让，在最顶层）
         for i, item in enumerate(self._pts):
             x, y, pt = item[:3]
