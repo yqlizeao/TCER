@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import math
 import tkinter as tk
 from pathlib import Path
 from dataclasses import dataclass
@@ -3210,12 +3211,29 @@ class PhasePortraitWidget:
                 poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
                 if poly:
                     aa_items.append(("polygon", poly, col, col))
-                # 大幅向心收敛推力做功脉冲微弧 (Control Impulse)
+                # 大幅向心收敛推力做功脉冲微弧 (Control Impulse，严格顺向波前)
                 if delta_ds < -0.12:
-                    mx = (x0 + x1) / 2
-                    my = (y0 + y1) / 2
-                    aa_items.append(("line", [(mx - 9, my - 7), (mx - 3, my), (mx - 9, my + 7)], theme.PHASE_IMPULSE, 2))
-                    aa_items.append(("line", [(mx - 15, my - 11), (mx - 7, my), (mx - 15, my + 11)], theme.PHASE_CORRIDOR, 1))
+                    dx = x1 - x0
+                    dy = y1 - y0
+                    dist = math.hypot(dx, dy)
+                    if dist > 12.0:
+                        ux = dx / dist
+                        uy = dy / dist
+                        nx = -uy
+                        ny = ux
+                        mx = (x0 + x1) / 2
+                        my = (y0 + y1) / 2
+                        tip1 = (mx + ux * 6, my + uy * 6)
+                        w1_1 = (mx - ux * 5 + nx * 9, my - uy * 5 + ny * 9)
+                        w1_2 = (mx - ux * 5 - nx * 9, my - uy * 5 - ny * 9)
+                        aa_items.append(("line", [w1_1, tip1, w1_2], theme.PHASE_IMPULSE, 2))
+                        # 第二道推力后波
+                        m2x = mx - ux * 8
+                        m2y = my - uy * 8
+                        tip2 = (m2x + ux * 5, m2y + uy * 5)
+                        w2_1 = (m2x - ux * 5 + nx * 13, m2y - uy * 5 + ny * 13)
+                        w2_2 = (m2x - ux * 5 - nx * 13, m2y - uy * 5 - ny * 13)
+                        aa_items.append(("line", [w2_1, tip2, w2_2], theme.PHASE_CORRIDOR, 1))
             # (F) 质点多态化与动力学事件光晕
             n_pts = len(self._pts)
             for i_pt, item in enumerate(self._pts):
@@ -3263,22 +3281,17 @@ class PhasePortraitWidget:
             c.create_text(pad_l + plot_w + 6, gy, text=prog_lbl, fill=theme.MUTED,
                           font=theme.FONT_UI_SMALL, anchor="w")
 
-        # 内置动力学微图例栏（右侧开阔安全区，自解释）
-        leg_x = pad_l + plot_w * 0.40
-        leg_y = pad_t + plot_h - 10
+        # 内置动力学微图例栏（置于最上方开阔安全区，自解释且一览无余）
+        leg_x = pad_l + 8
+        leg_y = pad_t - 16
         c.create_line(leg_x, leg_y, leg_x + 14, leg_y, fill=theme.SUCCESS, width=2)
-        c.create_text(leg_x + 18, leg_y, text="向心推进", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_line(leg_x + 75, leg_y, leg_x + 89, leg_y, fill=theme.ERROR, width=2)
-        c.create_text(leg_x + 93, leg_y, text="离心偏离", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_oval(leg_x + 150, leg_y - 4, leg_x + 158, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
-        c.create_text(leg_x + 162, leg_y, text="目标态", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_oval(leg_x + 210, leg_y - 4, leg_x + 218, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
-        c.create_text(leg_x + 222, leg_y, text="吸引子势阱", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        # 顶层极值域界标（推至两极，平实质朴，杜绝文字重叠）
-        c.create_text(pad_l + 6, pad_t - 16, text="← 目标收敛区 (偏离 ≤ 0.10)",
-                      fill=theme.PHASE_ZONE_DIRAC, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_text(pad_l + plot_w - 6, pad_t - 16, text="高熵偏离区 (偏离 ≥ 0.90) →",
-                      fill=theme.PHASE_ZONE_TRAP, font=theme.FONT_UI_SMALL, anchor="e")
+        c.create_text(leg_x + 18, leg_y, text="向心推进 (做正功)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_line(leg_x + 130, leg_y, leg_x + 144, leg_y, fill=theme.ERROR, width=2)
+        c.create_text(leg_x + 148, leg_y, text="离心偏离 (做负功)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 260, leg_y - 4, leg_x + 268, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
+        c.create_text(leg_x + 272, leg_y, text="狄拉克目标态", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 365, leg_y - 4, leg_x + 373, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
+        c.create_text(leg_x + 377, leg_y, text="平庸吸引子势阱", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
 
         # X 轴刻度文本（通俗自然，指明代码与意图的对齐程度）
         c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (精准达成目标)",
