@@ -3393,8 +3393,8 @@ class LlmReportsView:
         self._tree = ttk.Treeview(tree_container, columns=cols, show="headings",
                                   selectmode="browse")
         for col, text, w, mw, anchor, stretch in (
-                ("kind", "类型", 46, 40, "center", False),
-                ("title", "解读对象 / 标题", 180, 100, "w", True),
+                ("kind", "类型/态势", 56, 46, "center", False),
+                ("title", "解读对象 / 标题", 170, 100, "w", True),
                 ("time", "时间", 90, 82, "center", False)):
             self._tree.heading(col, text=text, anchor=anchor,
                                command=lambda c=col: self._sort_by(c))
@@ -3416,10 +3416,13 @@ class LlmReportsView:
         self._ctx_menu.add_command(label="删除本条报告", command=self._delete_selected)
         self._tree.bind("<Button-3>", self._on_tree_context_menu)
 
-        # 列表标签着色
+        # 列表标签着色（含相空间态势结论细分色）
         for k, meta in self.REPORT_KINDS.items():
             self._tree.tag_configure(f"kind_{k}", foreground=meta["color"])
-
+        self._tree.tag_configure("dyn_escaped", foreground=theme.SUCCESS)
+        self._tree.tag_configure("dyn_dirac", foreground=theme.SUCCESS)
+        self._tree.tag_configure("dyn_trapped", foreground=theme.ERROR)
+        self._tree.tag_configure("dyn_wandering", foreground=theme.WARNING)
         # 右：全高阅读区 — 作为报告展示主核心
         right = tk.Frame(paned, bg=theme.PANEL)
         paned.add(right, minsize=380)
@@ -3569,6 +3572,34 @@ class LlmReportsView:
         return "general"
 
     @classmethod
+    def _resolve_dynamics_status(cls, r: dict) -> tuple[str, str, str]:
+        """解析相空间动力学报告的态势结论 (status_key, label, color)。"""
+        dyn = r.get("dynamics_data") or {}
+        if not dyn:
+            return "dynamics", "相空间", theme.CHART_PALETTE[4]
+        ctype = str(dyn.get("convergence_type") or "").lower()
+        is_trapped = bool(dyn.get("attractor_trapped"))
+        traj = dyn.get("trajectory") or []
+        last_pt = traj[-1] if traj else {}
+        last_evt = str(last_pt.get("event") or "").lower()
+        last_vec = str(last_pt.get("vector") or "").lower()
+        last_ds = float(last_pt.get("semantic_distance", 0.5)) if last_pt else 0.5
+
+        is_escaped = (
+            ctype in ("escaped", "breakthrough")
+            or last_evt == "breakthrough"
+            or (is_trapped and last_vec in ("positive", "convergent") and last_ds <= 0.45)
+        )
+
+        if ctype == "dirac" or (last_ds <= 0.15 and not is_trapped):
+            return "dirac", "收敛", theme.SUCCESS
+        elif is_escaped:
+            return "escaped", "逃逸", theme.SUCCESS
+        elif ctype == "trapped" or is_trapped:
+            return "trapped", "捕获", theme.ERROR
+        else:
+            return "wandering", "漫游", theme.WARNING
+    @classmethod
     def _resolve_title(cls, r: dict) -> str:
         t = str(r.get("title") or r.get("session_title") or
                 r.get("project_name") or r.get("session_id") or "未命名报告")
@@ -3605,7 +3636,8 @@ class LlmReportsView:
             title = self._resolve_title(r).lower()
             model = str(r.get("model") or "").lower()
             text = str(r.get("text") or "").lower()
-            if kw not in title and kw not in model and kw not in text:
+            dyn_status = self._resolve_dynamics_status(r)[1] if kind == "dynamics" else ""
+            if kw not in title and kw not in model and kw not in text and kw not in dyn_status:
                 return False
         return True
 
@@ -3660,14 +3692,18 @@ class LlmReportsView:
 
         for r in filtered:
             kind = self._resolve_kind(r)
-            kind_lbl = self.REPORT_KINDS.get(kind, {}).get("label", "报告")
+            if kind == "dynamics":
+                status_key, kind_lbl, _col = self._resolve_dynamics_status(r)
+                tag = f"dyn_{status_key}" if status_key in ("escaped", "dirac", "trapped", "wandering") else f"kind_{kind}"
+            else:
+                kind_lbl = self.REPORT_KINDS.get(kind, {}).get("label", "报告")
+                tag = f"kind_{kind}"
             self._tree.insert(
                 "", "end", iid=r.get("id"),
-                tags=(f"kind_{kind}",),
+                tags=(tag,),
                 values=(kind_lbl,
                         self._fmt_title(self._resolve_title(r)),
                         self._fmt_time(r.get("created_at"))))
-
         self._count_lbl.config(text=f"{len(filtered)} / {len(self._reports)} 条")
         if sel and self._tree.exists(sel):
             self._tree.selection_set(sel)
@@ -3732,8 +3768,12 @@ class LlmReportsView:
         title = self._resolve_title(r)
 
         self._title_lbl.config(text=title)
-        self._kind_badge.config(
-            text=f"[{kind_meta['label']}解读]", fg=kind_meta["color"])
+        if kind == "dynamics":
+            _status_key, s_lbl, s_col = self._resolve_dynamics_status(r)
+            self._kind_badge.config(text=f"[相空间 · {s_lbl}]", fg=s_col)
+        else:
+            self._kind_badge.config(
+                text=f"[{kind_meta['label']}解读]", fg=kind_meta["color"])
         self._source_badge.config(text=f"源: {r.get('source') or 'claude'}")
         self._model_badge.config(text=f"模型: {r.get('model') or '-'}")
         self._scope_badge.config(text=f"档位: {r.get('scope') or '-'}")
