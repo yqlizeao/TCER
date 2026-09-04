@@ -1139,6 +1139,21 @@ class SessionColumn:
 
         menu.add_separator()
 
+        # LLM 深度解读分组（独立一组，高阶洞察直达）
+        _sparkle = ui_icon(self.container, "sparkle")
+        _layers = ui_icon(self.container, "layers")
+        menu.add_command(
+            label="LLM 过程解读",
+            command=lambda: self.controller.run_session_llm_interpret(report),
+            image=_sparkle, compound="left",
+        )
+        menu.add_command(
+            label="相空间动力学分析",
+            command=lambda: self.controller.run_session_dynamics_analysis(report),
+            image=_layers, compound="left",
+        )
+
+        menu.add_separator()
         # File location
         menu.add_command(
             label=f"在{_file_manager_label()}中打开",

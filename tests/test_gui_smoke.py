@@ -955,6 +955,42 @@ def test_session_column_pin_flag_marks(root, reports):
     root.update_idletasks()
 
 
+
+def test_session_column_right_click_menu(root, reports, monkeypatch):
+    """会话卡片右键菜单包含 LLM 深度解读独立分组。"""
+    from tcer.gui.views import SessionColumn, FlatMenu
+    called = []
+
+    class _Ctl:
+        def __getattr__(self, name):
+            return lambda *a, **kw: called.append(name)
+
+    col = SessionColumn(root, _Ctl())
+    col.update(reports)
+    root.update_idletasks()
+
+    # 捕获 FlatMenu.tk_popup
+    created_menus = []
+    orig_popup = FlatMenu.tk_popup
+    monkeypatch.setattr(FlatMenu, "tk_popup", lambda self, x, y: created_menus.append(self))
+
+    class FakeEvent:
+        x_root = 100
+        y_root = 100
+
+    r = col._reports[0]
+    sid = r.meta.session_id
+    col._on_right_click(FakeEvent(), r, sid)
+    assert len(created_menus) == 1
+    menu = created_menus[0]
+    labels = []
+    for row in menu._body.winfo_children():
+        for ch in row.winfo_children():
+            if isinstance(ch, tk.Label):
+                labels.append(ch.cget("text"))
+    assert "LLM 过程解读" in labels
+    assert "相空间动力学分析" in labels
+
 def test_on_analysis_bail_paths_reset_status():
     """切时间区间后当前 generation 的结果被丢弃时，右上角状态必须落地，
     不能永远卡在「分析中…」（历史 bug：静默 return 泄漏状态，只能重开项目）。

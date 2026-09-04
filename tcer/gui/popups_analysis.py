@@ -751,20 +751,9 @@ class SessionTimelinePopup:
 
     # -- LLM 解读（opt-in 联网；结果仅展示，不参与任何指标计算）--
     def _llm_derived(self) -> dict:
-        """打包弹窗已算好的派生数据给 llm_prompts（纯内存，主线程调用）。"""
-        return {
-            "stats": self._stats,
-            "cum_net": self._cum_net,
-            "cum_cost": self._cum_cost,
-            "retry_spans": self._rl["spans"],
-            "retry_details": self._rl["details"],
-            "spike_turn": self._tc["spike_turn"],
-            "cinv_turns": self._tc["cache_invalidation_turns"],
-            "compaction_turns": self._compaction_turns,
-            "ops_by_turn": self._ops_by_turn,
-            "loc_by_turn": self._loc_by_turn,
-            "hot_files": self._report.files_touched_details or {},
-        }
+        """打包会话派生数据给 llm_prompts（纯内存，主线程调用）。"""
+        from tcer.core import llm_prompts
+        return llm_prompts.build_llm_derived(self._report)
 
     def _on_llm_interpret(self) -> None:
         if self._llm_busy:

@@ -326,3 +326,58 @@ def parse_dynamics_payload(reply: str) -> tuple[str, dict | None]:
         except Exception:
             pass
     return text, None
+
+
+def build_llm_derived(report) -> dict:
+    """从 SessionReport 提取供 llm_prompts 消费的时序与事件派生数据（纯内存）。"""
+    from tcer.core import metrics as _metrics
+    u = report.usage
+    stats = u.turn_stats or []
+    tc = _metrics.turn_cost_analysis(u)
+    rl = _metrics.retry_loop_metrics(u)
+
+    loc_by_turn: dict[int, tuple[int, int]] = {}
+    for turn, a, d in u.turn_net_locs:
+        pa, pd = loc_by_turn.get(turn, (0, 0))
+        loc_by_turn[turn] = (pa + a, pd + d)
+
+    cum_net = []
+    if loc_by_turn and stats:
+        cn = 0
+        for t in stats:
+            a, d = loc_by_turn.get(t.turn, (0, 0))
+            cn += a - d
+            cum_net.append(cn)
+    else:
+        cum_net = None
+
+    ops_by_turn: dict[int, list] = {}
+    for op in u.tool_ops:
+        ops_by_turn.setdefault(op.turn, []).append(op)
+
+    turn_pos = {t.turn: i for i, t in enumerate(stats)}
+    cost_by_idx: dict[int, float] = {}
+    for turn, cost in tc.get("turn_costs", []):
+        i = turn_pos.get(turn)
+        if i is not None:
+            cost_by_idx[i] = cost_by_idx.get(i, 0.0) + cost
+    cum_cost = []
+    if stats and tc.get("turn_costs"):
+        cc = 0.0
+        for i in range(len(stats)):
+            cc += cost_by_idx.get(i, 0.0)
+            cum_cost.append(cc)
+
+    return {
+        "stats": stats,
+        "cum_net": cum_net,
+        "cum_cost": cum_cost,
+        "retry_spans": rl.get("spans", []),
+        "retry_details": rl.get("details", {}),
+        "spike_turn": tc.get("spike_turn"),
+        "cinv_turns": tc.get("cache_invalidation_turns", []),
+        "compaction_turns": list(u.compaction_turns),
+        "ops_by_turn": ops_by_turn,
+        "loc_by_turn": loc_by_turn,
+        "hot_files": report.files_touched_details or {},
+    }

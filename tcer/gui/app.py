@@ -48,6 +48,7 @@ class TcerGui:
         self._analysis_generation = 0
         self._analysis_cancel = threading.Event()
         self._upload_prefs: dict = upload_prefs.load()
+        self._llm_tasks: dict[str, str] = {}
 
         root.title("TCER")
         root.configure(bg=theme.BG)
@@ -1218,6 +1219,142 @@ class TcerGui:
         self._nb.select(self._llm_tab)
         self.llm_reports_view.select_report(report_id)
 
+
+    def run_session_llm_interpret(self, report) -> None:
+        """从右键菜单直接发起：会话过程收敛解读（异步并发，收信箱模型）。"""
+        self._run_session_llm(report, is_dynamics=False)
+
+    def run_session_dynamics_analysis(self, report) -> None:
+        """从右键菜单直接发起：相空间收敛动力学分析（异步并发，收信箱模型）。"""
+        self._run_session_llm(report, is_dynamics=True)
+
+    def _run_session_llm(self, report, is_dynamics: bool) -> None:
+        """从会话列表直接派发 LLM 任务（免阻断确认，后台独立线程池并发执行）。"""
+        from tkinter import messagebox
+        from threading import Thread
+        from tcer.core import llm_client, llm_prefs, llm_prompts, llm_reports
+        import time as _time
+        import sys as _sys
+
+        if not llm_prefs.enabled():
+            messagebox.showinfo(
+                "相空间分析" if is_dynamics else "LLM 解读",
+                "请先点击工具栏「LLM设置」完成服务配置。",
+                parent=self.root)
+            self.show_llm_config()
+            return
+
+        scopes = llm_prefs.scopes()
+        derived = llm_prompts.build_llm_derived(report)
+        action_name = "相空间收敛动力学分析" if is_dynamics else "LLM 过程收敛解读"
+        sid = report.meta.session_id or report.meta.path.stem
+        session_title = report.meta.title or sid[:12]
+        task_id = f"{int(_time.time() * 1000)}_{id(report)}"
+        task_desc = f"{session_title} · {action_name}"
+
+        # 登记活跃并发任务
+        self._llm_tasks[task_id] = task_desc
+        n_running = len(self._llm_tasks)
+        if n_running == 1:
+            self.filter_bar.status.config(
+                text=f"正在请求 {llm_prefs.model()} 生成: {session_title}…", fg=theme.ACCENT)
+        else:
+            self.filter_bar.status.config(
+                text=f"正在并发生成 {n_running} 项 LLM 报告…", fg=theme.ACCENT)
+
+        print(f"[LLM Task] Started: {task_desc} (Target: {llm_prefs.model()} @ {llm_prefs.base_url()})")
+
+        def worker():
+            try:
+                dialogue = None
+                texts: list[str] = []
+                if llm_prefs.has_scope("dialog", scopes):
+                    src = report.meta.source or "claude"
+                    if src == "claude" and report.meta.path:
+                        try:
+                            from tcer.core import reader
+                            dialogue = reader.read_dialogue(report.meta.path)
+                        except Exception:
+                            dialogue = None
+                    if dialogue is None:
+                        try:
+                            texts = TcerGui._load_user_messages(report, [])[0]
+                        except Exception:
+                            texts = []
+
+                if is_dynamics:
+                    system, user = llm_prompts.dynamics_prompt(
+                        report, derived, scopes, dialogue, texts)
+                else:
+                    system, user = llm_prompts.convergence_prompt(
+                        report, derived, scopes, dialogue, texts)
+
+                reply = llm_client.chat(
+                    base_url=llm_prefs.base_url() or "",
+                    api_key=llm_prefs.api_key(),
+                    model=llm_prefs.model() or "",
+                    system=system, user=user)
+
+                meta = report.meta
+                if is_dynamics:
+                    text, dyn_data = llm_prompts.parse_dynamics_payload(reply)
+                    kind = "dynamics"
+                    title = f"{meta.title or meta.session_id or '会话'} · 相空间分析"
+                else:
+                    text = reply
+                    dyn_data = None
+                    kind = "session"
+                    title = meta.title or meta.session_id or "会话解读"
+
+                entry = {
+                    "id": str(int(_time.time() * 1000)),
+                    "created_at": int(_time.time() * 1000),
+                    "kind": kind,
+                    "title": title,
+                    "session_id": meta.session_id,
+                    "session_title": meta.title,
+                    "source": meta.source or "claude",
+                    "model": llm_prefs.model(),
+                    "scope": llm_prefs.scopes_summary(scopes) if isinstance(scopes, list) else str(scopes),
+                    "turns": len(derived["stats"]),
+                    "net_loc": report.net_loc,
+                    "cost_display": f"${report.cost:.2f}",
+                    "text": text,
+                    "dynamics_data": dyn_data,
+                }
+                llm_reports.append(entry)
+                print(f"[LLM Task] Success: saved report {entry['id']} ({title})")
+
+                def on_success():
+                    self._llm_tasks.pop(task_id, None)
+                    remain = len(self._llm_tasks)
+                    if remain > 0:
+                        self.filter_bar.status.config(
+                            text=f"✓ 入库: {title}（还有 {remain} 项生成中…）",
+                            fg=theme.ACCENT)
+                    else:
+                        self.filter_bar.status.config(
+                            text=f"✓ 已入库: {title}", fg=theme.SUCCESS)
+                    # 刷新收信箱列表
+                    try:
+                        self.llm_reports_view._refresh_list()
+                    except Exception:
+                        pass
+                    # 若用户当前就停在 LLM 报告页签，或者这是单任务完成，自动选中查看
+                    if self._nb.index("current") == self._nb.index(self._llm_tab):
+                        self.llm_reports_view.select_report(entry["id"])
+
+                self.root.after(0, on_success)
+            except Exception as e:
+                print(f"[LLM Task Error] {task_desc}: {e}", file=_sys.stderr)
+                def on_err(err_text=str(e)):
+                    self._llm_tasks.pop(task_id, None)
+                    remain = len(self._llm_tasks)
+                    tip = f"× 生成失败: {err_text[:25]}" + (f"（余 {remain} 项）" if remain > 0 else "")
+                    self.filter_bar.status.config(text=tip, fg=theme.ERROR)
+                self.root.after(0, on_err)
+
+        Thread(target=worker, daemon=True).start()
     def show_llm_config(self) -> None:
         """LLM 设置弹窗（本地表单零联网；连接测试为用户显式点击）。"""
         from tcer.core import llm_prefs
