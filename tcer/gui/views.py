@@ -3142,12 +3142,33 @@ class PhasePortraitWidget:
         plot_h = h - pad_t - pad_b
         if plot_w <= 10 or plot_h <= 10:
             return
-        traj = self._data.get("trajectory") or []
+        raw_traj = list(self._data.get("trajectory") or [])
+        total_turns = self._report.get("turns")
+        if not isinstance(total_turns, (int, float)) or total_turns <= 1:
+            valid_turns = [pt.get("turn") for pt in raw_traj if isinstance(pt.get("turn"), (int, float))]
+            total_turns = max(valid_turns, default=1)
+        total_turns = max(1, int(total_turns))
+
+        # 防御性终态事实锚定：若模型在中间突变点提前闭合数组，自动补齐真实会话终态节点
+        traj = list(raw_traj)
+        if traj and total_turns > 1:
+            last_pt = traj[-1]
+            last_t = last_pt.get("turn")
+            if isinstance(last_t, (int, float)) and last_t < total_turns:
+                terminal_pt = {
+                    "turn": total_turns,
+                    "user_turn": last_pt.get("user_turn") or last_pt.get("u"),
+                    "semantic_distance": last_pt.get("semantic_distance", 0.35),
+                    "vector": "positive" if last_pt.get("vector") in ("positive", "convergent") else "neutral",
+                    "event": "normal",
+                    "note": "会话终态收敛" if last_pt.get("vector") in ("positive", "convergent") else "会话终态",
+                }
+                traj.append(terminal_pt)
+
         if getattr(self, "_view_mode", "manifold") == "phase_plane":
             self._draw_phase_plane(c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj)
         else:
             self._draw_manifold(c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj)
-
     def _draw_manifold(self, c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj) -> None:
         """经典状态-代价时序流形视图：横轴语义距离 Ds × 纵轴物理成本 $。"""
         cost_str = str(self._report.get("cost_display") or "")

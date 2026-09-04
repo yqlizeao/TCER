@@ -293,12 +293,22 @@ _DYNAMICS_SYSTEM = (
     f"(prompt {DYNAMICS_PROMPT_VERSION})"
 )
 
-
 def dynamics_prompt(report, derived: dict, scope=None, dialogue=None,
                     user_texts=None) -> tuple[str, str]:
     """组装相空间收敛动力学报告的 (system, user)。"""
     _, user = convergence_prompt(report, derived, scope, dialogue, user_texts)
-    return _DYNAMICS_SYSTEM, user
+    stats = derived.get("stats") or []
+    total_turns = len(stats) or report.usage.assistant_msgs or 1
+    user_msgs = report.usage.user_msgs or 1
+    constraint = (
+        f"\n\n[动力学轨迹客观事实契约]\n"
+        f"本会话底层客观记录：共 {total_turns} 个助手回合、{user_msgs} 轮用户消息。\n"
+        f"在末尾输出的 trajectory 数组中：\n"
+        f"1. 首项必须严格为第 1 回合 (turn=1)；\n"
+        f"2. 末项必须严格对应会话的终态第 {total_turns} 回合 (turn={total_turns})，严禁在中间突变点提前截断！\n"
+        f"3. 中间选取 3~10 个关键转折点（高熵偏离点、局部死锁点、强纠错突破点）。"
+    )
+    return _DYNAMICS_SYSTEM, user + constraint
 
 
 def parse_dynamics_payload(reply: str) -> tuple[str, dict | None]:
