@@ -1304,7 +1304,7 @@ class TcerGui:
 
                 meta = report.meta
                 if is_dynamics:
-                    text, dyn_data = llm_prompts.parse_dynamics_payload(reply)
+                    text, dyn_data = llm_prompts.parse_dynamics_payload(reply, derived)
                     kind = "dynamics"
                     title = f"{meta.title or meta.session_id or '会话'} · 相空间分析"
                 else:

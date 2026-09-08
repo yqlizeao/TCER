@@ -305,7 +305,7 @@ def dynamics_prompt(report, derived: dict, scope=None, dialogue=None,
     _, user = convergence_prompt(report, derived, scope, dialogue, user_texts)
     stats = derived.get("stats") or []
     total_turns = len(stats) or report.usage.assistant_msgs or 1
-    user_msgs = report.usage.user_msgs or 1
+    user_msgs = report.usage.user_msgs
     constraint = (
         f"\n\n[动力学轨迹客观事实契约]\n"
         f"本会话底层客观记录：共 {total_turns} 个助手回合、{user_msgs} 轮用户消息。\n"
@@ -317,7 +317,42 @@ def dynamics_prompt(report, derived: dict, scope=None, dialogue=None,
     return _DYNAMICS_SYSTEM, user + constraint
 
 
-def parse_dynamics_payload(reply: str) -> tuple[str, dict | None]:
+def ground_dynamics_user_turns(data: dict | None, derived: dict | None) -> dict | None:
+    """Ground U labels in local response order, independently of LLM estimates."""
+    if not isinstance(data, dict) or derived is None:
+        return data
+    stats = derived.get("stats") or []
+    if not any(t.user_turn is not None for t in stats):
+        return data
+    result = dict(data)
+    trajectory = data.get("trajectory")
+    if not isinstance(trajectory, list):
+        return result
+    points = []
+    for pt in trajectory:
+        if not isinstance(pt, dict):
+            points.append(pt)
+            continue
+        node = dict(pt)
+        turn = node.get("turn")
+        try:
+            idx = int(turn) - 1
+            valid = not isinstance(turn, bool) and float(turn) == idx + 1
+        except (TypeError, ValueError, OverflowError):
+            valid, idx = False, -1
+        if valid and 0 <= idx < len(stats) and stats[idx].user_turn is not None:
+            node["user_turn"] = stats[idx].user_turn
+            node.pop("u", None)
+        else:
+            # A node outside the recorded timeline has no verified U label.
+            node.pop("user_turn", None)
+            node.pop("u", None)
+        points.append(node)
+    result["trajectory"] = points
+    return result
+
+
+def parse_dynamics_payload(reply: str, derived: dict | None = None) -> tuple[str, dict | None]:
     """从 LLM 输出中分离 Markdown 正文与末尾结构化动力学遥测 JSON。"""
     import json
     import re
@@ -333,12 +368,12 @@ def parse_dynamics_payload(reply: str) -> tuple[str, dict | None]:
         cleaned = re.sub(r",\s*([\]}])", r"\1", raw_json)
         data = json.loads(cleaned)
         if isinstance(data, dict):
-            return text, data
+            return text, ground_dynamics_user_turns(data, derived)
     except Exception:
         try:
             data = json.loads(raw_json)
             if isinstance(data, dict):
-                return text, data
+                return text, ground_dynamics_user_turns(data, derived)
         except Exception:
             pass
     return text, None

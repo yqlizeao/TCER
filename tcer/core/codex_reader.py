@@ -39,6 +39,80 @@ def iter_events(path: Path):
                 continue
 
 
+def _user_message(obj: dict) -> dict | None:
+    """Recognize human input in both rollout formats; exclude injected context."""
+    pl = obj.get("payload")
+    if not isinstance(pl, dict):
+        return None
+    typ = obj.get("type")
+    if typ == "event_msg" and pl.get("type") == "user_message":
+        text = pl.get("message")
+        text = text.strip() if isinstance(text, str) else ""
+        images = _list_len(pl.get("images"))
+        local_images = _list_len(pl.get("local_images"))
+    elif typ == "response_item" and pl.get("type") == "message" and pl.get("role") == "user":
+        content = pl.get("content")
+        meta = pl.get("internal_chat_message_metadata_passthrough")
+        kinds = meta.get("content_item_kinds") if isinstance(meta, dict) else None
+        if isinstance(kinds, list) and kinds:
+            # Desktop attaches provenance to every content block. A user-role
+            # envelope can contain only plugin/environment/skill context.
+            if not any(isinstance(k, str) and k.startswith("user.") for k in kinds):
+                return None
+            if isinstance(content, list) and len(content) == len(kinds):
+                content = [c for c, k in zip(content, kinds)
+                           if isinstance(k, str) and k.startswith("user.")]
+        text = _message_text(content).strip()
+        if not kinds and text.startswith((
+            "# AGENTS.md instructions for ", "<environment_context>",
+            "<permissions instructions>", "<skills_instructions>",
+            "<recommended_plugins>", "<turn_aborted>",
+            "<subagent_notification>",
+            "A previous language model has been working",
+            "Another language model started to solve this problem",
+        )):
+            return None
+        images = sum(isinstance(c, dict) and c.get("type") == "input_image"
+                     for c in content) if isinstance(content, list) else 0
+        local_images = 0
+    else:
+        return None
+    if not text and not images and not local_images:
+        return None
+    return {"text": text or "[图片消息]", "images": images,
+            "local_images": local_images}
+
+
+def _events_with_user_messages(path: Path):
+    """Pair duplicate response/event representations, never identical new inputs."""
+    seen_ids: set[str] = set()
+    pending: tuple[str, str] | None = None
+    for obj in iter_events(path):
+        msg = _user_message(obj)
+        pl = obj.get("payload")
+        if msg is not None:
+            mid = pl.get("id")
+            duplicate = isinstance(mid, str) and bool(mid) and mid in seen_ids
+            if isinstance(mid, str) and mid:
+                seen_ids.add(mid)
+            key = (obj.get("type"), msg["text"])
+            if duplicate:
+                msg = None
+            elif pending and pending[0] != key[0] and pending[1] == key[1]:
+                msg = None
+                pending = None
+            else:
+                pending = key
+        elif isinstance(pl, dict) and (
+            (obj.get("type") == "response_item" and pl.get("role") != "developer"
+             and pl.get("type") != "message")
+            or pl.get("role") == "assistant"
+            or pl.get("type") in ("task_complete", "turn_aborted", "agent_message", "token_count")
+        ):
+            pending = None
+        yield obj, msg
+
+
 def discover_sessions() -> list[Path]:
     """Recursively collect Codex session JSONL files."""
     base = codex_sessions_dir()
@@ -254,7 +328,7 @@ def read_session_meta(path: Path) -> SessionMeta:
     # 首条 user_message ~7）。取齐即停——否则每次重新分析都要为读前 7 行而扫遍
     # 整个多 MB 的 rollout（实测 3383 行 / 8 MB 文件，约 480× 过度读取）。上限兜底
     # 从未发出其中某类事件的会话（如用户输入前就中断）。
-    for n, obj in enumerate(iter_events(path), 1):
+    for n, (obj, user_msg) in enumerate(_events_with_user_messages(path), 1):
         typ = obj.get("type")
         payload = obj.get("payload")
         if typ == "session_meta" and isinstance(payload, dict):
@@ -278,12 +352,9 @@ def read_session_meta(path: Path) -> SessionMeta:
             collaboration_mode = _json_label(payload.get("collaboration_mode")) or collaboration_mode
             reasoning_effort = _json_label(payload.get("effort")) or reasoning_effort
             got_turn_ctx = True
-        elif typ == "event_msg" and isinstance(payload, dict):
-            if payload.get("type") == "user_message" and fallback_title is None:
-                msg = payload.get("message")
-                if isinstance(msg, str) and msg.strip():
-                    fallback_title = truncate_summary(msg.strip(), 80)
-                    got_title = True
+        if user_msg is not None and fallback_title is None:
+            fallback_title = truncate_summary(user_msg["text"], 80)
+            got_title = True
         if (got_meta and got_turn_ctx and got_title) or n >= 512:
             break
 
@@ -326,7 +397,12 @@ def aggregate_usage(path: Path) -> TokenUsage:
     # 旧格式（无 task_started）回退为每个 token 差分步 +1 的人造计数。
     saw_task_started = False
 
-    for obj in iter_events(path):
+    for obj, user_msg in _events_with_user_messages(path):
+        if user_msg is not None:
+            # Keep only counts in the report; text remains lazy-loaded.
+            u.user_msgs += 1
+            u.image_count += user_msg["images"]
+            u.local_image_count += user_msg["local_images"]
         ts = parse_timestamp_ms(obj.get("timestamp"))
         if ts is not None:
             u.started_at = ts if u.started_at is None else min(u.started_at, ts)
@@ -345,13 +421,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
         if typ == "event_msg" and isinstance(payload, dict):
             ptype = payload.get("type")
             if ptype == "user_message":
-                msg = payload.get("message")
-                if isinstance(msg, str) and msg.strip():
-                    u.user_msgs += 1
-                    # Privacy boundary: keep Codex message text out of the
-                    # report object until the user explicitly opens the popup.
-                u.image_count += _list_len(payload.get("images"))
-                u.local_image_count += _list_len(payload.get("local_images"))
+                pass  # Counted by the shared input stream above.
             elif ptype == "task_started":
                 # Codex turn lifecycle (agent turn began) — NOT Claude's Task
                 # subagent tool. Track via task_count only; never invent a
@@ -481,17 +551,8 @@ def aggregate_usage(path: Path) -> TokenUsage:
 
 def read_user_messages(path: Path) -> list[str]:
     """Extract Codex user-message text on demand for the popup."""
-    messages: list[str] = []
-    for obj in iter_events(path):
-        payload = obj.get("payload")
-        if obj.get("type") != "event_msg" or not isinstance(payload, dict):
-            continue
-        if payload.get("type") != "user_message":
-            continue
-        msg = payload.get("message")
-        if isinstance(msg, str) and msg.strip():
-            messages.append(truncate_summary(msg.strip(), 500))
-    return messages
+    return [truncate_summary(msg["text"], 500)
+            for _, msg in _events_with_user_messages(path) if msg is not None]
 
 
 def read_conversation(path: Path) -> list[dict]:
@@ -517,8 +578,13 @@ def read_conversation(path: Path) -> list[dict]:
     canonical, non-truncated content.
     """
     convo: list[dict] = []
-    for obj in iter_events(path):
+    user_turn = 0
+    for obj, user_msg in _events_with_user_messages(path):
         ts = parse_timestamp_ms(obj.get("timestamp"))
+        if user_msg is not None:
+            user_turn += 1
+            convo.append({"role": "user", "type": "text", "text": user_msg["text"],
+                          "ts": ts, "user_turn": user_turn})
         if obj.get("type") != "response_item":
             continue
         payload = obj.get("payload")
@@ -528,8 +594,8 @@ def read_conversation(path: Path) -> list[dict]:
 
         if ptype == "message":
             role = payload.get("role")
-            if role not in ("user", "assistant"):
-                continue  # skip developer/system preamble
+            if role != "assistant":
+                continue  # Human input already emitted by the shared stream.
             text = _message_text(payload.get("content")).strip()
             if text:
                 convo.append({"role": role, "type": "text", "text": text, "ts": ts})
@@ -759,6 +825,7 @@ def _add_token_usage_with_stat(
             cache_read=after[1] - before[1],
             output_tokens=after[2] - before[2],
             model=model or "",
+            user_turn=u.user_msgs,
         ))
 
 
