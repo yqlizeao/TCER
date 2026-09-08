@@ -16,6 +16,7 @@ accumulated data.
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 from dataclasses import dataclass
@@ -1657,3 +1658,523 @@ def compute(
         cost_reported_ratio=cost_reported_ratio,
         loc_patch_agreement=loc_patch_agreement,
     )
+
+
+# ============================================================
+# Phase space convergence dynamics theory (Waddington, Friston,
+# Cybernetics, SLDS, Landauer dissipation)
+# ============================================================
+
+def compute_waddington_potential(ds: float, cost_fraction: float = 0.0) -> float:
+    """Compute Waddington epigenetic potential energy V(Ds, C).
+
+    References:
+      - C. H. Waddington (1957) The Strategy of the Genes
+      - Du et al. (2022) Learning Iterative Reasoning through Energy Minimization
+
+    Formula:
+      V(Ds, C) = - V_dirac / (1 + ((Ds - D_target) / sigma_dirac)^2)
+                 - V_trap / (1 + ((Ds - D_trap) / sigma_trap)^2)
+                 + alpha * exp(- (Ds - D_barrier)^2 / (2 * sigma_barrier^2))
+                 + beta * C
+
+    Clamped to [-1.2, 0.8].
+    """
+    ds_val = max(0.0, min(1.0, float(ds)))
+    cost_val = max(0.0, float(cost_fraction))
+
+    v_dirac = 1.0
+    d_target = 0.05
+    sigma_dirac = 0.08
+
+    v_trap = 0.6
+    d_trap = 0.86
+    sigma_trap = 0.35
+
+    alpha = 0.45
+    d_barrier = 0.55
+    sigma_barrier = 0.12
+
+    beta = 0.15
+
+    term_dirac = - v_dirac / (1.0 + ((ds_val - d_target) / sigma_dirac) ** 2)
+    term_trap = - v_trap / (1.0 + ((ds_val - d_trap) / sigma_trap) ** 2)
+    term_barrier = alpha * math.exp(- ((ds_val - d_barrier) ** 2) / (2.0 * (sigma_barrier ** 2)))
+    term_cost = beta * cost_val
+
+    total_v = term_dirac + term_trap + term_barrier + term_cost
+    return round(max(-1.2, min(0.8, total_v)), 4)
+
+
+def compute_epistemic_debt(read_lines: int, write_lines: int, grep_ops: int = 0, edit_lines: int = 0) -> float:
+    """Compute variational free energy epistemic debt Ed = J_pragmatic / max(1, J_epistemic).
+
+    References:
+      - Karl Friston (2010) The free-energy principle: a unified brain theory?
+      - arXiv:2412.10425 Active Inference for Self-Organizing Multi-LLM Systems
+
+    Fluxes:
+      - J_epistemic = read_lines + grep_ops * 20 (sensory uncertainty reduction)
+      - J_pragmatic = write_lines + edit_lines (action / environment modification)
+
+    Thresholds:
+      - Ed <= 1.0: "充分先验/平稳向心"
+      - 1.0 < Ed < 4.0: "常规推演"
+      - Ed >= 4.0: "认知盲区动刀"
+    """
+    j_epistemic = max(0.0, float(read_lines)) + max(0.0, float(grep_ops)) * 20.0
+    j_pragmatic = max(0.0, float(write_lines)) + max(0.0, float(edit_lines))
+    ed = j_pragmatic / max(1.0, j_epistemic)
+    return round(ed, 3)
+
+
+def compute_cybernetic_damping(traj: list[dict]) -> tuple[float, str, str]:
+    """Compute closed-loop cybernetic damping ratio zeta and stability classification.
+
+    References:
+      - arXiv:2603.10779 A Control-Theoretic Foundation for Agentic Systems
+      - Bode sensitivity integral theorem (waterbed effect)
+
+    Returns:
+      (zeta, category_key, category_cn)
+      - zeta < 0.70: ("underdamped", "欠阻尼震荡")
+      - 0.70 <= zeta <= 1.10: ("critical", "临界收敛")
+      - zeta > 1.10: ("overdamped", "过阻尼迟缓")
+    """
+    if not traj or len(traj) < 2:
+        return (1.0, "critical", "临界收敛")
+
+    ds_list = [max(0.0, min(1.0, float(pt.get("semantic_distance", pt.get("ds", 0.5))))) for pt in traj]
+    diffs = [ds_list[i] - ds_list[i - 1] for i in range(1, len(ds_list))]
+
+    # Calculate direction signs: +1 (diverging), -1 (converging), 0 (negligible)
+    signs = []
+    for d in diffs:
+        if d > 0.005:
+            signs.append(1)
+        elif d < -0.005:
+            signs.append(-1)
+        else:
+            signs.append(0)
+
+    # Count sign reversals between consecutive non-zero directions
+    non_zeros = [s for s in signs if s != 0]
+    reversals = 0
+    for i in range(1, len(non_zeros)):
+        if non_zeros[i] * non_zeros[i - 1] < 0:
+            reversals += 1
+
+    n_steps = len(ds_list)
+    overshoot_ratio = reversals / max(1, n_steps - 1)
+
+    # Base zeta formula: 1.0 - 0.8 * min(1.0, overshoot_ratio * 2.0)
+    zeta = 1.0 - 0.8 * min(1.0, overshoot_ratio * 2.0)
+
+    # Check for sluggish / overdamped stagnation or unidirectional drift:
+    # If no or low reversals, but progress is very slow or drifting away from target
+    if overshoot_ratio <= 0.15 and n_steps >= 3:
+        net_prog = ds_list[0] - ds_list[-1]
+        avg_abs_diff = sum(abs(d) for d in diffs) / max(1, len(diffs))
+        # 停滞不前 (向心净增量不足 0.05 且步长微弱) 或单向离心漂移 (无反转且向远离目标方向漂移)
+        if (net_prog < 0.05 and avg_abs_diff < 0.04) or (net_prog <= -0.02 and reversals == 0):
+            zeta = 1.40
+
+    zeta = round(zeta, 2)
+    if zeta < 0.70:
+        return (zeta, "underdamped", "欠阻尼震荡")
+    elif zeta > 1.10:
+        return (zeta, "overdamped", "过阻尼迟缓")
+    else:
+        return (zeta, "critical", "临界收敛")
+
+
+def detect_waterbed_events(traj: list[dict], ops_by_turn: dict | None = None) -> list[int]:
+    """Detect control-theoretic waterbed disturbance events.
+
+    A waterbed event occurs when a turn encounters test failures or retry loops
+    immediately following a constructive/positive forward turn (fixing A breaks B).
+
+    Returns list of turn numbers.
+    """
+    if not traj or len(traj) < 2:
+        return []
+
+    waterbed_turns: list[int] = []
+    for i in range(1, len(traj)):
+        prev_node = traj[i - 1]
+        cur_node = traj[i]
+
+        prev_vec = str(prev_node.get("vector") or "").lower()
+        prev_ds = float(prev_node.get("semantic_distance", prev_node.get("ds", 0.5)))
+        cur_ds = float(cur_node.get("semantic_distance", cur_node.get("ds", 0.5)))
+
+        # Determine if previous turn was positive / constructive
+        prev_is_positive = (
+            prev_vec in ("positive", "convergent")
+            or (cur_ds < prev_ds - 0.02)
+        )
+
+        # Determine if current turn experienced test failure or retry loop
+        cur_evt = str(cur_node.get("event") or "").lower()
+        cur_note = str(cur_node.get("note") or "").lower()
+        cur_turn_num = cur_node.get("turn") or (i + 1)
+
+        has_failure = (
+            cur_evt in ("test_fail", "retry_loop", "waterbed", "break_other")
+            or "test_fail" in cur_note
+            or "retry_loop" in cur_note
+            or "waterbed" in cur_note
+        )
+
+        if not has_failure and ops_by_turn:
+            turn_ops = ops_by_turn.get(cur_turn_num) or ops_by_turn.get(str(cur_turn_num))
+            if turn_ops and (turn_ops.get("test_fail") or turn_ops.get("retry_loop") or turn_ops.get("error")):
+                has_failure = True
+
+        if prev_is_positive and has_failure:
+            try:
+                waterbed_turns.append(int(cur_turn_num))
+            except (ValueError, TypeError):
+                waterbed_turns.append(i + 1)
+
+    return waterbed_turns
+
+
+def infer_phase_regime(ds: float, vector: str, event: str, epistemic_debt: float) -> str:
+    """Infer discrete phase regime in statistical physics SLDS (gas, liquid, glass, crystal).
+
+    References:
+      - MIT arXiv:2506.04374 A Statistical Physics of Language Model Reasoning
+
+    Regimes:
+      - 'crystal': Terminal convergence / ground state (Ds <= 0.15 or breakthrough/dirac event)
+      - 'glass': Deadlock / local minimum trap (retry loop, test failure, or Ed >= 4.0)
+      - 'gas': High-entropy search / exploratory (Ed < 0.5, exploratory / reading)
+      - 'liquid': Constructive synthesis / negative phase velocity (orderly code generation)
+    """
+    ds_val = max(0.0, min(1.0, float(ds)))
+    evt = str(event or "").lower()
+    vec = str(vector or "").lower()
+    ed = max(0.0, float(epistemic_debt))
+
+    # 1. Crystal / terminal state
+    if ds_val <= 0.15 or evt in ("breakthrough", "dirac", "crystal", "escaped"):
+        return "crystal"
+
+    # 2. Glass / deadlock state
+    if evt in ("retry_loop", "test_fail", "glass", "deadlock") or ed >= 4.0:
+        return "glass"
+
+    # 3. Gas / high-entropy exploratory
+    if evt in ("explore", "gas", "search") or (ed < 0.5 and vec not in ("positive", "convergent")):
+        return "gas"
+
+    # 4. Liquid / constructive condensation
+    if vec in ("positive", "convergent") or (0.5 <= ed <= 3.5):
+        return "liquid"
+
+    # Fallback by debt
+    if ed < 0.5:
+        return "gas"
+    elif ed >= 3.5:
+        return "glass"
+    return "liquid"
+
+
+def compute_landauer_dissipation(
+    net_loc: int,
+    rework_loc: int,
+    compaction_tokens: int,
+    total_tokens: int
+) -> tuple[float, float]:
+    """Compute Landauer erasure dissipation and Carnot computational efficiency.
+
+    References:
+      - R. Landauer (1961) Irreversibility and Heat Generation in the Computing Process
+      - A. Bérut et al. (2012) Experimental verification of Landauer's principle linking information and thermodynamics. Nature
+
+    Work & Dissipation:
+      - W_useful = max(0, net_loc) (software structural negentropy)
+      - Q_diss = rework_loc + compaction_tokens / 80.0 (irreversible information erasure)
+      - Carnot efficiency eta = W_useful / (W_useful + Q_diss + max(1.0, total_tokens / 1000.0))
+      - Dissipation ratio q_diss_ratio = Q_diss / max(1.0, W_useful + Q_diss)
+
+    Returns:
+      (q_diss_ratio, carnot_efficiency), both clamped in [0.0, 1.0].
+    """
+    w_useful = max(0.0, float(net_loc))
+    q_diss = max(0.0, float(rework_loc)) + max(0.0, float(compaction_tokens)) / 80.0
+    tot_tok = max(0.0, float(total_tokens))
+
+    denom_eta = w_useful + q_diss + max(1.0, tot_tok / 1000.0)
+    eta = w_useful / max(1.0, denom_eta)
+
+    denom_diss = max(1.0, w_useful + q_diss)
+    q_ratio = q_diss / denom_diss
+
+    return (
+        round(max(0.0, min(1.0, q_ratio)), 4),
+        round(max(0.0, min(1.0, eta)), 4)
+    )
+
+
+def compute_damping_spectrum(traj: list[dict], window_size: int = 5) -> dict:
+    """Compute instantaneous local cybernetic damping ratio spectrum along trajectory.
+
+    Uses a sliding window to capture localized phase transitions, underdamped bifurcations,
+    and recovery turns rather than collapsing the entire multi-hundred turn session
+    into a single global scalar.
+
+    Returns:
+      {
+        "turn_damping": [(turn, local_zeta), ...],
+        "bifurcations": [{"turn": t, "from_cat": "critical", "to_cat": "underdamped", "trigger": "instability"}, ...],
+        "mean_damping": float,
+        "instability_share": float (percentage of turns in underdamped oscillation),
+      }
+    """
+    if not traj:
+        return {
+            "turn_damping": [],
+            "bifurcations": [],
+            "mean_damping": 1.0,
+            "instability_share": 0.0,
+        }
+
+    turn_damping: list[tuple[int, float]] = []
+    bifurcations: list[dict] = []
+    prev_cat = None
+    underdamped_count = 0
+
+    w_size = max(2, int(window_size))
+    for i, pt in enumerate(traj):
+        turn = pt.get("turn", i + 1)
+        sub_traj = traj[max(0, i - w_size + 1): i + 1]
+        if len(sub_traj) < 2:
+            local_zeta = 1.00
+            cat_key = "critical"
+        else:
+            local_zeta, cat_key, _ = compute_cybernetic_damping(sub_traj)
+
+        turn_damping.append((turn, local_zeta))
+        if cat_key == "underdamped":
+            underdamped_count += 1
+
+        if prev_cat is not None and cat_key != prev_cat:
+            bifurcations.append({
+                "turn": turn,
+                "from_cat": prev_cat,
+                "to_cat": cat_key,
+                "local_zeta": local_zeta,
+            })
+        prev_cat = cat_key
+
+    mean_z = sum(z for _, z in turn_damping) / max(1, len(turn_damping))
+    instability_pct = underdamped_count / max(1, len(turn_damping))
+
+    return {
+        "turn_damping": turn_damping,
+        "bifurcations": bifurcations,
+        "mean_damping": round(mean_z, 2),
+        "instability_share": round(instability_pct, 3),
+    }
+
+
+def analyze_waterbed_causality(
+    traj: list[dict],
+    ops_by_turn: dict | None = None,
+    loc_by_turn: dict | None = None,
+) -> list[dict]:
+    """Analyze file-level asset-coupled waterbed causality chains and blast radius.
+
+    Traces the cross-turn propagation where modifications to file A trigger regressions
+    or test failures in non-associated files/tests in subsequent turns (Bode waterbed effect).
+
+    Returns list of causality link dictionaries:
+      [
+        {
+          "source_turn": int,
+          "target_turn": int,
+          "lag_turns": int,
+          "source_file": str,
+          "trigger_tool": str,
+          "kind": "asset_coupling_regression",
+          "blast_radius": int,
+        },
+        ...
+      ]
+    """
+    if not traj or len(traj) < 2:
+        return []
+
+    causality_links: list[dict] = []
+
+    # Map turns to edited files if ops_by_turn is provided
+    edits_by_turn: dict[int, list[tuple[str, str]]] = {}
+    if ops_by_turn:
+        for t, ops in ops_by_turn.items():
+            try:
+                t_int = int(t)
+            except (ValueError, TypeError):
+                continue
+            for op in ops:
+                t_name = getattr(op, "tool", "") or ""
+                p = getattr(op, "path", "") or ""
+                if t_name in ("Write", "Edit", "MultiEdit", "search_replace", "replace") and p:
+                    edits_by_turn.setdefault(t_int, []).append((p, t_name))
+
+    # Identify failure/regression turns
+    for i in range(1, len(traj)):
+        cur_node = traj[i]
+        cur_turn = cur_node.get("turn") or (i + 1)
+        try:
+            cur_turn_int = int(cur_turn)
+        except (ValueError, TypeError):
+            cur_turn_int = i + 1
+
+        cur_evt = str(cur_node.get("event") or "").lower()
+        cur_note = str(cur_node.get("note") or "").lower()
+        is_failure = (
+            cur_evt in ("test_fail", "retry_loop", "waterbed", "break_other")
+            or "test_fail" in cur_note
+            or "retry_loop" in cur_note
+        )
+
+        if not is_failure and ops_by_turn:
+            t_ops = ops_by_turn.get(cur_turn_int) or ops_by_turn.get(str(cur_turn_int))
+            if t_ops:
+                is_failure = any(
+                    getattr(op, "is_error", False)
+                    or "fail" in str(getattr(op, "tool", "")).lower()
+                    for op in t_ops
+                )
+
+        if is_failure:
+            # Look back up to 3 turns for constructive precursor edits
+            for lookback in range(1, min(4, i + 1)):
+                prev_idx = i - lookback
+                prev_node = traj[prev_idx]
+                prev_turn = prev_node.get("turn") or (prev_idx + 1)
+                try:
+                    prev_turn_int = int(prev_turn)
+                except (ValueError, TypeError):
+                    prev_turn_int = prev_idx + 1
+
+                prev_vec = str(prev_node.get("vector") or "").lower()
+                prev_ds = float(prev_node.get("semantic_distance", 0.5))
+                cur_ds = float(cur_node.get("semantic_distance", 0.5))
+
+                if prev_vec in ("positive", "convergent") or cur_ds < prev_ds:
+                    # Found triggering constructive edit
+                    edited_files = edits_by_turn.get(prev_turn_int, [])
+                    source_file = edited_files[0][0] if edited_files else "code_asset"
+                    tool_name = edited_files[0][1] if edited_files else "Edit"
+                    blast_rad = len(set(f for f, _ in edited_files)) if edited_files else 1
+
+                    causality_links.append({
+                        "source_turn": prev_turn_int,
+                        "target_turn": cur_turn_int,
+                        "lag_turns": cur_turn_int - prev_turn_int,
+                        "source_file": source_file,
+                        "trigger_tool": tool_name,
+                        "kind": "asset_coupling_regression",
+                        "blast_radius": blast_rad,
+                    })
+                    break
+
+    return causality_links
+
+
+def compute_swarm_synergy(traj: list[dict], subagent_reports: list | None = None) -> dict:
+    """Compute 2026 multi-agent swarm synergy and master-satellite manifold coupling.
+
+    References:
+      - Claude Code 2026 (Task dispatch to Scout, Worker, Reviewer)
+      - Oh My Pi 2026 (workpool & parallel subagent waves)
+
+    Quantifies Cooperative Synergy Gain (CSG): whether dispatched subagents provide
+    向心推进 (positive semantic reduction) or introduce chaotic noise and redundant drift.
+
+    Returns:
+      {
+        "total_subagents": int,
+        "synergy_score": float (0-100, >70 represents high synergy, <40 redundant drift),
+        "convergent_count": int,
+        "divergent_count": int,
+        "net_semantic_delta": float,
+        "active_turns": list[int],
+      }
+    """
+    if not traj:
+        return {
+            "total_subagents": 0,
+            "synergy_score": 75.0,
+            "convergent_count": 0,
+            "divergent_count": 0,
+            "net_semantic_delta": 0.0,
+            "active_turns": [],
+        }
+
+    total_subs = 0
+    conv_count = 0
+    div_count = 0
+    net_delta = 0.0
+    active_turns: list[int] = []
+
+    for i, pt in enumerate(traj):
+        subs = pt.get("subagents")
+        turn = pt.get("turn", i + 1)
+        if isinstance(subs, list) and subs:
+            try:
+                active_turns.append(int(turn))
+            except (ValueError, TypeError):
+                active_turns.append(i + 1)
+
+            for sub in subs:
+                total_subs += 1
+                delta = float(sub.get("semantic_delta", 0.0))
+                net_delta += delta
+                stat = str(sub.get("status") or "convergent").lower()
+                if stat == "convergent" or delta < 0:
+                    conv_count += 1
+                else:
+                    div_count += 1
+
+    if total_subs == 0:
+        # Check notes for subagent keywords
+        for i, pt in enumerate(traj):
+            note = str(pt.get("note") or "")
+            turn = pt.get("turn", i + 1)
+            if any(kw in note for kw in ("子代理", "子任务", "Scout", "Worker", "并行", "workpool")):
+                try:
+                    active_turns.append(int(turn))
+                except (ValueError, TypeError):
+                    active_turns.append(i + 1)
+                total_subs += 2
+                conv_count += 1
+                div_count += 1
+                net_delta -= 0.03
+
+    if total_subs == 0:
+        return {
+            "total_subagents": 0,
+            "synergy_score": 80.0,
+            "convergent_count": 0,
+            "divergent_count": 0,
+            "net_semantic_delta": 0.0,
+            "active_turns": [],
+        }
+
+    conv_ratio = conv_count / max(1, total_subs)
+    delta_bonus = min(20.0, max(-20.0, -net_delta * 200.0))
+    raw_score = 40.0 + conv_ratio * 45.0 + delta_bonus
+    final_score = round(max(10.0, min(98.0, raw_score)), 1)
+
+    return {
+        "total_subagents": total_subs,
+        "synergy_score": final_score,
+        "convergent_count": conv_count,
+        "divergent_count": div_count,
+        "net_semantic_delta": round(net_delta, 4),
+        "active_turns": active_turns,
+    }

@@ -2835,30 +2835,23 @@ class PhasePortraitWidget:
     要素：左下角高亮狄拉克目标点、右侧平庸代码吸引子引力漏斗、关键回合轨迹粒子与推进矢量箭头。
     """
     def __init__(self, parent) -> None:
-        from .charts import _ChartTooltip, _aa_layer
-        self._aa_layer = _aa_layer
+        from .charts import _ChartTooltip, _aa_layer_flat
+        self._aa_layer_flat = _aa_layer_flat
         self.container = tk.Frame(parent, bg=theme.PANEL_2, highlightthickness=1,
                                   highlightbackground=theme.BORDER)
         self.head = tk.Frame(self.container, bg=theme.CARD_HEADER_BG, padx=10, pady=5)
         self.head.pack(fill="x")
 
-        left_h = tk.Frame(self.head, bg=theme.CARD_HEADER_BG)
-        left_h.pack(side="left")
-        tk.Label(left_h, text="相空间收敛动力学相图", bg=theme.CARD_HEADER_BG,
+        # 第一行：主控栏（标题 + 视图模式切换 | 右侧四能力条）
+        row_top = tk.Frame(self.head, bg=theme.CARD_HEADER_BG)
+        row_top.pack(fill="x", pady=(0, 4))
+
+        left_top = tk.Frame(row_top, bg=theme.CARD_HEADER_BG)
+        left_top.pack(side="left")
+        tk.Label(left_top, text="相空间收敛动力学相图", bg=theme.CARD_HEADER_BG,
                  fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD).pack(side="left")
-        self.state_badge = tk.Label(left_h, text="", bg=theme.CARD_HEADER_BG,
-                                    font=theme.FONT_UI_SMALL, padx=6, pady=1)
-        self.state_badge.pack(side="left", padx=(8, 0))
-        self.lyapunov_badge = tk.Label(left_h, text="", bg=theme.CARD_HEADER_BG,
-                                       font=theme.FONT_UI_SMALL, padx=6, pady=1)
-        self.lyapunov_badge.pack(side="left", padx=(6, 0))
-        Tooltip(self.lyapunov_badge,
-                "李雅普诺夫指数 λ：代码演化稳定性度量。\n"
-                "λ < 0 代表系统收敛稳定，微小改动瑕疵会被负反馈吸收，向目标达成收敛；\n"
-                "λ > 0 代表系统失控发散，局部误解会被多轮工具链连锁放大，越改越乱。")
-        self.cap_lbl = tk.Label(self.head, text="")  # 兼容测试与标量文本读取
-        # 增加视图模式切换胶囊（时序流形 vs 相速度极限环对偶相平面）
-        self.mode_frame = tk.Frame(left_h, bg=theme.CARD_HEADER_BG)
+
+        self.mode_frame = tk.Frame(left_top, bg=theme.CARD_HEADER_BG)
         self.mode_frame.pack(side="left", padx=(14, 0))
         self._view_mode = "manifold"
         self._mode_btns = {}
@@ -2869,10 +2862,100 @@ class PhasePortraitWidget:
             btn.bind("<Button-1>", lambda _e, m=m_key: self._set_mode(m))
             self._mode_btns[m_key] = btn
         self._update_mode_btns()
-        self.caps_frame = tk.Frame(self.head, bg=theme.CARD_HEADER_BG)
+        # 缩放平移交互控制（Zoom & Pan）
+        self._zoom_scale: float = 1.0
+        self._pan_x: float = 0.0
+        self._pan_y: float = 0.0
+        self._drag_data: dict = {"x": 0, "y": 0, "panned": False}
+        self._drag_redraw_pending: bool = False
+        self._wheel_zoom_pending: bool = False
+        self._wheel_zoom_accum: float = 1.0
+        self._wheel_cx: float | None = None
+        self._wheel_cy: float | None = None
+        self._selected_node_idx: int | None = None
+        self._hud_btns: list[tuple[float, float, float, float, str]] = []
+
+        # 缩放控制微胶囊（保留百分比与复位按钮，无 emoji）
+        self.zoom_frame = tk.Frame(left_top, bg=theme.CARD_HEADER_BG)
+        self.zoom_frame.pack(side="left", padx=(12, 0))
+
+        btn_out = tk.Label(self.zoom_frame, text="－", bg=theme.PANEL_2,
+                           fg=theme.FG, font=theme.FONT_UI_SMALL, padx=6, pady=2, cursor=CLICK_CURSOR)
+        btn_out.pack(side="left", padx=1)
+        btn_out.bind("<Button-1>", lambda _e: self._zoom(0.85))
+
+        self.zoom_lbl = tk.Label(self.zoom_frame, text="100%", bg=theme.CARD_HEADER_BG,
+                                 fg=theme.MUTED, font=theme.FONT_UI_SMALL, padx=4)
+        self.zoom_lbl.pack(side="left", padx=1)
+
+        btn_in = tk.Label(self.zoom_frame, text="＋", bg=theme.PANEL_2,
+                          fg=theme.FG, font=theme.FONT_UI_SMALL, padx=6, pady=2, cursor=CLICK_CURSOR)
+        btn_in.pack(side="left", padx=1)
+        btn_in.bind("<Button-1>", lambda _e: self._zoom(1.18))
+
+        btn_rst = tk.Label(self.zoom_frame, text="复位", bg=theme.PANEL_2,
+                           fg=theme.FG, font=theme.FONT_UI_SMALL, padx=6, pady=2, cursor=CLICK_CURSOR)
+        btn_rst.pack(side="left", padx=(3, 1))
+        btn_rst.bind("<Button-1>", lambda _e: self._reset_zoom())
+
+        Tooltip(self.zoom_frame,
+                "视口缩放与平移漫游：\n"
+                "• 鼠标滚轮：以当前光标为中心自适应无级缩放 (100%~500%)；\n"
+                "• 拖拽漫游：鼠标中键/右键或按住空白处拖拽平滑漫游；\n"
+                "• 单击复位：一键归位；\n"
+                "• 分级展现 (LOD)：放大时自动展开被折叠抽稀的微观轮次。")
+        self.caps_frame = tk.Frame(row_top, bg=theme.CARD_HEADER_BG)
         self.caps_frame.pack(side="right")
 
-        self.canvas = tk.Canvas(self.container, bg=theme.BG, height=480,
+        # 第二行：物理遥测与运行态势徽标栏（终态、稳定性、推进节奏、有效产出率）
+        row_badges = tk.Frame(self.head, bg=theme.CARD_HEADER_BG)
+        row_badges.pack(fill="x", pady=(2, 0))
+
+        self.state_badge = tk.Label(row_badges, text="", bg=theme.CARD_HEADER_BG,
+                                    font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self.state_badge.pack(side="left")
+        Tooltip(self.state_badge,
+                "整场会话最终交付态势：\n"
+                "• 精准收敛：无多余冗余生成，代码直接收敛至狄拉克目标；\n"
+                "• 成功破局：虽曾遭遇死锁或偏离，但最终成功逃逸达成收敛；\n"
+                "• 陷入泥潭：深陷平庸代码吸引子，反复打补丁未脱困；\n"
+                "• 持续发散：语义偏离过大且发散，未能达成目标。")
+
+        self.lyapunov_badge = tk.Label(row_badges, text="", bg=theme.CARD_HEADER_BG,
+                                       font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self.lyapunov_badge.pack(side="left", padx=(6, 0))
+        Tooltip(self.lyapunov_badge,
+                "改动稳定性指数 λ：代码演化稳定性度量。\n"
+                "λ < 0 代表代码收敛稳定，小调整能被吸收，走向交付；\n"
+                "λ > 0 代表代码发散失控，局部误解被反复放大，越改越乱。")
+
+        self.damping_badge = tk.Label(row_badges, text="", bg=theme.CARD_HEADER_BG,
+                                      font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self.damping_badge.pack(side="left", padx=(6, 0))
+        Tooltip(self.damping_badge,
+                "推进节奏比 ζ：系统收敛动力学稳定性度量。\n"
+                "ζ < 0.70 为欠阻尼震荡：前后反复横跳、推倒重来；\n"
+                "0.70 ≤ ζ ≤ 1.10 为临界平稳：少做无用功、平稳向前推进；\n"
+                "ζ > 1.10 为过阻尼迟缓：推进停滞不前、盲目游走。")
+
+        self.carnot_badge = tk.Label(row_badges, text="", bg=theme.CARD_HEADER_BG,
+                                     font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self.carnot_badge.pack(side="left", padx=(6, 0))
+        Tooltip(self.carnot_badge,
+                "代码有效率 η：广义卡诺计算效率。\n"
+                "最终保留的有效代码行 vs 自己反复重构删除的废代码与压缩耗散。\n"
+                "高效率代表一次写对少返工；低效率代表大量废代码被自己推翻重写。")
+
+        self.swarm_badge = tk.Label(row_badges, text="", bg=theme.CARD_HEADER_BG,
+                                    font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self.swarm_badge.pack(side="left", padx=(6, 0))
+        Tooltip(self.swarm_badge,
+                "多智能体协同分（2026 Swarm Synergy）：\n"
+                "量化评估派生的子智能体（如 Scout/Worker/Reviewer）究竟是在协助主代理向心推进，\n"
+                "还是带来了额外的离心发散噪音与沟通损耗。")
+        self.cap_lbl = tk.Label(self.head, text="")  # 兼容测试与标量文本读取
+
+        self.canvas = tk.Canvas(self.container, bg=theme.BG, height=495,
                                 highlightthickness=0, cursor=CLICK_CURSOR)
         self.canvas.pack(fill="x", padx=4, pady=4)
         self._tooltip = _ChartTooltip(self.canvas)
@@ -2880,13 +2963,36 @@ class PhasePortraitWidget:
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", lambda _e: self._tooltip.hide())
         self.canvas.bind("<Destroy>", lambda _e: self._tooltip.hide())
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", lambda e: self._zoom(1.18, e.x, e.y))
+        self.canvas.bind("<Button-5>", lambda e: self._zoom(0.85, e.x, e.y))
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
+        self.canvas.bind("<B2-Motion>", self._on_pan_move)
+        self.canvas.bind("<ButtonRelease-2>", self._on_pan_end)
+        self.canvas.bind("<ButtonPress-3>", self._on_pan_start)
+        self.canvas.bind("<B3-Motion>", self._on_pan_move)
+        self.canvas.bind("<ButtonRelease-3>", self._on_pan_end)
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
+        self.canvas.bind("<Left>", lambda _e: self._step_node(-1))
+        self.canvas.bind("<Right>", lambda _e: self._step_node(1))
+        self.canvas.bind("<Escape>", lambda _e: self._deselect_node())
         self._data: dict = {}
         self._report: dict = {}
         self._pts: list = []
         self._aa_imgs: list = []  # 抗锯齿 PhotoImage 引用防 GC
         self._tgt_pos: tuple[float, float] | None = None
         self._att_pos: tuple[float, float] | None = None
+        self._regime_boxes: list = []
+        self._waterbed_turns: set = set()
         self._pad_t: int = 34
+        self._waterbed_boxes: list = []
+        self._barrier_box: tuple | None = None
+        self._horizon_box: tuple | None = None
+        self._hud_card_box: tuple[float, float, float, float] | None = None
+        self._impulse_boxes: list = []
     def render(self, dynamics_data: dict, report: dict) -> None:
         self._data = dynamics_data or {}
         self._report = report or {}
@@ -2910,23 +3016,88 @@ class PhasePortraitWidget:
         )
 
         if ctype == "dirac" or (last_ds <= 0.15 and not is_trapped):
-            self.state_badge.config(text="[精准收敛 · 达成目标]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+            self.state_badge.config(text="精准收敛 · 达成目标", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
         elif is_escaped:
-            self.state_badge.config(text="[成功破局 · 达成收敛]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+            self.state_badge.config(text="成功破局 · 达成收敛", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
         elif ctype == "trapped" or is_trapped:
-            self.state_badge.config(text="[陷入泥潭 · 循环死锁]", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
+            self.state_badge.config(text="陷入泥潭 · 循环死锁", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
         else:
-            self.state_badge.config(text="[方向发散 · 未收敛]", fg=theme.WARNING, bg=theme.WARN_TINT_BG)
+            self.state_badge.config(text="方向发散 · 未能收敛", fg=theme.WARNING, bg=theme.WARN_TINT_BG)
 
         # 1.1 李雅普诺夫稳定性徽标
         _, avg_lam, _ = self._compute_lyapunov_stats(traj, self._data.get("lyapunov_exponent"))
         if avg_lam < 0:
             self.lyapunov_badge.config(
-                text=f"[收敛稳定 λ = {avg_lam:+.2f}]", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+                text=f"收敛稳定 λ = {avg_lam:+.2f}", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
         else:
             self.lyapunov_badge.config(
-                text=f"[失控发散 λ = {avg_lam:+.2f}]", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
-        # 2. 三能力胶囊条（显示名称、分数与评级 Tooltip）
+                text=f"失控发散 λ = {avg_lam:+.2f}", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
+
+        # 1.2 控制论阻尼比徽标
+        zeta = self._data.get("damping_ratio")
+        if zeta is None:
+            zeta, cat_key, cat_cn = metrics.compute_cybernetic_damping(traj)
+        else:
+            zeta = float(zeta)
+            if zeta < 0.70:
+                cat_key, cat_cn = "underdamped", "反复横跳"
+            elif zeta > 1.10:
+                cat_key, cat_cn = "overdamped", "卡壳停滞"
+            else:
+                cat_key, cat_cn = "critical", "平稳推进"
+
+        if cat_key == "critical":
+            self.damping_badge.config(
+                text=f"阻尼比 ζ = {zeta:.2f} · 平稳推进", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
+        elif cat_key == "underdamped":
+            self.damping_badge.config(
+                text=f"阻尼比 ζ = {zeta:.2f} · 反复横跳", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
+        else:
+            self.damping_badge.config(
+                text=f"阻尼比 ζ = {zeta:.2f} · 卡壳停滞", fg=theme.WARNING, bg=theme.WARN_TINT_BG)
+
+        # 1.3 朗道尔卡诺效率徽标
+        carnot = self._data.get("carnot_efficiency")
+        if carnot is None:
+            carnot = 0.68
+        else:
+            carnot = float(carnot)
+        carnot_pct = int(round(carnot * 100))
+        if carnot >= 0.60:
+            carnot_txt = f"卡诺效率 η = {carnot_pct}% · 极少返工"
+            carnot_col = theme.SUCCESS
+            carnot_bg = theme.DIRAC_CORE_BG
+        elif carnot < 0.35:
+            carnot_txt = f"卡诺效率 η = {carnot_pct}% · 废码过多"
+            carnot_col = theme.ERROR
+            carnot_bg = theme.ERROR_TINT_BG
+        else:
+            carnot_txt = f"卡诺效率 η = {carnot_pct}% · 中等返工"
+            carnot_col = theme.WARNING
+            carnot_bg = theme.WARN_TINT_BG
+        self.carnot_badge.config(text=carnot_txt, fg=carnot_col, bg=carnot_bg)
+        # 1.4 多智能体协同徽标 (2026 Agent Swarm)
+        swarm = self._data.get("swarm_synergy") or {}
+        n_subs = swarm.get("total_subagents", 0)
+        if n_subs > 0:
+            s_score = swarm.get("synergy_score", 75.0)
+            if s_score >= 70:
+                s_txt = f"多智能体协同 {s_score:.0f} 分 · 向心增益"
+                s_col = theme.SUCCESS
+                s_bg = theme.DIRAC_CORE_BG
+            elif s_score < 40:
+                s_txt = f"多智能体协同 {s_score:.0f} 分 · 冗余耗散"
+                s_col = theme.ERROR
+                s_bg = theme.ERROR_TINT_BG
+            else:
+                s_txt = f"多智能体协同 {s_score:.0f} 分 · 常规协同"
+                s_col = theme.WARNING
+                s_bg = theme.WARN_TINT_BG
+            self.swarm_badge.config(text=s_txt, fg=s_col, bg=s_bg)
+        else:
+            self.swarm_badge.config(text="")
+
+        # 2. 四能力胶囊条（显示名称、分数与评级 Tooltip）
         for w in self.caps_frame.winfo_children():
             w.destroy()
         caps = self._data.get("capabilities") or {}
@@ -2938,6 +3109,8 @@ class PhasePortraitWidget:
                  "衡量对代码架构违背与局部死修的嗅觉。\n高分代表敏锐察觉偏离并主动挂起；低分代表盲目打补丁或侵入底层资产。"),
                 ("反馈收敛", "反馈收敛效率", caps.get("feedback_mutual_info"),
                  "衡量纠偏指令的互信息密度与介入时机。\n高分代表反馈精准向心制导；低分代表盲目试探或止损严重滞后。"),
+                ("认知平衡", "认知负债平衡力", caps.get("epistemic_balance"),
+                 "衡量先探查再动刀、控制先验不确定性的掌控力。\n高分代表充分探查再精准动刀；低分代表盲目在认知盲区切削底层代码。"),
             ]
             for short_name, full_name, score, desc in items:
                 if score is None:
@@ -2978,7 +3151,8 @@ class PhasePortraitWidget:
             self.cap_lbl.config(
                 text=f"意图降熵力 {caps.get('intent_formalization', '-')} · "
                      f"偏离敏锐度 {caps.get('drift_sensitivity', '-')} · "
-                     f"反馈收敛效率 {caps.get('feedback_mutual_info', '-')}")
+                     f"反馈收敛效率 {caps.get('feedback_mutual_info', '-')} · "
+                     f"认知平衡力 {caps.get('epistemic_balance', '-')}")
         else:
             self.cap_lbl.config(text="")
         self._redraw()
@@ -2997,6 +3171,169 @@ class PhasePortraitWidget:
                 bg=theme.HOVER_ACCENT if active else theme.PANEL_2,
                 fg=theme.FG_WHITE if active else theme.FG,
                 font=theme.FONT_UI_SMALL_BOLD if active else theme.FONT_UI_SMALL)
+
+    def _select_node(self, idx: int) -> None:
+        if not (0 <= idx < len(self._pts)):
+            return
+        self._selected_node_idx = idx
+        self.canvas.focus_set()
+        self._redraw()
+
+    def _step_node(self, delta: int) -> None:
+        if not self._pts:
+            return
+        n = len(self._pts)
+        if self._selected_node_idx is None:
+            self._selected_node_idx = 0 if delta >= 0 else (n - 1)
+        else:
+            self._selected_node_idx = (self._selected_node_idx + delta) % n
+        self._center_node(self._selected_node_idx)
+
+    def _center_node(self, idx: int | None = None) -> None:
+        if idx is None:
+            idx = self._selected_node_idx
+        if idx is None or not (0 <= idx < len(self._pts)):
+            return
+        target_x, target_y = self._pts[idx][:2]
+        w = max(self.canvas.winfo_width(), 600)
+        h = max(self.canvas.winfo_height(), 480)
+        pad_l, pad_t = 68, 38
+        plot_w = w - pad_l - 55
+        plot_h = h - pad_t - 48
+        screen_cx = pad_l + plot_w / 2.0
+        screen_cy = pad_t + plot_h / 2.0
+        dx = screen_cx - target_x
+        dy = screen_cy - target_y
+        self._pan_x += dx
+        self._pan_y += dy
+        self._clamp_pan()
+        self._redraw()
+
+    def _deselect_node(self) -> None:
+        self._selected_node_idx = None
+        self._redraw()
+
+    def _on_pan_start(self, event) -> None:
+        self._drag_data = {"x": event.x, "y": event.y, "panned": False}
+        self.canvas.config(cursor="fleur")
+
+    def _on_pan_move(self, event) -> None:
+        dx = event.x - self._drag_data["x"]
+        dy = event.y - self._drag_data["y"]
+        if abs(dx) > 1 or abs(dy) > 1:
+            self._drag_data["panned"] = True
+            if self._zoom_scale > 1.01:
+                self._pan_x += dx
+                self._pan_y += dy
+                self._drag_data["x"] = event.x
+                self._drag_data["y"] = event.y
+                self._clamp_pan()
+                if not getattr(self, "_drag_redraw_pending", False):
+                    self._drag_redraw_pending = True
+                    self.canvas.after(16, self._do_drag_redraw)
+
+    def _on_pan_end(self, event) -> None:
+        self.canvas.config(cursor=CLICK_CURSOR)
+        self._drag_redraw_pending = False
+        if getattr(self, "_drag_data", {}).get("panned"):
+            self._redraw()
+
+    def _do_drag_redraw(self) -> None:
+        self._drag_redraw_pending = False
+        self._redraw()
+
+    def _draw_hud_card(self, c, plot_w: float, plot_h: float, pad_l: float, pad_t: float) -> None:
+        """绘制当前选中质点的精显探针 HUD 卡片与十字准星。"""
+        self._hud_btns.clear()
+        if self._selected_node_idx is None or not (0 <= self._selected_node_idx < len(self._pts)):
+            return
+        item = self._pts[self._selected_node_idx]
+        x, y, pt = item[:3]
+
+        # 1. 质点双环发光十字准星
+        c.create_oval(x - 13, y - 13, x + 13, y + 13, outline=theme.ACCENT, width=1.5)
+        c.create_oval(x - 19, y - 19, x + 19, y + 19, outline=theme.ACCENT, dash=(2, 2), width=1)
+        c.create_line(x - 24, y, x - 15, y, fill=theme.ACCENT, width=1.5)
+        c.create_line(x + 15, y, x + 24, y, fill=theme.ACCENT, width=1.5)
+        c.create_line(x, y - 24, x, y - 15, fill=theme.ACCENT, width=1.5)
+        c.create_line(x, y + 15, x, y + 24, fill=theme.ACCENT, width=1.5)
+
+        # 2. 悬浮/驻留 HUD 探针卡片（左下角紧凑布局）
+        card_w = 480
+        card_h = 96
+        cx0 = pad_l + 10
+        cy0 = pad_t + plot_h - card_h - 10
+        cx1 = cx0 + card_w
+        cy1 = cy0 + card_h
+        self._hud_card_box = (cx0, cx1, cy0, cy1)
+        c.create_rectangle(cx0, cy0, cx1, cy1, fill=theme.PHASE_HUD_BG, outline=theme.ACCENT, width=1.5)
+
+        t_val = pt.get("turn")
+        u_val = pt.get("user_turn") or pt.get("u")
+        ds_val = float(pt.get("semantic_distance", 0.5))
+        ed_val = float(pt.get("epistemic_debt", 1.0))
+        pot_val = float(pt.get("potential_energy", 0.0))
+        reg_val = str(pt.get("regime") or "liquid").lower()
+        evt_val = str(pt.get("event") or "normal").lower()
+        vec_val = str(pt.get("vector") or "neutral").lower()
+        note_val = str(pt.get("note") or "")
+
+        # 标题栏（纯中文文字，无 emoji）
+        t_desc = f"质点探针 · 第 T{t_val} 轮" + (f" (用户 U{u_val})" if u_val else "")
+        c.create_text(cx0 + 12, cy0 + 15, text=t_desc, fill=theme.FG_WHITE,
+                      font=theme.FONT_UI_BOLD, anchor="w")
+
+        # 交互按钮群（加高至 20px，加大点击命中容差，无 emoji）
+        btn_y0, btn_y1 = cy0 + 5, cy0 + 25
+        # [< 上轮]
+        b1_x0, b1_x1 = cx1 - 184, cx1 - 126
+        c.create_rectangle(b1_x0, btn_y0, b1_x1, btn_y1, fill=theme.PANEL_2, outline=theme.BORDER)
+        c.create_text((b1_x0 + b1_x1) / 2, (btn_y0 + btn_y1) / 2, text="< 上轮", fill=theme.FG, font=theme.FONT_UI_SMALL, anchor="center")
+        self._hud_btns.append((b1_x0, btn_y0, b1_x1, btn_y1, "prev"))
+
+        # [下轮 >]
+        b2_x0, b2_x1 = cx1 - 122, cx1 - 64
+        c.create_rectangle(b2_x0, btn_y0, b2_x1, btn_y1, fill=theme.PANEL_2, outline=theme.BORDER)
+        c.create_text((b2_x0 + b2_x1) / 2, (btn_y0 + btn_y1) / 2, text="下轮 >", fill=theme.FG, font=theme.FONT_UI_SMALL, anchor="center")
+        self._hud_btns.append((b2_x0, btn_y0, b2_x1, btn_y1, "next"))
+
+        # [居中]
+        b3_x0, b3_x1 = cx1 - 60, cx1 - 22
+        c.create_rectangle(b3_x0, btn_y0, b3_x1, btn_y1, fill=theme.PANEL_2, outline=theme.BORDER)
+        c.create_text((b3_x0 + b3_x1) / 2, (btn_y0 + btn_y1) / 2, text="居中", fill=theme.FG, font=theme.FONT_UI_SMALL, anchor="center")
+        self._hud_btns.append((b3_x0, btn_y0, b3_x1, btn_y1, "center"))
+
+        # [关闭]
+        b4_x0, b4_x1 = cx1 - 18, cx1 - 2
+        c.create_rectangle(b4_x0, btn_y0, b4_x1, btn_y1, fill=theme.PANEL_2, outline=theme.BORDER)
+        c.create_text((b4_x0 + b4_x1) / 2, (btn_y0 + btn_y1) / 2, text="X", fill=theme.MUTED, font=theme.FONT_UI_BOLD, anchor="center")
+        self._hud_btns.append((b4_x0, btn_y0, b4_x1, btn_y1, "close"))
+
+        # 行 2：Ds & 推进方向
+        delta_ds_str = ""
+        if self._selected_node_idx > 0:
+            prev_ds = float(self._pts[self._selected_node_idx - 1][2].get("semantic_distance", 0.5))
+            dds = ds_val - prev_ds
+            delta_ds_str = f" ({'↓' if dds < 0 else '↑'}{abs(dds):.4f})"
+        vec_cn = {"positive": "向心推进", "convergent": "向心收敛", "negative": "离心偏离",
+                  "divergent": "离心发散", "trapped": "泥潭受困", "neutral": "常规平衡"}.get(vec_val, vec_val)
+        c.create_text(cx0 + 12, cy0 + 38,
+                      text=f"语义偏离 Ds: {ds_val:.4f}{delta_ds_str} · 矢量: {vec_cn}",
+                      fill=theme.ACCENT, font=theme.FONT_UI_SMALL, anchor="w")
+
+        # 行 3：物理相态与负债势能
+        reg_cn = {"gas": "高熵气态", "liquid": "凝聚液态", "glass": "自旋玻璃", "crystal": "晶态终态"}.get(reg_val, reg_val)
+        debt_desc = "探查充分" if ed_val <= 1.0 else ("盲区动刀" if ed_val >= 4.0 else "常规推演")
+        c.create_text(cx0 + 12, cy0 + 56,
+                      text=f"SLDS相态: {reg_cn} · 认知负债 Ed: {ed_val:.2f} ({debt_desc}) · 势能 V: {pot_val:.3f}",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+
+        # 行 4：事件与解读
+        note_display = note_val if len(note_val) <= 40 else (note_val[:38] + "…")
+        evt_badge = f"[{evt_val}] " if evt_val != "normal" else ""
+        c.create_text(cx0 + 12, cy0 + 76,
+                      text=f"复盘解读: {evt_badge}{note_display}",
+                      fill=theme.FG_WHITE, font=theme.FONT_UI_SMALL, anchor="w")
     @staticmethod
     def _calc_subagents(pt: dict) -> list[dict]:
         """提取或根据事实推导节点的子智能体多体协同任务。"""
@@ -3113,6 +3450,42 @@ class PhasePortraitWidget:
         self._tooltip.hide()
 
     def _on_motion(self, event) -> None:
+        if getattr(self, "_drag_data", {}).get("panned"):
+            self._tooltip.hide()
+            return
+        # 0. 优先检测是否悬浮于 HUD 卡片按钮上，呈现手型光标与高亮反馈
+        for bx0, by0, bx1, by1, _act in getattr(self, "_hud_btns", []):
+            if (bx0 - 4) <= event.x <= (bx1 + 4) and (by0 - 4) <= event.y <= (by1 + 4):
+                self.canvas.config(cursor=CLICK_CURSOR)
+                self._tooltip.hide()
+                return
+        if getattr(self, "_hud_card_box", None) and (
+            self._hud_card_box[0] <= event.x <= self._hud_card_box[1] and
+            self._hud_card_box[2] <= event.y <= self._hud_card_box[3]
+        ):
+            self.canvas.config(cursor="arrow")
+            self._tooltip.hide()
+            return
+        for bx0, bx1, by0, by1, r_turn, r_reg, r_ed in getattr(self, "_regime_boxes", []):
+            if bx0 <= event.x <= bx1 and by0 - 4 <= event.y <= by1 + 4:
+                reg_names = {
+                    "gas": ("高熵气态", "源码架构探查阶段", theme.REGIME_GAS),
+                    "liquid": ("凝聚液态", "主干业务构建阶段", theme.REGIME_LIQUID),
+                    "glass": ("自旋玻璃态", "循环修补死锁阶段", theme.REGIME_GLASS),
+                    "crystal": ("晶态终态", "目标精准收敛阶段", theme.REGIME_CRYSTAL),
+                }
+                r_title, r_desc, r_col = reg_names.get(r_reg, ("常规阶段", "", theme.MUTED))
+                lines = [
+                    f"阶段演化 · 回合 T{r_turn}",
+                    f"当前相态: {r_title}",
+                    f"阶段特征: {r_desc}",
+                    f"认知负债: Ed = {r_ed:.2f} · {'探查充分' if r_ed <= 1.0 else ('常规推演' if r_ed < 4.0 else '盲区动刀')}",
+                ]
+                ed_c = theme.DEBT_GLOW_SAFE if r_ed <= 1.0 else (theme.DEBT_GLOW_DANGER if r_ed >= 4.0 else theme.MUTED)
+                colors = [theme.FG_WHITE, r_col, theme.MUTED, ed_c]
+                self._tooltip.show(event.x, event.y, lines, colors)
+                return
+
         if not self._pts:
             self._tooltip.hide()
             return
@@ -3137,18 +3510,19 @@ class PhasePortraitWidget:
         if best_item:
             px, py, pt = best_item[:3]
             t = pt.get("turn", "-")
+            t_num = pt.get("turn")
             u = pt.get("user_turn") or pt.get("u")
             ds = pt.get("semantic_distance", 0.5)
             vec = str(pt.get("vector") or "neutral").lower()
             event_tag = str(pt.get("event") or "normal").lower()
             note = pt.get("note", "")
             status_map = {
-                "positive": ("向心推进 (做正功/逼近目标)", theme.SUCCESS),
-                "convergent": ("向心推进 (做正功/逼近目标)", theme.SUCCESS),
-                "negative": ("离心发散 (偏离目标)", theme.ERROR),
-                "divergent": ("严重发散 (偏离意图)", theme.ERROR),
-                "trapped": ("死锁陷阱 (被平庸吸引子捕获)", theme.ERROR),
-                "neutral": ("中性微调 / 震荡游走", theme.WARNING),
+                "positive": ("向心推进", theme.SUCCESS),
+                "convergent": ("向心推进", theme.SUCCESS),
+                "negative": ("离心发散", theme.ERROR),
+                "divergent": ("离心发散", theme.ERROR),
+                "trapped": ("死锁陷阱", theme.ERROR),
+                "neutral": ("中性微调", theme.WARNING),
             }
             event_map = {
                 "retry_loop": "连续重试死循环",
@@ -3179,6 +3553,66 @@ class PhasePortraitWidget:
                 v_col = theme.SUCCESS if v_val < 0 else (theme.ERROR if v_val > 0 else theme.MUTED)
                 lines.append(f"相速度: {v_val:+.4f}/步 ({v_desc})")
                 colors.append(v_col)
+            # 势能高度 V(Ds)
+            pe = pt.get("potential_energy")
+            if pe is None:
+                pe = metrics.compute_waddington_potential(ds)
+            else:
+                pe = float(pe)
+            pe_desc = "狄拉克势阱" if pe < -0.8 else ("平庸吸引盆" if ds > 0.75 else ("鞍点势垒" if abs(ds - 0.55) < 0.08 else "过渡区"))
+            pe_col = theme.SUCCESS if pe < -0.6 else (theme.ERROR if pe > 0.0 else theme.MUTED)
+            lines.append(f"势能高程: V = {pe:+.2f} · {pe_desc}")
+            colors.append(pe_col)
+
+            # 认知负债 Ed
+            ed = float(pt.get("epistemic_debt", 1.0))
+            ed_desc = "探查充分" if ed <= 1.0 else ("常规推演" if ed < 4.0 else "盲区动刀")
+            ed_col = theme.DEBT_GLOW_SAFE if ed <= 1.0 else (theme.DEBT_GLOW_DANGER if ed >= 4.0 else theme.MUTED)
+            lines.append(f"认知负债: Ed = {ed:.2f} · {ed_desc}")
+            colors.append(ed_col)
+
+            # 动力学相态
+            reg = str(pt.get("regime") or "liquid").lower()
+            reg_names = {
+                "gas": ("高熵气态", theme.REGIME_GAS),
+                "liquid": ("凝聚液态", theme.REGIME_LIQUID),
+                "glass": ("自旋玻璃态", theme.REGIME_GLASS),
+                "crystal": ("晶态终态", theme.REGIME_CRYSTAL),
+            }
+            reg_name, reg_col = reg_names.get(reg, ("常规液态", theme.MUTED))
+            lines.append(f"动力学相态: {reg_name}")
+            colors.append(reg_col)
+
+            # 局部瞬时阻尼比谱
+            dspec = self._data.get("damping_spectrum") or {}
+            td_map = dict(dspec.get("turn_damping", []))
+            if t_num in td_map:
+                loc_z = td_map[t_num]
+                loc_desc = "平稳推进" if 0.7 <= loc_z <= 1.1 else ("反复横跳" if loc_z < 0.7 else "卡壳停滞")
+                loc_col = theme.SUCCESS if 0.7 <= loc_z <= 1.1 else (theme.ERROR if loc_z < 0.7 else theme.WARNING)
+                lines.append(f"局部节奏: ζ = {loc_z:.2f} · {loc_desc}")
+                colors.append(loc_col)
+
+            # 控制论水床因果链检测
+            wb_turns = getattr(self, "_waterbed_turns", set())
+            causal_links = self._data.get("waterbed_causality") or []
+            found_causal = None
+            for cl in causal_links:
+                if cl.get("target_turn") == t_num:
+                    found_causal = cl
+                    break
+            if found_causal:
+                s_file = found_causal.get("source_file", "代码资产")
+                s_turn = found_causal.get("source_turn", "-")
+                b_rad = found_causal.get("blast_radius", 1)
+                lines.append(f"连锁破坏: 修改 {s_file} (T{s_turn}) 导致后续报错 · 冲击半径 {b_rad}")
+                colors.append(theme.WATERBED_ARC)
+            elif t_num in wb_turns or (t != "-" and str(t).isdigit() and int(t) in wb_turns):
+                lines.append("控制论警示: 水床效应扰动 · 修复引发非关联报错")
+                colors.append(theme.WATERBED_ARC)
+            if abs(ds - 0.55) <= 0.04:
+                lines.append("鞍点势垒: 处于势垒脊线")
+                colors.append(theme.PHASE_BARRIER_CREST)
 
             # 双信源信息流：信噪比与外部控制冲量
             snr, impulse = self._derive_flux_and_snr(pt)
@@ -3189,11 +3623,11 @@ class PhasePortraitWidget:
                 lines.append(f"人类控制冲量: {flux_lbl} · {impulse.get('note', '')}")
                 colors.append(theme.PHASE_IMPULSE if impulse.get("flux") == "high" else theme.MUTED)
 
-            # 混沌动力学：局部李雅普诺夫指数
+            # 局部稳定性
             lam_val = -0.65 if event_tag == "breakthrough" else (-0.35 if vec in ("positive", "convergent") else (+0.25 if event_tag == "retry_loop" else 0.10))
             lam_desc = "强力收敛" if lam_val <= -0.4 else ("渐近稳定" if lam_val < 0 else "发散风险")
             lam_col = theme.SUCCESS if lam_val < 0 else theme.ERROR
-            lines.append(f"局部李雅普诺夫: λ = {lam_val:+.2f} ({lam_desc})")
+            lines.append(f"改动稳定性: λ = {lam_val:+.2f} · {lam_desc}")
             colors.append(lam_col)
 
             # 多体系统：子智能体协同态势
@@ -3207,7 +3641,7 @@ class PhasePortraitWidget:
                     s_delta = sub.get("semantic_delta", 0.0)
                     s_stat = "向心收敛" if str(sub.get("status") or "").lower() == "convergent" else "发散噪声"
                     s_col = theme.SUCCESS if s_stat == "向心收敛" else theme.ERROR
-                    lines.append(f"  • {s_name} ({s_role}): ΔDs={s_delta:+.2f} ({s_stat})")
+                    lines.append(f"  • {s_name} · {s_role} · ΔDs={s_delta:+.2f} · {s_stat}")
                     colors.append(s_col)
 
             if event_tag in event_map:
@@ -3244,11 +3678,80 @@ class PhasePortraitWidget:
             if d_circle <= 54 or text_hit:
                 lines = [
                     "平庸代码吸引子 · 惯性势阱",
-                    "状态特征: 高熵先验势阱 · 偏离危险区 (Ds ≈ 0.86)",
+                    "状态特征: 高熵先验势阱 · 偏离危险区 · Ds 约 0.86",
                     "动力学定义: 预训练模型的面条冗余惯性黑洞",
                     "工程含义: 盲目机械修改、过度封装、局部重试死锁",
                 ]
                 colors = [theme.ERROR, theme.FG_WHITE, theme.MUTED, theme.MUTED]
+                self._tooltip.show(event.x, event.y, lines, colors)
+                return
+        # 4. 检测水床扰动微型胶囊与弧线
+        for bx0, bx1, by0, by1, wb_t in getattr(self, "_waterbed_boxes", []):
+            if bx0 <= event.x <= bx1 and by0 - 6 <= event.y <= by1 + 6:
+                lines = [
+                    "控制论水床效应 · 连锁破坏",
+                    f"触发位置: 助手第 {wb_t} 轮",
+                    "现象特征: 刚刚修复了前一个需求，却直接引发其他非关联模块报错挂掉",
+                    "工程根因: 代码修改缺乏全局边界隔离，拆东墙补西墙",
+                ]
+                colors = [theme.WATERBED_ARC, theme.FG_WHITE, theme.MUTED, theme.MUTED]
+                self._tooltip.show(event.x, event.y, lines, colors)
+                return
+
+        # 5. 检测鞍点势垒分水岭与胶囊
+        bbox = getattr(self, "_barrier_box", None)
+        if bbox:
+            bx0, bx1, by0, by1, lx, pt, ph, b_txt, is_crossed = bbox
+            capsule_hit = (bx0 <= event.x <= bx1 and by0 <= event.y <= by1)
+            line_hit = (abs(event.x - lx) <= 12 and pt <= event.y <= pt + ph)
+            if capsule_hit or line_hit:
+                status_desc = "已成功跨越 · 进入顺畅收敛通道" if is_crossed else "尚未跨越 · 处于核心理解阻碍期"
+                lines = [
+                    "需求理解分水岭 · Waddington 鞍点势垒",
+                    "分界线: 语义偏离度 0.55",
+                    f"当前状态: {status_desc}",
+                    "工程意义: 整个会话中最难啃的技术理解卡点，跨过后代码迅速收敛",
+                ]
+                colors = [theme.PHASE_BARRIER_CREST, theme.FG_WHITE, theme.SUCCESS if is_crossed else theme.WARNING, theme.MUTED]
+                self._tooltip.show(event.x, event.y, lines, colors)
+                return
+
+        # 6. 检测止损红线与视界拦截胶囊
+        hbox = getattr(self, "_horizon_box", None)
+        if hbox:
+            bx0, bx1, by0, by1, lx, pt, ph, lbl_txt, h_stat = hbox
+            capsule_hit = (bx0 <= event.x <= bx1 and by0 <= event.y <= by1)
+            line_hit = (abs(event.x - lx) <= 14 and pt <= event.y <= pt + ph)
+            if capsule_hit or line_hit:
+                if h_stat == "intercepted":
+                    h_col = theme.SUCCESS
+                    h_advice = "用户的关键反馈成功力挽狂澜，避免了全盘推翻"
+                elif h_stat == "breached":
+                    h_col = theme.ERROR
+                    h_advice = "偏离已无法挽回，继续对话只会产生更多冗余废代码，建议新开会话"
+                else:
+                    h_col = theme.MUTED
+                    h_advice = "代码演化未越界，处于安全受控区间"
+                lines = [
+                    "止损临界红线 · 语义偏离度 0.82",
+                    f"当前态势: {lbl_txt}",
+                    f"工程建议: {h_advice}",
+                ]
+                colors = [h_col, theme.FG_WHITE, theme.MUTED]
+                self._tooltip.show(event.x, event.y, lines, colors)
+                return
+
+        # 7. 检测人类外部信息注入标签
+        for bx0, bx1, by0, by1, u_val, flux, note in getattr(self, "_impulse_boxes", []):
+            if bx0 <= event.x <= bx1 and by0 <= event.y <= by1:
+                flux_name = "关键纠偏制导" if flux == "high" else ("常规需求微调" if flux == "mid" else "低效催促指令")
+                lines = [
+                    f"用户外部指令 · 消息 U{u_val}",
+                    f"指令性质: {flux_name}",
+                    f"指令内容: {note}",
+                    "向心贡献: 注入关键负熵，引导 AI 脱离歧途",
+                ]
+                colors = [theme.PHASE_IMPULSE if flux == "high" else theme.MUTED, theme.FG_WHITE, theme.MUTED, theme.MUTED]
                 self._tooltip.show(event.x, event.y, lines, colors)
                 return
 
@@ -3277,18 +3780,164 @@ class PhasePortraitWidget:
         ry = by - ux * half_width
         return [(tip_x, tip_y), (lx, ly), (rx, ry)]
 
+    def _zoom(self, factor: float, cx: float | None = None, cy: float | None = None) -> None:
+        new_scale = max(1.0, min(5.0, self._zoom_scale * factor))
+        if abs(new_scale - self._zoom_scale) < 0.005:
+            return
+        w = max(self.canvas.winfo_width(), 600)
+        h = max(self.canvas.winfo_height(), 480)
+        pad_l, pad_t = 68, 38
+        plot_w = w - pad_l - 55
+        plot_h = h - pad_t - 48
+        if new_scale <= 1.01:
+            self._zoom_scale = 1.0
+            self._pan_x = 0.0
+            self._pan_y = 0.0
+        else:
+            focus_x = cx if cx is not None else (pad_l + plot_w / 2.0)
+            focus_y = cy if cy is not None else (pad_t + plot_h / 2.0)
+            ratio = new_scale / self._zoom_scale
+            # 严格以光标所在视口相对位置为锚点缩放，彻底消除漂移
+            self._pan_x = (focus_x - pad_l) - (focus_x - pad_l - self._pan_x) * ratio
+            self._pan_y = (focus_y - pad_t) - (focus_y - pad_t - self._pan_y) * ratio
+            self._zoom_scale = new_scale
+        self._clamp_pan(plot_w, plot_h)
+        if hasattr(self, "zoom_lbl"):
+            self.zoom_lbl.config(text=f"{int(round(self._zoom_scale * 100))}%")
+        self._redraw()
+
+    def _reset_zoom(self) -> None:
+        self._zoom_scale = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+
+        if hasattr(self, "zoom_lbl"):
+            self.zoom_lbl.config(text="100%")
+        self._redraw()
+
+    def _on_mousewheel(self, event) -> None:
+        factor = 1.15 if (getattr(event, "delta", 0) > 0) else 0.87
+        self._wheel_zoom_accum = getattr(self, "_wheel_zoom_accum", 1.0) * factor
+        self._wheel_cx = getattr(event, "x", None)
+        self._wheel_cy = getattr(event, "y", None)
+        if not getattr(self, "_wheel_zoom_pending", False):
+            self._wheel_zoom_pending = True
+            self.canvas.after(16, self._apply_wheel_zoom)
+
+    def _apply_wheel_zoom(self) -> None:
+        self._wheel_zoom_pending = False
+        factor = getattr(self, "_wheel_zoom_accum", 1.0)
+        self._wheel_zoom_accum = 1.0
+        self._zoom(factor, getattr(self, "_wheel_cx", None), getattr(self, "_wheel_cy", None))
+
+    def _on_press(self, event) -> None:
+        # 1. 检测点击 HUD 探针卡片按钮（带 4px 容差补偿，确保边缘点击 100% 命中）
+        for bx0, by0, bx1, by1, act in getattr(self, "_hud_btns", []):
+            if (bx0 - 4) <= event.x <= (bx1 + 4) and (by0 - 4) <= event.y <= (by1 + 4):
+                if act == "prev":
+                    self._step_node(-1)
+                elif act == "next":
+                    self._step_node(1)
+                elif act == "center":
+                    self._center_node(self._selected_node_idx)
+                elif act == "close":
+                    self._deselect_node()
+                return
+
+        # 1b. 若点击落在 HUD 卡片主体上，拦截事件防止误触底层拖拽
+        if getattr(self, "_hud_card_box", None) and (
+            self._hud_card_box[0] <= event.x <= self._hud_card_box[1] and
+            self._hud_card_box[2] <= event.y <= self._hud_card_box[3]
+        ):
+            return
+
+        # 2. 检测是否单击质点节点进入探针巡航
+        for idx, item in enumerate(self._pts):
+            nx, ny = item[0], item[1]
+            if math.hypot(event.x - nx, event.y - ny) <= 14:
+                self._select_node(idx)
+                return
+
+        # 3. 空白处拖拽平移准备
+        self._drag_data = {"x": event.x, "y": event.y, "panned": False}
+        self.canvas.config(cursor="fleur")
+
+    def _on_double_click(self, event) -> None:
+        # 双击如果落在 HUD 探针卡片按钮上，视为连续单步递进，不重置缩放
+        for bx0, by0, bx1, by1, act in getattr(self, "_hud_btns", []):
+            if (bx0 - 4) <= event.x <= (bx1 + 4) and (by0 - 4) <= event.y <= (by1 + 4):
+                if act == "prev":
+                    self._step_node(-1)
+                elif act == "next":
+                    self._step_node(1)
+                elif act == "center":
+                    self._center_node(self._selected_node_idx)
+                elif act == "close":
+                    self._deselect_node()
+                return
+        if getattr(self, "_hud_card_box", None) and (
+            self._hud_card_box[0] <= event.x <= self._hud_card_box[1] and
+            self._hud_card_box[2] <= event.y <= self._hud_card_box[3]
+        ):
+            return
+        self._reset_zoom()
+
+    def _on_drag(self, event) -> None:
+        dx = event.x - self._drag_data["x"]
+        dy = event.y - self._drag_data["y"]
+        if abs(dx) > 1 or abs(dy) > 1:
+            self._drag_data["panned"] = True
+            if self._zoom_scale > 1.01:
+                self._pan_x += dx
+                self._pan_y += dy
+                self._drag_data["x"] = event.x
+                self._drag_data["y"] = event.y
+                self._clamp_pan()
+                if not getattr(self, "_drag_redraw_pending", False):
+                    self._drag_redraw_pending = True
+                    self.canvas.after(16, self._do_drag_redraw)
+
+    def _on_release(self, event) -> None:
+        self.canvas.config(cursor=CLICK_CURSOR)
+        self._drag_redraw_pending = False
+        if getattr(self, "_drag_data", {}).get("panned"):
+            self._redraw()
+
+    def _clamp_pan(self, plot_w: float | None = None, plot_h: float | None = None) -> None:
+        if self._zoom_scale <= 1.01:
+            self._pan_x = 0.0
+            self._pan_y = 0.0
+            return
+        if plot_w is None or plot_h is None:
+            w = max(self.canvas.winfo_width(), 600)
+            h = max(self.canvas.winfo_height(), 480)
+            plot_w = w - 68 - 55
+            plot_h = h - 38 - 48
+        min_pan_x = plot_w * (1.0 - self._zoom_scale) - 80
+        max_pan_x = 80
+        min_pan_y = plot_h * (1.0 - self._zoom_scale) - 80
+        max_pan_y = 80
+        self._pan_x = max(min_pan_x, min(max_pan_x, self._pan_x))
+        self._pan_y = max(min_pan_y, min(max_pan_y, self._pan_y))
     def _redraw(self):
         c = self.canvas
         c.delete("all")
         self._pts.clear()
         self._aa_imgs.clear()
+        self._regime_boxes.clear()
+        self._waterbed_boxes.clear()
+        self._impulse_boxes.clear()
+        self._hud_btns.clear()
+        self._barrier_box = None
+        self._horizon_box = None
+        self._hud_card_box = None
         w = c.winfo_width()
         h = c.winfo_height()
         if w < 100:
             w = max(w, c.winfo_reqwidth(), 600)
         if h < 50:
             h = max(h, c.winfo_reqheight(), 480)
-        pad_l, pad_r, pad_t, pad_b = 68, 55, 38, 34
+        pad_l, pad_r, pad_t, pad_b = 68, 55, 38, 48
         plot_w = w - pad_l - pad_r
         plot_h = h - pad_t - pad_b
         if plot_w <= 10 or plot_h <= 10:
@@ -3320,8 +3969,70 @@ class PhasePortraitWidget:
             self._draw_phase_plane(c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj)
         else:
             self._draw_manifold(c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj)
+    def _draw_waddington_landscape(self, pad_l: float, pad_t: float, plot_w: float, plot_h: float, aa_items: list,
+                                  zoom: float = 1.0, pan_x: float = 0.0, pan_y: float = 0.0) -> None:
+        """绘制 Waddington 双阱表观遗传连续势能曲面等高线。"""
+        steps = 36
+        plot_w_eff = plot_w * zoom
+        plot_h_eff = plot_h * zoom
+        for k in range(6):
+            base_y_frac = 0.16 + k * 0.14
+            base_y = pad_t + pan_y + base_y_frac * plot_h_eff
+            line_pts = []
+            for s in range(steps + 1):
+                ds = 0.04 + (s / steps) * 0.92
+                px = pad_l + pan_x + ds * plot_w_eff
+                v = metrics.compute_waddington_potential(ds)
+                py = base_y - v * (plot_h_eff * 0.09)
+                line_pts.append((px, py))
+            if k == 0 or k == 5:
+                col = theme.PHASE_CONTOUR_LOW
+            elif k in (2, 3):
+                col = theme.PHASE_CONTOUR_HIGH
+            else:
+                col = theme.PHASE_CONTOUR_MID
+            aa_items.append(("line", line_pts, col, 1))
+    def _draw_regime_band(self, c, pad_l: float, pad_t: float, plot_w: float, plot_h: float, traj: list) -> None:
+        """在画布底座绘制 SLDS 四相态连续光谱流带。"""
+        self._regime_boxes.clear()
+        if not traj:
+            return
+        band_y0 = pad_t + plot_h + 24
+        band_h = 10
+        band_y1 = band_y0 + band_h
+
+        c.create_text(pad_l - 8, (band_y0 + band_y1) / 2, text="阶段演化",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
+
+        n_steps = len(traj)
+        regime_colors = {
+            "gas": theme.REGIME_GAS,
+            "liquid": theme.REGIME_LIQUID,
+            "glass": theme.REGIME_GLASS,
+            "crystal": theme.REGIME_CRYSTAL,
+        }
+
+        for i, pt in enumerate(traj):
+            reg = str(pt.get("regime") or "liquid").lower()
+            col = regime_colors.get(reg, theme.REGIME_LIQUID)
+
+            x0 = pad_l + (i / n_steps) * plot_w
+            x1 = pad_l + ((i + 1) / n_steps) * plot_w
+
+            c.create_rectangle(x0, band_y0, x1, band_y1, fill=col, outline=theme.BG, width=1)
+
+            turn_val = pt.get("turn", i + 1)
+            ed_val = float(pt.get("epistemic_debt", 1.0))
+            self._regime_boxes.append((x0, x1, band_y0, band_y1, turn_val, reg, ed_val))
+
     def _draw_manifold(self, c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj) -> None:
         """经典状态-代价时序流形视图：横轴语义距离 Ds × 纵轴物理成本 $。"""
+        zoom = self._zoom_scale
+        pan_x = self._pan_x
+        pan_y = self._pan_y
+        plot_w_eff = plot_w * zoom
+        plot_h_eff = plot_h * zoom
+
         cost_str = str(self._report.get("cost_display") or "")
         m_cost = re.search(r"(\d+(?:\.\d+)?)", cost_str)
         max_cost_val = float(m_cost.group(1)) if m_cost else 10.0
@@ -3329,66 +4040,123 @@ class PhasePortraitWidget:
             max_cost_val = 10.0
         y_ticks = []
         for frac in (1.0, 0.75, 0.50, 0.25, 0.0):
-            gy = pad_t + (1.0 - frac) * plot_h
-            if 0.0 < frac < 1.0:
-                c.create_line(pad_l, gy, pad_l + plot_w, gy, fill=theme.BORDER, dash=(2, 4))
-            val = max_cost_val * frac
-            val_txt = f"${val:.1f}" if max_cost_val >= 1 else f"${val:.2f}"
-            y_ticks.append((gy, val_txt))
+            gy = pad_t + pan_y + (1.0 - frac) * plot_h_eff
+            if pad_t - 6 <= gy <= pad_t + plot_h + 6:
+                if 0.0 < frac < 1.0:
+                    c.create_line(pad_l, gy, pad_l + plot_w, gy, fill=theme.BORDER, dash=(2, 4))
+                val = max_cost_val * frac
+                val_txt = f"${val:.1f}" if max_cost_val >= 1 else f"${val:.2f}"
+                y_ticks.append((gy, val_txt))
+                c.create_text(pad_l - 8, gy, text=val_txt, fill=theme.MUTED,
+                              font=theme.FONT_UI_SMALL, anchor="e")
 
         # 关键状态分界线
-        line_target_x = pad_l + 0.10 * plot_w
-        line_danger_x = pad_l + 0.90 * plot_w
+        line_target_x = pad_l + pan_x + 0.10 * plot_w_eff
+        line_danger_x = pad_l + pan_x + 0.90 * plot_w_eff
         c.create_line(line_target_x, pad_t, line_target_x, pad_t + plot_h, fill=theme.PHASE_GRID_DIRAC, dash=(1, 4))
         c.create_line(line_danger_x, pad_t, line_danger_x, pad_t + plot_h, fill=theme.PHASE_GRID_TRAP, dash=(1, 4))
 
         # 止损红线与不可逆视界 (Ds=0.82)
         _lams, _avg_lam, horizon_status = self._compute_lyapunov_stats(traj, self._data.get("lyapunov_exponent"))
-        line_horizon_x = pad_l + 0.82 * plot_w
+        line_horizon_x = pad_l + pan_x + 0.82 * plot_w_eff
         c.create_line(line_horizon_x, pad_t + 18, line_horizon_x, pad_t + plot_h - 18, fill=theme.ERROR, dash=(3, 5), width=2)
+        if horizon_status == "intercepted":
+            lbl_txt = "成功纠偏 · 挽回失控"
+            bw = len(lbl_txt) * 11 + 24
+            bx0, by0, bx1, by1 = line_horizon_x - bw - 10, pad_t + 18, line_horizon_x - 10, pad_t + 38
+            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.DIRAC_CORE_BG, outline=theme.DIRAC_WELL_BORDER, width=1)
+            c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.SUCCESS, outline="")
+            c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt, fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+            self._horizon_box = (bx0, bx1, by0, by1, line_horizon_x, pad_t, plot_h, lbl_txt, "intercepted")
+        elif horizon_status == "breached":
+            lbl_txt = "越界失控"
+            bw = len(lbl_txt) * 11 + 24
+            bx0, by0, bx1, by1 = line_horizon_x + 10, pad_t + 18, line_horizon_x + bw + 10, pad_t + 38
+            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.ATTRACTOR_RINGS[0], outline=theme.ATTRACTOR_BASIN_BORDER, width=1)
+            c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.ERROR, outline="")
+            c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt, fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+            self._horizon_box = (bx0, bx1, by0, by1, line_horizon_x, pad_t, plot_h, lbl_txt, "breached")
 
         # X 轴底线
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
 
+        # (F) 顶部图例说明 (Legend)
+        leg_y = pad_t - 14
+        leg_x = pad_l + 10
+        c.create_line(leg_x, leg_y, leg_x + 18, leg_y, fill=theme.SUCCESS, width=2)
+        c.create_text(leg_x + 22, leg_y, text="向心推进", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_line(leg_x + 80, leg_y, leg_x + 98, leg_y, fill=theme.ERROR, width=2)
+        c.create_text(leg_x + 102, leg_y, text="离心偏离", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 160, leg_y - 4, leg_x + 168, leg_y + 4, outline=theme.DIRAC_WELL_BORDER, fill=theme.DIRAC_CORE_BG, width=1)
+        c.create_text(leg_x + 172, leg_y, text="狄拉克目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 260, leg_y - 4, leg_x + 268, leg_y + 4, outline=theme.ATTRACTOR_BASIN_BORDER, fill=theme.ATTRACTOR_RINGS[0], width=1)
+        c.create_text(leg_x + 272, leg_y, text="平庸代码吸引子", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+
+        # 底部 X 轴说明
+        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
+                      fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(pad_l + plot_w / 2, pad_t + plot_h + 12,
+                      text="语义距离：向左逼近目标达成 · 向右偏离真实意图",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
+        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
+                      fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
+
         aa_items: list = []
 
-        # (A) 相平面速度流场微线段网格
-        streamline_col = theme.PHASE_STREAMLINE
-        for row_idx, gy_frac in enumerate((0.20, 0.40, 0.60, 0.80)):
-            sy = pad_t + gy_frac * plot_h
-            for col_idx, gx_frac in enumerate((0.25, 0.40, 0.55, 0.70)):
-                sx = pad_l + gx_frac * plot_w
-                aa_items.append(("line", [(sx + 9, sy - 5), (sx - 9, sy + 4)], streamline_col, 1))
-                aa_items.append(("line", [(sx - 9, sy + 4), (sx - 4, sy + 2)], streamline_col, 1))
+        # (A0) Waddington 双阱连续势能等高线
+        self._draw_waddington_landscape(pad_l, pad_t, plot_w, plot_h, aa_items, zoom, pan_x, pan_y)
 
-        # (B) 理想向心收敛走廊参考线
+        # (A1) 鞍点势垒警戒脊线
+        line_barrier_x = pad_l + pan_x + 0.55 * plot_w_eff
+        c.create_line(line_barrier_x, pad_t + 18, line_barrier_x, pad_t + plot_h - 18,
+                      fill=theme.PHASE_BARRIER_CREST, dash=(2, 4), width=1)
+        barrier_crossed = bool(self._data.get("barrier_crossed"))
+        barrier_turn = self._data.get("barrier_turn")
+        if barrier_crossed:
+            b_txt = f"势垒突破 T{barrier_turn}" if barrier_turn else "势垒突破"
+            bw = len(b_txt) * 9 + 16
+            bx0, by0, bx1, by1 = line_barrier_x - bw / 2, pad_t + 18, line_barrier_x + bw / 2, pad_t + 36
+            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.CARD_HEADER_BG, outline=theme.PHASE_BARRIER_CREST, width=1)
+            c.create_text(line_barrier_x, (by0 + by1) / 2, text=b_txt,
+                          fill=theme.PHASE_BARRIER_CREST, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
+            self._barrier_box = (bx0, bx1, by0, by1, line_barrier_x, pad_t, plot_h, b_txt, True)
+        else:
+            b_txt = "鞍点势垒 · 0.55"
+            bw = len(b_txt) * 8 + 14
+            bx0, by0, bx1, by1 = line_barrier_x - bw / 2, pad_t + 18, line_barrier_x + bw / 2, pad_t + 36
+            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.CARD_HEADER_BG, outline=theme.BORDER, width=1)
+            c.create_text(line_barrier_x, (by0 + by1) / 2, text=b_txt,
+                          fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
+            self._barrier_box = (bx0, bx1, by0, by1, line_barrier_x, pad_t, plot_h, b_txt, False)
+
+        # (A2) 理想向心收敛走廊参考线
         corridor_pts = [
-            (pad_l + 0.85 * plot_w, pad_t + plot_h * 0.95),
-            (pad_l + 0.50 * plot_w, pad_t + plot_h * 0.92),
-            (pad_l + 0.22 * plot_w, pad_t + plot_h * 0.90),
-            (pad_l + 0.05 * plot_w, pad_t + plot_h * 0.88),
+            (pad_l + pan_x + 0.85 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.95),
+            (pad_l + pan_x + 0.50 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.92),
+            (pad_l + pan_x + 0.22 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.90),
+            (pad_l + pan_x + 0.05 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.88),
         ]
         aa_items.append(("line", corridor_pts, theme.PHASE_CORRIDOR, 1))
 
         # (C) 平庸代码吸引子引力势阱与黑洞同心圆
-        att_x = pad_l + plot_w * 0.86
-        att_y = pad_t + 90
+        att_x = pad_l + pan_x + plot_w_eff * 0.86
+        att_y = pad_t + pan_y + 90 * zoom
         self._att_pos = (att_x, att_y)
         self._pad_t = pad_t
         for r, col in zip((76, 56, 40), (theme.ATTRACTOR_BASIN_BORDER, theme.ATTRACTOR_BASIN_BORDER, theme.ATTRACTOR_RINGS[0])):
-            aa_items.append(("dot", att_x, att_y, r, None, col, 1))
+            aa_items.append(("dot", att_x, att_y, r * zoom, None, col, 1))
         for r, col in zip((28, 18, 10), theme.ATTRACTOR_RINGS):
-            aa_items.append(("dot", att_x, att_y, r, col, theme.ATTRACTOR_RINGS[1], 1))
-        aa_items.append(("dot", att_x, att_y, 4, theme.ERROR, theme.ERROR, 1))
+            aa_items.append(("dot", att_x, att_y, r * zoom, col, theme.ATTRACTOR_RINGS[1], 1))
+        aa_items.append(("dot", att_x, att_y, 4 * zoom, theme.ERROR, theme.ERROR, 1))
 
         # (D) 狄拉克目标点
-        tgt_x = pad_l + plot_w * 0.05
-        tgt_y = pad_t + plot_h * 0.88
+        tgt_x = pad_l + pan_x + plot_w_eff * 0.05
+        tgt_y = pad_t + pan_y + plot_h_eff * 0.88
         self._tgt_pos = (tgt_x, tgt_y)
         for r in (36, 24):
-            aa_items.append(("dot", tgt_x, tgt_y, r, None, theme.DIRAC_WELL_BORDER, 1))
-        aa_items.append(("dot", tgt_x, tgt_y, 16, theme.DIRAC_CORE_BG, theme.SUCCESS, 2))
-        aa_items.append(("dot", tgt_x, tgt_y, 5, theme.SUCCESS, theme.SUCCESS, 1))
+            aa_items.append(("dot", tgt_x, tgt_y, r * zoom, None, theme.DIRAC_WELL_BORDER, 1))
+        aa_items.append(("dot", tgt_x, tgt_y, 16 * zoom, theme.DIRAC_CORE_BG, theme.SUCCESS, 2))
+        aa_items.append(("dot", tgt_x, tgt_y, 5 * zoom, theme.SUCCESS, theme.SUCCESS, 1))
 
         # (E) 计算真实会话动力学轨迹节点
         n = len(traj)
@@ -3401,17 +4169,15 @@ class PhasePortraitWidget:
         if traj:
             for idx, pt in enumerate(traj):
                 ds = max(0.0, min(1.0, float(pt.get("semantic_distance", 0.5))))
-                px = pad_l + ds * plot_w
+                px = pad_l + pan_x + ds * plot_w_eff
                 t_val = pt.get("turn")
                 if isinstance(t_val, (int, float)) and total_turns > 1:
                     frac = max(0.0, min(1.0, (float(t_val) - 1.0) / (float(total_turns) - 1.0)))
                 else:
                     frac = idx / (n - 1) if n > 1 else 0.5
-                py = (pad_t + plot_h) - frac * plot_h * 0.82 - 8
+                py = (pad_t + pan_y + plot_h_eff) - frac * plot_h_eff * 0.82 - 8 * zoom
                 offset_y = -14 if (idx % 2 == 0 and py > pad_t + 28) else 14
                 self._pts.append((px, py, pt, offset_y))
-
-            # (1) 渐变信噪比光晕管径 (Variable SNR Conduit)
             for i in range(1, len(self._pts)):
                 x0, y0, prev_pt = self._pts[i - 1][:3]
                 x1, y1, cur_pt = self._pts[i][:3]
@@ -3445,27 +4211,26 @@ class PhasePortraitWidget:
                 poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
                 if poly:
                     aa_items.append(("polygon", poly, col, col))
-
-            # (2) 人类信源信息注入冲量引导线 (User Impulse Lines)
+            # (2) 人类信源信息注入冲量引导线（仅对最具向心突破意义的至多 2 条关键纠偏绘制高亮指引线，杜绝数十条灰线遮挡）
             impulse_dashed_lines: list[tuple[float, float, float, float, str, tuple, int]] = []
+            key_impulses: list = []
             for i_pt, item in enumerate(self._pts):
                 x, y, pt = item[:3]
                 prev_pt = self._pts[i_pt - 1][2] if i_pt > 0 else None
                 _snr, impulse = self._derive_flux_and_snr(pt, prev_pt)
-                if impulse:
-                    flux = impulse.get("flux", "mid")
-                    if flux == "high":
-                        # 关键纠偏：绿色/青色清晰虚线引导线（向右上方舒展引出，长度充裕）
-                        arr_len = 42
-                        ix0 = x + arr_len * 0.75
-                        iy0 = y - arr_len * 0.45
-                        impulse_dashed_lines.append((x + 4, y - 2, ix0, iy0, theme.PHASE_IMPULSE, (3, 2), 1))
-                    else:
-                        # 初始需求/迭代要求：纤细灰色虚线（向右上方舒展引出，长度充裕）
-                        arr_len = 38
-                        ix0 = x + arr_len * 0.75
-                        iy0 = y - arr_len * 0.45
-                        impulse_dashed_lines.append((x + 4, y - 2, ix0, iy0, theme.BORDER_HOVER, (2, 3), 1))
+                if impulse and impulse.get("flux") == "high":
+                    cur_ds = float(pt.get("semantic_distance", 0.5))
+                    prev_ds = float(prev_pt.get("semantic_distance", 0.5)) if prev_pt else 0.5
+                    if cur_ds < prev_ds - 0.01:
+                        key_impulses.append((i_pt, x, y, pt, impulse))
+
+            for i_pt, x, y, pt, impulse in key_impulses[:2]:
+                u_val = pt.get("user_turn") or pt.get("u")
+                arr_len = 38
+                ix0 = x + arr_len * 0.75
+                iy0 = y - arr_len * 0.45
+                impulse_dashed_lines.append((x + 4, y - 2, ix0, iy0, theme.PHASE_IMPULSE, (3, 2), 1))
+                self._impulse_boxes.append((x + 28, x + 120, y - 26, y - 8, u_val, "high", impulse.get("note", "")))
             # (3) 多体系统卫星微质点群 (Subagent Satellites)
             for item in self._pts:
                 x, y, pt = item[:3]
@@ -3490,6 +4255,14 @@ class PhasePortraitWidget:
                 event_tag = str(pt.get("event") or "normal").lower()
                 base_col = theme.ERROR if vec in ("negative", "divergent", "trapped") else (
                     theme.SUCCESS if vec in ("positive", "convergent") else theme.WARNING)
+                # 认知负债动态光晕
+                ed = float(pt.get("epistemic_debt", 1.0))
+                if ed >= 4.0:
+                    aa_items.append(("dot", x, y, 13, None, theme.DEBT_GLOW_DANGER, 1))
+                    aa_items.append(("dot", x, y, 17, None, theme.DEBT_GLOW_DANGER, 1))
+                elif ed <= 1.0:
+                    aa_items.append(("dot", x, y, 9, None, theme.DEBT_GLOW_SAFE, 1))
+
                 if i_pt == 0:
                     aa_items.append(("dot", x, y, 8, None, theme.PHASE_START_HALO, 1))
                 elif i_pt == n_pts - 1:
@@ -3504,98 +4277,121 @@ class PhasePortraitWidget:
                     aa_items.append(("dot", x, y, 8, None, theme.ERROR, 1))
                 aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
 
-        self._aa_layer(c, aa_items, self._aa_imgs)
-        # 人类信源外部冲量引导线（纯虚线辅助对齐，无任何箭头侵入主轨迹）
+        self._aa_layer_flat(c, aa_items, "aa_data")
+        # 控制论水床效应扰动弧
+        waterbed_turns = metrics.detect_waterbed_events(traj)
+        self._waterbed_turns = set(waterbed_turns)
+        for wb_t in waterbed_turns:
+            for i_wb in range(1, len(self._pts)):
+                cur_pt = self._pts[i_wb][2]
+                cur_t = cur_pt.get("turn") or (i_wb + 1)
+                if cur_t == wb_t:
+                    x0, y0 = self._pts[i_wb - 1][:2]
+                    x1, y1 = self._pts[i_wb][:2]
+                    mid_x = (x0 + x1) / 2.0
+                    arch_h = max(26.0, min(52.0, math.hypot(x1 - x0, y1 - y0) * 0.45))
+                    mid_y = min(y0, y1) - arch_h
+                    arc_pts = []
+                    for t_step in range(17):
+                        t_ratio = t_step / 16.0
+                        bx = (1 - t_ratio) ** 2 * x0 + 2 * (1 - t_ratio) * t_ratio * mid_x + t_ratio ** 2 * x1
+                        by = (1 - t_ratio) ** 2 * y0 + 2 * (1 - t_ratio) * t_ratio * mid_y + t_ratio ** 2 * y1
+                        arc_pts.append((bx, by))
+                    for idx_arc in range(len(arc_pts) - 1):
+                        c.create_line(arc_pts[idx_arc][0], arc_pts[idx_arc][1],
+                                      arc_pts[idx_arc + 1][0], arc_pts[idx_arc + 1][1],
+                                      fill=theme.WATERBED_ARC, dash=(3, 3), width=1)
+                    wb_bw = 64
+                    wb_bx0, wb_by0, wb_bx1, wb_by1 = mid_x - wb_bw / 2, mid_y - 14, mid_x + wb_bw / 2, mid_y + 4
+                    c.create_rectangle(wb_bx0, wb_by0, wb_bx1, wb_by1, fill=theme.CARD_HEADER_BG, outline=theme.WATERBED_ARC, width=1)
+                    c.create_text(mid_x, (wb_by0 + wb_by1) / 2, text="水床扰动", fill=theme.WATERBED_ARC,
+                                  font=theme.FONT_UI_SMALL_BOLD, anchor="center")
+                    self._waterbed_boxes.append((wb_bx0, wb_bx1, wb_by0, wb_by1, wb_t))
+                    break
         for lx0, ly0, lx1, ly1, col, d_pat, lw in impulse_dashed_lines:
             c.create_line(lx0, ly0, lx1, ly1, fill=col, dash=d_pat, width=lw)
-        c.create_text(att_x, pad_t + 10, text="平庸代码吸引子",
-                      fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
-        c.create_text(tgt_x + 22, tgt_y, text="狄拉克目标点",
-                      fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
-        # 止损视界拦截状态文本
-        # 止损视界拦截状态徽章胶囊（无生硬括号，精致底衬与状态微光）
-        if horizon_status == "intercepted":
-            lbl_txt = "成功纠偏 · 挽回失控"
-            bw = len(lbl_txt) * 11 + 24
-            bx0, by0, bx1, by1 = line_horizon_x - bw - 10, pad_t + 18, line_horizon_x - 10, pad_t + 38
-            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.DIRAC_CORE_BG, outline=theme.DIRAC_WELL_BORDER, width=1)
-            c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.SUCCESS, outline="")
-            c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt,
-                          fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        elif horizon_status == "breached":
-            lbl_txt = "偏离过大 · 建议推翻重开"
-            bw = len(lbl_txt) * 11 + 24
-            bx0, by0, bx1, by1 = line_horizon_x + 10, pad_t + 18, line_horizon_x + bw + 10, pad_t + 38
-            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.ATTRACTOR_RINGS[0], outline=theme.ATTRACTOR_BASIN_BORDER, width=1)
-            c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.ERROR, outline="")
-            c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt,
-                          fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        else:
-            lbl_txt = "失控临界红线 (Ds=0.82)"
-            bw = len(lbl_txt) * 8.5 + 16
-            bx0, by0, bx1, by1 = line_horizon_x - bw / 2, pad_t + 18, line_horizon_x + bw / 2, pad_t + 38
-            c.create_rectangle(bx0, by0, bx1, by1, fill=theme.CARD_HEADER_BG, outline=theme.BORDER, width=1)
-            c.create_text(line_horizon_x, (by0 + by1) / 2, text=lbl_txt,
-                          fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
-        for gy, val_txt in y_ticks:
-            c.create_text(pad_l - 6, gy, text=val_txt, fill=theme.MUTED,
-                          font=theme.FONT_UI_SMALL, anchor="e")
-
-        leg_w = 460
-        leg_x = max(pad_l + 8, pad_l + (plot_w - leg_w) / 2)
-        leg_y = pad_t - 16
-        c.create_line(leg_x, leg_y, leg_x + 14, leg_y, fill=theme.SUCCESS, width=2)
-        c.create_text(leg_x + 18, leg_y, text="向心推进 (贴近目标)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_line(leg_x + 130, leg_y, leg_x + 144, leg_y, fill=theme.ERROR, width=2)
-        c.create_text(leg_x + 148, leg_y, text="离心偏离 (偏离需求)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_oval(leg_x + 260, leg_y - 4, leg_x + 268, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
-        c.create_text(leg_x + 272, leg_y, text="狄拉克目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_oval(leg_x + 365, leg_y - 4, leg_x + 373, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
-        c.create_text(leg_x + 377, leg_y, text="平庸代码吸引子", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-
-        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
-                      fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_text(pad_l + plot_w / 2, pad_t + plot_h + 12,
-                      text="语义距离：向左逼近目标达成 · 向右偏离真实意图",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
-        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
-                      fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
+        dspec = self._data.get("damping_spectrum") or {}
+        bif_turns = {b["turn"] for b in dspec.get("bifurcations", []) if b.get("to_cat") == "underdamped"}
+        n_pts = len(self._pts)
+        drawn_label_boxes: list[tuple[float, float]] = []
+        seen_drawn_u: set = set()
+        prev_event_tag = None
 
         for i, item in enumerate(self._pts):
             x, y, pt = item[:3]
-            offset_y = item[3] if len(item) > 3 else (-14 if (i % 2 == 0 and y > pad_t + 28) else 14)
             t_val = pt.get("turn")
             event_tag = str(pt.get("event") or "normal").lower()
             u_val = pt.get("user_turn") or pt.get("u")
+            prev_u = (self._pts[i - 1][2].get("user_turn") or self._pts[i - 1][2].get("u")) if i > 0 else None
+
+            # 判断局部轨迹切线是否近乎垂直（陡峭爬升/暴跌段）
+            is_vertical = False
+            if i > 0 and i < n_pts - 1:
+                dx = abs(self._pts[i + 1][0] - self._pts[i - 1][0])
+                dy = abs(self._pts[i + 1][1] - self._pts[i - 1][1])
+                is_vertical = (dy > 1.3 * max(1.0, dx))
+
+            # 候选偏移位置：若为陡峭垂直段，左右错开排版；否则上下交错
+            if is_vertical:
+                offset_x = -26 if (i % 2 == 0) else 26
+                offset_y = 0
+                anchor_pos = "e" if (i % 2 == 0) else "w"
+            else:
+                offset_x = 0
+                offset_y = item[3] if len(item) > 3 else (-14 if (i % 2 == 0 and y > pad_t + 28) else 14)
+                anchor_pos = "center"
+
+            cand_x = x + offset_x
+            cand_y = y + offset_y
+
+            is_milestone = (i == 0 or i == n_pts - 1 or event_tag in ("breakthrough", "compaction") or any(k[0] == i for k in key_impulses[:2]))
+            # 2D 欧氏防叠检测 (dx^2 + dy^2 < 38^2)
+            is_colliding = any((cand_x - lx)**2 + (cand_y - ly)**2 < 38**2 for lx, ly in drawn_label_boxes)
+
+            if is_colliding and is_vertical:
+                alt_offset_x = -offset_x
+                alt_cand_x = x + alt_offset_x
+                if not any((alt_cand_x - lx)**2 + (cand_y - ly)**2 < 38**2 for lx, ly in drawn_label_boxes):
+                    cand_x = alt_cand_x
+                    anchor_pos = "e" if alt_offset_x < 0 else "w"
+                    is_colliding = False
+
+            can_draw = is_milestone or not is_colliding
+
             prev_pt = self._pts[i - 1][2] if i > 0 else None
             _snr, impulse = self._derive_flux_and_snr(pt, prev_pt)
-            t_str = f"T{t_val}·U{u_val}" if (t_val is not None and u_val is not None) else (f"T{t_val}" if t_val is not None else "")
-            c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
-                          font=theme.FONT_UI_SMALL_BOLD)
-            # 若该点为人类外部信息注入点，标注推力徽标（放置在点右侧开阔区，避免遮挡前进轨迹）
-            if impulse and impulse.get("flux") == "high":
+
+            if can_draw:
+                drawn_label_boxes.append((cand_x, cand_y))
+                t_str = f"T{t_val}·U{u_val}" if (t_val is not None and u_val is not None) else (f"T{t_val}" if t_val is not None else "")
+                c.create_text(cand_x, cand_y, text=t_str, fill=theme.FG_WHITE,
+                              font=theme.FONT_UI_SMALL_BOLD, anchor=anchor_pos)
+
+            # 人类冲量文本标注（仅高亮极其关键的突破纠偏，其余常规指令收拢至悬浮卡片）
+            if impulse and impulse.get("flux") == "high" and any(k[0] == i for k in key_impulses[:2]):
                 c.create_text(x + 36, y - 19, text=f"U{u_val} 关键纠偏", fill=theme.PHASE_IMPULSE,
                               font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-            elif impulse and impulse.get("flux") == "mid":
-                req_lbl = "初始需求" if (u_val in (1, "1") or i == 0) else "迭代要求"
-                c.create_text(x + 33, y - 17, text=f"U{u_val} {req_lbl}", fill=theme.MUTED,
-                              font=theme.FONT_UI_SMALL, anchor="w")
-            # 卫星标签标注
+
+            # 卫星标签标注（密集区域仅绘制微质点与引力细线，避免遮挡相邻主轨迹与水床标签）
             subs = self._calc_subagents(pt)
             if subs:
                 k_total = len(subs)
                 orbit_r = 20
-                for k, sub in enumerate(subs[:3]):
-                    angle = -math.pi / 4 + k * (math.pi * 2 / max(k_total, 3))
-                    sx = x + orbit_r * math.cos(angle)
-                    sy = y + orbit_r * math.sin(angle)
-                    s_name = sub.get("name", "Sub")
-                    s_col = theme.SUCCESS if str(sub.get("status") or "").lower() == "convergent" else theme.ERROR
-                    c.create_text(sx + 5, sy, text=s_name, fill=s_col,
-                                  font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+                is_clustered = any(j != i and ((self._pts[j][0] - x)**2 + (self._pts[j][1] - y)**2) < 36**2 for j in range(n_pts))
+                if not is_clustered:
+                    for k, sub in enumerate(subs[:3]):
+                        angle = -math.pi / 4 + k * (math.pi * 2 / max(k_total, 3))
+                        sx = x + orbit_r * math.cos(angle)
+                        sy = y + orbit_r * math.sin(angle)
+                        s_name = sub.get("name", "Sub")
+                        s_col = theme.SUCCESS if str(sub.get("status") or "").lower() == "convergent" else theme.ERROR
+                        c.create_text(sx + 5, sy, text=s_name, fill=s_col,
+                                      font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
-            if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
+            # 事件标签标注（连续同类事件如重试死锁，仅在首轮标记一次，杜绝重叠堆叠）
+            is_new_event = (event_tag != prev_event_tag or event_tag in ("breakthrough", "compaction"))
+            if is_new_event and event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
                 evt_labels = {
                     "retry_loop": "重试",
                     "breakthrough": "突破",
@@ -3604,12 +4400,23 @@ class PhasePortraitWidget:
                 }
                 lbl_text = evt_labels.get(event_tag, "")
                 evt_col = theme.SUCCESS if event_tag == "breakthrough" else theme.ERROR
-                c.create_text(x, y + offset_y + (10 if offset_y > 0 else -10),
-                              text=f"({lbl_text})", fill=evt_col,
-                              font=theme.FONT_UI_SMALL)
+                evt_y = cand_y + (10 if offset_y >= 0 else -10) if can_draw else y + 12
+                evt_anchor = anchor_pos if can_draw else "center"
+                c.create_text(cand_x if can_draw else x, evt_y,
+                              text=lbl_text, fill=evt_col,
+                              font=theme.FONT_UI_SMALL, anchor=evt_anchor)
+            prev_event_tag = event_tag
+
+            if t_val in bif_turns and event_tag not in ("retry_loop", "breakthrough", "compaction", "test_fail"):
+                c.create_text(cand_x if can_draw else x, (cand_y + 10) if can_draw else (y + 12),
+                              text="失控拐点", fill=theme.ERROR,
+                              font=theme.FONT_UI_SMALL, anchor=anchor_pos if can_draw else "center")
         if not traj:
             c.create_text(pad_l + plot_w / 2, pad_t + plot_h / 2,
                           text="（本动力学报告无细分轨迹采样数据）", fill=theme.MUTED)
+        self._draw_regime_band(c, pad_l, pad_t, plot_w, plot_h, traj)
+        self._draw_hud_card(c, plot_w, plot_h, pad_l, pad_t)
+
 
     def _draw_phase_plane(self, c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj) -> None:
         """P1 相速度极限环对偶相平面：横轴语义距离 Ds × 纵轴相速度 dDs/dt。"""
@@ -3634,13 +4441,20 @@ class PhasePortraitWidget:
         v_max = max(v_vals) if v_vals else 0.05
         v_max = max(0.005, v_max)
 
+        zoom = self._zoom_scale
+        pan_x = self._pan_x
+        pan_y = self._pan_y
+        plot_w_eff = plot_w * zoom
+        plot_h_eff = plot_h * zoom
+        zero_y = pad_t + 0.5 * plot_h + pan_y
+
         for idx, n in enumerate(raw_nodes):
             ds = n["ds"]
-            px = pad_l + ds * plot_w
+            px = pad_l + pan_x + ds * plot_w_eff
             v = n["v"]
             ratio = (abs(v) / v_max) ** 0.55 if v_max > 0 else 0
             sign = 1 if v > 0 else (-1 if v < 0 else 0)
-            py = zero_y - sign * ratio * (plot_h * 0.40)
+            py = zero_y - sign * ratio * (plot_h_eff * 0.40)
             offset_y = -14 if (idx % 2 == 0 and py > pad_t + 28) else 14
             self._pts.append((px, py, n["pt"], offset_y, v))
 
@@ -3683,31 +4497,30 @@ class PhasePortraitWidget:
             c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt, fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         # 底部 X 轴底线与文字
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
-        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
+        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 目标终态",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_text(pad_l + plot_w / 2, pad_t + plot_h + 12,
                       text="语义距离：向左逼近目标达成 · 向右偏离真实意图",
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
-        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
+        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 偏离初始态",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
         # 3. 抗锯齿图层 items (Layer 1)
         aa_items: list = []
 
-        tgt_x = pad_l + plot_w * 0.05
+        tgt_x = pad_l + pan_x + plot_w_eff * 0.05
         tgt_y = zero_y
         self._tgt_pos = (tgt_x, tgt_y)
         for r in (30, 20):
-            aa_items.append(("dot", tgt_x, tgt_y, r, None, theme.DIRAC_WELL_BORDER, 1))
-        aa_items.append(("dot", tgt_x, tgt_y, 14, theme.DIRAC_CORE_BG, theme.SUCCESS, 2))
-        aa_items.append(("dot", tgt_x, tgt_y, 5, theme.SUCCESS, theme.SUCCESS, 1))
+            aa_items.append(("dot", tgt_x, tgt_y, r * zoom, None, theme.DIRAC_WELL_BORDER, 1))
+        aa_items.append(("dot", tgt_x, tgt_y, 14 * zoom, theme.DIRAC_CORE_BG, theme.SUCCESS, 2))
+        aa_items.append(("dot", tgt_x, tgt_y, 5 * zoom, theme.SUCCESS, theme.SUCCESS, 1))
 
-        att_x = pad_l + plot_w * 0.86
+        att_x = pad_l + pan_x + plot_w_eff * 0.86
         att_y = zero_y
         self._att_pos = (att_x, att_y)
         for r, col in zip((48, 34, 22), (theme.ATTRACTOR_BASIN_BORDER, theme.ATTRACTOR_RINGS[0], theme.ATTRACTOR_RINGS[1])):
-            aa_items.append(("dot", att_x, att_y, r, None, col, 1))
-        aa_items.append(("dot", att_x, att_y, 4, theme.ERROR, theme.ERROR, 1))
-
+            aa_items.append(("dot", att_x, att_y, r * zoom, None, col, 1))
+        aa_items.append(("dot", att_x, att_y, 4 * zoom, theme.ERROR, theme.ERROR, 1))
         cycle_pts = [item for item in self._pts if str(item[2].get("event") or "").lower() == "retry_loop"]
         if cycle_pts:
             for c_pt in cycle_pts:
@@ -3758,10 +4571,10 @@ class PhasePortraitWidget:
                 aa_items.append(("dot", x, y, 9, None, theme.SUCCESS, 1))
             aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
 
-        self._aa_layer(c, aa_items, self._aa_imgs)
+        self._aa_layer_flat(c, aa_items, "aa_data")
 
         # 4. 上层文本标签 (Layer 2)
-        c.create_text(tgt_x + 22, tgt_y, text="狄拉克不动点",
+        c.create_text(tgt_x + 22, tgt_y, text="狄拉克目标点",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         c.create_text(att_x, att_y - 36, text="平庸代码吸引子",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
@@ -3770,51 +4583,73 @@ class PhasePortraitWidget:
         leg_x = max(pad_l + 8, pad_l + (plot_w - leg_w) / 2)
         leg_y = pad_t - 16
         c.create_line(leg_x, leg_y, leg_x + 14, leg_y, fill=theme.SUCCESS, width=2)
-        c.create_text(leg_x + 18, leg_y, text="向心收敛 (下半区)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_line(leg_x + 130, leg_y, leg_x + 144, leg_y, fill=theme.ERROR, width=2)
-        c.create_text(leg_x + 148, leg_y, text="离心发散 (上半区)", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_oval(leg_x + 260, leg_y - 4, leg_x + 268, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
-        c.create_text(leg_x + 272, leg_y, text="狄拉克目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_oval(leg_x + 365, leg_y - 4, leg_x + 373, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
-        c.create_text(leg_x + 377, leg_y, text="平庸代码吸引子", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(leg_x + 18, leg_y, text="向心收敛", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_line(leg_x + 105, leg_y, leg_x + 119, leg_y, fill=theme.ERROR, width=2)
+        c.create_text(leg_x + 123, leg_y, text="离心发散", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 210, leg_y - 4, leg_x + 218, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
+        c.create_text(leg_x + 222, leg_y, text="狄拉克目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_oval(leg_x + 340, leg_y - 4, leg_x + 348, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
+        c.create_text(leg_x + 352, leg_y, text="平庸代码吸引子", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
 
+        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
+                      fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(pad_l + plot_w / 2, pad_t + plot_h + 12,
+                      text="语义距离：向左逼近目标达成 · 向右偏离真实意图",
+                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
+        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
+                      fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
+        n_pts_p = len(self._pts)
+        drawn_boxes_p: list[tuple[float, float]] = []
         for i, item in enumerate(self._pts):
             x, y, pt = item[:3]
             offset_y = item[3] if len(item) > 3 else (-14 if (i % 2 == 0 and y > pad_t + 28) else 14)
             t_val = pt.get("turn")
             u_val = pt.get("user_turn") or pt.get("u")
+            prev_u = (self._pts[i - 1][2].get("user_turn") or self._pts[i - 1][2].get("u")) if i > 0 else None
             event_tag = str(pt.get("event") or "normal").lower()
+            is_milestone = (i == 0 or i == n_pts_p - 1 or event_tag in ("breakthrough", "compaction"))
+            cand_x = x
+            cand_y = y + offset_y
+            is_colliding = any((cand_x - lx)**2 + (cand_y - ly)**2 < 38**2 for lx, ly in drawn_boxes_p)
+            can_draw = is_milestone or not is_colliding
             subs = self._calc_subagents(pt)
             if subs:
                 k_total = len(subs)
                 orbit_r = 18
-                for k, sub in enumerate(subs[:3]):
-                    angle = -math.pi / 4 + k * (math.pi * 2 / max(k_total, 3))
-                    sx = x + orbit_r * math.cos(angle)
-                    sy = y + orbit_r * math.sin(angle)
-                    s_name = sub.get("name", "Sub")
-                    s_col = theme.SUCCESS if str(sub.get("status") or "").lower() == "convergent" else theme.ERROR
-                    c.create_text(sx + 5, sy, text=s_name, fill=s_col,
-                                  font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+                is_clustered = any(j != i and ((self._pts[j][0] - x)**2 + (self._pts[j][1] - y)**2) < 32**2 for j in range(n_pts_p))
+                if not is_clustered:
+                    for k, sub in enumerate(subs[:3]):
+                        angle = -math.pi / 4 + k * (math.pi * 2 / max(k_total, 3))
+                        sx = x + orbit_r * math.cos(angle)
+                        sy = y + orbit_r * math.sin(angle)
+                        s_name = sub.get("name", "Sub")
+                        s_col = theme.SUCCESS if str(sub.get("status") or "").lower() == "convergent" else theme.ERROR
+                        c.create_text(sx + 5, sy, text=s_name, fill=s_col,
+                                      font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
-            t_str = f"T{t_val}·U{u_val}" if (t_val is not None and u_val is not None) else (f"T{t_val}" if t_val is not None else "")
-            c.create_text(x, y + offset_y, text=t_str, fill=theme.FG_WHITE,
-                          font=theme.FONT_UI_SMALL_BOLD)
-            if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
-                evt_labels = {
-                    "retry_loop": "极限环死锁",
-                    "breakthrough": "向心冲刺",
-                    "compaction": "压缩",
-                    "test_fail": "报错",
-                }
-                lbl_text = evt_labels.get(event_tag, "")
-                evt_col = theme.SUCCESS if event_tag == "breakthrough" else theme.ERROR
-                c.create_text(x, y + offset_y + (10 if offset_y > 0 else -10),
-                              text=f"({lbl_text})", fill=evt_col,
-                              font=theme.FONT_UI_SMALL)
+            if can_draw:
+                drawn_boxes_p.append((cand_x, cand_y))
+                t_str = f"T{t_val}·U{u_val}" if (t_val is not None and u_val is not None) else (f"T{t_val}" if t_val is not None else "")
+                c.create_text(cand_x, cand_y, text=t_str, fill=theme.FG_WHITE,
+                              font=theme.FONT_UI_SMALL_BOLD)
+                if event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
+                    evt_labels = {
+                        "retry_loop": "极限环死锁",
+                        "breakthrough": "向心冲刺",
+                        "compaction": "压缩",
+                        "test_fail": "报错",
+                    }
+                    lbl_text = evt_labels.get(event_tag, "")
+                    evt_col = theme.SUCCESS if event_tag == "breakthrough" else theme.ERROR
+                    c.create_text(cand_x, cand_y + (10 if offset_y > 0 else -10),
+                                  text=lbl_text, fill=evt_col,
+                                  font=theme.FONT_UI_SMALL)
         if not traj:
             c.create_text(pad_l + plot_w / 2, pad_t + plot_h / 2,
                           text="（本动力学报告无细分轨迹采样数据）", fill=theme.MUTED)
+        self._draw_regime_band(c, pad_l, pad_t, plot_w, plot_h, traj)
+        self._draw_hud_card(c, plot_w, plot_h, pad_l, pad_t)
+
 class LlmReportsView:
     """「LLM 报告」页签 — 会话/项目/多源解读的持久化回看（左列表 + 右全高阅读区）。
 
@@ -4441,6 +5276,10 @@ class LlmReportsView:
         indent = len(ln) - len(ln.lstrip(" "))
 
         # 无序列表处理（支持多级嵌套与键值加粗）
+        # 清洗孤立列表分隔符伪影（如 • -- / - --- / --）
+        if re.match(r"^[-*•·]\s*[-=—_]{2,}\s*$", s_strip) or re.match(r"^[-=—_]{2,}\s*$", s_strip):
+            return
+
         if re.match(r"^[-*•·]\s*", s_strip):
             clean_content = re.sub(r"^[-*•·]\s*", "", s_strip)
             if indent >= 4:

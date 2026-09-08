@@ -61,6 +61,19 @@ PHASE_ZONE_DIRAC = "#3fb950"         # 收敛目标域提示文字绿
 PHASE_ZONE_TRAP = "#d29922"          # 高熵危险域提示文字橙
 PHASE_START_HALO = "#e0b341"         # 相空间起点光晕金
 PHASE_IMPULSE = "#4ec9b0"            # 向心推力做功脉冲绿
+# 前沿动力学理论色彩（Waddington 势能曲面、认知负债、SLDS 相态、水床扰动）
+PHASE_CONTOUR_LOW = "#16221d"    # 深渊极低势
+PHASE_CONTOUR_MID = "#1f262e"    # 中间平原
+PHASE_CONTOUR_HIGH = "#32251e"   # 高耸势垒
+PHASE_BARRIER_CREST = "#e0b341"  # 鞍点势垒脊线色（金色微细虚线）
+DEBT_GLOW_SAFE = "#4ec9b0"       # 低负债向心绿
+DEBT_GLOW_DANGER = "#f48771"     # 盲目动刀橙红
+REGIME_GAS = "#569cd6"           # 气态探查蓝
+REGIME_LIQUID = "#4ec9b0"        # 液态构建绿
+REGIME_GLASS = "#ce9178"         # 玻璃态死锁褐橙
+REGIME_CRYSTAL = "#dcdcaa"       # 晶态收敛金白
+WATERBED_ARC = "#c586c0"         # 控制论水床扰动弧（微细紫红虚线弧）
+PHASE_HUD_BG = "#121822"           # 质点探针 HUD 驻留卡片底色
 # basic (white): absolute baseline values and direct calculations.
 # compound (yellow): contains magic numbers / coefficients, reference only.
 LEVEL_BASIC = "#e0e0e0"

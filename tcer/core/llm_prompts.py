@@ -248,26 +248,46 @@ def estimate_request_tokens(report, derived: dict, scope: str, dialogue=None,
     return estimate_tokens(system) + estimate_tokens(user)
 
 
-DYNAMICS_PROMPT_VERSION = "2026-09-dyn-v2"
+DYNAMICS_PROMPT_VERSION = "2026-09-dyn-v3"
 
 _DYNAMICS_SYSTEM = (
     "你是信息论与 AI 编程动力学分析专家。基于王垠关于 AI 编程的动力学与熵论框架"
     "（双信源模型、初始意图降熵、相空间游走、平庸代码吸引子俘获、狄拉克目标收敛、反馈互信息增益），"
+    "结合 Waddington 连续势能曲面鞍点越迁、Friston 变分自由能认知负债比、现代控制论闭环阻尼与水床效应、"
+    "MIT 隐式切换动力系统 (SLDS) 四相态演化、以及计算热力学朗道尔信息擦除耗散与卡诺效率，"
     "对本次真实 AI 编程会话进行相动力学深度推演复盘。\n\n"
-    "【排版绝对约束】严禁使用任何 LaTeX 数学公式代码语法（绝不可出现 $...$、$$...$$ 或 \\text 等任何数学符号标记！）。"
-    "所有物理量概念一律使用通俗易懂的中文工程师自然语言（直接写「初始意图熵」、「语义偏离距离 Ds」、「狄拉克目标代码状态」、「平庸代码吸引子」）。确保排版阅读极致顺畅。\n\n"
+    "【排版与易读性硬约束】\n"
+    "1. 严禁使用任何 LaTeX 数学公式代码语法（绝不可出现 $...$、$$...$$ 或 \\text 等数学符号标记！）。"
+    "所有物理量概念一律使用通俗易懂的中文工程师自然语言（直接写 Ds、Ed、lambda、zeta、eta、V 等）。\n"
+    "2. 输出结构必须层次分明、核心结论先行、极易速读。严禁无结构的大段文字墙！"
+    "分析关键转折时，必须显式加粗对应的回合代号（例如 **【T1 初始需求】**、**【T71 连续重试】**、**【T382 势垒突破】**），"
+    "与相空间轨迹图上的质点形成强烈视觉联动，让使用者能在 10 秒内抓住核心因果脉络。\n"
+    "3. 严禁输出任何孤立无意义的横线或连字符行（如 `• --` 或 `--`）！"
+    "在每个章节标题（## 一、...）正下方第一行，必须先用一行明确标出该节聚焦讨论的时空范围（例如 `时空区间: 助手第 T1~T115 轮 · 用户消息 U1`）。\n\n"
     "输出必须包含且仅包含以下两部分：\n\n"
-    "第一部分：深度复盘报告（简体中文 Markdown 结构，≤1200 字）：\n"
-    "## 一、初始意图降熵评估\n"
-    "分析首轮需求的形式化程度、信息密度与边界清晰度：初始语义不确定性消减了多少？机器理解空间是否确定？\n\n"
-    "## 二、相空间游走与偏离轨迹\n"
-    "结合真实代码 diff、工具调用与报错反馈，追踪代码状态在相空间中的移动：AI 是直奔目标，还是在先验空间高熵震荡？偏离发生在何处？\n\n"
+    "第一部分：深度复盘报告（简体中文 Markdown 结构，800~1200 字，必须严格遵循以下章节大纲）：\n\n"
+    "### 【会话动力学定性判词与速读摘要】\n"
+    "- **终态定性**：从「精准收敛 / 成功破局 / 循环卡死 / 持续发散」中选一并简要定性；\n"
+    "- **关键时空拐点**：指出最重要的死锁回合或破局突破回合代号（如 **【Txxx】**）；\n"
+    "- **核心归因**：用 2 句话直击成败要害（首轮需求信息量、盲改负债、多智能体协同增益等）。\n\n"
+    "## 一、初始意图降熵与边界约束\n"
+    "分析首轮需求的形式化程度、信息密度与边界清晰度：消减了多少语义不确定性？AI 的先验理解空间是否确定？"
+    "是否因首轮语义未限制实现手段而为后续漫游埋下伏笔？\n\n"
+    "## 二、主干轨迹演进与势垒跨越\n"
+    "结合代码 diff、工具调用与报错，追踪代码在相空间的移动：AI 是直奔目标，还是在先验空间高熵震荡？"
+    "在哪个关键回合（明确标注 **【Txxx】**）越过了 Ds 约 0.55 的 Waddington 鞍点势垒进入收敛深阱？偏离发生在何处？\n\n"
     "## 三、平庸代码吸引子受困复盘\n"
-    "分析 AI 是否被巨大平庸代码吸引子（预训练面条代码与机械冗余惯性陷阱）俘获（陷入重试循环、局部死修、测试假跑通）；若发生，何时被捕获、最终是否成功逃逸？\n\n"
-    "## 四、反馈控制与互信息增益\n"
-    "评价用户的每一轮纠偏反馈：哪些指令注入了高互信息、提供了强向心制导推力？哪些属于低信息量试探？止损时机是否及时？\n\n"
-    "## 五、AI 程序员三能力量化建议\n"
-    "针对「意图降熵力（形式化表达能力）」、「偏离感知敏锐度（代码质量嗅觉）」、「反馈序列收敛控制（纠偏制导效率）」给出会话维度的专业改进建议。\n\n"
+    "分析 AI 是否被巨大平庸代码吸引子（预训练面条代码与机械冗余惯性陷阱）俘获（陷入重试循环、局部死修、测试假跑通）；"
+    "SLDS 相态何时陷入玻璃态；若发生，何时被捕获、最终是否成功逃逸？\n\n"
+    "## 四、反馈控制、多智能体协同与思维链效能\n"
+    "评价用户的每一轮反馈注入了多少向心互信息；结合 2026 前沿多智能体分派（如 Task 派发 Scout/Worker/Reviewer）"
+    "分析子代理是提供了有效向心推力还是引入了冗余沟通噪音；评估长思维链（Thinking tokens）是在深度破局还是在空转耗散。\n\n"
+    "## 五、修改稳定性与连锁破坏（水床效应）\n"
+    "分析闭环阻尼与修改稳定性；追踪跨文件修改引发的水床连锁破坏（如修改核心文件在后续回合导致非关联模块测试报错）；"
+    "评估代码重构返工与上下文压缩带来的朗道尔信息擦除耗散，以及最终有效代码的广义卡诺计算效率。\n\n"
+    "## 六、AI 程序员综合能力量化建议\n"
+    "针对「意图降熵力（形式化表达能力）」、「偏离感知敏锐度（代码质量嗅觉）」、「反馈序列收敛控制（纠偏制导效率）」、"
+    "「认知负债平衡力（先探查再动刀掌控力）」给出会话维度的专业改进建议。\n\n"
     "第二部分：动力学遥测数据（必须严格放置在报告最末尾，包裹在唯一的 ```json ... ``` 代码块中，供相空间相图渲染）：\n"
     "```json\n"
     "{\n"
@@ -275,26 +295,38 @@ _DYNAMICS_SYSTEM = (
     "  \"attractor_trapped\": true | false,\n"
     "  \"attractor_turn\": null,\n"
     "  \"convergence_type\": \"dirac\" | \"wandering\" | \"trapped\" | \"escaped\",\n"
+    "  \"barrier_crossed\": true | false,\n"
+    "  \"barrier_turn\": null,\n"
+    "  \"damping_ratio\": 0.85,\n"
+    "  \"carnot_efficiency\": 0.68,\n"
     "  \"trajectory\": [\n"
-    "    {\"turn\": 1, \"user_turn\": 1, \"semantic_distance\": 0.85, \"snr\": 0.60, \"vector\": \"positive\", \"event\": \"normal\", \"user_impulse\": {\"flux\": \"mid\", \"note\": \"初始意图形式化\"}, \"note\": \"首次按需求生成骨架\"},\n"
-    "    {\"turn\": 138, \"user_turn\": 1, \"semantic_distance\": 0.75, \"snr\": 0.70, \"vector\": \"positive\", \"event\": \"normal\", \"subagents\": [{\"name\": \"Scout\", \"role\": \"源码探查\", \"semantic_delta\": -0.03, \"status\": \"convergent\"}], \"note\": \"派发子代理探查\"}\n"
+    "    {\"turn\": 1, \"user_turn\": 1, \"semantic_distance\": 0.85, \"snr\": 0.60, \"vector\": \"positive\", \"event\": \"normal\", \"potential_energy\": -0.59, \"epistemic_debt\": 0.35, \"regime\": \"gas\", \"user_impulse\": {\"flux\": \"mid\", \"note\": \"初始意图形式化\"}, \"note\": \"首次按需求生成骨架\"},\n"
+    "    {\"turn\": 138, \"user_turn\": 1, \"semantic_distance\": 0.75, \"snr\": 0.70, \"vector\": \"positive\", \"event\": \"normal\", \"potential_energy\": -0.42, \"epistemic_debt\": 1.20, \"regime\": \"liquid\", \"subagents\": [{\"name\": \"Scout\", \"role\": \"源码探查\", \"semantic_delta\": -0.03, \"status\": \"convergent\"}], \"note\": \"派发子代理探查\"}\n"
     "  ],\n"
     "  \"capabilities\": {\n"
     "    \"intent_formalization\": 80,\n"
     "    \"drift_sensitivity\": 70,\n"
-    "    \"feedback_mutual_info\": 75\n"
+    "    \"feedback_mutual_info\": 75,\n"
+    "    \"epistemic_balance\": 85\n"
     "  },\n"
     "  \"lyapunov_exponent\": -0.25\n"
     "}\n"
     "```\n"
     "遥测协议规范说明：\n"
     "- convergence_type 取值：\"dirac\"(全面收敛至狄拉克目标) / \"escaped\"(虽曾受困但最终成功逃逸突破) / \"trapped\"(深陷平庸吸引子死锁未逃逸) / \"wandering\"(高熵漫游未收敛)；\n"
+    "- barrier_crossed: 是否成功跨越 Ds 约 0.55 的 Waddington 鞍点势垒脊线向狄拉克漏斗演进（布尔值）；\n"
+    "- barrier_turn: 首次越迁跨过势垒的回合序号（整数或 null）；\n"
+    "- damping_ratio: 控制论闭环阻尼比 zeta（浮点数，<0.70 欠阻尼震荡，0.70~1.10 临界收敛，>1.10 过阻尼迟缓）；\n"
+    "- carnot_efficiency: 广义卡诺计算效率 eta（0.0~1.0 浮点数，衡量有效代码负熵功相比不可逆擦除耗散与 token 总开销的占比）；\n"
     "- trajectory 节点格式：turn 为真实助手回合号（数字），user_turn 为对应发生时的用户消息轮次序号（如 U1、U2，整数数字）；\n"
+    "- potential_energy: Waddington 势能曲面高度（-1.2~0.8 浮点数，越低越稳定，两端为势阱，中间 0.55 处为势垒）；\n"
+    "- epistemic_debt: 该步变分自由能认知负债比（浮点数，<=1.0 充分先验向心，1.0~4.0 常规推演，>=4.0 认知盲区动刀）；\n"
+    "- regime: SLDS 动力学相态取值：\"gas\"(高熵探查) / \"liquid\"(凝聚构建) / \"glass\"(玻璃态死锁) / \"crystal\"(晶态终态)；\n"
     "- event 取值：\"normal\" / \"retry_loop\"(连续重试) / \"test_fail\"(测试报错打乱) / \"compaction\"(上下文压缩) / \"breakthrough\"(突破收敛)；\n"
     "- snr 取值：当前阶段有效业务信号与面条代码/死试噪声之比（0.0~1.0 浮点数，驱动轨迹流体管径粗细）；\n"
     "- user_impulse: 若该节点存在用户外部消息介入，输出该对象（flux 为 \"high\"(强向心制导) | \"mid\"(常规微调) | \"low\"(低效催促/模糊反馈)，note 为干预摘要）；\n"
     "- subagents: 若该回合派生了并行子代理/子任务（如 Task / Agent / Scout），输出卫星质点列表（包含 name, role, semantic_delta(位移增量), status: \"convergent\"|\"divergent\"）；\n"
-    "- capabilities 三项得分区间为 0~100 整数（>=65 优秀向心控制，<40 严重失控）；\n"
+    "- capabilities 四项得分区间为 0~100 整数（>=65 优秀向心控制，<40 严重失控）；新增 epistemic_balance 衡量先探查再动刀的认知平衡掌控力；\n"
     "- lyapunov_exponent 取值：全局李雅普诺夫指数（浮点数，<0 代表系统耗散渐近稳定，>0 代表混沌敏感发散，跨越止损视界）。\n"
     f"(prompt {DYNAMICS_PROMPT_VERSION})"
 )
@@ -306,29 +338,85 @@ def dynamics_prompt(report, derived: dict, scope=None, dialogue=None,
     stats = derived.get("stats") or []
     total_turns = len(stats) or report.usage.assistant_msgs or 1
     user_msgs = report.usage.user_msgs
+
+    # 动态自适应期望采样节点规模（精炼黄金比例，长会话收敛至 10~16 个核心里程碑）
+    if total_turns <= 12:
+        min_pts, max_pts = max(3, total_turns - 1), max(4, total_turns)
+    elif total_turns <= 40:
+        min_pts, max_pts = 5, 8
+    elif total_turns <= 150:
+        min_pts, max_pts = 8, 12
+    else:
+        min_pts, max_pts = 10, min(16, max(12, total_turns // 55))
+    u_events: list[str] = []
+    seen_u = set()
+    for t in stats:
+        u_val = getattr(t, "user_turn", None)
+        if u_val is not None and u_val not in seen_u:
+            seen_u.add(u_val)
+            t_num = getattr(t, "turn", 0) + 1
+            u_events.append(f"U{u_val}于第{t_num}轮")
+
+    retry_spans = derived.get("retry_spans") or []
+    retry_events = [f"第{a + 1}-{b + 1}轮死循环" for a, b in retry_spans[:6]]
+
+    comp_turns = derived.get("compaction_turns") or []
+    comp_events = [f"第{t + 1}轮压缩" for t in comp_turns[:5]]
+
+    anchors_desc = []
+    if u_events:
+        anchors_desc.append("用户消息介入点: " + "、".join(u_events[:15]))
+    if retry_events:
+        anchors_desc.append("重试死锁区间: " + "、".join(retry_events))
+    if comp_events:
+        anchors_desc.append("上下文压缩: " + "、".join(comp_events))
+
+    anchors_text = ("\n底层客观核心时空事件参考（请优先纳入对应回合为采样节点）：\n- " + "\n- ".join(anchors_desc)) if anchors_desc else ""
+
     constraint = (
         f"\n\n[动力学轨迹客观事实契约]\n"
-        f"本会话底层客观记录：共 {total_turns} 个助手回合、{user_msgs} 轮用户消息。\n"
-        f"在末尾输出的 trajectory 数组中：\n"
+        f"本会话客观记录：共 {total_turns} 个助手回合、{user_msgs} 轮用户消息。\n"
+        f"为了敏锐、细腻地捕捉到整场对话中产生变化的每个演变阶段，输出的 trajectory 数组必须严格满足：\n"
         f"1. 首项必须严格为第 1 回合 (turn=1)；\n"
-        f"2. 末项必须严格对应会话的终态第 {total_turns} 回合 (turn={total_turns})，严禁在中间突变点提前截断！\n"
-        f"3. 中间选取 3~10 个关键转折点（高熵偏离点、局部死锁点、强纠错突破点）。"
+        f"2. 末项必须严格对应会话终态第 {total_turns} 回合 (turn={total_turns})，严禁在中间突变点提前截断！\n"
+        f"3. 采样分辨率动态适配：本会话长达 {total_turns} 个回合，必须输出 {min_pts}~{max_pts} 个详细轨迹采样节点，严禁粗略归纳或跳过关键阶段！\n"
+        f"4. 核心变化敏感捕捉：必须将所有关键用户交互点（U1, U2...）、死锁重试、报错及关键突破点作为节点呈现。\n"
+        f"5. 每个节点必须准确填写真实对应的 turn（数字）与 user_turn（数字），并在 note 中说明该阶段的动作与变化。"
+        f"{anchors_text}"
     )
     return _DYNAMICS_SYSTEM, user + constraint
 
 
-def ground_dynamics_user_turns(data: dict | None, derived: dict | None) -> dict | None:
-    """Ground U labels in local response order, independently of LLM estimates."""
-    if not isinstance(data, dict) or derived is None:
+def _parse_turn_int(val, default: int = 0) -> int:
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        try:
+            return int(val)
+        except (ValueError, OverflowError):
+            return default
+    if isinstance(val, str):
+        cleaned = val.lstrip("Tt# 轮第").rstrip("轮步").strip()
+        try:
+            return int(cleaned)
+        except (ValueError, OverflowError):
+            return default
+    return default
+
+
+def ground_dynamics_user_turns(data: dict | None, derived: dict | None = None) -> dict | None:
+    """Ground U labels in local response order and deterministically backfill missing dynamics fields."""
+    if not isinstance(data, dict):
         return data
-    stats = derived.get("stats") or []
-    if not any(t.user_turn is not None for t in stats):
-        return data
+
+    from tcer.core import metrics as _metrics
+
     result = dict(data)
+    stats = (derived.get("stats") or []) if derived else []
+    has_stats_user_turn = any(t.user_turn is not None for t in stats)
+
     trajectory = data.get("trajectory")
     if not isinstance(trajectory, list):
-        return result
-    points = []
+        trajectory = []
+    points: list[dict] = []
     for pt in trajectory:
         if not isinstance(pt, dict):
             points.append(pt)
@@ -340,15 +428,232 @@ def ground_dynamics_user_turns(data: dict | None, derived: dict | None) -> dict 
             valid = not isinstance(turn, bool) and float(turn) == idx + 1
         except (TypeError, ValueError, OverflowError):
             valid, idx = False, -1
+
         if valid and 0 <= idx < len(stats) and stats[idx].user_turn is not None:
             node["user_turn"] = stats[idx].user_turn
             node.pop("u", None)
-        else:
-            # A node outside the recorded timeline has no verified U label.
+        elif has_stats_user_turn:
             node.pop("user_turn", None)
             node.pop("u", None)
+
+        # Ensure semantic_distance is a bounded float
+        ds = float(node.get("semantic_distance", node.get("ds", 0.5)))
+        ds = max(0.0, min(1.0, ds))
+        node["semantic_distance"] = round(ds, 4)
+
+        vec = str(node.get("vector") or "neutral").lower()
+        evt = str(node.get("event") or "normal").lower()
+
+        # 1. potential_energy fallback
+        if node.get("potential_energy") is None:
+            cost_frac = 0.0
+            if derived and derived.get("cum_cost"):
+                cum_cost = derived["cum_cost"]
+                if valid and 0 <= idx < len(cum_cost):
+                    cost_frac = cum_cost[idx] / max(1e-6, cum_cost[-1])
+            elif valid and len(stats) > 1:
+                cost_frac = idx / max(1, len(stats) - 1)
+            node["potential_energy"] = _metrics.compute_waddington_potential(ds, cost_frac)
+        else:
+            try:
+                node["potential_energy"] = float(node["potential_energy"])
+            except (TypeError, ValueError):
+                node["potential_energy"] = _metrics.compute_waddington_potential(ds, 0.0)
+
+        # 2. epistemic_debt fallback
+        if node.get("epistemic_debt") is None:
+            ed = None
+            if derived:
+                ops_by_turn = derived.get("ops_by_turn") or {}
+                loc_by_turn = derived.get("loc_by_turn") or {}
+                try:
+                    t_num = int(turn)
+                    t_ops = ops_by_turn.get(t_num, [])
+                    r_lines = 0
+                    g_ops = 0
+                    for op in t_ops:
+                        t_name = (getattr(op, "tool", "") or "").lower()
+                        if "grep" in t_name or "search" in t_name or "glob" in t_name:
+                            g_ops += 1
+                        elif "read" in t_name:
+                            r_lines += 50
+                    w_lines = 0
+                    if t_num in loc_by_turn:
+                        a, d = loc_by_turn[t_num]
+                        w_lines = a + d
+                    elif t_ops:
+                        for op in t_ops:
+                            t_name = (getattr(op, "tool", "") or "").lower()
+                            if t_name in ("write", "edit", "multiedit", "search_replace", "replace"):
+                                w_lines += 30
+                    if r_lines > 0 or g_ops > 0 or w_lines > 0:
+                        ed = _metrics.compute_epistemic_debt(r_lines, w_lines, g_ops)
+                except (TypeError, ValueError):
+                    pass
+            if ed is None:
+                if evt in ("retry_loop", "test_fail", "glass", "deadlock"):
+                    ed = 4.50
+                elif evt in ("explore", "gas", "search") or vec in ("neutral", "exploratory"):
+                    ed = 0.35
+                elif vec in ("positive", "convergent"):
+                    ed = 1.20
+                else:
+                    ed = 0.85
+            node["epistemic_debt"] = round(float(ed), 3)
+        else:
+            try:
+                node["epistemic_debt"] = float(node["epistemic_debt"])
+            except (TypeError, ValueError):
+                node["epistemic_debt"] = 1.0
+
+        # 3. regime fallback
+        if not node.get("regime"):
+            node["regime"] = _metrics.infer_phase_regime(ds, vec, evt, node["epistemic_debt"])
+        else:
+            node["regime"] = str(node["regime"]).lower()
+
         points.append(node)
+    # 针对长会话的自适应时空分辨率强化：若采样点之间存在巨大空洞跨度，根据客观事件与时序自动补齐插值
+    total_timeline_turns = len(stats)
+    if total_timeline_turns >= 25 and len(points) >= 2:
+        points.sort(key=lambda p: _parse_turn_int(p.get("turn"), 0))
+        gap_threshold = max(50, total_timeline_turns // 8)
+        dense_points: list[dict] = []
+        for p_idx in range(len(points) - 1):
+            cur_p = points[p_idx]
+            next_p = points[p_idx + 1]
+            dense_points.append(cur_p)
+            if len(dense_points) >= 16:
+                continue
+            try:
+                t_a = _parse_turn_int(cur_p.get("turn"), 1)
+                t_b = _parse_turn_int(next_p.get("turn"), total_timeline_turns)
+            except (ValueError, TypeError):
+                continue
+            if t_b - t_a > gap_threshold:
+                gap_turns = []
+                for s_idx in range(t_a, min(t_b - 1, len(stats))):
+                    stat_obj = stats[s_idx]
+                    u_num = getattr(stat_obj, "user_turn", None)
+                    err_num = getattr(stat_obj, "errors", 0) or 0
+                    if u_num is not None:
+                        gap_turns.append((s_idx + 1, u_num, "user_impulse", "用户介入微调"))
+                        break  # 单一空洞优先插入最关键的1个用户转折点
+                    elif err_num > 0 and len(gap_turns) == 0:
+                        gap_turns.append((s_idx + 1, None, "test_fail", "环境报错"))
+
+                if not gap_turns and (t_b - t_a) > gap_threshold * 1.8:
+                    step = (t_b - t_a) // 2
+                    gap_turns.append((t_a + step, None, "normal", "常规推进过渡"))
+
+                ds_a = float(cur_p.get("semantic_distance") or 0.5)
+                ds_b = float(next_p.get("semantic_distance") or 0.5)
+                for g_turn, g_u, g_evt, g_note in gap_turns[:1]:
+                    interp_frac = (g_turn - t_a) / max(1, t_b - t_a)
+                    g_ds = round(ds_a + interp_frac * (ds_b - ds_a), 4)
+                    g_vec = "positive" if g_ds < ds_a else ("neutral" if abs(g_ds - ds_a) < 0.02 else "negative")
+                    c_frac = (g_turn - 1) / max(1, total_timeline_turns - 1)
+                    p_eng = _metrics.compute_waddington_potential(g_ds, c_frac)
+                    e_debt = 4.5 if g_evt == "test_fail" else (1.2 if g_vec == "positive" else 0.85)
+                    g_node = {
+                        "turn": g_turn,
+                        "semantic_distance": g_ds,
+                        "vector": g_vec,
+                        "event": g_evt,
+                        "potential_energy": p_eng,
+                        "epistemic_debt": e_debt,
+                        "regime": _metrics.infer_phase_regime(g_ds, g_vec, g_evt, e_debt),
+                        "note": g_note,
+                    }
+                    if g_u is not None:
+                        g_node["user_turn"] = g_u
+                    dense_points.append(g_node)
+
+        dense_points.append(points[-1])
+        points = dense_points
+
     result["trajectory"] = points
+
+    # Global telemetry backfills
+    if result.get("damping_ratio") is None:
+        zeta, _, _ = _metrics.compute_cybernetic_damping(points)
+        result["damping_ratio"] = zeta
+    else:
+        try:
+            result["damping_ratio"] = float(result["damping_ratio"])
+        except (TypeError, ValueError):
+            result["damping_ratio"] = 1.0
+
+    if result.get("carnot_efficiency") is None:
+        net_loc = derived.get("net_loc", 0) if derived else 0
+        rework_loc = derived.get("rework_loc", 0) if derived else 0
+        comp_tok = derived.get("compaction_tokens", 0) if derived else 0
+        tot_tok = derived.get("total_tokens", 0) if derived else 0
+        if tot_tok == 0 and net_loc == 0:
+            last_ds = float(points[-1].get("semantic_distance", 0.5)) if points else 0.5
+            result["carnot_efficiency"] = 0.72 if last_ds <= 0.35 else 0.48
+        else:
+            _, carnot = _metrics.compute_landauer_dissipation(net_loc, rework_loc, comp_tok, tot_tok)
+            result["carnot_efficiency"] = carnot
+    else:
+        try:
+            result["carnot_efficiency"] = float(result["carnot_efficiency"])
+        except (TypeError, ValueError):
+            result["carnot_efficiency"] = 0.5
+
+    if result.get("barrier_crossed") is None:
+        crossed = False
+        b_turn = None
+        started_above = False
+        for pt in points:
+            ds_val = float(pt.get("semantic_distance", 0.5))
+            if ds_val > 0.55:
+                started_above = True
+            elif started_above and ds_val <= 0.50:
+                crossed = True
+                b_turn = pt.get("turn")
+                break
+        if not crossed and result.get("convergence_type") in ("dirac", "escaped"):
+            max_ds = max((float(pt.get("semantic_distance", 0.5)) for pt in points), default=0.5)
+            last_ds = float(points[-1].get("semantic_distance", 0.5)) if points else 0.5
+            if max_ds >= 0.55 and last_ds <= 0.45:
+                crossed = True
+        result["barrier_crossed"] = crossed
+        if result.get("barrier_turn") is None and crossed:
+            result["barrier_turn"] = b_turn
+    else:
+        result["barrier_crossed"] = bool(result["barrier_crossed"])
+
+    if isinstance(result.get("capabilities"), dict):
+        caps = dict(result["capabilities"])
+        if "epistemic_balance" not in caps or caps.get("epistemic_balance") is None:
+            debts = [float(pt.get("epistemic_debt", 1.0)) for pt in points]
+            if debts:
+                avg_debt = sum(debts) / max(1, len(debts))
+                high_debts = sum(1 for d in debts if d >= 4.0)
+                score = 85
+                if high_debts > 0:
+                    score -= high_debts * 20
+                if avg_debt > 3.0:
+                    score -= 25
+                elif avg_debt > 2.0:
+                    score -= 10
+                caps["epistemic_balance"] = max(20, min(95, score))
+            else:
+                caps["epistemic_balance"] = 75
+        result["capabilities"] = caps
+
+    # 2026 深化动力学特征与时序局部谱补齐
+    if result.get("damping_spectrum") is None:
+        result["damping_spectrum"] = _metrics.compute_damping_spectrum(points)
+
+    if result.get("waterbed_causality") is None:
+        ops_by_turn = derived.get("ops_by_turn") if derived else None
+        loc_by_turn = derived.get("loc_by_turn") if derived else None
+        result["waterbed_causality"] = _metrics.analyze_waterbed_causality(points, ops_by_turn, loc_by_turn)
+
+    if result.get("swarm_synergy") is None:
+        result["swarm_synergy"] = _metrics.compute_swarm_synergy(points)
     return result
 
 
@@ -431,4 +736,10 @@ def build_llm_derived(report) -> dict:
         "ops_by_turn": ops_by_turn,
         "loc_by_turn": loc_by_turn,
         "hot_files": report.files_touched_details or {},
+        "net_loc": getattr(report, "net_loc", 0) or 0,
+        "rework_loc": getattr(report, "code_reworked", 0) or 0,
+        "compaction_tokens": getattr(report.usage, "compaction_discarded_tokens", 0) or 0,
+        "total_tokens": getattr(report.usage, "total_tokens", 0) or 0,
+        "reasoning_tokens": getattr(u, "reasoning_output_tokens", 0) or 0,
+        "subagent_density": getattr(report, "subagent_density", 0.0) or 0.0,
     }
