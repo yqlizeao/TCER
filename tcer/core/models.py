@@ -79,6 +79,7 @@ class TurnStat:
     tool_calls: int = 0
     errors: int = 0
     model: str = ""                  # 该回合的模型（归一化 id；混用/未知为 ""）
+    user_turn: int | None = None     # 此响应发生前的真实用户消息累计数；None=未记录
 
 
 @dataclass
@@ -246,7 +247,8 @@ class TokenUsage:
         rebased_other_stats = [
             TurnStat(t.turn + self_max_ts_turn + 1, t.ts, t.input_tokens,
                      t.cache_write, t.cache_read, t.output_tokens,
-                     t.duration_ms, t.tool_calls, t.errors, t.model)
+                     t.duration_ms, t.tool_calls, t.errors, t.model,
+                     t.user_turn + self.user_msgs if t.user_turn is not None else None)
             for t in other.turn_stats
         ]
 
