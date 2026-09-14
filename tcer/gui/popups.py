@@ -1744,6 +1744,74 @@ class LlmConfigPopup:
             for w_elem in (item, cb_canvas, text_col, title_lbl, desc_lbl):
                 w_elem.bind("<Enter>", _hover_enter)
                 w_elem.bind("<Leave>", _hover_leave)
+
+        # 过程数据供给档：控制 read_dialogue 纳入的工具结果深度与逐回合时序密度。
+        # 单选条目（点击整卡切换；选中态强调色边框 + 圆点）。
+        detail_card = self._card(inner, "过程数据供给量（影响 prompt 规模与 token 消耗）")
+        cur_detail = self._llm_prefs.normalize_dialog_detail(config.get("dialog_detail"))
+        self._detail_var = tk.StringVar(value=cur_detail)
+        self._detail_items: dict[str, tk.Frame] = {}
+
+        def _paint_detail(d_key: str) -> None:
+            frame = self._detail_items.get(d_key)
+            if frame is not None and frame.winfo_exists():
+                # 选中态：强调色边框并加粗（子元素底色固定，避免半选视觉残影）
+                on = self._detail_var.get() == d_key
+                frame.config(highlightbackground=(
+                    theme.ACCENT if on else theme.BORDER),
+                    highlightthickness=2 if on else 1)
+
+        def _pick_detail(d_key: str) -> None:
+            self._detail_var.set(d_key)
+            for k in self._detail_items:
+                _paint_detail(k)
+
+        for d_key, (d_label, d_tip) in self._llm_prefs.DIALOG_DETAIL_LABELS.items():
+            d_item = tk.Frame(detail_card, bg=theme.PANEL, relief="flat",
+                              highlightthickness=1, highlightbackground=theme.BORDER,
+                              padx=10, pady=7, cursor=CLICK_CURSOR)
+            d_item.pack(fill="x", pady=(0, 5))
+            dot = tk.Canvas(d_item, width=14, height=14, bg=theme.PANEL,
+                            highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
+            dot.pack(side="left", padx=(0, 8))
+            txt_col = tk.Frame(d_item, bg=theme.PANEL, cursor=CLICK_CURSOR)
+            txt_col.pack(side="left", fill="both", expand=True)
+            # 点击绑定必须覆盖 Label 本身——Label 在条目上层遮挡容器，漏绑即
+            # 「点了没反应」（曾因此报「完整」无法选中：描述长、Label 占满整行）。
+            lbl_title = tk.Label(txt_col, text=d_label, bg=theme.PANEL,
+                                 fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
+                                 anchor="w", cursor=CLICK_CURSOR)
+            lbl_title.pack(fill="x")
+            lbl_desc = tk.Label(txt_col, text=d_tip, bg=theme.PANEL, fg=theme.MUTED,
+                                font=theme.FONT_UI_SMALL, wraplength=360, anchor="w",
+                                justify="left", cursor=CLICK_CURSOR)
+            lbl_desc.pack(fill="x")
+            self._detail_items[d_key] = d_item
+
+            def _draw_dot(_c=dot, _k=d_key):
+                _c.delete("all")
+                on = self._detail_var.get() == _k
+                outline = theme.ACCENT if on else theme.BORDER_HOVER
+                _c.create_oval(2, 2, 12, 12, outline=outline, width=1)
+                if on:
+                    _c.create_oval(5, 5, 9, 9, fill=theme.ACCENT, outline="")
+
+            self._detail_dot_drawers = getattr(self, "_detail_dot_drawers", {})
+            self._detail_dot_drawers[d_key] = _draw_dot
+
+            def _make_pick(k=d_key):
+                return (lambda _e=None: (_pick_detail(k),
+                                         [fn() for fn in
+                                          self._detail_dot_drawers.values()]))
+            pick = _make_pick(d_key)
+            for w_el in (d_item, dot, txt_col, lbl_title, lbl_desc):
+                w_el.bind("<Button-1>", pick)
+        # 初始选中态绘制
+        for fn in self._detail_dot_drawers.values():
+            fn()
+        for k in self._detail_items:
+            _paint_detail(k)
+
         win.bind("<Escape>", lambda e: win.destroy())
         self._fit_window()
 
@@ -1859,6 +1927,7 @@ class LlmConfigPopup:
             "model": self._model_var.get().strip(),
             "scopes": sel_scopes,
             "scope": self._llm_prefs.scopes_summary(sel_scopes),
+            "dialog_detail": self._detail_var.get(),
         }
         if bool(cfg["base_url"]) != bool(cfg["model"]):
             self.set_status("服务地址与模型需同时填写（或同时留空以清除配置）",

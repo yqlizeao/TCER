@@ -770,7 +770,8 @@ class SessionTimelinePopup:
             return
         scopes = llm_prefs.scopes()
         derived = self._llm_derived()
-        est = llm_prompts.estimate_request_tokens(self._report, derived, scopes)
+        est = llm_prompts.estimate_request_tokens(
+            self._report, derived, scopes, detail=llm_prefs.dialog_detail())
         if llm_prefs.has_scope("dialog", scopes):
             est += llm_prompts.estimate_tokens(
                 "消" * llm_prompts.MAX_DIALOGUE_CHARS)
@@ -813,7 +814,8 @@ class SessionTimelinePopup:
             return
         scopes = llm_prefs.scopes()
         derived = self._llm_derived()
-        est = llm_prompts.estimate_request_tokens(self._report, derived, scopes)
+        est = llm_prompts.estimate_request_tokens(
+            self._report, derived, scopes, detail=llm_prefs.dialog_detail())
         if llm_prefs.has_scope("dialog", scopes):
             est += llm_prompts.estimate_tokens(
                 "消" * llm_prompts.MAX_DIALOGUE_CHARS)
@@ -863,10 +865,12 @@ class SessionTimelinePopup:
                         texts = []
             if is_dynamics:
                 system, user = llm_prompts.dynamics_prompt(
-                    self._report, derived, scope, dialogue, texts)
+                    self._report, derived, scope, dialogue, texts,
+                    llm_prefs.dialog_detail())
             else:
                 system, user = llm_prompts.convergence_prompt(
-                    self._report, derived, scope, dialogue, texts)
+                    self._report, derived, scope, dialogue, texts,
+                    llm_prefs.dialog_detail())
             reply = llm_client.chat(base_url=llm_prefs.base_url() or "",
                                     api_key=llm_prefs.api_key(),
                                     model=llm_prefs.model() or "",
@@ -937,11 +941,15 @@ class SessionTimelinePopup:
                 kind = "session"
                 title = meta.title or meta.session_id or "会话解读"
 
+            # 机械审计校验（与右键直达路径同口径，确定性本地规则）
+            audit_flags = llm_prompts.audit_warnings(
+                payload if ok else "", is_dynamics)
             entry = {
                 "id": str(int(_time.time() * 1000)),
                 "created_at": int(_time.time() * 1000),
                 "kind": kind,
                 "title": title,
+                "audit_warnings": audit_flags,
                 "session_id": meta.session_id,
                 "session_title": meta.title,
                 "source": meta.source or "claude",

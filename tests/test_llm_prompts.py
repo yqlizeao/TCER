@@ -142,7 +142,12 @@ def test_estimate_request_tokens_grows_with_scope():
     m = estimate_request_tokens(r, d, "metrics")
     dg = estimate_request_tokens(r, d, "dialog", user_texts=["消息" * 10])
     f = estimate_request_tokens(r, d, "full", user_texts=["消息" * 10])
-    assert 0 < m < dg < f
+    # dialog 档按供给档上限估（实际组装全量，粗估让用户看到真实出境规模）
+    assert 0 < m < dg == f
+    # 供给档放大预估（大上下文配置在确认弹窗看到更大量级）
+    dg_rich = estimate_request_tokens(r, d, "dialog", detail="rich")
+    f_full = estimate_request_tokens(r, d, "full", detail="full")
+    assert dg < dg_rich < f_full
 
 
 def test_multi_select_scopes():
@@ -252,12 +257,74 @@ def test_dynamics_subagents_and_multi_agent_manifold():
     assert len(subs_explicit) == 1
     assert subs_explicit[0]["name"] == "Scout"
     assert subs_explicit[0]["semantic_delta"] == -0.05
+    # 图面显示名做英文角色映射（LLM 遥测可能给 Scout/Worker，图上说中文）
+    assert PhasePortraitWidget._sub_display_name(subs_explicit[0]) == "探查"
 
     subs_inferred = PhasePortraitWidget._calc_subagents(traj[1])
     assert len(subs_inferred) == 2
-    assert subs_inferred[0]["name"] == "Scout"
-    assert subs_inferred[1]["name"] == "Worker"
+    # 推断示意卫星直接用平实中文名（勿再引入 Scout/Worker 英文代号）
+    assert subs_inferred[0]["name"] == "探查"
+    assert subs_inferred[1]["name"] == "执行"
 
     # 无子代理注记的常规节点返回空列表
     subs_none = PhasePortraitWidget._calc_subagents({"turn": 2, "note": "常规单行修改"})
     assert subs_none == []
+
+
+def test_dynamics_payload_malformed_telemetry_tolerant():
+    """畸形遥测容错：semantic_distance 为字符串/null、trajectory 混入字符串元素时不丢数据。"""
+    from tcer.core.llm_prompts import parse_dynamics_payload
+
+    reply = (
+        "正文分析\n\n"
+        "```json\n"
+        "{\n"
+        '  "convergence_type": "dirac",\n'
+        '  "trajectory": [\n'
+        '    {"turn": 1, "semantic_distance": "high", "vector": "positive"},\n'
+        '    {"turn": 2, "semantic_distance": null, "vector": "positive"},\n'
+        '    "我是混入的字符串元素",\n'
+        '    {"turn": 3, "semantic_distance": 0.3, "vector": "positive"}\n'
+        "  ]\n"
+        "}\n"
+        "```"
+    )
+    text, data = parse_dynamics_payload(reply)
+    assert "正文分析" in text
+    assert data is not None                     # 畸形输入不丢弃整份遥测
+    traj = data["trajectory"]
+    assert len(traj) == 3                       # 字符串元素被丢弃
+    assert traj[0]["semantic_distance"] == 0.5  # "high" 回退默认 0.5
+    assert traj[1]["semantic_distance"] == 0.5  # null 回退默认 0.5
+    assert traj[2]["semantic_distance"] == 0.3  # 合法值原样保留
+
+
+def test_audit_warnings_flags_contract_violations():
+    """机械审计校验：谄媚措辞/缺小节/锚点不足各自命中，守约文本通过。"""
+    from tcer.core.llm_prompts import audit_warnings
+
+    # 1) 笼统表扬 + 缺小节 + 锚点不足 + 无归因：四类全中
+    bad = ("## 一、摘要\n整体表现良好，完成度较高。\n\n## 二、过程\nAI 写了代码。")
+    warns = audit_warnings(bad)
+    assert any("笼统表扬" in w for w in warns)
+    assert any("必备小节" in w for w in warns)
+    assert any("转折锚点" in w for w in warns)
+    assert any("责任" in w for w in warns)
+
+    # 2) 守约文本（四节齐 + 三个锚点 + 归因判定 + 无黑名单短语）→ 通过
+    good = (
+        "## 一、用户到底想要什么\n做导出。\n\n"
+        "## 二、过程主线速览\n开局顺利。\n\n"
+        "## 三、关键转折逐一深挖\n**【T12】** 偏离。\n**【T30】** 纠偏。\n**【T71】** 收敛。\n"
+        "责任判定：此转折归因于 AI 理解偏差。\n\n"
+        "## 四、反馈序列审计\n用户 U3 纠偏有效。\n\n"
+        "## 五、如果重来一次\n早点说。\n\n## 六、下一步行动\n继续推进。"
+    )
+    assert audit_warnings(good) == []
+
+    # 3) dynamics 口径：必备小节集不同（速读摘要/开局/…）
+    warns_dyn = audit_warnings("报告正文", is_dynamics=True)
+    assert any("必备小节" in w for w in warns_dyn)
+
+    # 4) 空正文
+    assert audit_warnings("") == ["模型返回了空正文"]

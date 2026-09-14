@@ -10,11 +10,17 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 from tcer.core.app_dirs import prefs_dir
 
 MAX_REPORTS = 200
+
+# 并发收信箱模型下多个 worker 会同时落盘（app 右键直达并发任务），
+# load→改→save 是读改写序列，无锁会互相覆盖丢报告（Windows 上 os.replace
+# 还会因目标文件被并发线程持有句柄抛 PermissionError）。
+_LOCK = threading.Lock()
 
 
 def _path() -> Path:
@@ -53,15 +59,18 @@ def save(reports: list[dict]) -> None:
 
 def append(entry: dict) -> None:
     """追加一条并裁剪到 MAX_REPORTS（entry 需含 created_at 毫秒）。"""
-    reports = load()
-    reports.append(entry)
-    reports.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
-    save(reports[:MAX_REPORTS])
+    with _LOCK:
+        reports = load()
+        reports.append(entry)
+        reports.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        save(reports[:MAX_REPORTS])
 
 
 def delete(report_id: str) -> None:
-    save([r for r in load() if r.get("id") != report_id])
+    with _LOCK:
+        save([r for r in load() if r.get("id") != report_id])
 
 
 def clear() -> None:
-    save([])
+    with _LOCK:
+        save([])

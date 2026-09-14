@@ -1728,6 +1728,41 @@ def compute_epistemic_debt(read_lines: int, write_lines: int, grep_ops: int = 0,
     return round(ed, 3)
 
 
+def ds_of(pt) -> float:
+    """读取轨迹节点语义距离（semantic_distance 优先、兼容 ds 别名）。
+
+    转换失败（null/字符串/缺字段）回退 0.5，并钳位到 [0.0, 1.0]。
+    注意用显式 None 链而非 or 链：Ds=0.0（狄拉克目标点，完全契合意图）
+    是合法值，or 链会把它穿透成回退默认——恰是最不能丢的值。
+    """
+    v = pt.get("semantic_distance")
+    if v is None:
+        v = pt.get("ds")
+    if v is None:
+        return 0.5
+    try:
+        v = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return 0.5
+    return max(0.0, min(1.0, v))
+
+
+def _turn_failed(node) -> bool:
+    """判定轨迹节点所在回合是否为失败/回归事件。
+
+    event 集合与 note 关键词集合为两处消费（detect_waterbed_events /
+    analyze_waterbed_causality）的并集，保持口径一致。
+    """
+    evt = str(node.get("event") or "").lower()
+    note = str(node.get("note") or "").lower()
+    return (
+        evt in ("test_fail", "retry_loop", "waterbed", "break_other")
+        or "test_fail" in note
+        or "retry_loop" in note
+        or "waterbed" in note
+    )
+
+
 def compute_cybernetic_damping(traj: list[dict]) -> tuple[float, str, str]:
     """Compute closed-loop cybernetic damping ratio zeta and stability classification.
 
@@ -1744,7 +1779,7 @@ def compute_cybernetic_damping(traj: list[dict]) -> tuple[float, str, str]:
     if not traj or len(traj) < 2:
         return (1.0, "critical", "临界收敛")
 
-    ds_list = [max(0.0, min(1.0, float(pt.get("semantic_distance", pt.get("ds", 0.5))))) for pt in traj]
+    ds_list = [ds_of(pt) for pt in traj]
     diffs = [ds_list[i] - ds_list[i - 1] for i in range(1, len(ds_list))]
 
     # Calculate direction signs: +1 (diverging), -1 (converging), 0 (negligible)
@@ -1788,13 +1823,15 @@ def compute_cybernetic_damping(traj: list[dict]) -> tuple[float, str, str]:
         return (zeta, "critical", "临界收敛")
 
 
-def detect_waterbed_events(traj: list[dict], ops_by_turn: dict | None = None) -> list[int]:
+def detect_waterbed_events(traj: list[dict]) -> list[int]:
     """Detect control-theoretic waterbed disturbance events.
 
     A waterbed event occurs when a turn encounters test failures or retry loops
     immediately following a constructive/positive forward turn (fixing A breaks B).
 
-    Returns list of turn numbers.
+    轨迹节点 turn 字段为 1-based 回合号。
+
+    Returns list of turn numbers (1-based).
     """
     if not traj or len(traj) < 2:
         return []
@@ -1805,8 +1842,8 @@ def detect_waterbed_events(traj: list[dict], ops_by_turn: dict | None = None) ->
         cur_node = traj[i]
 
         prev_vec = str(prev_node.get("vector") or "").lower()
-        prev_ds = float(prev_node.get("semantic_distance", prev_node.get("ds", 0.5)))
-        cur_ds = float(cur_node.get("semantic_distance", cur_node.get("ds", 0.5)))
+        prev_ds = ds_of(prev_node)
+        cur_ds = ds_of(cur_node)
 
         # Determine if previous turn was positive / constructive
         prev_is_positive = (
@@ -1814,28 +1851,16 @@ def detect_waterbed_events(traj: list[dict], ops_by_turn: dict | None = None) ->
             or (cur_ds < prev_ds - 0.02)
         )
 
-        # Determine if current turn experienced test failure or retry loop
-        cur_evt = str(cur_node.get("event") or "").lower()
-        cur_note = str(cur_node.get("note") or "").lower()
-        cur_turn_num = cur_node.get("turn") or (i + 1)
+        # 回合号显式解析：合法 int/float 且 >=1 时取 int(turn)，
+        # 否则（缺失/0/字符串等畸形值）回退位置序号 i+1，不与合法 falsy 值混吞
+        cur_turn = cur_node.get("turn")
+        if isinstance(cur_turn, (int, float)) and not isinstance(cur_turn, bool) and cur_turn >= 1:
+            cur_turn_num = int(cur_turn)
+        else:
+            cur_turn_num = i + 1
 
-        has_failure = (
-            cur_evt in ("test_fail", "retry_loop", "waterbed", "break_other")
-            or "test_fail" in cur_note
-            or "retry_loop" in cur_note
-            or "waterbed" in cur_note
-        )
-
-        if not has_failure and ops_by_turn:
-            turn_ops = ops_by_turn.get(cur_turn_num) or ops_by_turn.get(str(cur_turn_num))
-            if turn_ops and (turn_ops.get("test_fail") or turn_ops.get("retry_loop") or turn_ops.get("error")):
-                has_failure = True
-
-        if prev_is_positive and has_failure:
-            try:
-                waterbed_turns.append(int(cur_turn_num))
-            except (ValueError, TypeError):
-                waterbed_turns.append(i + 1)
+        if prev_is_positive and _turn_failed(cur_node):
+            waterbed_turns.append(cur_turn_num)
 
     return waterbed_turns
 
@@ -1873,12 +1898,11 @@ def infer_phase_regime(ds: float, vector: str, event: str, epistemic_debt: float
     if vec in ("positive", "convergent") or (0.5 <= ed <= 3.5):
         return "liquid"
 
-    # Fallback by debt
+    # Fallback by debt（glass 阈值与主门 ed >= 4.0 对齐；此分支仅
+    # 3.5 < ed < 4.0 且向量非正向时可达，收尾返回 glass）
     if ed < 0.5:
         return "gas"
-    elif ed >= 3.5:
-        return "glass"
-    return "liquid"
+    return "glass"
 
 
 def compute_landauer_dissipation(
@@ -1928,9 +1952,9 @@ def compute_damping_spectrum(traj: list[dict], window_size: int = 5) -> dict:
     Returns:
       {
         "turn_damping": [(turn, local_zeta), ...],
-        "bifurcations": [{"turn": t, "from_cat": "critical", "to_cat": "underdamped", "trigger": "instability"}, ...],
+        "bifurcations": [{"turn": t, "from_cat": ..., "to_cat": ..., "local_zeta": z}, ...],
         "mean_damping": float,
-        "instability_share": float (percentage of turns in underdamped oscillation),
+        "instability_share": float (0-1 分数，欠阻尼震荡回合占比；非百分比),
       }
     """
     if not traj:
@@ -1983,12 +2007,14 @@ def compute_damping_spectrum(traj: list[dict], window_size: int = 5) -> dict:
 def analyze_waterbed_causality(
     traj: list[dict],
     ops_by_turn: dict | None = None,
-    loc_by_turn: dict | None = None,
 ) -> list[dict]:
     """Analyze file-level asset-coupled waterbed causality chains and blast radius.
 
     Traces the cross-turn propagation where modifications to file A trigger regressions
     or test failures in non-associated files/tests in subsequent turns (Bode waterbed effect).
+
+    回合号口径：ops_by_turn 的键为 0-based（ToolOp.turn），轨迹节点 turn 字段为
+    1-based，交叉查表处统一 -1 对齐。
 
     Returns list of causality link dictionaries:
       [
@@ -2009,7 +2035,7 @@ def analyze_waterbed_causality(
 
     causality_links: list[dict] = []
 
-    # Map turns to edited files if ops_by_turn is provided
+    # Map turns to edited files if ops_by_turn is provided（键为 0-based ToolOp.turn）
     edits_by_turn: dict[int, list[tuple[str, str]]] = {}
     if ops_by_turn:
         for t, ops in ops_by_turn.items():
@@ -2032,24 +2058,7 @@ def analyze_waterbed_causality(
         except (ValueError, TypeError):
             cur_turn_int = i + 1
 
-        cur_evt = str(cur_node.get("event") or "").lower()
-        cur_note = str(cur_node.get("note") or "").lower()
-        is_failure = (
-            cur_evt in ("test_fail", "retry_loop", "waterbed", "break_other")
-            or "test_fail" in cur_note
-            or "retry_loop" in cur_note
-        )
-
-        if not is_failure and ops_by_turn:
-            t_ops = ops_by_turn.get(cur_turn_int) or ops_by_turn.get(str(cur_turn_int))
-            if t_ops:
-                is_failure = any(
-                    getattr(op, "is_error", False)
-                    or "fail" in str(getattr(op, "tool", "")).lower()
-                    for op in t_ops
-                )
-
-        if is_failure:
+        if _turn_failed(cur_node):
             # Look back up to 3 turns for constructive precursor edits
             for lookback in range(1, min(4, i + 1)):
                 prev_idx = i - lookback
@@ -2061,12 +2070,13 @@ def analyze_waterbed_causality(
                     prev_turn_int = prev_idx + 1
 
                 prev_vec = str(prev_node.get("vector") or "").lower()
-                prev_ds = float(prev_node.get("semantic_distance", 0.5))
-                cur_ds = float(cur_node.get("semantic_distance", 0.5))
+                prev_ds = ds_of(prev_node)
+                cur_ds = ds_of(cur_node)
 
                 if prev_vec in ("positive", "convergent") or cur_ds < prev_ds:
                     # Found triggering constructive edit
-                    edited_files = edits_by_turn.get(prev_turn_int, [])
+                    # （轨迹 turn 为 1-based，edits_by_turn 键为 0-based，查表 -1 对齐）
+                    edited_files = edits_by_turn.get(prev_turn_int - 1, [])
                     source_file = edited_files[0][0] if edited_files else "code_asset"
                     tool_name = edited_files[0][1] if edited_files else "Edit"
                     blast_rad = len(set(f for f, _ in edited_files)) if edited_files else 1
@@ -2074,7 +2084,7 @@ def analyze_waterbed_causality(
                     causality_links.append({
                         "source_turn": prev_turn_int,
                         "target_turn": cur_turn_int,
-                        "lag_turns": cur_turn_int - prev_turn_int,
+                        "lag_turns": max(0, cur_turn_int - prev_turn_int),
                         "source_file": source_file,
                         "trigger_tool": tool_name,
                         "kind": "asset_coupling_regression",
@@ -2085,7 +2095,7 @@ def analyze_waterbed_causality(
     return causality_links
 
 
-def compute_swarm_synergy(traj: list[dict], subagent_reports: list | None = None) -> dict:
+def compute_swarm_synergy(traj: list[dict]) -> dict:
     """Compute 2026 multi-agent swarm synergy and master-satellite manifold coupling.
 
     References:
@@ -2095,10 +2105,14 @@ def compute_swarm_synergy(traj: list[dict], subagent_reports: list | None = None
     Quantifies Cooperative Synergy Gain (CSG): whether dispatched subagents provide
     向心推进 (positive semantic reduction) or introduce chaotic noise and redundant drift.
 
+    无 subagents 数据（含空轨迹）时不造数：返回 total_subagents=0 且 synergy_score=None，
+    其余字段给中性默认（保持返回 dict 形状不变，键不删）。
+
     Returns:
       {
         "total_subagents": int,
-        "synergy_score": float (0-100, >70 represents high synergy, <40 redundant drift),
+        "synergy_score": float | None (0-100, >70 represents high synergy, <40 redundant drift;
+                          None when no subagent data),
         "convergent_count": int,
         "divergent_count": int,
         "net_semantic_delta": float,
@@ -2108,7 +2122,7 @@ def compute_swarm_synergy(traj: list[dict], subagent_reports: list | None = None
     if not traj:
         return {
             "total_subagents": 0,
-            "synergy_score": 75.0,
+            "synergy_score": None,
             "convergent_count": 0,
             "divergent_count": 0,
             "net_semantic_delta": 0.0,
@@ -2131,8 +2145,13 @@ def compute_swarm_synergy(traj: list[dict], subagent_reports: list | None = None
                 active_turns.append(i + 1)
 
             for sub in subs:
+                if not isinstance(sub, dict):
+                    continue
                 total_subs += 1
-                delta = float(sub.get("semantic_delta", 0.0))
+                try:
+                    delta = float(sub.get("semantic_delta", 0.0))
+                except (TypeError, ValueError, OverflowError):
+                    delta = 0.0  # LLM 遥测畸形值（字符串/null）按中性处理
                 net_delta += delta
                 stat = str(sub.get("status") or "convergent").lower()
                 if stat == "convergent" or delta < 0:
@@ -2141,24 +2160,10 @@ def compute_swarm_synergy(traj: list[dict], subagent_reports: list | None = None
                     div_count += 1
 
     if total_subs == 0:
-        # Check notes for subagent keywords
-        for i, pt in enumerate(traj):
-            note = str(pt.get("note") or "")
-            turn = pt.get("turn", i + 1)
-            if any(kw in note for kw in ("子代理", "子任务", "Scout", "Worker", "并行", "workpool")):
-                try:
-                    active_turns.append(int(turn))
-                except (ValueError, TypeError):
-                    active_turns.append(i + 1)
-                total_subs += 2
-                conv_count += 1
-                div_count += 1
-                net_delta -= 0.03
-
-    if total_subs == 0:
+        # 无子代理遥测：不按 note 关键词造数，返回中性形状
         return {
             "total_subagents": 0,
-            "synergy_score": 80.0,
+            "synergy_score": None,
             "convergent_count": 0,
             "divergent_count": 0,
             "net_semantic_delta": 0.0,

@@ -5,6 +5,7 @@ NameError / 签名漂移 / 组件构建崩溃这类回归——此前靠手工�
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,16 +15,9 @@ from tcer.core.models import SessionMeta, TokenUsage, ToolOp, TurnStat
 
 tk = pytest.importorskip("tkinter")
 
-
-@pytest.fixture(scope="module")
-def root():
-    try:
-        r = tk.Tk()
-    except tk.TclError:
-        pytest.skip("无显示环境,跳过 GUI 冒烟")
-    r.withdraw()
-    yield r
-    r.destroy()
+# root fixture 由 conftest 提供（session 级单 root 共享——Windows 上同进程
+# 二次 Tk() 会 init.tcl 失败，此前双文件各建 root 时 capture 模式下后跑的
+# 套件被静默 skip）。
 
 
 def _report(sid: str, net: int = 300) -> metrics.SessionReport:
@@ -1360,7 +1354,7 @@ def test_llm_reports_view(root, monkeypatch, tmp_path):
     tgt_x, tgt_y = v._phase_portrait._tgt_pos
     v._phase_portrait._on_motion(FakeEvent(tgt_x, tgt_y))
     assert v._phase_portrait._tooltip._win is not None
-    assert "狄拉克目标点" in v._phase_portrait._tooltip._sig[0][0]
+    assert "目标点" in v._phase_portrait._tooltip._sig[0][0]
     v._phase_portrait._tooltip.hide()
 
     # 验证 P1 相速度对偶极限环模式切换与悬停相速度解析
@@ -1394,6 +1388,38 @@ def test_llm_reports_view(root, monkeypatch, tmp_path):
     assert len(v._tree.get_children()) == 3
     v._clear_all()
     assert not v._tree.get_children()
+
+
+def test_llm_reports_view_cancel_tasks_button(root, monkeypatch, tmp_path):
+    """on_cancel_tasks 回调注入：None 时无取消按钮、传入时有按钮且点击触发。"""
+    from tcer.core import llm_reports
+    from tcer.gui.views import LlmReportsView
+
+    monkeypatch.setattr(llm_reports, "_path",
+                        lambda: tmp_path / "llm_reports.json")
+    # 1. 未注入回调（现有调用方兼容）：完全不出现取消按钮
+    v_none = LlmReportsView(root)
+    root.update_idletasks()
+    assert getattr(v_none, "_cancel_tasks_btn", "missing") is None
+    def _all_button_texts(widget):
+        out = []
+        for child in widget.winfo_children():
+            if isinstance(child, tk.Button):
+                out.append(child.cget("text"))
+            out.extend(_all_button_texts(child))
+        return out
+    assert "取消生成中任务" not in _all_button_texts(v_none._paned_ref)
+
+    # 2. 注入回调：出现按钮，点击触发回调（flat_button 在 Windows 是 tk.Button 可 invoke）
+    calls = []
+    v_cb = LlmReportsView(root, on_cancel_tasks=lambda: calls.append(1))
+    root.update_idletasks()
+    btn = v_cb._cancel_tasks_btn
+    assert btn is not None
+    assert btn.cget("text") == "取消生成中任务"
+    assert btn.winfo_manager() == "pack"  # 已布局显示而非仅创建
+    btn.invoke()
+    assert calls == [1]
 
 def test_llm_config_popup(root, monkeypatch, tmp_path):
     """LLM 设置弹窗：构建/状态行/半填校验零保存/测试连接入口校验。"""
@@ -1435,8 +1461,53 @@ def test_llm_config_popup(root, monkeypatch, tmp_path):
     assert llm_prefs.scopes() == ["metrics", "tools"]
 
 
+def test_llm_config_popup_dialog_detail(root, monkeypatch, tmp_path):
+    """供给档单选：默认 rich、三档切换生效、保存与回填链路完整。"""
+    from tcer.core import llm_prefs
+    from tcer.gui.popups import LlmConfigPopup
+
+    monkeypatch.setattr(llm_prefs, "_prefs_path",
+                        lambda: tmp_path / "tcer_llm.json")
+    saved = []
+    p = LlmConfigPopup(root, config={}, on_save=lambda **kw: saved.append(kw))
+    root.update_idletasks()
+    assert p._detail_var.get() == "full", "未配置时默认 full（完整档）"
+    assert set(p._detail_items) == {"standard", "rich", "full"}
+
+    p._url_var.set("http://x")
+    p._model_var.set("m")
+    p._do_save()
+    assert saved[0]["dialog_detail"] == "full"
+
+    p._detail_var.set("full")
+    p._do_save()
+    assert saved[1]["dialog_detail"] == "full"
+
+    # 回归：点击必须覆盖 Label 本身（曾只绑容器，Label 遮挡致「完整」点不中）
+    p._detail_var.set("rich")
+    std_item = p._detail_items["standard"]
+    txt_col = [w for w in std_item.winfo_children() if isinstance(w, tk.Frame)][0]
+    desc_lbl = [w for w in txt_col.winfo_children() if isinstance(w, tk.Label)][-1]
+    desc_lbl.event_generate("<Button-1>")
+    root.update()
+    assert p._detail_var.get() == "standard", "点击描述 Label 必须切换选中"
+
+    # 回填：已有配置打开弹窗时选中已存档位；畸形值回落默认
+    p2 = LlmConfigPopup(root, config={"base_url": "http://x", "model": "m",
+                                      "dialog_detail": "bogus"},
+                        on_save=lambda **kw: None)
+    root.update_idletasks()
+    assert p2._detail_var.get() == "full", "未知档位合法化到默认 full"
+
+    # 持久化读取链路
+    from tcer.gui.app import TcerGui
+    dummy = object.__new__(TcerGui)
+    dummy._save_llm_config(**saved[1])
+    assert llm_prefs.dialog_detail() == "full"
+
+
 def test_app_session_llm_analysis_dispatch(root, reports, monkeypatch, tmp_path):
-    """验证从右键菜单直接调用控制器派发 LLM 任务（自持独立线程池，无 AttributeError）。"""
+    """验证从右键菜单直接调用控制器派发 LLM 任务（有界线程池，无 AttributeError）。"""
     import time
     from tcer.core import llm_prefs, llm_reports, llm_client
     from tcer.gui.app import TcerGui
@@ -1444,6 +1515,9 @@ def test_app_session_llm_analysis_dispatch(root, reports, monkeypatch, tmp_path)
     monkeypatch.setattr(llm_prefs, "_prefs_path", lambda: tmp_path / "tcer_llm.json")
     monkeypatch.setattr(llm_reports, "_path", lambda: tmp_path / "llm_reports.json")
     llm_prefs.save({"base_url": "http://mock", "model": "mock-llm", "api_key": "k"})
+    # 跳过首次知情确认弹窗（交互路径单独测）
+    monkeypatch.setattr(TcerGui, "_confirm_llm_direct",
+                        lambda self, r, d: True)  # 每次都弹确认：测试直接放行
 
     chat_calls = []
 
@@ -1453,6 +1527,8 @@ def test_app_session_llm_analysis_dispatch(root, reports, monkeypatch, tmp_path)
 
     monkeypatch.setattr(llm_client, "chat", mock_chat)
 
+    # 隔离后台项目扫描：其完成回调异步覆盖状态栏，与 LLM 提示竞争
+    monkeypatch.setattr(TcerGui, "refresh_projects", lambda self: None)
     app = TcerGui(root)
     r = reports[0]
 
@@ -1460,7 +1536,7 @@ def test_app_session_llm_analysis_dispatch(root, reports, monkeypatch, tmp_path)
     app.run_session_llm_interpret(r)
     app.run_session_dynamics_analysis(r)
 
-    # 等待后台 worker 线程完成
+    # 等待后台 worker 线程完成（UI 队列经 root.update 轮询消化）
     deadline = time.time() + 3.0
     while time.time() < deadline and len(chat_calls) < 2:
         root.update()
@@ -1468,6 +1544,156 @@ def test_app_session_llm_analysis_dispatch(root, reports, monkeypatch, tmp_path)
 
     assert len(chat_calls) == 2
     assert "mock-llm" in chat_calls[0]["model"]
+    # 任务表必须清空——曾因误删 after(0, on_err) 调度行导致失败任务永久泄漏
+    _drain_llm_queue(app, root)
+    assert not app._llm_tasks
+    # 报告必须真的入库——worker 内任何 NameError/作用域漏洞曾被「任务表清空」
+    # 断言掩盖（错误路径同样清表，测试假绿；曾因 uuid4 未 import 报生成失败）
+    saved_reports = llm_reports.load()
+    assert len(saved_reports) == 2, f"应有 2 份报告入库，实际 {len(saved_reports)}"
+    assert all(r.get("text") for r in saved_reports)
+    kinds = {r["kind"] for r in saved_reports}
+    assert kinds == {"session", "dynamics"}
+
+
+def _drain_llm_queue(app, root, timeout: float = 5.0):
+    """泵事件循环直到任务表清空（worker 完成回调由 60ms 轮询器在主线程执行）。
+
+    超时取宽（5s）：全量跑时机器负载高，60ms 轮询偶发延迟不代表功能异常。"""
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline and app._llm_tasks:
+        root.update()
+        time.sleep(0.02)
+
+
+def test_app_session_llm_task_error_path_clears_registry(root, reports, monkeypatch, tmp_path):
+    """失败路径必须清任务表 + 状态栏红字（回归：on_err 曾是死代码，任务永久泄漏零反馈）。"""
+    import time
+    from tcer.core import llm_prefs, llm_reports, llm_client
+    from tcer.gui.app import TcerGui
+
+    monkeypatch.setattr(llm_prefs, "_prefs_path", lambda: tmp_path / "tcer_llm.json")
+    monkeypatch.setattr(llm_reports, "_path", lambda: tmp_path / "llm_reports.json")
+    llm_prefs.save({"base_url": "http://mock", "model": "mock-llm", "api_key": "k"})
+    monkeypatch.setattr(TcerGui, "_confirm_llm_direct",
+                        lambda self, r, d: True)  # 每次都弹确认：测试直接放行
+
+    def boom(**kw):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(llm_client, "chat", boom)
+
+    monkeypatch.setattr(TcerGui, "refresh_projects", lambda self: None)
+    app = TcerGui(root)
+    app.run_session_llm_interpret(reports[0])
+    assert len(app._llm_tasks) == 1
+
+    # 超时取宽（10s）：全量跑时线程池调度偶发延迟，不代表功能异常
+    _drain_llm_queue(app, root, timeout=10.0)
+    assert not app._llm_tasks, "失败任务必须从任务表移除"
+    status_text = app.filter.status.cget("text")
+    assert "生成失败" in status_text and "network down"[:8] in status_text
+
+
+def test_app_session_llm_dedup_same_session_kind(root, reports, monkeypatch, tmp_path):
+    """同一会话同类任务运行中重复派发被拒（双发 = 双倍成本与数据出境）。"""
+    import time
+    from tcer.core import llm_prefs, llm_reports, llm_client
+    from tcer.gui.app import TcerGui
+
+    monkeypatch.setattr(llm_prefs, "_prefs_path", lambda: tmp_path / "tcer_llm.json")
+    monkeypatch.setattr(llm_reports, "_path", lambda: tmp_path / "llm_reports.json")
+    llm_prefs.save({"base_url": "http://mock", "model": "mock-llm", "api_key": "k"})
+    monkeypatch.setattr(TcerGui, "_confirm_llm_direct",
+                        lambda self, r, d: True)  # 每次都弹确认：测试直接放行
+
+    started = []
+    release = threading.Event()
+
+    def slow_chat(**kw):
+        started.append(kw)
+        release.wait(3.0)
+        return "解读文本"
+
+    monkeypatch.setattr(llm_client, "chat", slow_chat)
+
+    # 隔离后台项目扫描：其完成回调异步覆盖状态栏，与 LLM 提示竞争
+    monkeypatch.setattr(TcerGui, "refresh_projects", lambda self: None)
+    app = TcerGui(root)
+    r = reports[0]
+    app.run_session_llm_interpret(r)
+    app.run_session_llm_interpret(r)  # 同会话同 kind：必须被去重拒绝
+    assert len(app._llm_tasks) == 1
+
+    release.set()
+    _drain_llm_queue(app, root)
+    assert len(started) == 1, "重复派发不应产生第二次网络请求"
+    assert not app._llm_tasks
+
+
+def test_app_session_llm_confirm_every_time(root, reports, monkeypatch, tmp_path):
+    """每次右键直达都弹知情确认：拒绝零网络；确认放行；再次派发再次确认。"""
+    from tcer.core import llm_prefs, llm_reports, llm_client
+    from tcer.gui.app import TcerGui
+
+    monkeypatch.setattr(llm_prefs, "_prefs_path", lambda: tmp_path / "tcer_llm.json")
+    monkeypatch.setattr(llm_reports, "_path", lambda: tmp_path / "llm_reports.json")
+    llm_prefs.save({"base_url": "http://mock", "model": "mock-llm", "api_key": "k"})
+
+    calls = []
+    monkeypatch.setattr(llm_client, "chat", lambda **kw: calls.append(kw) or "文本")
+
+    answers = []
+    monkeypatch.setattr("tkinter.messagebox.askyesno",
+                        lambda *a, **k: answers.append(k) or False)
+
+    monkeypatch.setattr(TcerGui, "refresh_projects", lambda self: None)
+    app = TcerGui(root)
+
+    # 拒绝：零网络调用、零任务
+    app.run_session_llm_interpret(reports[0])
+    assert len(answers) == 1 and not calls and not app._llm_tasks
+
+    # 确认：放行一次
+    monkeypatch.setattr("tkinter.messagebox.askyesno", lambda *a, **k: True)
+    app.run_session_llm_interpret(reports[0])
+    _drain_llm_queue(app, root)
+    assert len(calls) == 1
+
+    # 再次派发：必须再次确认（每次都弹，无「记住」机制）
+    answers2 = []
+    monkeypatch.setattr("tkinter.messagebox.askyesno",
+                        lambda *a, **k: answers2.append(k) or False)
+    app.run_session_llm_interpret(reports[0])
+    assert len(answers2) == 1 and len(calls) == 1, "第二次派发也要先确认，拒绝则零新增请求"
+
+
+def test_llm_reports_append_thread_safe(tmp_path):
+    """并发 append 不丢报告（模块锁回归：曾无锁丢更新 + Windows PermissionError）。"""
+    import threading
+    from tcer.core import llm_reports
+
+    llm_reports._path = lambda: tmp_path / "reports.json"
+    n_threads, per_thread = 6, 8
+    barrier = threading.Barrier(n_threads)
+
+    def worker(tid: int):
+        barrier.wait()  # 强制交错
+        for i in range(per_thread):
+            llm_reports.append({
+                "id": f"r-{tid}-{i}", "created_at": 1_000_000 + tid * 100 + i,
+                "kind": "session", "title": f"t{tid}-{i}", "text": "x"})
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+
+    ids = {r["id"] for r in llm_reports.load()}
+    assert len(ids) == n_threads * per_thread, f"并发 append 丢报告: 仅 {len(ids)}"
+
 
 def test_project_profile_popup(root, reports):
     """项目画像弹窗：热点文件/模型混用/技能 MCP 三节渲染不炸。"""
@@ -1658,3 +1884,36 @@ def test_real_projects_view(root):
     assert v._tok(999) == "999"                 # 不足万位回落千分位
     v.set_rows([])                   # 空数据走占位分支
     root.update_idletasks()
+
+
+def test_llm_reports_audit_badge(root, monkeypatch, tmp_path):
+    """审计校验徽标：警示报告亮黄牌（Tooltip 列明细）、通过亮绿、旧报告隐藏。"""
+    from tcer.core import llm_reports
+    from tcer.gui.views import LlmReportsView
+
+    monkeypatch.setattr(llm_reports, "_path",
+                        lambda: tmp_path / "llm_reports.json")
+    llm_reports.append({
+        "id": "a1", "created_at": 2_000_000, "kind": "session",
+        "title": "违约报告", "text": "整体表现良好。",
+        "audit_warnings": ["含笼统表扬措辞（审计立场禁止）：整体表现良好",
+                           "转折锚点仅 0 处（要求至少 3 个 **【T数字】** 深挖）"]})
+    llm_reports.append({
+        "id": "a2", "created_at": 1_000_000, "kind": "session",
+        "title": "守约报告", "text": "合格审计文本", "audit_warnings": []})
+    llm_reports.append({
+        "id": "a3", "created_at": 500_000, "kind": "session",
+        "title": "旧版报告（无校验字段）", "text": "旧文本"})
+
+    v = LlmReportsView(root)
+    v.on_show()
+
+    v.select_report("a1")
+    assert "2 项警示" in v._audit_badge.cget("text")
+    assert "笼统表扬" in v._audit_tip.text
+
+    v.select_report("a2")
+    assert "通过" in v._audit_badge.cget("text")
+
+    v.select_report("a3")
+    assert v._audit_badge.cget("text") == ""

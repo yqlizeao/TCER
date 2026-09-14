@@ -205,10 +205,14 @@ def init_db() -> None:
             for name, decl in cols.items():
                 if name not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-        # 历史数据时间戳自愈迁移：将存入的毫秒级时间戳（>10^10）自动纠正为秒级时间戳
-        conn.execute(
-            "UPDATE uploads SET ts = ts / 1000 WHERE ts IS NOT NULL AND ts > 10000000000"
-        )
+        # 历史数据时间戳自愈迁移：将存入的毫秒级时间戳（>10^10）自动纠正为秒级
+        # 时间戳。PRAGMA user_version=1 打标，避免每次启动都跑一遍全表 UPDATE
+        # （迁移幂等无害，但没必要常驻开销）。
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+            conn.execute(
+                "UPDATE uploads SET ts = ts / 1000 WHERE ts IS NOT NULL AND ts > 10000000000"
+            )
+            conn.execute("PRAGMA user_version = 1")
         conn.commit()
     finally:
         conn.close()

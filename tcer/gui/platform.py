@@ -76,11 +76,13 @@ def bind_mousewheel(canvas, callback):
         return lambda: canvas.unbind_all("<MouseWheel>")
 
     if PLATFORM == "linux":
-        # X11/Wayland: Button-4 = scroll up, Button-5 = scroll down
+        # X11/Wayland: Button-4 = scroll up, Button-5 = scroll down.
+        # 单位约定与 win/mac 一致：上滚 = 负值（曾反号，Treeview 直传 units
+        # 时 Linux 上滚会向下滚）。
         def _on_up(e):
-            callback(1)
-        def _on_down(e):
             callback(-1)
+        def _on_down(e):
+            callback(1)
         canvas.bind_all("<Button-4>", _on_up)
         canvas.bind_all("<Button-5>", _on_down)
         return lambda: (canvas.unbind_all("<Button-4>"),

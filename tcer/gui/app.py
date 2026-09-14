@@ -48,7 +48,13 @@ class TcerGui:
         self._analysis_generation = 0
         self._analysis_cancel = threading.Event()
         self._upload_prefs: dict = upload_prefs.load()
-        self._llm_tasks: dict[str, str] = {}
+        # LLM 收信箱并发任务模型：task_id -> {key, desc, future}；
+        # worker 经有界线程池派发（避免无界裸线程），完成回调走线程安全
+        # UI 队列由主线程轮询执行（Windows 跨线程 after 会丢，见 #38 ⓒ）。
+        self._llm_tasks: dict[str, dict] = {}
+        self._llm_executor = None  # 惰性创建 ThreadPoolExecutor
+        self._llm_ui_queue: queue.Queue = queue.Queue()
+        self._poll_llm_ui_queue()
 
         root.title("TCER")
         root.configure(bg=theme.BG)
@@ -109,8 +115,8 @@ class TcerGui:
             release = update_check.latest_release()
             try:
                 self.root.after(0, lambda: self._show_update(release, silent))
-            except tk.TclError:
-                pass  # 窗口已关闭
+            except (tk.TclError, RuntimeError):
+                pass  # 窗口已关闭（无 mainloop 的 Tk 上跨线程 after 抛 RuntimeError）
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -154,8 +160,8 @@ class TcerGui:
                     msg = f"下载中… {d // 1024} KB" + (f" / {t // 1024} KB" if t else "")
                     try:
                         self.root.after(0, lambda m=msg: popup.set_progress(m))
-                    except tk.TclError:
-                        pass
+                    except (tk.TclError, RuntimeError):
+                        pass  # 下载进度回调线程：无 mainloop 的 Tk 抛 RuntimeError
                 self.root.after(0, lambda: popup.set_progress(f"正在下载 {name}…"))
                 updater.download(url, dest, progress_cb=cb)
                 self.root.after(0, lambda: popup.set_progress("下载完成,即将重启以完成更新…"))
@@ -248,7 +254,8 @@ class TcerGui:
         self.trend_chart = TrendChart(tab_t, controller=self)
         self.model_compare = ModelCompareView(tab_c, controller=self)
         self.real_projects_view = views.RealProjectsView(tab_r, controller=self)
-        self.llm_reports_view = views.LlmReportsView(tab_l, controller=self)
+        self.llm_reports_view = views.LlmReportsView(
+            tab_l, controller=self, on_cancel_tasks=self._on_cancel_llm_tasks)
         self._llm_tab = tab_l
         # 项目聚合页签独立于当前分析（后台扫全部项目），首次切入加载。
         self._realproj_loaded = False
@@ -1213,8 +1220,9 @@ class TcerGui:
         # 读取，弹窗内回退到用户消息采样）；user_texts=各源 read_user_messages。
         load_dialogue = None
         if (report.meta.source or "claude") == "claude":
-            from tcer.core import reader
-            load_dialogue = lambda: reader.read_dialogue(report.meta.path)
+            from tcer.core import reader, llm_prefs
+            load_dialogue = lambda: reader.read_dialogue(
+                report.meta.path, detail=llm_prefs.dialog_detail())
         popups.SessionTimelinePopup(
             self.root, report,
             load_user_texts=lambda: TcerGui._load_user_messages(report, [])[0],
@@ -1236,12 +1244,11 @@ class TcerGui:
         self._run_session_llm(report, is_dynamics=True)
 
     def _run_session_llm(self, report, is_dynamics: bool) -> None:
-        """从会话列表直接派发 LLM 任务（免阻断确认，后台独立线程池并发执行）。"""
+        """从会话列表直接派发 LLM 任务（收信箱模型：首次确认 + 去重 + 有界线程池 + UI 队列回填）。"""
         from tkinter import messagebox
-        from threading import Thread
-        from tcer.core import llm_client, llm_prefs, llm_prompts, llm_reports
-        import time as _time
-        import sys as _sys
+        from concurrent.futures import ThreadPoolExecutor
+        from uuid import uuid4
+        from tcer.core import llm_prefs, llm_prompts
 
         if not llm_prefs.enabled():
             messagebox.showinfo(
@@ -1251,16 +1258,35 @@ class TcerGui:
             self.show_llm_config()
             return
 
+        # 每次直达都弹知情确认（端点/出境范围/预估 tokens）——数据出境是不可
+        # 逆动作，与时间线弹窗路径同口径；曾试过「确认一次记住」但体验上确认框
+        # 时有时无反而不可预期（重存 LLM 配置会重置记住态），固定为每次确认。
+        if not self._confirm_llm_direct(report, is_dynamics):
+            return
+
+        # 去重：同一会话的同类任务运行/排队中只派发一次（双发 = 双倍成本与出境）。
+        sid = report.meta.session_id or report.meta.path.stem
+        kind = "dynamics" if is_dynamics else "session"
+        dedup_key = (sid, kind)
+        if any(t["key"] == dedup_key for t in self._llm_tasks.values()):
+            self.filter.set_status("该会话的同类 LLM 任务已在生成中，请在收信箱稍候")
+            return
+
         scopes = llm_prefs.scopes()
         derived = llm_prompts.build_llm_derived(report)
         action_name = "相空间收敛动力学分析" if is_dynamics else "LLM 过程收敛解读"
-        sid = report.meta.session_id or report.meta.path.stem
         session_title = report.meta.title or sid[:12]
-        task_id = f"{int(_time.time() * 1000)}_{id(report)}"
+        task_id = uuid4().hex
         task_desc = f"{session_title} · {action_name}"
 
-        # 登记活跃并发任务
-        self._llm_tasks[task_id] = task_desc
+        if self._llm_executor is None:
+            self._llm_executor = ThreadPoolExecutor(
+                max_workers=3, thread_name_prefix="tcer-llm")
+
+        # 登记活跃并发任务（submit 在登记前：排队中的任务也占去重位）
+        future = self._llm_executor.submit(
+            self._llm_worker, report, derived, scopes, is_dynamics, task_id, task_desc)
+        self._llm_tasks[task_id] = {"key": dedup_key, "desc": task_desc, "future": future}
         n_running = len(self._llm_tasks)
         if n_running == 1:
             self.filter.status.config(
@@ -1271,96 +1297,179 @@ class TcerGui:
 
         print(f"[LLM Task] Started: {task_desc} (Target: {llm_prefs.model()} @ {llm_prefs.base_url()})")
 
-        def worker():
-            try:
-                dialogue = None
-                texts: list[str] = []
-                if llm_prefs.has_scope("dialog", scopes):
-                    src = report.meta.source or "claude"
-                    if src == "claude" and report.meta.path:
-                        try:
-                            from tcer.core import reader
-                            dialogue = reader.read_dialogue(report.meta.path)
-                        except Exception:
-                            dialogue = None
-                    if dialogue is None:
-                        try:
-                            texts = TcerGui._load_user_messages(report, [])[0]
-                        except Exception:
-                            texts = []
+    def _confirm_llm_direct(self, report, is_dynamics: bool) -> bool:
+        """右键直达的首次知情确认（内容口径与时间线弹窗确认一致）。"""
+        from tcer.core import llm_prefs, llm_prompts
+        scopes = llm_prefs.scopes()
+        derived = llm_prompts.build_llm_derived(report)
+        est = llm_prompts.estimate_request_tokens(
+            report, derived, scopes, detail=llm_prefs.dialog_detail())
+        if llm_prefs.has_scope("dialog", scopes):
+            est += llm_prompts.estimate_tokens("消" * llm_prompts.MAX_DIALOGUE_CHARS)
+        scope_labels = " · ".join(
+            f"[{llm_prefs.SCOPE_LABELS.get(s, s)}]" for s in scopes) or "（未授权数据）"
+        action = "相空间收敛动力学分析" if is_dynamics else "LLM 过程收敛解读"
+        return messagebox.askyesno(
+            "LLM 直达分析确认",
+            f"右键直达{action}：将把会话数据发送到\n"
+            f"{llm_prefs.model()} @ {llm_prefs.base_url()}\n\n"
+            f"出境范围：{scope_labels}\n\n"
+            f"预估约 {est:,} tokens（dialog 档含完整对话全文，出境后不可撤销）。\n"
+            "解读结果只进「LLM 报告」收信箱，不参与任何指标计算。\n\n"
+            "确认后将立即开始生成（完成后自动收入收信箱）。",
+            parent=self.root)
 
-                if is_dynamics:
-                    system, user = llm_prompts.dynamics_prompt(
-                        report, derived, scopes, dialogue, texts)
-                else:
-                    system, user = llm_prompts.convergence_prompt(
-                        report, derived, scopes, dialogue, texts)
-
-                reply = llm_client.chat(
-                    base_url=llm_prefs.base_url() or "",
-                    api_key=llm_prefs.api_key(),
-                    model=llm_prefs.model() or "",
-                    system=system, user=user)
-
-                meta = report.meta
-                if is_dynamics:
-                    text, dyn_data = llm_prompts.parse_dynamics_payload(reply, derived)
-                    kind = "dynamics"
-                    title = f"{meta.title or meta.session_id or '会话'} · 相空间分析"
-                else:
-                    text = reply
-                    dyn_data = None
-                    kind = "session"
-                    title = meta.title or meta.session_id or "会话解读"
-
-                entry = {
-                    "id": str(int(_time.time() * 1000)),
-                    "created_at": int(_time.time() * 1000),
-                    "kind": kind,
-                    "title": title,
-                    "session_id": meta.session_id,
-                    "session_title": meta.title,
-                    "source": meta.source or "claude",
-                    "model": llm_prefs.model(),
-                    "scope": llm_prefs.scopes_summary(scopes) if isinstance(scopes, list) else str(scopes),
-                    "turns": len(derived["stats"]),
-                    "net_loc": report.net_loc,
-                    "cost_display": f"${report.cost:.2f}",
-                    "text": text,
-                    "dynamics_data": dyn_data,
-                }
-                llm_reports.append(entry)
-                print(f"[LLM Task] Success: saved report {entry['id']} ({title})")
-
-                def on_success():
-                    self._llm_tasks.pop(task_id, None)
-                    remain = len(self._llm_tasks)
-                    if remain > 0:
-                        self.filter.status.config(
-                            text=f"✓ 入库: {title}（还有 {remain} 项生成中…）",
-                            fg=theme.ACCENT)
-                    else:
-                        self.filter.status.config(
-                            text=f"✓ 已入库: {title}", fg=theme.SUCCESS)
-                    # 刷新收信箱列表
+    def _llm_worker(self, report, derived: dict, scopes, is_dynamics: bool,
+                    task_id: str, task_desc: str) -> None:
+        """worker 主体（线程池内执行）：懒加载对话 → 组 prompt → 调 LLM → 经 UI 队列回主线程。"""
+        from uuid import uuid4
+        from tcer.core import llm_client, llm_prefs, llm_prompts, llm_reports
+        import time as _time
+        import sys as _sys
+        try:
+            dialogue = None
+            texts: list[str] = []
+            if llm_prefs.has_scope("dialog", scopes):
+                src = report.meta.source or "claude"
+                if src == "claude" and report.meta.path:
                     try:
-                        self.llm_reports_view._refresh_list()
+                        from tcer.core import reader
+                        dialogue = reader.read_dialogue(
+                            report.meta.path, detail=llm_prefs.dialog_detail())
                     except Exception:
-                        pass
-                    # 若用户当前就停在 LLM 报告页签，或者这是单任务完成，自动选中查看
-                    if self._nb.index("current") == self._nb.index(self._llm_tab):
-                        self.llm_reports_view.select_report(entry["id"])
+                        dialogue = None
+                if dialogue is None:
+                    try:
+                        texts = TcerGui._load_user_messages(report, [])[0]
+                    except Exception:
+                        texts = []
 
-                self.root.after(0, on_success)
-            except Exception as e:
-                print(f"[LLM Task Error] {task_desc}: {e}", file=_sys.stderr)
-                def on_err(err_text=str(e)):
-                    self._llm_tasks.pop(task_id, None)
-                    remain = len(self._llm_tasks)
-                    tip = f"× 生成失败: {err_text[:25]}" + (f"（余 {remain} 项）" if remain > 0 else "")
-                    self.filter.status.config(text=tip, fg=theme.ERROR)
+            detail = llm_prefs.dialog_detail()
+            if is_dynamics:
+                system, user = llm_prompts.dynamics_prompt(
+                    report, derived, scopes, dialogue, texts, detail)
+            else:
+                system, user = llm_prompts.convergence_prompt(
+                    report, derived, scopes, dialogue, texts, detail)
 
-        Thread(target=worker, daemon=True).start()
+            reply = llm_client.chat(
+                base_url=llm_prefs.base_url() or "",
+                api_key=llm_prefs.api_key(),
+                model=llm_prefs.model() or "",
+                system=system, user=user)
+
+            meta = report.meta
+            if is_dynamics:
+                text, dyn_data = llm_prompts.parse_dynamics_payload(reply, derived)
+                kind = "dynamics"
+                title = f"{meta.title or meta.session_id or '会话'} · 相空间分析"
+            else:
+                text = reply
+                dyn_data = None
+                kind = "session"
+                title = meta.title or meta.session_id or "会话解读"
+
+            # uuid 作 id：毫秒时间戳在并发完成时会碰撞（同 id 报告删除时会被连带误删）。
+            entry_id = f"{int(_time.time() * 1000)}_{uuid4().hex[:8]}"
+            # 机械审计校验（确定性本地规则，兜住高谄媚倾向模型的输出违约）
+            audit_flags = llm_prompts.audit_warnings(text, is_dynamics)
+            entry = {
+                "id": entry_id,
+                "created_at": int(_time.time() * 1000),
+                "kind": kind,
+                "title": title,
+                "audit_warnings": audit_flags,
+                "session_id": meta.session_id,
+                "session_title": meta.title,
+                "source": meta.source or "claude",
+                "model": llm_prefs.model(),
+                "scope": llm_prefs.scopes_summary(scopes) if isinstance(scopes, list) else str(scopes),
+                "turns": len(derived["stats"]),
+                "net_loc": report.net_loc,
+                "cost_display": f"${report.cost:.2f}",
+                "text": text,
+                "dynamics_data": dyn_data,
+            }
+            llm_reports.append(entry)  # 模块级锁保证并发落盘安全
+            print(f"[LLM Task] Success: saved report {entry_id} ({title})")
+            self._llm_ui_queue.put(
+                lambda: self._on_llm_task_done(task_id, title, entry_id))
+        except Exception as e:
+            print(f"[LLM Task Error] {task_desc}: {e}", file=_sys.stderr)
+            err_text = str(e)
+            self._llm_ui_queue.put(
+                lambda: self._on_llm_task_error(task_id, task_desc, err_text))
+
+    def _poll_llm_ui_queue(self) -> None:
+        """主线程定时轮询队列，安全执行跨线程 UI 回调（防 Windows 跨线程 after 丢失）。"""
+        try:
+            while True:
+                fn = self._llm_ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        try:
+            self.root.after(60, self._poll_llm_ui_queue)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _on_llm_task_done(self, task_id: str, title: str, entry_id: str) -> None:
+        """主线程：任务完成回填（清任务表 → 状态栏 → 刷新收信箱）。"""
+        self._llm_tasks.pop(task_id, None)
+        remain = len(self._llm_tasks)
+        if remain > 0:
+            self.filter.status.config(
+                text=f"✓ 入库: {title}（还有 {remain} 项生成中…）",
+                fg=theme.ACCENT)
+        else:
+            self.filter.status.config(
+                text=f"✓ 已入库: {title}", fg=theme.SUCCESS)
+        try:
+            self.llm_reports_view._refresh_list()
+        except Exception as e:
+            print(f"[LLM Task] refresh inbox failed: {e}", file=sys.stderr)
+        # 若用户当前就停在 LLM 报告页签，自动选中查看
+        if self._nb.index("current") == self._nb.index(self._llm_tab):
+            self.llm_reports_view.select_report(entry_id)
+
+    def _on_llm_task_error(self, task_id: str, task_desc: str, err_text: str) -> None:
+        """主线程：任务失败回填（任务表必清——曾因误删调度行致永久泄漏与零反馈）。"""
+        self._llm_tasks.pop(task_id, None)
+        remain = len(self._llm_tasks)
+        tip = f"× 生成失败: {err_text[:25]}" + (f"（余 {remain} 项）" if remain > 0 else "")
+        self.filter.status.config(text=f"{tip} [{task_desc}]"[:80], fg=theme.ERROR)
+
+    def cancel_llm_tasks(self) -> tuple[int, int]:
+        """取消全部 LLM 任务：返回 (已取消排队数, 运行中不可中断数)。
+
+        排队中的（未开跑）立即取消并出表；运行中的网络请求无法中断，
+        完成后经 UI 队列自然回收。
+        """
+        cancelled, running = 0, 0
+        for task_id in list(self._llm_tasks):
+            fut = self._llm_tasks[task_id].get("future")
+            if fut is not None and fut.cancel():
+                self._llm_tasks.pop(task_id, None)
+                cancelled += 1
+            else:
+                running += 1
+        return cancelled, running
+
+    def _on_cancel_llm_tasks(self) -> None:
+        """收信箱「取消生成中任务」回调：取消排队项并提示运行中余量。"""
+        cancelled, running = self.cancel_llm_tasks()
+        if cancelled == 0 and running == 0:
+            self.filter.set_status("当前没有生成中的 LLM 任务")
+            return
+        tip = f"已取消 {cancelled} 项排队任务"
+        if running:
+            tip += f"；{running} 项正在生成（网络请求不可中断，完成后自然入库）"
+        self.filter.set_status(tip)
     def show_llm_config(self) -> None:
         """LLM 设置弹窗（本地表单零联网；连接测试为用户显式点击）。"""
         from tcer.core import llm_prefs
@@ -1379,6 +1488,9 @@ class TcerGui:
         }
         if scopes is not None:
             cfg["scopes"] = scopes
+        # 过程数据供给档（standard/rich/full）：弹窗「过程数据供给量」单选
+        if isinstance(_extra.get("dialog_detail"), str) and _extra["dialog_detail"]:
+            cfg["dialog_detail"] = llm_prefs.normalize_dialog_detail(_extra["dialog_detail"])
         llm_prefs.save(cfg)
 
     def show_session_compare(self) -> None:

@@ -294,17 +294,29 @@ def read_user_messages(path: Path) -> list[str]:
     return messages
 
 
-def read_dialogue(path: Path) -> list[str]:
+def read_dialogue(path: Path, detail: str = "standard") -> list[str]:
     """交织对话时间线（LLM 解读专用；与 read_user_messages 同样的懒加载边界）。
 
     用户消息全文（完整保留无截断）、assistant 文本（完整保留方案与总结，跳过
     纯 thinking 块）、工具调用明细与代码编辑（Edit 的 old/new 差异、Write 内容、
     Bash 命令全量）。按 message.id 与 tool_use id 去重（防 rewind 重发双计）。
     返回行列表（``[用户] …`` / ``[AI] …`` / ``[工具] …``）。
+
+    ``detail`` 为过程数据供给档（llm_prefs.dialog_detail）：
+    - standard：仅纳入报错的工具结果摘要（历史行为）；
+    - rich/full：非报错工具结果（Grep/Read/Bash 等正常输出——AI 的观察面）
+      也纳入摘要，让模型看到「AI 当时看到了什么」而不仅是「它做了什么」；
+      full 档摘要长度加倍（大上下文模型配置）。
     """
     lines: list[str] = []
     seen_texts: set[str] = set()
     seen_tools: set[str] = set()
+    seen_results: set[str] = set()   # tool_result 的 tool_use_id 去重（rewind 重发）
+    tool_names: dict[str, str] = {}  # tool_use id → 工具名（result 摘要按工具定制长度）
+    rich = detail in ("rich", "full")
+    # rich 档摘要长度：探索/执行类工具结果信息密度高给长摘要，其余给短摘要
+    n_obs = 800 if detail == "full" else 400
+    n_misc = 400 if detail == "full" else 200
     for obj in iter_messages(path):
         msg = obj.get("message")
         if not isinstance(msg, dict):
@@ -324,9 +336,17 @@ def read_dialogue(path: Path) -> list[str]:
                 if txt and not _is_user_noise(txt):
                     lines.append(f"[用户] {txt}")
             elif isinstance(content, list):
-                # 捕获工具执行反馈（报错、异常、测试未通过），为 LLM 提供环境因果证据
+                # 捕获工具执行反馈：报错必录（环境因果证据）；rich/full 档连
+                # 正常输出也带摘要——AI 的观察面（搜到什么/读到什么/测试输出）
+                # 是判定「AI 是没看见还是看见了不理」的关键证据。
                 for it in content:
                     if isinstance(it, dict) and it.get("type") == "tool_result":
+                        rid = it.get("tool_use_id")
+                        rid = rid if isinstance(rid, str) and rid else None
+                        if rid is not None:
+                            if rid in seen_results:
+                                continue
+                            seen_results.add(rid)
                         is_err = it.get("is_error") is True
                         raw_c = it.get("content")
                         c_text = ""
@@ -348,6 +368,17 @@ def read_dialogue(path: Path) -> list[str]:
                             if len(c_text) > 250:
                                 err_summary += "…"
                             lines.append(f"[工具反馈:报错] {err_summary}")
+                        elif rich and c_text:
+                            tname = tool_names.get(rid or "", "")
+                            limit = n_obs if tname in (
+                                "Grep", "Glob", "Read", "NotebookRead", "Bash",
+                                "mcp__tools__report_pc_loc",
+                            ) else n_misc
+                            out_summary = c_text[:limit].replace("\r", "").strip()
+                            if len(c_text) > limit:
+                                out_summary += "…"
+                            label = f"[工具反馈:{tname}]" if tname else "[工具反馈:输出]"
+                            lines.append(f"{label} {out_summary}")
         elif role == "assistant" and isinstance(content, list):
             mid = msg.get("id")
             has_id = isinstance(mid, str) and mid
@@ -378,6 +409,9 @@ def read_dialogue(path: Path) -> list[str]:
                         if tid in seen_tools:
                             continue
                         seen_tools.add(tid)
+                        tname = str(it.get("name") or "")
+                        if tname:
+                            tool_names[tid] = tname
                     inp = it.get("input") if isinstance(it.get("input"), dict) else {}
                     tname = str(it.get("name") or "")
                     arg = (inp.get("file_path") or inp.get("path")

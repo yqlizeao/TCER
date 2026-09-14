@@ -2827,6 +2827,54 @@ class RealProjectsView:
         return "-" if v is None else f"${v:.1f}"
 
 
+def _dynamics_terminal_state(dyn: dict) -> str:
+    """相空间动力学终态判定（共享 SSOT）。
+
+    PhasePortraitWidget.render 的态势徽章与 LlmReportsView._resolve_dynamics_status
+    的列表态势着色共用同一实现，杜绝两份分支逻辑漂移。返回四态键：
+    'dirac'（精准收敛）/ 'escaped'（成功破局）/ 'trapped'（陷入泥潭）/
+    'wandering'（方向发散）。
+    """
+    dyn = dyn or {}
+    ctype = str(dyn.get("convergence_type") or "").lower()
+    is_trapped = bool(dyn.get("attractor_trapped"))
+    traj = dyn.get("trajectory") or []
+    last_pt = traj[-1] if traj else {}
+    last_evt = str(last_pt.get("event") or "").lower()
+    last_vec = str(last_pt.get("vector") or "").lower()
+    try:
+        last_ds = metrics.ds_of(last_pt) if last_pt else 0.5
+    except (ValueError, TypeError):
+        last_ds = 0.5
+
+    # 检查是否达成逃逸或向心突破：
+    # (A) 显式标为 escaped/breakthrough
+    # (B) 末点带有 breakthrough 事件
+    # (C) 虽曾受困但末尾向心大幅推进且偏离显著消减 (Ds <= 0.45 且 vector 推进)
+    is_escaped = (
+        ctype in ("escaped", "breakthrough")
+        or last_evt == "breakthrough"
+        or (is_trapped and last_vec in ("positive", "convergent") and last_ds <= 0.45)
+    )
+
+    if ctype == "dirac" or (last_ds <= 0.15 and not is_trapped):
+        return "dirac"
+    if is_escaped:
+        return "escaped"
+    if ctype == "trapped" or is_trapped:
+        return "trapped"
+    return "wandering"
+
+
+# 终态四态 → 态势徽章文案/配色（与 _dynamics_terminal_state 键位一一对应）
+_DYNAMIC_STATE_BADGES = {
+    "dirac": ("精准收敛 · 达成目标", theme.SUCCESS, theme.DIRAC_CORE_BG),
+    "escaped": ("成功破局 · 达成收敛", theme.SUCCESS, theme.DIRAC_CORE_BG),
+    "trapped": ("陷入泥潭 · 循环死锁", theme.ERROR, theme.ERROR_TINT_BG),
+    "wandering": ("方向发散 · 未能收敛", theme.WARNING, theme.WARN_TINT_BG),
+}
+
+
 class PhasePortraitWidget:
     """相空间收敛动力学相图（专属 dynamics 类型报告，其余报告自动隐藏）。
 
@@ -2834,6 +2882,12 @@ class PhasePortraitWidget:
     纵轴：回合推进进度
     要素：左下角高亮狄拉克目标点、右侧平庸代码吸引子引力漏斗、关键回合轨迹粒子与推进矢量箭头。
     """
+    # 画布几何 SSOT：内边距与最小画布下限，_redraw / _zoom / _clamp_pan /
+    # _center_node 四处共用同一来源（原先各自硬编码，实际绘制与平移钳位用不同
+    # 几何会导致缩放中心漂移）
+    _PAD_L, _PAD_R, _PAD_T, _PAD_B = 68, 55, 38, 48
+    _MIN_CANVAS_W, _MIN_CANVAS_H = 600, 480
+
     def __init__(self, parent) -> None:
         from .charts import _ChartTooltip, _aa_layer_flat
         self._aa_layer_flat = _aa_layer_flat
@@ -2868,7 +2922,10 @@ class PhasePortraitWidget:
         self._pan_y: float = 0.0
         self._drag_data: dict = {"x": 0, "y": 0, "panned": False}
         self._drag_redraw_pending: bool = False
+        self._drag_redraw_after: str | None = None  # 16ms 拖拽节流定时器 id（Destroy 时统一取消）
         self._wheel_zoom_pending: bool = False
+        self._wheel_zoom_after: str | None = None   # 16ms 滚轮缩放节流定时器 id
+        self._unbind_wheel = None                   # bind_all 滚轮解绑回调（Enter 绑定 / Leave·Destroy 解绑）
         self._wheel_zoom_accum: float = 1.0
         self._wheel_cx: float | None = None
         self._wheel_cy: float | None = None
@@ -2916,9 +2973,9 @@ class PhasePortraitWidget:
         self.state_badge.pack(side="left")
         Tooltip(self.state_badge,
                 "整场会话最终交付态势：\n"
-                "• 精准收敛：无多余冗余生成，代码直接收敛至狄拉克目标；\n"
+                "• 精准收敛：无多余冗余生成，代码直达用户真实目标；\n"
                 "• 成功破局：虽曾遭遇死锁或偏离，但最终成功逃逸达成收敛；\n"
-                "• 陷入泥潭：深陷平庸代码吸引子，反复打补丁未脱困；\n"
+                "• 陷入泥潭：落入惯性套路，反复打补丁未脱困；\n"
                 "• 持续发散：语义偏离过大且发散，未能达成目标。")
 
         self.lyapunov_badge = tk.Label(row_badges, text="", bg=theme.CARD_HEADER_BG,
@@ -2942,7 +2999,7 @@ class PhasePortraitWidget:
                                      font=theme.FONT_UI_SMALL, padx=6, pady=1)
         self.carnot_badge.pack(side="left", padx=(6, 0))
         Tooltip(self.carnot_badge,
-                "代码有效率 η：广义卡诺计算效率。\n"
+                "代码有效率 η：最终有效代码占全部开销的比例。\n"
                 "最终保留的有效代码行 vs 自己反复重构删除的废代码与压缩耗散。\n"
                 "高效率代表一次写对少返工；低效率代表大量废代码被自己推翻重写。")
 
@@ -2951,7 +3008,7 @@ class PhasePortraitWidget:
         self.swarm_badge.pack(side="left", padx=(6, 0))
         Tooltip(self.swarm_badge,
                 "多智能体协同分（2026 Swarm Synergy）：\n"
-                "量化评估派生的子智能体（如 Scout/Worker/Reviewer）究竟是在协助主代理向心推进，\n"
+                "量化评估派生的并行子代理（探查/执行/审查等分工）究竟是在帮忙推进，\n"
                 "还是带来了额外的离心发散噪音与沟通损耗。")
         self.cap_lbl = tk.Label(self.head, text="")  # 兼容测试与标量文本读取
 
@@ -2961,11 +3018,12 @@ class PhasePortraitWidget:
         self._tooltip = _ChartTooltip(self.canvas)
         self.canvas.bind("<Configure>", lambda _e: self._redraw())
         self.canvas.bind("<Motion>", self._on_motion)
-        self.canvas.bind("<Leave>", lambda _e: self._tooltip.hide())
-        self.canvas.bind("<Destroy>", lambda _e: self._tooltip.hide())
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind("<Button-4>", lambda e: self._zoom(1.18, e.x, e.y))
-        self.canvas.bind("<Button-5>", lambda e: self._zoom(0.85, e.x, e.y))
+        self.canvas.bind("<Leave>", self._on_canvas_leave)
+        self.canvas.bind("<Destroy>", self._on_canvas_destroy)
+        # Windows 把滚轮事件投给焦点窗口而非指针下窗口，canvas 直绑收不到；
+        # 统一经 platform.bind_mousewheel（Enter 时 bind_all 接管、Leave/Destroy
+        # 解绑——与排名页/报告页 Treeview 滚轮同款用法）
+        self.canvas.bind("<Enter>", self._on_canvas_enter)
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
@@ -2982,7 +3040,6 @@ class PhasePortraitWidget:
         self._data: dict = {}
         self._report: dict = {}
         self._pts: list = []
-        self._aa_imgs: list = []  # 抗锯齿 PhotoImage 引用防 GC
         self._tgt_pos: tuple[float, float] | None = None
         self._att_pos: tuple[float, float] | None = None
         self._regime_boxes: list = []
@@ -2996,33 +3053,15 @@ class PhasePortraitWidget:
     def render(self, dynamics_data: dict, report: dict) -> None:
         self._data = dynamics_data or {}
         self._report = report or {}
-        # 1. 态势徽章（终态感知，自洽反映吸引子逃逸与向心突破）
-        ctype = str(self._data.get("convergence_type") or "").lower()
-        is_trapped = bool(self._data.get("attractor_trapped"))
+        # 切换报告重渲染时，已选质点索引可能超出新轨迹范围 → 复位探针避免悬空
+        if self._selected_node_idx is not None:
+            n_traj = len(self._data.get("trajectory") or [])
+            if not (0 <= self._selected_node_idx < n_traj):
+                self._selected_node_idx = None
+        # 1. 态势徽章（终态判定走共享 SSOT，与报告列表态势着色同源）
         traj = self._data.get("trajectory") or []
-        last_pt = traj[-1] if traj else {}
-        last_evt = str(last_pt.get("event") or "").lower()
-        last_vec = str(last_pt.get("vector") or "").lower()
-        last_ds = float(last_pt.get("semantic_distance", 0.5)) if last_pt else 0.5
-
-        # 检查是否达成逃逸或向心突破：
-        # (A) 显式标为 escaped/breakthrough
-        # (B) 末点带有 breakthrough 事件
-        # (C) 虽曾受困但末尾向心大幅推进且偏离显著消减 (Ds <= 0.45 且 vector 推进)
-        is_escaped = (
-            ctype in ("escaped", "breakthrough")
-            or last_evt == "breakthrough"
-            or (is_trapped and last_vec in ("positive", "convergent") and last_ds <= 0.45)
-        )
-
-        if ctype == "dirac" or (last_ds <= 0.15 and not is_trapped):
-            self.state_badge.config(text="精准收敛 · 达成目标", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
-        elif is_escaped:
-            self.state_badge.config(text="成功破局 · 达成收敛", fg=theme.SUCCESS, bg=theme.DIRAC_CORE_BG)
-        elif ctype == "trapped" or is_trapped:
-            self.state_badge.config(text="陷入泥潭 · 循环死锁", fg=theme.ERROR, bg=theme.ERROR_TINT_BG)
-        else:
-            self.state_badge.config(text="方向发散 · 未能收敛", fg=theme.WARNING, bg=theme.WARN_TINT_BG)
+        state_txt, state_col, state_bg = _DYNAMIC_STATE_BADGES[_dynamics_terminal_state(self._data)]
+        self.state_badge.config(text=state_txt, fg=state_col, bg=state_bg)
 
         # 1.1 李雅普诺夫稳定性徽标
         _, avg_lam, _ = self._compute_lyapunov_stats(traj, self._data.get("lyapunov_exponent"))
@@ -3064,36 +3103,48 @@ class PhasePortraitWidget:
             carnot = float(carnot)
         carnot_pct = int(round(carnot * 100))
         if carnot >= 0.60:
-            carnot_txt = f"卡诺效率 η = {carnot_pct}% · 极少返工"
+            carnot_txt = f"代码有效率 η = {carnot_pct}% · 极少返工"
             carnot_col = theme.SUCCESS
             carnot_bg = theme.DIRAC_CORE_BG
         elif carnot < 0.35:
-            carnot_txt = f"卡诺效率 η = {carnot_pct}% · 废码过多"
+            carnot_txt = f"代码有效率 η = {carnot_pct}% · 废码过多"
             carnot_col = theme.ERROR
             carnot_bg = theme.ERROR_TINT_BG
         else:
-            carnot_txt = f"卡诺效率 η = {carnot_pct}% · 中等返工"
+            carnot_txt = f"代码有效率 η = {carnot_pct}% · 中等返工"
             carnot_col = theme.WARNING
             carnot_bg = theme.WARN_TINT_BG
         self.carnot_badge.config(text=carnot_txt, fg=carnot_col, bg=carnot_bg)
         # 1.4 多智能体协同徽标 (2026 Agent Swarm)
+        # LLM 遥测字段做数值防御（字符串 "82"/None 不崩；synergy_score 缺省或非法
+        # 时隐藏徽标——metrics 层无子代理时不再造数，返回 None）
         swarm = self._data.get("swarm_synergy") or {}
-        n_subs = swarm.get("total_subagents", 0)
+        try:
+            n_subs = int(swarm.get("total_subagents") or 0)
+        except (ValueError, TypeError):
+            n_subs = 0
         if n_subs > 0:
-            s_score = swarm.get("synergy_score", 75.0)
-            if s_score >= 70:
+            try:
+                s_score = float(swarm.get("synergy_score"))
+            except (ValueError, TypeError):
+                s_score = None
+            if s_score is None:
+                self.swarm_badge.config(text="")
+            elif s_score >= 70:
                 s_txt = f"多智能体协同 {s_score:.0f} 分 · 向心增益"
                 s_col = theme.SUCCESS
                 s_bg = theme.DIRAC_CORE_BG
+                self.swarm_badge.config(text=s_txt, fg=s_col, bg=s_bg)
             elif s_score < 40:
                 s_txt = f"多智能体协同 {s_score:.0f} 分 · 冗余耗散"
                 s_col = theme.ERROR
                 s_bg = theme.ERROR_TINT_BG
+                self.swarm_badge.config(text=s_txt, fg=s_col, bg=s_bg)
             else:
                 s_txt = f"多智能体协同 {s_score:.0f} 分 · 常规协同"
                 s_col = theme.WARNING
                 s_bg = theme.WARN_TINT_BG
-            self.swarm_badge.config(text=s_txt, fg=s_col, bg=s_bg)
+                self.swarm_badge.config(text=s_txt, fg=s_col, bg=s_bg)
         else:
             self.swarm_badge.config(text="")
 
@@ -3189,17 +3240,41 @@ class PhasePortraitWidget:
             self._selected_node_idx = (self._selected_node_idx + delta) % n
         self._center_node(self._selected_node_idx)
 
+    def _plot_geometry(self) -> tuple[int, int]:
+        """画布有效 (w, h)：未映射（无头/初建）时回退请求尺寸，统一最小下限。
+
+        _redraw / _zoom / _clamp_pan / _center_node 共用同一来源，避免实际
+        绘制与平移钳位各用一套几何导致缩放锚点漂移。
+        """
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w < 100:
+            w = max(w, self.canvas.winfo_reqwidth(), self._MIN_CANVAS_W)
+        if h < 50:
+            h = max(h, self.canvas.winfo_reqheight(), self._MIN_CANVAS_H)
+        return w, h
+
+    def _plot_size(self) -> tuple[float, float]:
+        """由 _plot_geometry 推导绘图区 (plot_w, plot_h)（扣除四向内边距）。"""
+        w, h = self._plot_geometry()
+        return w - self._PAD_L - self._PAD_R, h - self._PAD_T - self._PAD_B
+
+    def _total_turns(self, traj: list) -> int:
+        """会话总回合数：报告 turns 字段优先，缺失/非法时回退轨迹最大 turn。"""
+        total = self._report.get("turns")
+        if not isinstance(total, (int, float)) or total <= 1:
+            valid = [pt.get("turn") for pt in traj if isinstance(pt.get("turn"), (int, float))]
+            total = max(valid, default=1)
+        return max(1, int(total))
+
     def _center_node(self, idx: int | None = None) -> None:
         if idx is None:
             idx = self._selected_node_idx
         if idx is None or not (0 <= idx < len(self._pts)):
             return
         target_x, target_y = self._pts[idx][:2]
-        w = max(self.canvas.winfo_width(), 600)
-        h = max(self.canvas.winfo_height(), 480)
-        pad_l, pad_t = 68, 38
-        plot_w = w - pad_l - 55
-        plot_h = h - pad_t - 48
+        plot_w, plot_h = self._plot_size()
+        pad_l, pad_t = self._PAD_L, self._PAD_T
         screen_cx = pad_l + plot_w / 2.0
         screen_cy = pad_t + plot_h / 2.0
         dx = screen_cx - target_x
@@ -3230,7 +3305,7 @@ class PhasePortraitWidget:
                 self._clamp_pan()
                 if not getattr(self, "_drag_redraw_pending", False):
                     self._drag_redraw_pending = True
-                    self.canvas.after(16, self._do_drag_redraw)
+                    self._drag_redraw_after = self.canvas.after(16, self._do_drag_redraw)
 
     def _on_pan_end(self, event) -> None:
         self.canvas.config(cursor=CLICK_CURSOR)
@@ -3240,6 +3315,7 @@ class PhasePortraitWidget:
 
     def _do_drag_redraw(self) -> None:
         self._drag_redraw_pending = False
+        self._drag_redraw_after = None
         self._redraw()
 
     def _draw_hud_card(self, c, plot_w: float, plot_h: float, pad_l: float, pad_t: float) -> None:
@@ -3259,7 +3335,7 @@ class PhasePortraitWidget:
         c.create_line(x, y + 15, x, y + 24, fill=theme.ACCENT, width=1.5)
 
         # 2. 悬浮/驻留 HUD 探针卡片（左下角紧凑布局）
-        card_w = 480
+        card_w = min(480, plot_w)  # 窄画布收缩卡宽，防「居中/X」按钮越出画布
         card_h = 96
         cx0 = pad_l + 10
         cy0 = pad_t + plot_h - card_h - 10
@@ -3270,7 +3346,7 @@ class PhasePortraitWidget:
 
         t_val = pt.get("turn")
         u_val = pt.get("user_turn") or pt.get("u")
-        ds_val = float(pt.get("semantic_distance", 0.5))
+        ds_val = metrics.ds_of(pt)
         ed_val = float(pt.get("epistemic_debt", 1.0))
         pot_val = float(pt.get("potential_energy", 0.0))
         reg_val = str(pt.get("regime") or "liquid").lower()
@@ -3278,8 +3354,9 @@ class PhasePortraitWidget:
         vec_val = str(pt.get("vector") or "neutral").lower()
         note_val = str(pt.get("note") or "")
 
-        # 标题栏（纯中文文字，无 emoji）
-        t_desc = f"质点探针 · 第 T{t_val} 轮" + (f" (用户 U{u_val})" if u_val else "")
+        # 标题栏（纯中文文字，无 emoji；turn 缺失时显示 "-" 而非「第 TNone 轮」）
+        t_show = t_val if t_val is not None else "-"
+        t_desc = f"质点探针 · 第 T{t_show} 轮" + (f" (用户 U{u_val})" if u_val else "")
         c.create_text(cx0 + 12, cy0 + 15, text=t_desc, fill=theme.FG_WHITE,
                       font=theme.FONT_UI_BOLD, anchor="w")
 
@@ -3312,7 +3389,7 @@ class PhasePortraitWidget:
         # 行 2：Ds & 推进方向
         delta_ds_str = ""
         if self._selected_node_idx > 0:
-            prev_ds = float(self._pts[self._selected_node_idx - 1][2].get("semantic_distance", 0.5))
+            prev_ds = metrics.ds_of(self._pts[self._selected_node_idx - 1][2])
             dds = ds_val - prev_ds
             delta_ds_str = f" ({'↓' if dds < 0 else '↑'}{abs(dds):.4f})"
         vec_cn = {"positive": "向心推进", "convergent": "向心收敛", "negative": "离心偏离",
@@ -3321,30 +3398,38 @@ class PhasePortraitWidget:
                       text=f"语义偏离 Ds: {ds_val:.4f}{delta_ds_str} · 矢量: {vec_cn}",
                       fill=theme.ACCENT, font=theme.FONT_UI_SMALL, anchor="w")
 
-        # 行 3：物理相态与负债势能
-        reg_cn = {"gas": "高熵气态", "liquid": "凝聚液态", "glass": "自旋玻璃", "crystal": "晶态终态"}.get(reg_val, reg_val)
-        debt_desc = "探查充分" if ed_val <= 1.0 else ("盲区动刀" if ed_val >= 4.0 else "常规推演")
+        # 行 3：阶段与负债势能（平实语）
+        reg_cn = {"gas": "探索期", "liquid": "构建期", "glass": "卡壳期", "crystal": "收尾期"}.get(reg_val, reg_val)
+        debt_desc = "探查充分" if ed_val <= 1.0 else ("没搞清楚就大改" if ed_val >= 4.0 else "常规推演")
         c.create_text(cx0 + 12, cy0 + 56,
-                      text=f"SLDS相态: {reg_cn} · 认知负债 Ed: {ed_val:.2f} ({debt_desc}) · 势能 V: {pot_val:.3f}",
+                      text=f"阶段: {reg_cn} · 认知负债 Ed: {ed_val:.2f} ({debt_desc}) · 势能 V: {pot_val:.3f}",
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
 
-        # 行 4：事件与解读
+        # 行 4：事件与解读（事件名转中文，与悬浮 Tooltip 的胶囊文案风格统一，无方括号噪音）
         note_display = note_val if len(note_val) <= 40 else (note_val[:38] + "…")
-        evt_badge = f"[{evt_val}] " if evt_val != "normal" else ""
+        evt_cn = {
+            "retry_loop": "重试死锁", "test_fail": "测试报错",
+            "compaction": "上下文压缩", "breakthrough": "关键突破",
+        }.get(evt_val)
+        detail_parts = [p for p in (evt_cn, note_display) if p]
         c.create_text(cx0 + 12, cy0 + 76,
-                      text=f"复盘解读: {evt_badge}{note_display}",
+                      text=f"复盘解读: {' · '.join(detail_parts)}",
                       fill=theme.FG_WHITE, font=theme.FONT_UI_SMALL, anchor="w")
     @staticmethod
     def _calc_subagents(pt: dict) -> list[dict]:
-        """提取或根据事实推导节点的子智能体多体协同任务。"""
+        """提取或根据事实推导节点的并行子代理分工。"""
         subs = pt.get("subagents")
         if isinstance(subs, list) and subs:
             return subs
         note = str(pt.get("note") or "")
         if any(kw in note for kw in ("探查", "子任务", "子代理", "探针", "扫描", "并行", "检索")):
+            # 视觉层示意卫星：仅据笔记关键词推断，与 metrics 层「不造数」口径区分，
+            # 标 inferred 供 tooltip 加「据笔记推断」前缀（示意图 vs 真实遥测）
             return [
-                {"name": "Scout", "role": "空间探查", "semantic_delta": -0.04, "status": "convergent"},
-                {"name": "Worker", "role": "局部实现", "semantic_delta": 0.01, "status": "divergent"},
+                {"name": "探查", "role": "查找相关代码", "semantic_delta": -0.04,
+                 "status": "convergent", "inferred": True},
+                {"name": "执行", "role": "动手实现修改", "semantic_delta": 0.01,
+                 "status": "divergent", "inferred": True},
             ]
         return []
 
@@ -3359,8 +3444,8 @@ class PhasePortraitWidget:
                 lam = -0.05
             else:
                 prev = traj[i - 1]
-                ds_cur = max(0.0, min(1.0, float(n.get("semantic_distance", 0.5))))
-                ds_prev = max(0.0, min(1.0, float(prev.get("semantic_distance", 0.5))))
+                ds_cur = metrics.ds_of(n)
+                ds_prev = metrics.ds_of(prev)
                 delta_ds = ds_cur - ds_prev
                 evt = str(n.get("event") or "").lower()
                 vec = str(n.get("vector") or "").lower()
@@ -3383,8 +3468,8 @@ class PhasePortraitWidget:
         else:
             avg_lam = sum(lam_list) / len(lam_list) if lam_list else -0.10
 
-        max_ds = max((float(pt.get("semantic_distance", 0.5)) for pt in traj), default=0.5)
-        last_ds = float(traj[-1].get("semantic_distance", 0.5)) if traj else 0.5
+        max_ds = max((metrics.ds_of(pt) for pt in traj), default=0.5)
+        last_ds = metrics.ds_of(traj[-1]) if traj else 0.5
         if max_ds >= 0.78 and last_ds <= 0.45:
             horizon_status = "intercepted"
         elif last_ds >= 0.82 and avg_lam >= 0:
@@ -3477,7 +3562,7 @@ class PhasePortraitWidget:
                 r_title, r_desc, r_col = reg_names.get(r_reg, ("常规阶段", "", theme.MUTED))
                 lines = [
                     f"阶段演化 · 回合 T{r_turn}",
-                    f"当前相态: {r_title}",
+                    f"当前阶段: {r_title}",
                     f"阶段特征: {r_desc}",
                     f"认知负债: Ed = {r_ed:.2f} · {'探查充分' if r_ed <= 1.0 else ('常规推演' if r_ed < 4.0 else '盲区动刀')}",
                 ]
@@ -3512,7 +3597,7 @@ class PhasePortraitWidget:
             t = pt.get("turn", "-")
             t_num = pt.get("turn")
             u = pt.get("user_turn") or pt.get("u")
-            ds = pt.get("semantic_distance", 0.5)
+            ds = metrics.ds_of(pt)
             vec = str(pt.get("vector") or "neutral").lower()
             event_tag = str(pt.get("event") or "normal").lower()
             note = pt.get("note", "")
@@ -3559,29 +3644,44 @@ class PhasePortraitWidget:
                 pe = metrics.compute_waddington_potential(ds)
             else:
                 pe = float(pe)
-            pe_desc = "狄拉克势阱" if pe < -0.8 else ("平庸吸引盆" if ds > 0.75 else ("鞍点势垒" if abs(ds - 0.55) < 0.08 else "过渡区"))
+            pe_desc = "接近目标（稳定区）" if pe < -0.8 else (
+                "惯性套路区（偏离目标）" if ds > 0.75 else (
+                    "关键转折关口" if abs(ds - 0.55) < 0.08 else "过渡区"))
             pe_col = theme.SUCCESS if pe < -0.6 else (theme.ERROR if pe > 0.0 else theme.MUTED)
             lines.append(f"势能高程: V = {pe:+.2f} · {pe_desc}")
             colors.append(pe_col)
 
             # 认知负债 Ed
             ed = float(pt.get("epistemic_debt", 1.0))
-            ed_desc = "探查充分" if ed <= 1.0 else ("常规推演" if ed < 4.0 else "盲区动刀")
+            ed_desc = "探查充分" if ed <= 1.0 else ("常规推演" if ed < 4.0 else "没搞清楚就大改")
             ed_col = theme.DEBT_GLOW_SAFE if ed <= 1.0 else (theme.DEBT_GLOW_DANGER if ed >= 4.0 else theme.MUTED)
             lines.append(f"认知负债: Ed = {ed:.2f} · {ed_desc}")
             colors.append(ed_col)
 
-            # 动力学相态
+            # 动力学阶段（平实语：探索/构建/卡壳/收尾）
             reg = str(pt.get("regime") or "liquid").lower()
             reg_names = {
-                "gas": ("高熵气态", theme.REGIME_GAS),
-                "liquid": ("凝聚液态", theme.REGIME_LIQUID),
-                "glass": ("自旋玻璃态", theme.REGIME_GLASS),
-                "crystal": ("晶态终态", theme.REGIME_CRYSTAL),
+                "gas": ("探索期", theme.REGIME_GAS),
+                "liquid": ("构建期", theme.REGIME_LIQUID),
+                "glass": ("卡壳期", theme.REGIME_GLASS),
+                "crystal": ("收尾期", theme.REGIME_CRYSTAL),
             }
-            reg_name, reg_col = reg_names.get(reg, ("常规液态", theme.MUTED))
-            lines.append(f"动力学相态: {reg_name}")
+            reg_name, reg_col = reg_names.get(reg, ("构建期", theme.MUTED))
+            lines.append(f"当前阶段: {reg_name}")
             colors.append(reg_col)
+
+            # 转折触发者（dyn-v4 遥测新增：区分用户推动 / AI 自主 / 环境冲击）
+            trig = str(pt.get("trigger") or "").lower()
+            trig_names = {
+                "user": ("用户消息推动", theme.ACCENT),
+                "ai": ("AI 自主决策", theme.WARNING),
+                "env": ("报错或外部事件驱动", theme.ERROR),
+                "none": ("常规推进", theme.MUTED),
+            }
+            if trig in trig_names:
+                trig_name, trig_col = trig_names[trig]
+                lines.append(f"本轮驱动: {trig_name}")
+                colors.append(trig_col)
 
             # 局部瞬时阻尼比谱
             dspec = self._data.get("damping_spectrum") or {}
@@ -3608,15 +3708,15 @@ class PhasePortraitWidget:
                 lines.append(f"连锁破坏: 修改 {s_file} (T{s_turn}) 导致后续报错 · 冲击半径 {b_rad}")
                 colors.append(theme.WATERBED_ARC)
             elif t_num in wb_turns or (t != "-" and str(t).isdigit() and int(t) in wb_turns):
-                lines.append("控制论警示: 水床效应扰动 · 修复引发非关联报错")
+                lines.append("警示: 按下葫芦浮起瓢 · 修复一处引发别处报错")
                 colors.append(theme.WATERBED_ARC)
             if abs(ds - 0.55) <= 0.04:
-                lines.append("鞍点势垒: 处于势垒脊线")
+                lines.append("位置: 关键转折关口（Ds≈0.55 分水岭）")
                 colors.append(theme.PHASE_BARRIER_CREST)
 
             # 双信源信息流：信噪比与外部控制冲量
             snr, impulse = self._derive_flux_and_snr(pt)
-            lines.append(f"信噪比: {snr:.0%} ({'高信噪比/高内聚' if snr >= 0.7 else ('低信噪比/高熵噪声' if snr < 0.35 else '中等')})")
+            lines.append(f"信噪比: {snr:.0%} ({'高信噪比/高内聚' if snr >= 0.7 else ('噪声偏多' if snr < 0.35 else '中等')})")
             colors.append(theme.SUCCESS if snr >= 0.7 else (theme.ERROR if snr < 0.35 else theme.MUTED))
             if impulse:
                 flux_lbl = {"high": "关键纠偏", "mid": "常规指令", "low": "微弱扰动"}.get(impulse.get("flux"), "外部干预")
@@ -3630,18 +3730,19 @@ class PhasePortraitWidget:
             lines.append(f"改动稳定性: λ = {lam_val:+.2f} · {lam_desc}")
             colors.append(lam_col)
 
-            # 多体系统：子智能体协同态势
+            # 多体系统：子智能体协同态势（关键词推断的示意卫星须注明非真实遥测）
             subs = self._calc_subagents(pt)
             if subs:
-                lines.append(f"多体协同: 派生 {len(subs)} 个并行子智能体")
+                inferred = any(s.get("inferred") for s in subs)
+                lines.append(f"并行子代理{'（据笔记推断）' if inferred else ''}: 共 {len(subs)} 个分工协作")
                 colors.append(theme.CHART_PALETTE[4])
                 for sub in subs[:3]:
-                    s_name = sub.get("name", "Sub")
+                    s_name = self._sub_display_name(sub)
                     s_role = sub.get("role", "任务")
                     s_delta = sub.get("semantic_delta", 0.0)
-                    s_stat = "向心收敛" if str(sub.get("status") or "").lower() == "convergent" else "发散噪声"
-                    s_col = theme.SUCCESS if s_stat == "向心收敛" else theme.ERROR
-                    lines.append(f"  • {s_name} · {s_role} · ΔDs={s_delta:+.2f} · {s_stat}")
+                    s_stat = "帮忙推进" if str(sub.get("status") or "").lower() == "convergent" else "越帮越忙"
+                    s_col = theme.SUCCESS if s_stat == "帮忙推进" else theme.ERROR
+                    lines.append(f"  • {s_name} · {s_role} · 偏离变化 {s_delta:+.2f} · {s_stat}")
                     colors.append(s_col)
 
             if event_tag in event_map:
@@ -3660,7 +3761,7 @@ class PhasePortraitWidget:
             text_hit = (tgt_x + 15 <= event.x <= tgt_x + 190) and abs(event.y - tgt_y) <= 18
             if d_circle <= 28 or text_hit:
                 lines = [
-                    "狄拉克目标点 · 零熵理想态",
+                    "目标点 · 完全契合用户意图",
                     "状态特征: 契合真实意图 · 语义距离 0.00",
                     "动力学定义: 业务意图形式化收敛终点",
                     "工程含义: 逻辑精炼紧凑，无多余冗余生成",
@@ -3677,19 +3778,19 @@ class PhasePortraitWidget:
             text_hit = abs(event.x - att_x) <= 110 and abs(event.y - ty_mid) <= 18
             if d_circle <= 54 or text_hit:
                 lines = [
-                    "平庸代码吸引子 · 惯性势阱",
-                    "状态特征: 高熵先验势阱 · 偏离危险区 · Ds 约 0.86",
+                    "惯性套路区 · 套路化生成",
+                    "状态特征: 套路化生成 · 偏离危险区 · Ds 约 0.86",
                     "动力学定义: 预训练模型的面条冗余惯性黑洞",
                     "工程含义: 盲目机械修改、过度封装、局部重试死锁",
                 ]
                 colors = [theme.ERROR, theme.FG_WHITE, theme.MUTED, theme.MUTED]
                 self._tooltip.show(event.x, event.y, lines, colors)
                 return
-        # 4. 检测水床扰动微型胶囊与弧线
+        # 4. 检测连锁反应（水床弧线）微型胶囊与弧线
         for bx0, bx1, by0, by1, wb_t in getattr(self, "_waterbed_boxes", []):
             if bx0 <= event.x <= bx1 and by0 - 6 <= event.y <= by1 + 6:
                 lines = [
-                    "控制论水床效应 · 连锁破坏",
+                    "连锁破坏 · 按下葫芦浮起瓢",
                     f"触发位置: 助手第 {wb_t} 轮",
                     "现象特征: 刚刚修复了前一个需求，却直接引发其他非关联模块报错挂掉",
                     "工程根因: 代码修改缺乏全局边界隔离，拆东墙补西墙",
@@ -3707,7 +3808,7 @@ class PhasePortraitWidget:
             if capsule_hit or line_hit:
                 status_desc = "已成功跨越 · 进入顺畅收敛通道" if is_crossed else "尚未跨越 · 处于核心理解阻碍期"
                 lines = [
-                    "需求理解分水岭 · Waddington 鞍点势垒",
+                    "需求理解分水岭 · 关键转折关口",
                     "分界线: 语义偏离度 0.55",
                     f"当前状态: {status_desc}",
                     "工程意义: 整个会话中最难啃的技术理解卡点，跨过后代码迅速收敛",
@@ -3784,11 +3885,8 @@ class PhasePortraitWidget:
         new_scale = max(1.0, min(5.0, self._zoom_scale * factor))
         if abs(new_scale - self._zoom_scale) < 0.005:
             return
-        w = max(self.canvas.winfo_width(), 600)
-        h = max(self.canvas.winfo_height(), 480)
-        pad_l, pad_t = 68, 38
-        plot_w = w - pad_l - 55
-        plot_h = h - pad_t - 48
+        plot_w, plot_h = self._plot_size()
+        pad_l, pad_t = self._PAD_L, self._PAD_T
         if new_scale <= 1.01:
             self._zoom_scale = 1.0
             self._pan_x = 0.0
@@ -3815,17 +3913,64 @@ class PhasePortraitWidget:
             self.zoom_lbl.config(text="100%")
         self._redraw()
 
-    def _on_mousewheel(self, event) -> None:
-        factor = 1.15 if (getattr(event, "delta", 0) > 0) else 0.87
+    def _on_canvas_enter(self, _event=None) -> None:
+        # Windows 滚轮事件投给焦点窗口，canvas 直绑收不到 → Enter 时经 helper
+        # bind_all 接管（沿用排名页/报告页 Treeview 滚轮的模式）
+        from .platform import bind_mousewheel
+        if self._unbind_wheel is None:
+            self._unbind_wheel = bind_mousewheel(self.canvas, self._on_mousewheel)
+
+    def _on_canvas_leave(self, _event=None) -> None:
+        self._tooltip.hide()
+        if self._unbind_wheel is not None:
+            try:
+                self._unbind_wheel()
+            except tk.TclError:
+                pass
+            self._unbind_wheel = None
+
+    def _on_canvas_destroy(self, _event=None) -> None:
+        """canvas 销毁：藏 Tooltip、解除 bind_all 滚轮接管并取消未决的节流定时器。
+
+        bind_all 的滚轮 handler 闭包引用 self，widget 销毁后不解绑会泄漏并劫持
+        同应用其他组件的滚轮；after(16) 节流定时器同理需要 after_cancel。
+        """
+        try:
+            self._tooltip.hide()
+        except tk.TclError:
+            pass  # tooltip 的 Toplevel 可能已随父窗口先行销毁
+        if self._unbind_wheel is not None:
+            try:
+                self._unbind_wheel()
+            except tk.TclError:
+                pass
+            self._unbind_wheel = None
+        for attr in ("_drag_redraw_after", "_wheel_zoom_after"):
+            aid = getattr(self, attr, None)
+            if aid is not None:
+                try:
+                    self.canvas.after_cancel(aid)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
+
+    def _on_mousewheel(self, units: int) -> None:
+        # bind_mousewheel 单位约定（三平台统一）：上滚 = 负值（win/mac 一格
+        # -delta/120，linux Button-4 → -1）。「上滚=放大、下滚=缩小」
+        factor = 1.15 if units < 0 else 0.87
         self._wheel_zoom_accum = getattr(self, "_wheel_zoom_accum", 1.0) * factor
-        self._wheel_cx = getattr(event, "x", None)
-        self._wheel_cy = getattr(event, "y", None)
+        try:
+            self._wheel_cx = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+            self._wheel_cy = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+        except tk.TclError:
+            self._wheel_cx = self._wheel_cy = None
         if not getattr(self, "_wheel_zoom_pending", False):
             self._wheel_zoom_pending = True
-            self.canvas.after(16, self._apply_wheel_zoom)
+            self._wheel_zoom_after = self.canvas.after(16, self._apply_wheel_zoom)
 
     def _apply_wheel_zoom(self) -> None:
         self._wheel_zoom_pending = False
+        self._wheel_zoom_after = None
         factor = getattr(self, "_wheel_zoom_accum", 1.0)
         self._wheel_zoom_accum = 1.0
         self._zoom(factor, getattr(self, "_wheel_cx", None), getattr(self, "_wheel_cy", None))
@@ -3834,6 +3979,8 @@ class PhasePortraitWidget:
         # 1. 检测点击 HUD 探针卡片按钮（带 4px 容差补偿，确保边缘点击 100% 命中）
         for bx0, by0, bx1, by1, act in getattr(self, "_hud_btns", []):
             if (bx0 - 4) <= event.x <= (bx1 + 4) and (by0 - 4) <= event.y <= (by1 + 4):
+                # HUD 步进后保留 ←/→/Esc 键盘巡航的焦点链（否则焦点留在别处）
+                self.canvas.focus_set()
                 if act == "prev":
                     self._step_node(-1)
                 elif act == "next":
@@ -3851,10 +3998,10 @@ class PhasePortraitWidget:
         ):
             return
 
-        # 2. 检测是否单击质点节点进入探针巡航
+        # 2. 检测是否单击质点节点进入探针巡航（命中半径与悬浮高亮 24px 对齐）
         for idx, item in enumerate(self._pts):
             nx, ny = item[0], item[1]
-            if math.hypot(event.x - nx, event.y - ny) <= 14:
+            if math.hypot(event.x - nx, event.y - ny) <= 24:
                 self._select_node(idx)
                 return
 
@@ -3880,6 +4027,12 @@ class PhasePortraitWidget:
             self._hud_card_box[2] <= event.y <= self._hud_card_box[3]
         ):
             return
+        # 双击命中质点 → 仅选中进入探针巡航，不触发视口复位
+        for idx, item in enumerate(self._pts):
+            nx, ny = item[0], item[1]
+            if math.hypot(event.x - nx, event.y - ny) <= 24:
+                self._select_node(idx)
+                return
         self._reset_zoom()
 
     def _on_drag(self, event) -> None:
@@ -3895,7 +4048,7 @@ class PhasePortraitWidget:
                 self._clamp_pan()
                 if not getattr(self, "_drag_redraw_pending", False):
                     self._drag_redraw_pending = True
-                    self.canvas.after(16, self._do_drag_redraw)
+                    self._drag_redraw_after = self.canvas.after(16, self._do_drag_redraw)
 
     def _on_release(self, event) -> None:
         self.canvas.config(cursor=CLICK_CURSOR)
@@ -3909,10 +4062,7 @@ class PhasePortraitWidget:
             self._pan_y = 0.0
             return
         if plot_w is None or plot_h is None:
-            w = max(self.canvas.winfo_width(), 600)
-            h = max(self.canvas.winfo_height(), 480)
-            plot_w = w - 68 - 55
-            plot_h = h - 38 - 48
+            plot_w, plot_h = self._plot_size()
         min_pan_x = plot_w * (1.0 - self._zoom_scale) - 80
         max_pan_x = 80
         min_pan_y = plot_h * (1.0 - self._zoom_scale) - 80
@@ -3923,7 +4073,6 @@ class PhasePortraitWidget:
         c = self.canvas
         c.delete("all")
         self._pts.clear()
-        self._aa_imgs.clear()
         self._regime_boxes.clear()
         self._waterbed_boxes.clear()
         self._impulse_boxes.clear()
@@ -3931,23 +4080,12 @@ class PhasePortraitWidget:
         self._barrier_box = None
         self._horizon_box = None
         self._hud_card_box = None
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w < 100:
-            w = max(w, c.winfo_reqwidth(), 600)
-        if h < 50:
-            h = max(h, c.winfo_reqheight(), 480)
-        pad_l, pad_r, pad_t, pad_b = 68, 55, 38, 48
-        plot_w = w - pad_l - pad_r
-        plot_h = h - pad_t - pad_b
+        pad_l, pad_r, pad_t, pad_b = self._PAD_L, self._PAD_R, self._PAD_T, self._PAD_B
+        plot_w, plot_h = self._plot_size()
         if plot_w <= 10 or plot_h <= 10:
             return
         raw_traj = list(self._data.get("trajectory") or [])
-        total_turns = self._report.get("turns")
-        if not isinstance(total_turns, (int, float)) or total_turns <= 1:
-            valid_turns = [pt.get("turn") for pt in raw_traj if isinstance(pt.get("turn"), (int, float))]
-            total_turns = max(valid_turns, default=1)
-        total_turns = max(1, int(total_turns))
+        total_turns = self._total_turns(raw_traj)
 
         # 防御性终态事实锚定：若模型在中间突变点提前闭合数组，自动补齐真实会话终态节点
         traj = list(raw_traj)
@@ -4033,6 +4171,54 @@ class PhasePortraitWidget:
         plot_w_eff = plot_w * zoom
         plot_h_eff = plot_h * zoom
 
+        self._draw_manifold_y_axis(c, plot_w, plot_h, pad_l, pad_t, pan_y, plot_h_eff)
+        self._draw_manifold_horizon(c, plot_w, plot_h, pad_l, pad_t, traj, pan_x, plot_w_eff)
+        self._draw_manifold_axis_legend(c, plot_w, plot_h, pad_l, pad_t)
+
+        aa_items: list = []
+
+        # (A0) Waddington 双阱连续势能等高线
+        self._draw_waddington_landscape(pad_l, pad_t, plot_w, plot_h, aa_items, zoom, pan_x, pan_y)
+
+        # (A1) 鞍点势垒警戒脊线
+        self._draw_manifold_barrier(c, pad_l, pad_t, plot_h, pan_x, plot_w_eff)
+
+        # (A2) 理想向心收敛走廊参考线
+        corridor_pts = [
+            (pad_l + pan_x + 0.85 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.95),
+            (pad_l + pan_x + 0.50 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.92),
+            (pad_l + pan_x + 0.22 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.90),
+            (pad_l + pan_x + 0.05 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.88),
+        ]
+        aa_items.append(("line", corridor_pts, theme.PHASE_CORRIDOR, 1))
+
+        # (C) 平庸代码吸引子 + (D) 狄拉克目标点
+        self._draw_manifold_poles(aa_items, pad_l, pad_t, pan_x, pan_y, zoom, plot_w_eff, plot_h_eff)
+
+        # (E) 计算真实会话动力学轨迹节点与连线
+        total_turns = self._total_turns(traj)
+        self._calc_manifold_pts(traj, pad_l, pad_t, pan_x, pan_y, zoom, plot_w_eff, plot_h_eff, total_turns)
+        self._draw_manifold_links(aa_items)
+        impulse_dashed_lines, key_impulses = self._collect_manifold_impulses()
+        # (3) 多体系统卫星微质点群 (Subagent Satellites)
+        self._draw_satellite_dots(aa_items, 20)
+        self._draw_manifold_halos(aa_items)
+
+        self._aa_layer_flat(c, aa_items, "aa_data")
+        # 控制论水床效应扰动弧
+        self._draw_waterbed_arcs(c, traj)
+        for lx0, ly0, lx1, ly1, col, d_pat, lw in impulse_dashed_lines:
+            c.create_line(lx0, ly0, lx1, ly1, fill=col, dash=d_pat, width=lw)
+
+        self._draw_manifold_labels(c, pad_t, key_impulses)
+        if not traj:
+            c.create_text(pad_l + plot_w / 2, pad_t + plot_h / 2,
+                          text="（本动力学报告无细分轨迹采样数据）", fill=theme.MUTED)
+        self._draw_regime_band(c, pad_l, pad_t, plot_w, plot_h, traj)
+        self._draw_hud_card(c, plot_w, plot_h, pad_l, pad_t)
+
+    def _draw_manifold_y_axis(self, c, plot_w, plot_h, pad_l, pad_t, pan_y, plot_h_eff) -> None:
+        """(Y 轴) 物理成本刻度虚线与标签。"""
         cost_str = str(self._report.get("cost_display") or "")
         m_cost = re.search(r"(\d+(?:\.\d+)?)", cost_str)
         max_cost_val = float(m_cost.group(1)) if m_cost else 10.0
@@ -4050,7 +4236,8 @@ class PhasePortraitWidget:
                 c.create_text(pad_l - 8, gy, text=val_txt, fill=theme.MUTED,
                               font=theme.FONT_UI_SMALL, anchor="e")
 
-        # 关键状态分界线
+    def _draw_manifold_horizon(self, c, plot_w, plot_h, pad_l, pad_t, traj, pan_x, plot_w_eff) -> None:
+        """关键状态分界线与止损红线（Ds=0.82 不可逆视界）及拦截状态胶囊。"""
         line_target_x = pad_l + pan_x + 0.10 * plot_w_eff
         line_danger_x = pad_l + pan_x + 0.90 * plot_w_eff
         c.create_line(line_target_x, pad_t, line_target_x, pad_t + plot_h, fill=theme.PHASE_GRID_DIRAC, dash=(1, 4))
@@ -4077,6 +4264,8 @@ class PhasePortraitWidget:
             c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt, fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
             self._horizon_box = (bx0, bx1, by0, by1, line_horizon_x, pad_t, plot_h, lbl_txt, "breached")
 
+    def _draw_manifold_axis_legend(self, c, plot_w, plot_h, pad_l, pad_t) -> None:
+        """X 轴底线、顶部图例说明 (Legend) 与底部 X 轴说明。"""
         # X 轴底线
         c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
 
@@ -4088,9 +4277,9 @@ class PhasePortraitWidget:
         c.create_line(leg_x + 80, leg_y, leg_x + 98, leg_y, fill=theme.ERROR, width=2)
         c.create_text(leg_x + 102, leg_y, text="离心偏离", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_oval(leg_x + 160, leg_y - 4, leg_x + 168, leg_y + 4, outline=theme.DIRAC_WELL_BORDER, fill=theme.DIRAC_CORE_BG, width=1)
-        c.create_text(leg_x + 172, leg_y, text="狄拉克目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(leg_x + 172, leg_y, text="目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_oval(leg_x + 260, leg_y - 4, leg_x + 268, leg_y + 4, outline=theme.ATTRACTOR_BASIN_BORDER, fill=theme.ATTRACTOR_RINGS[0], width=1)
-        c.create_text(leg_x + 272, leg_y, text="平庸代码吸引子", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(leg_x + 272, leg_y, text="惯性套路区", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
 
         # 底部 X 轴说明
         c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
@@ -4101,19 +4290,15 @@ class PhasePortraitWidget:
         c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
 
-        aa_items: list = []
-
-        # (A0) Waddington 双阱连续势能等高线
-        self._draw_waddington_landscape(pad_l, pad_t, plot_w, plot_h, aa_items, zoom, pan_x, pan_y)
-
-        # (A1) 鞍点势垒警戒脊线
+    def _draw_manifold_barrier(self, c, pad_l, pad_t, plot_h, pan_x, plot_w_eff) -> None:
+        """(A1) 鞍点势垒警戒脊线与突破/未突破状态胶囊。"""
         line_barrier_x = pad_l + pan_x + 0.55 * plot_w_eff
         c.create_line(line_barrier_x, pad_t + 18, line_barrier_x, pad_t + plot_h - 18,
                       fill=theme.PHASE_BARRIER_CREST, dash=(2, 4), width=1)
         barrier_crossed = bool(self._data.get("barrier_crossed"))
         barrier_turn = self._data.get("barrier_turn")
         if barrier_crossed:
-            b_txt = f"势垒突破 T{barrier_turn}" if barrier_turn else "势垒突破"
+            b_txt = f"转折突破 T{barrier_turn}" if barrier_turn else "转折突破"
             bw = len(b_txt) * 9 + 16
             bx0, by0, bx1, by1 = line_barrier_x - bw / 2, pad_t + 18, line_barrier_x + bw / 2, pad_t + 36
             c.create_rectangle(bx0, by0, bx1, by1, fill=theme.CARD_HEADER_BG, outline=theme.PHASE_BARRIER_CREST, width=1)
@@ -4121,7 +4306,7 @@ class PhasePortraitWidget:
                           fill=theme.PHASE_BARRIER_CREST, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
             self._barrier_box = (bx0, bx1, by0, by1, line_barrier_x, pad_t, plot_h, b_txt, True)
         else:
-            b_txt = "鞍点势垒 · 0.55"
+            b_txt = "转折关口 · Ds 0.55"
             bw = len(b_txt) * 8 + 14
             bx0, by0, bx1, by1 = line_barrier_x - bw / 2, pad_t + 18, line_barrier_x + bw / 2, pad_t + 36
             c.create_rectangle(bx0, by0, bx1, by1, fill=theme.CARD_HEADER_BG, outline=theme.BORDER, width=1)
@@ -4129,16 +4314,8 @@ class PhasePortraitWidget:
                           fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
             self._barrier_box = (bx0, bx1, by0, by1, line_barrier_x, pad_t, plot_h, b_txt, False)
 
-        # (A2) 理想向心收敛走廊参考线
-        corridor_pts = [
-            (pad_l + pan_x + 0.85 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.95),
-            (pad_l + pan_x + 0.50 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.92),
-            (pad_l + pan_x + 0.22 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.90),
-            (pad_l + pan_x + 0.05 * plot_w_eff, pad_t + pan_y + plot_h_eff * 0.88),
-        ]
-        aa_items.append(("line", corridor_pts, theme.PHASE_CORRIDOR, 1))
-
-        # (C) 平庸代码吸引子引力势阱与黑洞同心圆
+    def _draw_manifold_poles(self, aa_items, pad_l, pad_t, pan_x, pan_y, zoom, plot_w_eff, plot_h_eff) -> None:
+        """(C) 平庸代码吸引子引力势阱同心圆 + (D) 狄拉克目标点。"""
         att_x = pad_l + pan_x + plot_w_eff * 0.86
         att_y = pad_t + pan_y + 90 * zoom
         self._att_pos = (att_x, att_y)
@@ -4149,7 +4326,6 @@ class PhasePortraitWidget:
             aa_items.append(("dot", att_x, att_y, r * zoom, col, theme.ATTRACTOR_RINGS[1], 1))
         aa_items.append(("dot", att_x, att_y, 4 * zoom, theme.ERROR, theme.ERROR, 1))
 
-        # (D) 狄拉克目标点
         tgt_x = pad_l + pan_x + plot_w_eff * 0.05
         tgt_y = pad_t + pan_y + plot_h_eff * 0.88
         self._tgt_pos = (tgt_x, tgt_y)
@@ -4158,127 +4334,169 @@ class PhasePortraitWidget:
         aa_items.append(("dot", tgt_x, tgt_y, 16 * zoom, theme.DIRAC_CORE_BG, theme.SUCCESS, 2))
         aa_items.append(("dot", tgt_x, tgt_y, 5 * zoom, theme.SUCCESS, theme.SUCCESS, 1))
 
-        # (E) 计算真实会话动力学轨迹节点
+    def _calc_manifold_pts(self, traj, pad_l, pad_t, pan_x, pan_y, zoom, plot_w_eff, plot_h_eff, total_turns) -> None:
+        """(E) 计算轨迹节点屏幕坐标并填充 self._pts（LLM 遥测数值容错）。"""
         n = len(traj)
-        total_turns = self._report.get("turns")
-        if not isinstance(total_turns, (int, float)) or total_turns <= 1:
-            valid_turns = [pt.get("turn") for pt in traj if isinstance(pt.get("turn"), (int, float))]
-            total_turns = max(valid_turns, default=1)
-        total_turns = max(1, int(total_turns))
+        for idx, pt in enumerate(traj):
+            try:
+                ds = metrics.ds_of(pt)
+            except (ValueError, TypeError):
+                ds = 0.5
+            px = pad_l + pan_x + ds * plot_w_eff
+            t_val = pt.get("turn")
+            if isinstance(t_val, (int, float)) and total_turns > 1:
+                frac = max(0.0, min(1.0, (float(t_val) - 1.0) / (float(total_turns) - 1.0)))
+            else:
+                frac = idx / (n - 1) if n > 1 else 0.5
+            py = (pad_t + pan_y + plot_h_eff) - frac * plot_h_eff * 0.82 - 8 * zoom
+            offset_y = -14 if (idx % 2 == 0 and py > pad_t + 28) else 14
+            self._pts.append((px, py, pt, offset_y))
 
-        if traj:
-            for idx, pt in enumerate(traj):
-                ds = max(0.0, min(1.0, float(pt.get("semantic_distance", 0.5))))
-                px = pad_l + pan_x + ds * plot_w_eff
-                t_val = pt.get("turn")
-                if isinstance(t_val, (int, float)) and total_turns > 1:
-                    frac = max(0.0, min(1.0, (float(t_val) - 1.0) / (float(total_turns) - 1.0)))
-                else:
-                    frac = idx / (n - 1) if n > 1 else 0.5
-                py = (pad_t + pan_y + plot_h_eff) - frac * plot_h_eff * 0.82 - 8 * zoom
-                offset_y = -14 if (idx % 2 == 0 and py > pad_t + 28) else 14
-                self._pts.append((px, py, pt, offset_y))
-            for i in range(1, len(self._pts)):
-                x0, y0, prev_pt = self._pts[i - 1][:3]
-                x1, y1, cur_pt = self._pts[i][:3]
-                snr_prev, _ = self._derive_flux_and_snr(prev_pt)
-                snr_cur, _ = self._derive_flux_and_snr(cur_pt, prev_pt)
-                avg_snr = (snr_prev + snr_cur) / 2.0
-                if avg_snr >= 0.60:
-                    glow_lw = max(4, int(round(avg_snr * 8)))
-                    aa_items.append(("line", [(x0, y0), (x1, y1)], theme.DIRAC_WELL_BORDER, glow_lw))
-                elif avg_snr < 0.35:
-                    aa_items.append(("line", [(x0, y0), (x1, y1)], theme.ATTRACTOR_BASIN_BORDER, 3))
+    def _draw_manifold_links(self, aa_items) -> None:
+        """轨迹连线：SNR 光晕底衬层 + 矢量着色段与推进箭头。"""
+        for i in range(1, len(self._pts)):
+            x0, y0, prev_pt = self._pts[i - 1][:3]
+            x1, y1, cur_pt = self._pts[i][:3]
+            snr_prev, _ = self._derive_flux_and_snr(prev_pt)
+            snr_cur, _ = self._derive_flux_and_snr(cur_pt, prev_pt)
+            avg_snr = (snr_prev + snr_cur) / 2.0
+            if avg_snr >= 0.60:
+                glow_lw = max(4, int(round(avg_snr * 8)))
+                aa_items.append(("line", [(x0, y0), (x1, y1)], theme.DIRAC_WELL_BORDER, glow_lw))
+            elif avg_snr < 0.35:
+                aa_items.append(("line", [(x0, y0), (x1, y1)], theme.ATTRACTOR_BASIN_BORDER, 3))
 
-            for i in range(1, len(self._pts)):
-                x0, y0, prev_pt = self._pts[i - 1][:3]
-                x1, y1, cur_pt = self._pts[i][:3]
-                prev_ds = prev_pt.get("semantic_distance", 0.5)
-                cur_ds = cur_pt.get("semantic_distance", 0.5)
-                delta_ds = cur_ds - prev_ds
-                vec = str(cur_pt.get("vector") or "neutral").lower()
+        for i in range(1, len(self._pts)):
+            x0, y0, prev_pt = self._pts[i - 1][:3]
+            x1, y1, cur_pt = self._pts[i][:3]
+            prev_ds = metrics.ds_of(prev_pt)
+            cur_ds = metrics.ds_of(cur_pt)
+            delta_ds = cur_ds - prev_ds
+            vec = str(cur_pt.get("vector") or "neutral").lower()
 
-                if vec in ("negative", "divergent", "trapped") or delta_ds > 0.02:
-                    col = theme.ERROR
-                    lw = 3
-                elif vec in ("positive", "convergent") or delta_ds < -0.02:
-                    col = theme.SUCCESS
-                    lw = 3
-                else:
-                    col = theme.WARNING
-                    lw = 2
-                aa_items.append(("line", [(x0, y0), (x1, y1)], col, lw))
-                poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
-                if poly:
-                    aa_items.append(("polygon", poly, col, col))
-            # (2) 人类信源信息注入冲量引导线（仅对最具向心突破意义的至多 2 条关键纠偏绘制高亮指引线，杜绝数十条灰线遮挡）
-            impulse_dashed_lines: list[tuple[float, float, float, float, str, tuple, int]] = []
-            key_impulses: list = []
-            for i_pt, item in enumerate(self._pts):
-                x, y, pt = item[:3]
-                prev_pt = self._pts[i_pt - 1][2] if i_pt > 0 else None
-                _snr, impulse = self._derive_flux_and_snr(pt, prev_pt)
-                if impulse and impulse.get("flux") == "high":
-                    cur_ds = float(pt.get("semantic_distance", 0.5))
-                    prev_ds = float(prev_pt.get("semantic_distance", 0.5)) if prev_pt else 0.5
-                    if cur_ds < prev_ds - 0.01:
-                        key_impulses.append((i_pt, x, y, pt, impulse))
+            if vec in ("negative", "divergent", "trapped") or delta_ds > 0.02:
+                col = theme.ERROR
+                lw = 3
+            elif vec in ("positive", "convergent") or delta_ds < -0.02:
+                col = theme.SUCCESS
+                lw = 3
+            else:
+                col = theme.WARNING
+                lw = 2
+            aa_items.append(("line", [(x0, y0), (x1, y1)], col, lw))
+            poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
+            if poly:
+                aa_items.append(("polygon", poly, col, col))
 
-            for i_pt, x, y, pt, impulse in key_impulses[:2]:
-                u_val = pt.get("user_turn") or pt.get("u")
-                arr_len = 38
-                ix0 = x + arr_len * 0.75
-                iy0 = y - arr_len * 0.45
-                impulse_dashed_lines.append((x + 4, y - 2, ix0, iy0, theme.PHASE_IMPULSE, (3, 2), 1))
-                self._impulse_boxes.append((x + 28, x + 120, y - 26, y - 8, u_val, "high", impulse.get("note", "")))
-            # (3) 多体系统卫星微质点群 (Subagent Satellites)
-            for item in self._pts:
-                x, y, pt = item[:3]
-                subs = self._calc_subagents(pt)
-                if subs:
-                    k_total = len(subs)
-                    orbit_r = 20
-                    for k, sub in enumerate(subs[:3]):
-                        angle = -math.pi / 4 + k * (math.pi * 2 / max(k_total, 3))
-                        sx = x + orbit_r * math.cos(angle)
-                        sy = y + orbit_r * math.sin(angle)
-                        s_status = str(sub.get("status") or "convergent").lower()
-                        s_col = theme.SUCCESS if s_status == "convergent" else theme.ERROR
-                        tether_col = theme.DIRAC_WELL_BORDER if s_status == "convergent" else theme.ATTRACTOR_BASIN_BORDER
-                        aa_items.append(("line", [(x, y), (sx, sy)], tether_col, 1))
-                        aa_items.append(("dot", sx, sy, 3, s_col, theme.FG_WHITE, 1))
+    def _collect_manifold_impulses(self) -> tuple[list, list]:
+        """(2) 人类信源信息注入冲量引导线：仅收集最具向心突破意义的至多 2 条
+        关键纠偏（杜绝数十条灰线遮挡主轨迹）。空轨迹时安全返回空表。"""
+        impulse_dashed_lines: list[tuple[float, float, float, float, str, tuple, int]] = []
+        key_impulses: list = []
+        for i_pt, item in enumerate(self._pts):
+            x, y, pt = item[:3]
+            prev_pt = self._pts[i_pt - 1][2] if i_pt > 0 else None
+            _snr, impulse = self._derive_flux_and_snr(pt, prev_pt)
+            if impulse and impulse.get("flux") == "high":
+                cur_ds = metrics.ds_of(pt)
+                prev_ds = metrics.ds_of(prev_pt) if prev_pt else 0.5
+                if cur_ds < prev_ds - 0.01:
+                    key_impulses.append((i_pt, x, y, pt, impulse))
 
-            n_pts = len(self._pts)
-            for i_pt, item in enumerate(self._pts):
-                x, y, pt = item[:3]
-                vec = str(pt.get("vector") or "neutral").lower()
-                event_tag = str(pt.get("event") or "normal").lower()
-                base_col = theme.ERROR if vec in ("negative", "divergent", "trapped") else (
-                    theme.SUCCESS if vec in ("positive", "convergent") else theme.WARNING)
-                # 认知负债动态光晕
-                ed = float(pt.get("epistemic_debt", 1.0))
-                if ed >= 4.0:
-                    aa_items.append(("dot", x, y, 13, None, theme.DEBT_GLOW_DANGER, 1))
-                    aa_items.append(("dot", x, y, 17, None, theme.DEBT_GLOW_DANGER, 1))
-                elif ed <= 1.0:
-                    aa_items.append(("dot", x, y, 9, None, theme.DEBT_GLOW_SAFE, 1))
+        for i_pt, x, y, pt, impulse in key_impulses[:2]:
+            u_val = pt.get("user_turn") or pt.get("u")
+            arr_len = 38
+            ix0 = x + arr_len * 0.75
+            iy0 = y - arr_len * 0.45
+            impulse_dashed_lines.append((x + 4, y - 2, ix0, iy0, theme.PHASE_IMPULSE, (3, 2), 1))
+            self._impulse_boxes.append((x + 28, x + 120, y - 26, y - 8, u_val, "high", impulse.get("note", "")))
+        return impulse_dashed_lines, key_impulses
 
-                if i_pt == 0:
-                    aa_items.append(("dot", x, y, 8, None, theme.PHASE_START_HALO, 1))
-                elif i_pt == n_pts - 1:
-                    aa_items.append(("dot", x, y, 8, None, theme.SUCCESS if vec in ("positive", "convergent") else theme.ERROR, 1))
-                if event_tag == "retry_loop":
-                    aa_items.append(("dot", x, y, 9, None, theme.ERROR, 1))
-                elif event_tag == "breakthrough":
-                    aa_items.append(("dot", x, y, 9, None, theme.SUCCESS, 1))
-                elif event_tag == "compaction":
-                    aa_items.append(("dot", x, y, 8, None, theme.CHART_PALETTE[0], 1))
-                elif vec in ("negative", "divergent", "trapped"):
-                    aa_items.append(("dot", x, y, 8, None, theme.ERROR, 1))
-                aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
+    @staticmethod
+    def _satellite_ring(x: float, y: float, subs: list, orbit_r: float) -> list[tuple[float, float, dict]]:
+        """按轨道环均分计算子智能体卫星落点 [(sx, sy, sub), ...]（至多 3 颗）。"""
+        k_total = len(subs)
+        out = []
+        for k, sub in enumerate(subs[:3]):
+            angle = -math.pi / 4 + k * (math.pi * 2 / max(k_total, 3))
+            out.append((x + orbit_r * math.cos(angle), y + orbit_r * math.sin(angle), sub))
+        return out
 
-        self._aa_layer_flat(c, aa_items, "aa_data")
-        # 控制论水床效应扰动弧
+    def _draw_satellite_dots(self, aa_items: list, orbit_r: float) -> None:
+        """(3) 多体系统卫星微质点群：主质点周围画引力细线与卫星微点（抗锯齿层）。"""
+        for item in self._pts:
+            x, y, pt = item[:3]
+            subs = self._calc_subagents(pt)
+            for sx, sy, sub in self._satellite_ring(x, y, subs, orbit_r):
+                s_status = str(sub.get("status") or "convergent").lower()
+                s_col = theme.SUCCESS if s_status == "convergent" else theme.ERROR
+                tether_col = theme.DIRAC_WELL_BORDER if s_status == "convergent" else theme.ATTRACTOR_BASIN_BORDER
+                aa_items.append(("line", [(x, y), (sx, sy)], tether_col, 1))
+                aa_items.append(("dot", sx, sy, 3, s_col, theme.FG_WHITE, 1))
+
+    # LLM 遥测 subagents 的常用英文角色名 → 平实中文（图面统一说人话）
+    _SUB_NAME_CN = {
+        "scout": "探查", "worker": "执行", "reviewer": "审查",
+        "planner": "规划", "researcher": "调研", "explorer": "探查",
+        "implementer": "实现", "coder": "编码", "tester": "测试",
+    }
+
+    @classmethod
+    def _sub_display_name(cls, sub: dict) -> str:
+        raw = str(sub.get("name") or "Sub")
+        return cls._SUB_NAME_CN.get(raw.strip().lower(), raw)
+
+    def _draw_satellite_labels(self, c, orbit_r: float, cluster_px: float) -> None:
+        """卫星名文本标注：密集簇内（与其他质点距 < cluster_px）只画微点不写名。"""
+        n_pts = len(self._pts)
+        for i, item in enumerate(self._pts):
+            x, y, pt = item[:3]
+            subs = self._calc_subagents(pt)
+            if not subs:
+                continue
+            is_clustered = any(j != i and ((self._pts[j][0] - x)**2 + (self._pts[j][1] - y)**2) < cluster_px**2
+                               for j in range(n_pts))
+            if is_clustered:
+                continue
+            for sx, sy, sub in self._satellite_ring(x, y, subs, orbit_r):
+                s_name = self._sub_display_name(sub)
+                s_col = theme.SUCCESS if str(sub.get("status") or "").lower() == "convergent" else theme.ERROR
+                c.create_text(sx + 5, sy, text=s_name, fill=s_col,
+                              font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+
+    def _draw_manifold_halos(self, aa_items) -> None:
+        """轨迹质点：认知负债动态光晕 + 起终点/事件环 + 矢量基色核。"""
+        n_pts = len(self._pts)
+        for i_pt, item in enumerate(self._pts):
+            x, y, pt = item[:3]
+            vec = str(pt.get("vector") or "neutral").lower()
+            event_tag = str(pt.get("event") or "normal").lower()
+            base_col = theme.ERROR if vec in ("negative", "divergent", "trapped") else (
+                theme.SUCCESS if vec in ("positive", "convergent") else theme.WARNING)
+            # 认知负债动态光晕
+            ed = float(pt.get("epistemic_debt", 1.0))
+            if ed >= 4.0:
+                aa_items.append(("dot", x, y, 13, None, theme.DEBT_GLOW_DANGER, 1))
+                aa_items.append(("dot", x, y, 17, None, theme.DEBT_GLOW_DANGER, 1))
+            elif ed <= 1.0:
+                aa_items.append(("dot", x, y, 9, None, theme.DEBT_GLOW_SAFE, 1))
+
+            if i_pt == 0:
+                aa_items.append(("dot", x, y, 8, None, theme.PHASE_START_HALO, 1))
+            elif i_pt == n_pts - 1:
+                aa_items.append(("dot", x, y, 8, None, theme.SUCCESS if vec in ("positive", "convergent") else theme.ERROR, 1))
+            if event_tag == "retry_loop":
+                aa_items.append(("dot", x, y, 9, None, theme.ERROR, 1))
+            elif event_tag == "breakthrough":
+                aa_items.append(("dot", x, y, 9, None, theme.SUCCESS, 1))
+            elif event_tag == "compaction":
+                aa_items.append(("dot", x, y, 8, None, theme.CHART_PALETTE[0], 1))
+            elif vec in ("negative", "divergent", "trapped"):
+                aa_items.append(("dot", x, y, 8, None, theme.ERROR, 1))
+            aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
+
+    def _draw_waterbed_arcs(self, c, traj) -> None:
+        """控制论水床效应扰动弧：16 段二次贝塞尔自适应起拱 + 胶囊标签。"""
         waterbed_turns = metrics.detect_waterbed_events(traj)
         self._waterbed_turns = set(waterbed_turns)
         for wb_t in waterbed_turns:
@@ -4304,13 +4522,13 @@ class PhasePortraitWidget:
                     wb_bw = 64
                     wb_bx0, wb_by0, wb_bx1, wb_by1 = mid_x - wb_bw / 2, mid_y - 14, mid_x + wb_bw / 2, mid_y + 4
                     c.create_rectangle(wb_bx0, wb_by0, wb_bx1, wb_by1, fill=theme.CARD_HEADER_BG, outline=theme.WATERBED_ARC, width=1)
-                    c.create_text(mid_x, (wb_by0 + wb_by1) / 2, text="水床扰动", fill=theme.WATERBED_ARC,
+                    c.create_text(mid_x, (wb_by0 + wb_by1) / 2, text="连锁反应", fill=theme.WATERBED_ARC,
                                   font=theme.FONT_UI_SMALL_BOLD, anchor="center")
                     self._waterbed_boxes.append((wb_bx0, wb_bx1, wb_by0, wb_by1, wb_t))
                     break
-        for lx0, ly0, lx1, ly1, col, d_pat, lw in impulse_dashed_lines:
-            c.create_line(lx0, ly0, lx1, ly1, fill=col, dash=d_pat, width=lw)
 
+    def _draw_manifold_labels(self, c, pad_t, key_impulses) -> None:
+        """上层文本标签：回合号 / 关键纠偏冲量 / 事件标签 / 失控拐点（2D 欧氏防叠）。"""
         dspec = self._data.get("damping_spectrum") or {}
         bif_turns = {b["turn"] for b in dspec.get("bifurcations", []) if b.get("to_cat") == "underdamped"}
         n_pts = len(self._pts)
@@ -4373,22 +4591,6 @@ class PhasePortraitWidget:
                 c.create_text(x + 36, y - 19, text=f"U{u_val} 关键纠偏", fill=theme.PHASE_IMPULSE,
                               font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
-            # 卫星标签标注（密集区域仅绘制微质点与引力细线，避免遮挡相邻主轨迹与水床标签）
-            subs = self._calc_subagents(pt)
-            if subs:
-                k_total = len(subs)
-                orbit_r = 20
-                is_clustered = any(j != i and ((self._pts[j][0] - x)**2 + (self._pts[j][1] - y)**2) < 36**2 for j in range(n_pts))
-                if not is_clustered:
-                    for k, sub in enumerate(subs[:3]):
-                        angle = -math.pi / 4 + k * (math.pi * 2 / max(k_total, 3))
-                        sx = x + orbit_r * math.cos(angle)
-                        sy = y + orbit_r * math.sin(angle)
-                        s_name = sub.get("name", "Sub")
-                        s_col = theme.SUCCESS if str(sub.get("status") or "").lower() == "convergent" else theme.ERROR
-                        c.create_text(sx + 5, sy, text=s_name, fill=s_col,
-                                      font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-
             # 事件标签标注（连续同类事件如重试死锁，仅在首轮标记一次，杜绝重叠堆叠）
             is_new_event = (event_tag != prev_event_tag or event_tag in ("breakthrough", "compaction"))
             if is_new_event and event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
@@ -4411,42 +4613,22 @@ class PhasePortraitWidget:
                 c.create_text(cand_x if can_draw else x, (cand_y + 10) if can_draw else (y + 12),
                               text="失控拐点", fill=theme.ERROR,
                               font=theme.FONT_UI_SMALL, anchor=anchor_pos if can_draw else "center")
-        if not traj:
-            c.create_text(pad_l + plot_w / 2, pad_t + plot_h / 2,
-                          text="（本动力学报告无细分轨迹采样数据）", fill=theme.MUTED)
-        self._draw_regime_band(c, pad_l, pad_t, plot_w, plot_h, traj)
-        self._draw_hud_card(c, plot_w, plot_h, pad_l, pad_t)
-
+        # 卫星标签标注（密集簇只画微质点与引力细线，避免遮挡相邻主轨迹与水床标签）
+        self._draw_satellite_labels(c, 20, 36)
 
     def _draw_phase_plane(self, c, plot_w, plot_h, pad_l, pad_r, pad_t, pad_b, traj) -> None:
         """P1 相速度极限环对偶相平面：横轴语义距离 Ds × 纵轴相速度 dDs/dt。"""
-        zero_y = pad_t + 0.5 * plot_h
-
-        # 1. 计算相速度与非线性缩放坐标
-        raw_nodes = []
-        for i, pt in enumerate(traj):
-            ds = max(0.0, min(1.0, float(pt.get("semantic_distance", 0.5))))
-            t = pt.get("turn", i + 1)
-            if i == 0:
-                v = 0.0
-            else:
-                prev = traj[i - 1]
-                prev_ds = max(0.0, min(1.0, float(prev.get("semantic_distance", 0.5))))
-                prev_t = prev.get("turn", i)
-                dt = max(1, t - prev_t)
-                v = (ds - prev_ds) / dt
-            raw_nodes.append({"pt": pt, "turn": t, "u": pt.get("user_turn") or pt.get("u"), "ds": ds, "v": v, "evt": pt.get("event")})
-
-        v_vals = [abs(n["v"]) for n in raw_nodes if n["v"] != 0]
-        v_max = max(v_vals) if v_vals else 0.05
-        v_max = max(0.005, v_max)
-
         zoom = self._zoom_scale
         pan_x = self._pan_x
         pan_y = self._pan_y
         plot_w_eff = plot_w * zoom
-        plot_h_eff = plot_h * zoom
         zero_y = pad_t + 0.5 * plot_h + pan_y
+
+        # 1. 计算相速度与非线性缩放坐标
+        raw_nodes = self._calc_phase_nodes(traj)
+        v_vals = [abs(n["v"]) for n in raw_nodes if n["v"] != 0]
+        v_max = max(v_vals) if v_vals else 0.05
+        v_max = max(0.005, v_max)
 
         for idx, n in enumerate(raw_nodes):
             ds = n["ds"]
@@ -4454,11 +4636,56 @@ class PhasePortraitWidget:
             v = n["v"]
             ratio = (abs(v) / v_max) ** 0.55 if v_max > 0 else 0
             sign = 1 if v > 0 else (-1 if v < 0 else 0)
-            py = zero_y - sign * ratio * (plot_h_eff * 0.40)
+            # y 映射的常量项 (0.5*plot_h) 折进 world 坐标随 zoom 缩放：缩放锚定
+            # 公式假设 screen = pad + pan + zoom*world，原式 zero_y 内含不随 zoom
+            # 缩放的常量项会破坏仿射假设，放大时质点相对光标漂移
+            py = pad_t + pan_y + zoom * (0.5 * plot_h - sign * ratio * 0.4 * plot_h)
             offset_y = -14 if (idx % 2 == 0 and py > pad_t + 28) else 14
             self._pts.append((px, py, n["pt"], offset_y, v))
 
-        # 2. 背景参考系 (Layer 0)
+        # 2. 背景参考系 (Layer 0) + 止损红线与视界判定 + X 轴底线
+        self._draw_phase_reference(c, plot_w, plot_h, pad_l, pad_t, zero_y)
+        self._draw_phase_horizon(c, plot_w, plot_h, pad_l, pad_t, traj, pan_x, plot_w_eff)
+        c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
+
+        # 3. 抗锯齿图层 items (Layer 1)
+        aa_items: list = []
+        self._draw_phase_poles(aa_items, pad_l, pan_x, zoom, plot_w_eff, zero_y)
+        self._draw_phase_links(aa_items)
+        # 多体系统卫星微质点群 (相平面投影)
+        self._draw_satellite_dots(aa_items, 18)
+        self._draw_phase_halos(aa_items)
+
+        self._aa_layer_flat(c, aa_items, "aa_data")
+
+        # 4. 上层文本标签 (Layer 2)
+        self._draw_phase_legend(c, plot_w, plot_h, pad_l, pad_t)
+        self._draw_phase_labels(c, pad_t)
+        if not traj:
+            c.create_text(pad_l + plot_w / 2, pad_t + plot_h / 2,
+                          text="（本动力学报告无细分轨迹采样数据）", fill=theme.MUTED)
+        self._draw_regime_band(c, pad_l, pad_t, plot_w, plot_h, traj)
+        self._draw_hud_card(c, plot_w, plot_h, pad_l, pad_t)
+
+    def _calc_phase_nodes(self, traj: list) -> list[dict]:
+        """计算逐节点相速度 (dDs/dt) 与悬停元数据的原始节点表。"""
+        raw_nodes = []
+        for i, pt in enumerate(traj):
+            ds = metrics.ds_of(pt)
+            t = pt.get("turn", i + 1)
+            if i == 0:
+                v = 0.0
+            else:
+                prev = traj[i - 1]
+                prev_ds = metrics.ds_of(prev)
+                prev_t = prev.get("turn", i)
+                dt = max(1, t - prev_t)
+                v = (ds - prev_ds) / dt
+            raw_nodes.append({"pt": pt, "turn": t, "u": pt.get("user_turn") or pt.get("u"), "ds": ds, "v": v, "evt": pt.get("event")})
+        return raw_nodes
+
+    def _draw_phase_reference(self, c, plot_w, plot_h, pad_l, pad_t, zero_y) -> None:
+        """背景参考系：零平衡线 + 发散/收敛分区虚线与区名。"""
         c.create_line(pad_l, zero_y, pad_l + plot_w, zero_y, fill=theme.BORDER, width=2)
         c.create_text(pad_l - 6, zero_y, text="0 (平衡)", fill=theme.MUTED,
                       font=theme.FONT_UI_SMALL, anchor="e")
@@ -4476,9 +4703,11 @@ class PhasePortraitWidget:
                       font=theme.FONT_UI_SMALL, anchor="e")
         c.create_text(pad_l + 12, pad_t + plot_h - 12, text="↓ 向心收敛区 (dDs/dt < 0 · 逼近目标达成)",
                       fill=theme.PHASE_ZONE_DIRAC, font=theme.FONT_UI_SMALL, anchor="w")
-        # 止损红线与视界判定
+
+    def _draw_phase_horizon(self, c, plot_w, plot_h, pad_l, pad_t, traj, pan_x, plot_w_eff) -> None:
+        """止损红线（Ds=0.82）与视界拦截状态徽章胶囊（含 pan/zoom 偏移）。"""
         _lams_p, _avg_lam_p, horizon_status_p = self._compute_lyapunov_stats(traj, self._data.get("lyapunov_exponent"))
-        line_horizon_x = pad_l + 0.82 * plot_w
+        line_horizon_x = pad_l + pan_x + 0.82 * plot_w_eff
         c.create_line(line_horizon_x, pad_t + 18, line_horizon_x, pad_t + plot_h - 18, fill=theme.ERROR, dash=(3, 5), width=2)
         # 止损视界拦截状态徽章胶囊（对偶相平面）
         if horizon_status_p == "intercepted":
@@ -4495,18 +4724,9 @@ class PhasePortraitWidget:
             c.create_rectangle(bx0, by0, bx1, by1, fill=theme.ATTRACTOR_RINGS[0], outline=theme.ATTRACTOR_BASIN_BORDER, width=1)
             c.create_oval(bx0 + 8, by0 + 7, bx0 + 14, by0 + 13, fill=theme.ERROR, outline="")
             c.create_text(bx0 + 20, (by0 + by1) / 2, text=lbl_txt, fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        # 底部 X 轴底线与文字
-        c.create_line(pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=theme.BORDER, width=1)
-        c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 目标终态",
-                      fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
-        c.create_text(pad_l + plot_w / 2, pad_t + plot_h + 12,
-                      text="语义距离：向左逼近目标达成 · 向右偏离真实意图",
-                      fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
-        c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 偏离初始态",
-                      fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
-        # 3. 抗锯齿图层 items (Layer 1)
-        aa_items: list = []
 
+    def _draw_phase_poles(self, aa_items, pad_l, pan_x, zoom, plot_w_eff, zero_y) -> None:
+        """狄拉克目标点、平庸代码吸引子与 retry_loop 极限环（抗锯齿层）。"""
         tgt_x = pad_l + pan_x + plot_w_eff * 0.05
         tgt_y = zero_y
         self._tgt_pos = (tgt_x, tgt_y)
@@ -4528,6 +4748,8 @@ class PhasePortraitWidget:
                 aa_items.append(("dot", cx, cy, 32, None, theme.ATTRACTOR_BASIN_BORDER, 2))
                 aa_items.append(("dot", cx, cy, 20, None, theme.ERROR, 1))
 
+    def _draw_phase_links(self, aa_items) -> None:
+        """相轨迹连线：按相速度符号着色 + 推进箭头。"""
         for i in range(1, len(self._pts)):
             x0, y0, prev_pt = self._pts[i - 1][:3]
             x1, y1, cur_pt = self._pts[i][:3]
@@ -4538,23 +4760,9 @@ class PhasePortraitWidget:
             poly = self._get_arrowhead_poly(x0, y0, x1, y1, length=10, half_width=5, setback=6)
             if poly:
                 aa_items.append(("polygon", poly, col, col))
-            # 多体系统卫星微质点群 (相平面投影)
-            for item in self._pts:
-                x, y, pt = item[:3]
-                subs = self._calc_subagents(pt)
-                if subs:
-                    k_total = len(subs)
-                    orbit_r = 18
-                    for k, sub in enumerate(subs[:3]):
-                        angle = -math.pi / 4 + k * (math.pi * 2 / max(k_total, 3))
-                        sx = x + orbit_r * math.cos(angle)
-                        sy = y + orbit_r * math.sin(angle)
-                        s_status = str(sub.get("status") or "convergent").lower()
-                        s_col = theme.SUCCESS if s_status == "convergent" else theme.ERROR
-                        tether_col = theme.DIRAC_WELL_BORDER if s_status == "convergent" else theme.ATTRACTOR_BASIN_BORDER
-                        aa_items.append(("line", [(x, y), (sx, sy)], tether_col, 1))
-                        aa_items.append(("dot", sx, sy, 3, s_col, theme.FG_WHITE, 1))
 
+    def _draw_phase_halos(self, aa_items) -> None:
+        """相平面质点：起终点/事件环 + 相速度基色核。"""
         n_pts = len(self._pts)
         for i_pt, item in enumerate(self._pts):
             x, y, pt = item[:3]
@@ -4571,12 +4779,13 @@ class PhasePortraitWidget:
                 aa_items.append(("dot", x, y, 9, None, theme.SUCCESS, 1))
             aa_items.append(("dot", x, y, 5, base_col, theme.FG_WHITE, 2))
 
-        self._aa_layer_flat(c, aa_items, "aa_data")
-
-        # 4. 上层文本标签 (Layer 2)
-        c.create_text(tgt_x + 22, tgt_y, text="狄拉克目标点",
+    def _draw_phase_legend(self, c, plot_w, plot_h, pad_l, pad_t) -> None:
+        """上层图例（狄拉克/吸引子标签 + 顶部图例条）与底部 X 轴底座说明。"""
+        tgt_x, tgt_y = self._tgt_pos
+        att_x, att_y = self._att_pos
+        c.create_text(tgt_x + 22, tgt_y, text="目标点",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, anchor="w")
-        c.create_text(att_x, att_y - 36, text="平庸代码吸引子",
+        c.create_text(att_x, att_y - 36, text="惯性套路区",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL_BOLD, anchor="center")
 
         leg_w = 460
@@ -4587,9 +4796,9 @@ class PhasePortraitWidget:
         c.create_line(leg_x + 105, leg_y, leg_x + 119, leg_y, fill=theme.ERROR, width=2)
         c.create_text(leg_x + 123, leg_y, text="离心发散", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_oval(leg_x + 210, leg_y - 4, leg_x + 218, leg_y + 4, outline=theme.SUCCESS, fill=theme.DIRAC_CORE_BG, width=1)
-        c.create_text(leg_x + 222, leg_y, text="狄拉克目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(leg_x + 222, leg_y, text="目标点", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         c.create_oval(leg_x + 340, leg_y - 4, leg_x + 348, leg_y + 4, outline=theme.ERROR, fill=theme.ATTRACTOR_RINGS[0], width=1)
-        c.create_text(leg_x + 352, leg_y, text="平庸代码吸引子", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        c.create_text(leg_x + 352, leg_y, text="惯性套路区", fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
 
         c.create_text(pad_l, pad_t + plot_h + 12, text="0.0 (契合真实意图)",
                       fill=theme.SUCCESS, font=theme.FONT_UI_SMALL, anchor="w")
@@ -4598,6 +4807,9 @@ class PhasePortraitWidget:
                       fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="center")
         c.create_text(pad_l + plot_w, pad_t + plot_h + 12, text="1.0 (严重偏离意图)",
                       fill=theme.ERROR, font=theme.FONT_UI_SMALL, anchor="e")
+
+    def _draw_phase_labels(self, c, pad_t) -> None:
+        """逐点回合号/事件标签（2D 欧氏防叠）与卫星名标注。"""
         n_pts_p = len(self._pts)
         drawn_boxes_p: list[tuple[float, float]] = []
         for i, item in enumerate(self._pts):
@@ -4612,20 +4824,6 @@ class PhasePortraitWidget:
             cand_y = y + offset_y
             is_colliding = any((cand_x - lx)**2 + (cand_y - ly)**2 < 38**2 for lx, ly in drawn_boxes_p)
             can_draw = is_milestone or not is_colliding
-            subs = self._calc_subagents(pt)
-            if subs:
-                k_total = len(subs)
-                orbit_r = 18
-                is_clustered = any(j != i and ((self._pts[j][0] - x)**2 + (self._pts[j][1] - y)**2) < 32**2 for j in range(n_pts_p))
-                if not is_clustered:
-                    for k, sub in enumerate(subs[:3]):
-                        angle = -math.pi / 4 + k * (math.pi * 2 / max(k_total, 3))
-                        sx = x + orbit_r * math.cos(angle)
-                        sy = y + orbit_r * math.sin(angle)
-                        s_name = sub.get("name", "Sub")
-                        s_col = theme.SUCCESS if str(sub.get("status") or "").lower() == "convergent" else theme.ERROR
-                        c.create_text(sx + 5, sy, text=s_name, fill=s_col,
-                                      font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
             if can_draw:
                 drawn_boxes_p.append((cand_x, cand_y))
@@ -4644,11 +4842,8 @@ class PhasePortraitWidget:
                     c.create_text(cand_x, cand_y + (10 if offset_y > 0 else -10),
                                   text=lbl_text, fill=evt_col,
                                   font=theme.FONT_UI_SMALL)
-        if not traj:
-            c.create_text(pad_l + plot_w / 2, pad_t + plot_h / 2,
-                          text="（本动力学报告无细分轨迹采样数据）", fill=theme.MUTED)
-        self._draw_regime_band(c, pad_l, pad_t, plot_w, plot_h, traj)
-        self._draw_hud_card(c, plot_w, plot_h, pad_l, pad_t)
+        # 卫星标签标注（密集簇只画微质点与引力细线）
+        self._draw_satellite_labels(c, 18, 32)
 
 class LlmReportsView:
     """「LLM 报告」页签 — 会话/项目/多源解读的持久化回看（左列表 + 右全高阅读区）。
@@ -4669,9 +4864,10 @@ class LlmReportsView:
         "general":  {"label": "通用", "color": theme.MUTED, "desc": "综合解读报告"},
     }
 
-    def __init__(self, parent, controller=None) -> None:
+    def __init__(self, parent, controller=None, on_cancel_tasks=None) -> None:
         from .widgets import flat_button, FlatMenu
         self.controller = controller
+        self._cancel_tasks_btn = None  # 未注入 on_cancel_tasks 回调时完全不显示取消按钮
         self._reports: list[dict] = []
         self._selected_id: str | None = None
         self._sort_col = "time"
@@ -4700,6 +4896,11 @@ class LlmReportsView:
                                    font=theme.FONT_UI_SMALL)
         self._count_lbl.pack(side="left", padx=8)
         flat_button(bar, "清空", self._clear_all, padx=theme.PAD_S).pack(side="right", padx=2)
+        if on_cancel_tasks is not None:
+            # 取消生成中任务入口（controller 注入回调；后 pack 在「清空」左侧）
+            self._cancel_tasks_btn = flat_button(
+                bar, "取消生成中任务", on_cancel_tasks, padx=theme.PAD_S)
+            self._cancel_tasks_btn.pack(side="right", padx=2)
 
         # 搜索与类型过滤工具条
         filter_box = tk.Frame(left, bg=theme.BG)
@@ -4825,6 +5026,16 @@ class LlmReportsView:
             font=theme.FONT_UI_SMALL)
         self._metrics_lbl.pack(side="left", padx=4)
 
+        # 审计校验徽标：机械检查 LLM 输出是否守住审计契约（缺小节/笼统表扬/
+        # 转折锚点不足）。旧报告无该字段时隐藏；警示列于 Tooltip。
+        self._audit_badge = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self._audit_tip = Tooltip(
+            self._audit_badge,
+            "对报告正文的机械审计校验（本地规则，非二次 LLM 调用）：\n"
+            "· 缺少必备小节 / 含笼统表扬措辞 / 转折锚点不足时亮警示，\n"
+            "  说明模型未完全遵守审计立场——相关结论请折扣采信。")
         self._time_lbl = tk.Label(
             self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
             font=theme.FONT_UI_SMALL)
@@ -4922,32 +5133,20 @@ class LlmReportsView:
 
     @classmethod
     def _resolve_dynamics_status(cls, r: dict) -> tuple[str, str, str]:
-        """解析相空间动力学报告的态势结论 (status_key, label, color)。"""
+        """解析相空间动力学报告的态势结论 (status_key, label, color)。
+
+        终态判定走共享 SSOT _dynamics_terminal_state（与相图态势徽章同源）。
+        """
         dyn = r.get("dynamics_data") or {}
         if not dyn:
             return "dynamics", "相空间", theme.CHART_PALETTE[4]
-        ctype = str(dyn.get("convergence_type") or "").lower()
-        is_trapped = bool(dyn.get("attractor_trapped"))
-        traj = dyn.get("trajectory") or []
-        last_pt = traj[-1] if traj else {}
-        last_evt = str(last_pt.get("event") or "").lower()
-        last_vec = str(last_pt.get("vector") or "").lower()
-        last_ds = float(last_pt.get("semantic_distance", 0.5)) if last_pt else 0.5
-
-        is_escaped = (
-            ctype in ("escaped", "breakthrough")
-            or last_evt == "breakthrough"
-            or (is_trapped and last_vec in ("positive", "convergent") and last_ds <= 0.45)
-        )
-
-        if ctype == "dirac" or (last_ds <= 0.15 and not is_trapped):
-            return "dirac", "收敛", theme.SUCCESS
-        elif is_escaped:
-            return "escaped", "逃逸", theme.SUCCESS
-        elif ctype == "trapped" or is_trapped:
-            return "trapped", "捕获", theme.ERROR
-        else:
-            return "wandering", "漫游", theme.WARNING
+        status_map = {
+            "dirac": ("dirac", "收敛", theme.SUCCESS),
+            "escaped": ("escaped", "逃逸", theme.SUCCESS),
+            "trapped": ("trapped", "捕获", theme.ERROR),
+            "wandering": ("wandering", "漫游", theme.WARNING),
+        }
+        return status_map[_dynamics_terminal_state(dyn)]
     @classmethod
     def _resolve_title(cls, r: dict) -> str:
         t = str(r.get("title") or r.get("session_title") or
@@ -5073,6 +5272,7 @@ class LlmReportsView:
         self._scope_badge.config(text="")
         self._metrics_lbl.config(text="")
         self._time_lbl.config(text="")
+        self._audit_badge.config(text="")
 
     def _sort_by(self, col: str) -> None:
         if self._sort_col == col:
@@ -5126,6 +5326,17 @@ class LlmReportsView:
         self._source_badge.config(text=f"源: {r.get('source') or 'claude'}")
         self._model_badge.config(text=f"模型: {r.get('model') or '-'}")
         self._scope_badge.config(text=f"档位: {r.get('scope') or '-'}")
+        warns = r.get("audit_warnings")
+        if isinstance(warns, list) and warns:
+            self._audit_badge.config(
+                text=f"审计校验: {len(warns)} 项警示", fg=theme.WARNING)
+            self._audit_tip.text = "\n".join(f"· {w}" for w in warns)
+        elif isinstance(warns, list):
+            self._audit_badge.config(text="审计校验: 通过", fg=theme.SUCCESS)
+            self._audit_tip.text = "本地机械规则全部通过：小节齐全、无笼统表扬、转折锚点达标。"
+        else:
+            self._audit_badge.config(text="", fg=theme.MUTED)
+            self._audit_tip.text = ""
 
         # 构造关键指标摘要
         metrics_parts = []
@@ -5141,8 +5352,13 @@ class LlmReportsView:
 
         # 动力学相图视口联动（仅 dynamics 类型显示，其余报告完全隐藏）
         if kind == "dynamics":
-            self._phase_portrait.render(r.get("dynamics_data") or {}, r)
-            self._phase_portrait.pack(fill="x", padx=10, pady=(0, 6), before=self._text_frame)
+            try:
+                self._phase_portrait.render(r.get("dynamics_data") or {}, r)
+            except Exception:
+                # 兜底：相图渲染异常时降级隐藏，保证右侧正文阅读区不受牵连
+                self._phase_portrait.pack_forget()
+            else:
+                self._phase_portrait.pack(fill="x", padx=10, pady=(0, 6), before=self._text_frame)
         else:
             self._phase_portrait.pack_forget()
 

@@ -702,3 +702,131 @@ def test_exec_harness_utf8_command_not_mojibaked(tmp_path):
     cmd = codex_reader._shell_command_from_exec(js)
     assert "性格|标签" in cmd
     assert cmd.startswith("rg -n")
+
+
+# --------------------------------------------------------------------------- #
+# 用户输入识别与双表示去重（PR #5 引入的 _events_with_user_messages 四层启发式：
+# id 去重 → pending 窗口 → content_item_kinds 过滤 → 前缀黑名单）
+# --------------------------------------------------------------------------- #
+
+def _resp_user(text: str, item_id: str = "item_1") -> dict:
+    return {"type": "response_item", "payload": {
+        "type": "message", "role": "user", "id": item_id,
+        "content": [{"type": "input_text", "text": text}]}}
+
+
+def _event_user(text: str, item_id: str | None = None) -> dict:
+    pl = {"type": "user_message", "message": text}
+    if item_id is not None:
+        pl["id"] = item_id
+    return {"type": "event_msg", "payload": pl}
+
+
+def _assistant() -> dict:
+    return {"type": "response_item", "payload": {
+        "type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": "ok"}]}}
+
+
+def _count_user_inputs(path: Path) -> list[str]:
+    return [m["text"] for _, m in codex_reader._events_with_user_messages(path)
+            if m is not None]
+
+
+def test_user_input_dual_representation_deduped_by_pending(tmp_path):
+    """同一输入的 response_item/event_msg 双表示（event 侧无 id）只计 1 条。"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        _resp_user("帮我修复登录 bug", "item_1"),
+        _event_user("帮我修复登录 bug"),
+        _assistant(),
+    ])
+    assert _count_user_inputs(p) == ["帮我修复登录 bug"]
+
+
+def test_user_input_dual_representation_deduped_by_id(tmp_path):
+    """双表示共享同一 payload id 时按 id 去重（顺序无关：event 先出现）。"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        _event_user("继续", "item_7"),
+        _resp_user("继续", "item_7"),
+        _assistant(),
+    ])
+    assert _count_user_inputs(p) == ["继续"]
+
+
+def test_user_resend_same_text_counts_twice(tmp_path):
+    """用户真实重发同文本（同为 response_item，中间夹 assistant）计 2 条——
+    pending 窗口被 assistant 终止，type 相同也不判重。"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        _resp_user("继续", "item_1"),
+        _assistant(),
+        _resp_user("继续", "item_2"),
+        _assistant(),
+    ])
+    assert _count_user_inputs(p) == ["继续", "继续"]
+
+
+def test_user_input_desktop_context_envelope_filtered(tmp_path):
+    """Desktop 注入的 user-role 信封（content_item_kinds 无 user. 前缀）不计。"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "user", "id": "item_env",
+            "content": [
+                {"type": "input_text", "text": "<environment_context>…</environment_context>"},
+                {"type": "input_text", "text": "# AGENTS.md instructions for repo"},
+            ],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["environment.context", "plugin.agents_md"],
+            }}},
+        _resp_user("真实需求", "item_2"),
+        _assistant(),
+    ])
+    assert _count_user_inputs(p) == ["真实需求"]
+
+
+def test_user_input_mixed_kinds_keeps_user_blocks(tmp_path):
+    """kinds 混合时只保留 user. 前缀的 content 块（注入与真话同信封）。"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "user", "id": "item_m",
+            "content": [
+                {"type": "input_text", "text": "<skills_instructions>…</skills_instructions>"},
+                {"type": "input_text", "text": "请实现导出功能"},
+            ],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["plugin.skills", "user.text"],
+            }}},
+        _assistant(),
+    ])
+    assert _count_user_inputs(p) == ["请实现导出功能"]
+
+
+def test_user_input_injected_prefix_blacklist_filtered(tmp_path):
+    """旧格式注入（response_item 侧 user-role 信封、无 kinds）按前缀黑名单过滤
+    （AGENTS.md / 环境上下文 / 接力前言；event_msg user_message 历史上均为真实输入，不设黑名单）。"""
+    def _injected(text: str, item_id: str) -> dict:
+        return {"type": "response_item", "payload": {
+            "type": "message", "role": "user", "id": item_id,
+            "content": [{"type": "input_text", "text": text}]}}
+
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        _injected("# AGENTS.md instructions for C:\repo", "item_a"),
+        _injected("<environment_context>locale=zh</environment_context>", "item_b"),
+        _injected("A previous language model has been working on this task.", "item_c"),
+        _resp_user("真实需求", "item_1"),
+        _assistant(),
+    ])
+    assert _count_user_inputs(p) == ["真实需求"]
+
+
+def test_user_input_image_only_message_counts(tmp_path):
+    """纯图片消息（无文本但有 images/local_images）计 1 条，文本占位 [图片消息]。"""
+    p = _write_jsonl(tmp_path / "s.jsonl", [
+        {"type": "event_msg", "payload": {
+            "type": "user_message", "message": "", "images": [{"url": "blob:1"}]}},
+        _assistant(),
+    ])
+    msgs = _count_user_inputs(p)
+    assert msgs == ["[图片消息]"]
+    u = codex_reader.aggregate_usage(p)
+    assert u.user_msgs == 1
+    assert u.image_count == 1

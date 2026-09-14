@@ -13,13 +13,35 @@ import pytest
 tk = pytest.importorskip("tkinter")
 
 
+# 热力图测试依赖独立映射窗口的真实尺寸（winfo_*），故自建 root 而非复用
+# 共享 root——共享 root 上残留的前序测试组件（如整套 TcerGui 界面）会把
+# fill="both" 的画布挤到 0 尺寸。同进程再建第二个 Tk() 会偶发 init.tcl
+# 失败（曾表现为随机整体 skip），此时退回复用共享 root：先清掉残留子组件
+# 再映射（heatmap 是共享 root 的最后一批使用者，清场无副作用）。
 @pytest.fixture()
-def root():
+def wide_root(root_session):
+    import time
     try:
         r = tk.Tk()
     except tk.TclError:
-        pytest.skip("no display available")
+        for w in root_session.winfo_children():
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+        root_session.deiconify()
+        root_session.geometry("1000x700")
+        for _ in range(100):  # 泵到几何真正生效（WM 异步；未映射时 winfo_width=1）
+            root_session.update()
+            if (root_session.winfo_width() >= 1000
+                    and root_session.winfo_height() >= 700):
+                break
+            time.sleep(0.02)
+        yield root_session
+        root_session.withdraw()
+        return
     r.geometry("1000x700")
+    r.update()
     yield r
     r.destroy()
 
@@ -34,17 +56,17 @@ def _mk_report(i: int):
 
 
 @pytest.fixture()
-def heatmap(root, monkeypatch):
+def heatmap(wide_root, monkeypatch):
     from tcer.gui import charts
     from tcer.gui.charts import HeatmapChart
     rng = random.Random(1)
     monkeypatch.setattr(charts, "raw_value", lambda r, key: rng.expovariate(1 / 4))
-    frame = tk.Frame(root)
+    frame = tk.Frame(wide_root)
     frame.pack(fill="both", expand=True)
     selected = []
     hm = HeatmapChart(frame, controller=SimpleNamespace(
         on_select_session=selected.append))
-    root.update()
+    wide_root.update()
     hm.update([_mk_report(i) for i in range(120)])
     hm._selected = selected
     return hm
@@ -54,12 +76,12 @@ def test_calendar_draws_cells(heatmap):
     assert len(heatmap.canvas.find_all()) > 50
 
 
-def test_hours_view_and_back(heatmap, root):
+def test_hours_view_and_back(heatmap, wide_root):
     heatmap._set_view("hours")
-    root.update()
+    wide_root.update()
     assert len(heatmap.canvas.find_all()) > 100   # 7×24 格 + 标签 + 边际条
     heatmap._set_view("calendar")
-    root.update()
+    wide_root.update()
     assert len(heatmap.canvas.find_all()) > 50
 
 

@@ -757,3 +757,76 @@ def test_read_dialogue_captures_tool_failure_feedback(tmp_path: Path):
     assert out[0] == "[用户] 运行测试"
     assert out[1] == "[工具] Bash pytest"
     assert out[2].startswith("[工具反馈:报错] FAILED tests/test_foo.py::test_bar")
+
+
+def test_read_dialogue_detail_rich_includes_normal_outputs(tmp_path: Path):
+    """rich 供给档：正常工具结果（AI 的观察面）也纳入摘要，按工具定制长度。
+
+    standard 档保持历史行为（仅报错）；rich/full 是供给扩容的主路径——
+    没有它模型只看得到「AI 做了什么」，看不到「AI 当时看到了什么」。
+    """
+    import json
+    from tcer.core import reader
+
+    p = tmp_path / "rich_detail.jsonl"
+    lines = [
+        {"type": "user", "message": {"role": "user",
+         "content": [{"type": "text", "text": "找一下相关代码"}]}},
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant",
+         "content": [
+             {"type": "tool_use", "id": "t1", "name": "Grep",
+              "input": {"pattern": "foo", "path": "src"}},
+             {"type": "tool_use", "id": "t2", "name": "Edit",
+              "input": {"file_path": "a.py", "old_string": "x", "new_string": "y"}},
+         ]}},
+        {"type": "user", "message": {"role": "user",
+         "content": [
+             {"type": "tool_result", "tool_use_id": "t1", "is_error": False,
+              "content": "src/a.py:10: def foo()\nsrc/b.py:42: foo() call"},
+             {"type": "tool_result", "tool_use_id": "t2", "is_error": False,
+              "content": "The file has been edited successfully."},
+         ]}},
+        # rewind 重发同一 tool_result：按 tool_use_id 去重，不双计
+        {"type": "user", "message": {"role": "user",
+         "content": [
+             {"type": "tool_result", "tool_use_id": "t1", "is_error": False,
+              "content": "src/a.py:10: def foo()\nsrc/b.py:42: foo() call"},
+         ]}},
+    ]
+    with p.open("w", encoding="utf-8") as fh:
+        for obj in lines:
+            fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+    # standard：仅工具行，正常输出被过滤（历史行为不变）
+    out_std = reader.read_dialogue(p, detail="standard")
+    assert not any("[工具反馈:Grep]" in ln for ln in out_std)
+    assert not any("[工具反馈:Edit]" in ln for ln in out_std)
+
+    # rich：正常输出纳入；Grep（探索类）与 Edit（杂项）都出现且只出现一次
+    out_rich = reader.read_dialogue(p, detail="rich")
+    grep_lines = [ln for ln in out_rich if ln.startswith("[工具反馈:Grep]")]
+    edit_lines = [ln for ln in out_rich if ln.startswith("[工具反馈:Edit]")]
+    assert len(grep_lines) == 1, "rewind 重发的 tool_result 必须按 id 去重"
+    assert len(edit_lines) == 1
+    assert "src/a.py:10: def foo()" in grep_lines[0]
+
+    # full：摘要更长（截断阈值翻倍）
+    long_output = "L" * 600
+    p2 = tmp_path / "full_detail.jsonl"
+    lines2 = [
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant",
+         "content": [{"type": "tool_use", "id": "t9", "name": "Bash",
+                      "input": {"command": "pytest"}}]}},
+        {"type": "user", "message": {"role": "user",
+         "content": [{"type": "tool_result", "tool_use_id": "t9", "is_error": False,
+                      "content": long_output}]}},
+    ]
+    with p2.open("w", encoding="utf-8") as fh:
+        for obj in lines2:
+            fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    out_full = reader.read_dialogue(p2, detail="full")
+    bash_ln = next(ln for ln in out_full if ln.startswith("[工具反馈:Bash]"))
+    assert "…" not in bash_ln, "600 字符在 full 档（800 上限）不应截断"
+    out_rich2 = reader.read_dialogue(p2, detail="rich")
+    bash_ln2 = next(ln for ln in out_rich2 if ln.startswith("[工具反馈:Bash]"))
+    assert bash_ln2.endswith("…"), "600 字符在 rich 档（400 上限）应截断"

@@ -137,3 +137,30 @@ def write_session():
                 fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
         return path
     return _write
+
+
+@pytest.fixture(scope="session")
+def root():
+    """全测试会话共享的单个 Tk root。
+
+    Windows 上同进程「先建后销 root 再建新 root」会抛
+    couldn't read init.tcl —— 此前 smoke 与 dynamics 两文件各自建销 root，
+    pytest capture 模式下后建者整体 skip（覆盖被静默吞掉，-s 才恢复）。
+    单 root 全程复用后消除顺序耦合；无显示环境（CI headless）照旧整体 skip。
+    需要真实窗口尺寸的测试（heatmap）用 root_session 别名包装本 fixture
+    并自行 deiconify/withdraw。
+    """
+    tk = pytest.importorskip("tkinter")
+    try:
+        r = tk.Tk()
+    except tk.TclError:
+        pytest.skip("无显示环境,跳过 GUI 冒烟")
+    r.withdraw()
+    yield r
+    r.destroy()
+
+
+@pytest.fixture(scope="session")
+def root_session(root):
+    """别名 fixture：供需要包装（deiconify/几何设定）而非遮蔽共享 root 的文件。"""
+    return root

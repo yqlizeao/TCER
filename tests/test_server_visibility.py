@@ -200,17 +200,28 @@ def test_millisecond_timestamp_normalization_and_migration(db):
     sess = next(s for s in res["sessions"] if s["session_id"] == "s_ms")
     assert sess["ts"] == 1_700_000_000
 
-    # 模拟数据库中已有旧的毫秒时间戳
+    # 模拟老版本库升级：已有毫秒时间戳且从未跑过迁移（user_version=0）
     conn = db.connect()
     try:
         conn.execute("UPDATE uploads SET ts=1710000000000 WHERE session_id='s_ms'")
+        conn.execute("PRAGMA user_version = 0")
         conn.commit()
     finally:
         conn.close()
 
-    # 再次触发 init_db() 自愈迁移
+    # 触发 init_db() 自愈迁移（迁移一次后打标，不再重复执行）
     db.init_db()
 
+    conn = db.connect()
+    try:
+        ts = conn.execute("SELECT ts FROM uploads WHERE session_id='s_ms'").fetchone()["ts"]
+        assert ts == 1_710_000_000
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+    # 已打标：重复 init_db 不再触碰数据（否则秒级 ts 会被再除 1000 毁掉）
+    db.init_db()
     conn = db.connect()
     try:
         ts = conn.execute("SELECT ts FROM uploads WHERE session_id='s_ms'").fetchone()["ts"]

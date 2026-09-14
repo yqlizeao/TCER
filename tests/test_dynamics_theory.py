@@ -23,9 +23,6 @@ from tcer.core.llm_prompts import (
     parse_dynamics_payload,
 )
 
-tk = pytest.importorskip("tkinter")
-
-
 # ============================================================
 # 1. Waddington 双阱势能曲面方程测试
 # ============================================================
@@ -249,20 +246,20 @@ def test_damping_spectrum_sliding_window():
 
 def test_waterbed_causality_asset_chains():
     class DummyOp:
-        def __init__(self, turn, tool, path, is_error=False):
+        def __init__(self, turn, tool, path):
             self.turn = turn
             self.tool = tool
             self.path = path
-            self.is_error = is_error
 
     traj = [
         {"turn": 1, "vector": "positive", "semantic_distance": 0.80},
         {"turn": 2, "vector": "positive", "semantic_distance": 0.55},
         {"turn": 3, "event": "test_fail", "semantic_distance": 0.60},
     ]
+    # ops_by_turn 键为 0-based ToolOp.turn；轨迹节点 turn 为 1-based（接口口径 SSOT）
     ops_by_turn = {
-        2: [DummyOp(2, "Edit", "tcer/core/models.py")],
-        3: [DummyOp(3, "Bash", "pytest tests/test_pricing.py", is_error=True)],
+        1: [DummyOp(1, "Edit", "tcer/core/models.py")],
+        2: [DummyOp(2, "Bash", "pytest tests/test_pricing.py")],
     }
 
     causal = metrics.analyze_waterbed_causality(traj, ops_by_turn)
@@ -273,6 +270,31 @@ def test_waterbed_causality_asset_chains():
     assert link["lag_turns"] == 1
     assert link["source_file"] == "tcer/core/models.py"
     assert link["blast_radius"] == 1
+
+
+def test_waterbed_causality_off_by_one_alignment():
+    """回合号口径回归：轨迹 1-based turn=5 的编辑须命中 0-based 键 4，而非占位符。"""
+    class DummyOp:
+        def __init__(self, turn, tool, path):
+            self.turn = turn
+            self.tool = tool
+            self.path = path
+
+    traj = [
+        {"turn": 1, "vector": "positive", "semantic_distance": 0.80},
+        {"turn": 5, "vector": "positive", "semantic_distance": 0.50},
+        {"turn": 6, "event": "test_fail", "semantic_distance": 0.55},
+    ]
+    ops_by_turn = {4: [DummyOp(4, "Edit", "file_a.py")]}
+
+    causal = metrics.analyze_waterbed_causality(traj, ops_by_turn)
+    assert causal, "应检出跨回合资产耦合水床链"
+    link = causal[0]
+    assert link["source_file"] == "file_a.py"      # 而非 "code_asset" 占位符
+    assert link["trigger_tool"] == "Edit"
+    assert link["source_turn"] == 5
+    assert link["target_turn"] == 6
+    assert link["lag_turns"] == 1
 
 
 def test_swarm_synergy_and_multibody_coupling():
@@ -301,22 +323,44 @@ def test_swarm_synergy_and_multibody_coupling():
     assert s_low["divergent_count"] == 2
     assert s_low["synergy_score"] < 50.0
 
+
+def test_swarm_synergy_no_subagents_neutral():
+    """无子代理数据不造数：note 关键词不得虚构 total_subagents，返回中性形状。"""
+    traj_note_only = [
+        {"turn": 1, "semantic_distance": 0.80, "note": "并行修改了三个文件"},
+        {"turn": 2, "semantic_distance": 0.50, "note": "单代理顺序推进"},
+    ]
+    s = metrics.compute_swarm_synergy(traj_note_only)
+    assert s["total_subagents"] == 0
+    assert s["synergy_score"] is None
+    assert s["convergent_count"] == 0
+    assert s["divergent_count"] == 0
+    assert s["net_semantic_delta"] == 0.0
+    assert s["active_turns"] == []
+
+    # 空轨迹同样不造数
+    s_empty = metrics.compute_swarm_synergy([])
+    assert s_empty["total_subagents"] == 0
+    assert s_empty["synergy_score"] is None
+
 # ============================================================
 # 6. 遥测协议兼容性与确定性后备补全测试
 # ============================================================
 
 def test_telemetry_protocol_and_deterministic_backfill():
-    # 验证 DYNAMICS_PROMPT_VERSION 已更新为 2026-09-dyn-v3
-    assert DYNAMICS_PROMPT_VERSION == "2026-09-dyn-v3"
-    assert "2026-09-dyn-v3" in _DYNAMICS_SYSTEM
-    assert "Waddington" in _DYNAMICS_SYSTEM
+    # 验证 DYNAMICS_PROMPT_VERSION 已更新为 2026-09-dyn-v4
+    assert DYNAMICS_PROMPT_VERSION == "2026-09-dyn-v4"
+    assert "2026-09-dyn-v4" in _DYNAMICS_SYSTEM
     assert "epistemic_balance" in _DYNAMICS_SYSTEM
     assert "damping_ratio" in _DYNAMICS_SYSTEM
     assert "carnot_efficiency" in _DYNAMICS_SYSTEM
+    # dyn-v4：转折归因字段（trigger）与反谄媚审计立场
+    assert "trigger" in _DYNAMICS_SYSTEM
+    assert "审计立场" in _DYNAMICS_SYSTEM
+    assert "禁止笼统正面评价" in _DYNAMICS_SYSTEM
 
     # 提示词中明确禁止 LaTeX 代码标记
-    assert "严禁使用任何 LaTeX 数学公式代码语法" in _DYNAMICS_SYSTEM
-    assert "通俗易懂的中文工程师自然语言" in _DYNAMICS_SYSTEM
+    assert "严禁" in _DYNAMICS_SYSTEM and "LaTeX" in _DYNAMICS_SYSTEM
 
     # 模拟历史旧版模型输出（缺少 potential_energy, epistemic_debt, regime 等新字段）
     legacy_reply = (
@@ -435,13 +479,54 @@ def test_long_session_dynamic_sampling_and_gap_boosting():
         assert "regime" in p
 
 
-def test_gui_phase_portrait_smoke():
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("无显示环境，跳过 GUI 冒烟")
+def test_ground_caps_trajectory_to_16():
+    """LLM 超发节点封顶：>16 时保前 15 个 + 强制保留末点终态。"""
+    stats_30 = [TurnStat(i, ts=i * 1000, input_tokens=1000, output_tokens=500)
+                for i in range(30)]
+    derived = {"stats": stats_30, "ops_by_turn": {}, "loc_by_turn": {}}
+    payload = {
+        "convergence_type": "escaped",
+        "trajectory": [
+            {"turn": t, "semantic_distance": round(0.85 - 0.7 * (t - 1) / 19, 4),
+             "vector": "positive", "event": "normal"}
+            for t in range(1, 21)
+        ],
+    }
+    grounded = ground_dynamics_user_turns(payload, derived)
+    assert grounded is not None
+    traj = grounded["trajectory"]
+    assert len(traj) <= 16
+    assert traj[0]["turn"] == 1       # 首点（初始意图）保留
+    assert traj[-1]["turn"] == 20     # 末点终态强制保留
 
-    root.withdraw()
+
+def test_ground_user_turn_with_holey_stats():
+    """stats 回合号有空洞时按回合键接地，而非位置索引错配。"""
+    holey_stats = [
+        TurnStat(0, ts=1, user_turn=1),
+        TurnStat(1, ts=2),
+        TurnStat(2, ts=3),
+        TurnStat(5, ts=4, user_turn=42),
+        TurnStat(6, ts=5, user_turn=43),
+    ]
+    derived = {"stats": holey_stats, "ops_by_turn": {}, "loc_by_turn": {}}
+    payload = {
+        "convergence_type": "dirac",
+        "trajectory": [
+            {"turn": 6, "semantic_distance": 0.40, "vector": "positive", "u": 99},
+        ],
+    }
+    grounded = ground_dynamics_user_turns(payload, derived)
+    assert grounded is not None
+    node = grounded["trajectory"][0]
+    # 节点 1-based turn=6 → 0-based 键 5 → 命中 TurnStat(turn=5).user_turn=42
+    assert node.get("user_turn") == 42
+    assert "u" not in node
+
+
+def test_gui_phase_portrait_smoke(root):
+    # root 来自 conftest 的 session 级共享 fixture（无显示环境整体 skip；
+    # 纯数学测试不依赖 Tk，不被 tkinter 绑架）
     try:
         from tcer.gui.views import PhasePortraitWidget
 
@@ -487,7 +572,7 @@ def test_gui_phase_portrait_smoke():
 
         # 断言微型物理徽标文本非空
         assert "阻尼比" in widget.damping_badge.cget("text")
-        assert "卡诺效率" in widget.carnot_badge.cget("text")
+        assert "代码有效率" in widget.carnot_badge.cget("text")
         assert "收敛稳定" in widget.lyapunov_badge.cget("text")
         assert "多智能体协同" in widget.swarm_badge.cget("text")
         # 2. 切换为相速度极限环模式并重新渲染
@@ -564,4 +649,45 @@ def test_gui_phase_portrait_smoke():
         assert "0.0 (契合真实意图)" in canvas_texts
         assert "1.0 (严重偏离意图)" in canvas_texts
     finally:
-        root.destroy()
+        widget.canvas.destroy()
+
+
+def test_gui_phase_portrait_empty_trajectory_no_crash(root):
+    """空轨迹 dynamics 报告在两种视图模式下渲染均不崩（UnboundLocalError 回归）。
+
+    修复前：_draw_manifold 的冲量虚线列表只在 `if traj:` 块内初始化、块外消费，
+    空轨迹直接 UnboundLocalError，4414 行附近的「无细分轨迹采样数据」兜底不可达。
+    """
+    # root 同样来自 conftest 共享 fixture
+    try:
+        from tcer.gui.views import PhasePortraitWidget
+
+        widget = PhasePortraitWidget(root)
+        empty_dyn = {
+            "convergence_type": "trapped",
+            "attractor_trapped": True,
+            "damping_ratio": 1.2,
+            "carnot_efficiency": 0.4,
+            "swarm_synergy": {"total_subagents": 0, "synergy_score": None},
+            "trajectory": [],
+        }
+        for mode in ("manifold", "phase_plane"):
+            widget._set_mode(mode)
+            widget.render(empty_dyn, {"turns": 0, "cost_display": ""})
+            root.update_idletasks()
+            # 兜底提示文本应真实出现在画布上（空轨迹分支可达性验证）
+            canvas_texts = [widget.canvas.itemcget(iid, "text")
+                            for iid in widget.canvas.find_all()
+                            if widget.canvas.type(iid) == "text"]
+            assert any("无细分轨迹采样数据" in t for t in canvas_texts), \
+                f"{mode} 模式应显示空轨迹兜底提示"
+            assert widget._pts == []
+
+        # 切换报告（轨迹突然非空）后选中索引复位不残留：先造一个越界选中
+        widget._selected_node_idx = 3
+        widget.render({"trajectory": [
+            {"turn": 1, "semantic_distance": 0.8, "vector": "positive"},
+        ]}, {"turns": 1})
+        assert widget._selected_node_idx is None
+    finally:
+        widget.canvas.destroy()

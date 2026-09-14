@@ -18,6 +18,19 @@ from tcer.core.app_dirs import prefs_dir
 SCOPES = ("metrics", "dialog", "tools")
 DEFAULT_SCOPES = ["metrics", "dialog", "tools"]
 DEFAULT_SCOPE = "full"
+
+# 过程数据供给档（read_dialogue 的工具结果纳入深度）：
+# - standard：仅报错摘要（历史行为，最省 token）
+# - rich    ：+ 正常工具结果摘要（Grep/Read/测试输出等 AI 观察面，约 3-5× 数据量）
+# - full    ：摘要加倍 + 全量时序（大上下文模型配置，如 1M 窗口）
+DIALOG_DETAILS = ("standard", "rich", "full")
+DEFAULT_DIALOG_DETAIL = "full"
+# (标题, 描述) 供配置弹窗展示——SSOT，弹窗直接引用
+DIALOG_DETAIL_LABELS = {
+    "standard": ("标准", "只保留工具报错的摘要，不含工具正常输出；逐回合时序最多 40 行。prompt 体积最小，适合上下文窗口 32K 及以下的小模型。"),
+    "rich": ("丰富", "在标准基础上，把工具的正常输出（搜索命中、文件读取内容、测试运行结果等 AI 当时看到的信息）以每条 400 字符的摘要一并纳入，逐回合时序最多 100 行。数据量约为标准档的 3-5 倍，适合 128K 上下文窗口的模型。"),
+    "full": ("完整", "工具输出摘要放宽到每条 800 字符，逐回合时序最多 200 行，非 Claude 数据源的单条用户消息放宽到 3000 字符。数据供给量最大，适合 200K 以上大上下文窗口的模型（如 Gemini 1M 配置）。"),
+}
 SCOPE_LABELS = {
     "metrics": "会话指标与时序",
     "dialog": "对话交互时间线",
@@ -110,6 +123,7 @@ def load() -> dict:
     prefs = {
         "base_url": "", "api_key": "", "model": "",
         "scopes": list(DEFAULT_SCOPES), "scope": DEFAULT_SCOPE,
+        "dialog_detail": DEFAULT_DIALOG_DETAIL,
     }
     try:
         with _prefs_path().open("r", encoding="utf-8") as fh:
@@ -124,6 +138,7 @@ def load() -> dict:
     raw_scopes = stored.get("scopes") if "scopes" in stored else stored.get("scope")
     prefs["scopes"] = normalize_scopes(raw_scopes)
     prefs["scope"] = scopes_summary(prefs["scopes"])
+    prefs["dialog_detail"] = normalize_dialog_detail(stored.get("dialog_detail"))
     return prefs
 
 
@@ -180,3 +195,14 @@ def scopes() -> list[str]:
     if cur and cur != cfg.get("scope"):
         return normalize_scopes(cur)
     return cfg["scopes"]
+
+
+def normalize_dialog_detail(raw) -> str:
+    """供给档合法化（未知/缺失 → 默认 rich）。"""
+    s = str(raw or "").strip().lower()
+    return s if s in DIALOG_DETAILS else DEFAULT_DIALOG_DETAIL
+
+
+def dialog_detail() -> str:
+    """当前过程数据供给档（standard/rich/full）。"""
+    return load()["dialog_detail"]
