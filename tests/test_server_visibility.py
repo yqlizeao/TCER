@@ -184,3 +184,36 @@ def _row_id(db, sid: str) -> int:
         return r["id"]
     finally:
         conn.close()
+
+
+def test_millisecond_timestamp_normalization_and_migration(db):
+    # 模拟客户端上报毫秒时间戳 generated_at = 1_700_000_000_000 (13位)
+    db.insert_records(
+        uploaded_by="alice",
+        person="alice",
+        project="projA",
+        aggregate=None,
+        sessions=[_session_row("s_ms", title="MS Session")],
+        generated_at=1_700_000_000_000,
+    )
+    res = db.sessions_list(viewer="alice")
+    sess = next(s for s in res["sessions"] if s["session_id"] == "s_ms")
+    assert sess["ts"] == 1_700_000_000
+
+    # 模拟数据库中已有旧的毫秒时间戳
+    conn = db.connect()
+    try:
+        conn.execute("UPDATE uploads SET ts=1710000000000 WHERE session_id='s_ms'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 再次触发 init_db() 自愈迁移
+    db.init_db()
+
+    conn = db.connect()
+    try:
+        ts = conn.execute("SELECT ts FROM uploads WHERE session_id='s_ms'").fetchone()["ts"]
+        assert ts == 1_710_000_000
+    finally:
+        conn.close()

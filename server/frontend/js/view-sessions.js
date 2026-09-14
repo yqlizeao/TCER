@@ -24,10 +24,13 @@ function visTag(v) {
 }
 
 function sessItemHTML(s) {
+  const timeBadge = s.ts
+    ? `<span class="sess-time" title="${fmt.datetime(s.ts)}">${fmt.time(s.ts)}</span>`
+    : "";
   return `
     <div class="sess-item" data-id="${s.id}">
       <div class="sess-t">${escapeHTML(s.title)}${s.aggregate_only ? ' <span class="tag-agg">仅聚合</span>' : ""}</div>
-      <div class="sess-m"><span>${escapeHTML(s.person)}</span><span>${escapeHTML(s.project)}</span><span>${fmt.money(s.cost_usd)}</span>${visTag(s.visibility)}</div>
+      <div class="sess-m"><span>${escapeHTML(s.person)}</span><span>${escapeHTML(s.project)}</span>${timeBadge}<span>${fmt.money(s.cost_usd)}</span>${visTag(s.visibility)}</div>
     </div>`;
 }
 
@@ -263,10 +266,14 @@ function paintSessionDetail() {
        </div>`
     : visTag(vis);
 
+  const timeSub = d.ts
+    ? ` · <span class="sd-time" title="会话时间">${fmt.datetime(d.ts)}</span>`
+    : "";
+
   el.innerHTML = `
     <div class="sd-head">
       <div><div class="sd-title">${escapeHTML(d.title || d.session_id || "会话")}${d.aggregate_only ? ' <span class="tag-agg">仅聚合</span>' : ""}</div>
-        <div class="sd-sub">${escapeHTML(d.project || "—")} · ${escapeHTML(d.person || "—")} ${visTag(vis)}</div></div>
+        <div class="sd-sub">${escapeHTML(d.project || "—")} · ${escapeHTML(d.person || "—")}${timeSub} ${visTag(vis)}</div></div>
       <div class="sd-head-r">
         ${visCtl}
         <div class="mode-toggle">

@@ -205,6 +205,10 @@ def init_db() -> None:
             for name, decl in cols.items():
                 if name not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        # 历史数据时间戳自愈迁移：将存入的毫秒级时间戳（>10^10）自动纠正为秒级时间戳
+        conn.execute(
+            "UPDATE uploads SET ts = ts / 1000 WHERE ts IS NOT NULL AND ts > 10000000000"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -463,9 +467,10 @@ def insert_records(
                          if isinstance(v, (int, float))) or None
         ts = row.get("started_at")
         if ts:
-            ts = int(ts) // 1000 if ts > 10_000_000_000 else int(ts)
+            ts = int(ts) // 1000 if int(ts) > 10_000_000_000 else int(ts)
         else:
-            ts = generated_at or now
+            raw_gen = generated_at or now
+            ts = int(raw_gen) // 1000 if int(raw_gen) > 10_000_000_000 else int(raw_gen)
         return (
             batch_id, now, uploaded_by, person, project, kind,
             row.get("session_id"), row.get("title"),

@@ -356,7 +356,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
 .sess-item:hover { border-color: var(--tx-mute); }
 .sess-item.active { border-color: var(--accent); background: var(--panel-2); }
 .sess-t { font-size: var(--fs-sm); font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sess-m { font-size: var(--fs-eyebrow); color: var(--tx-mute); display: flex; gap: 8px; }
+.sess-m { font-size: var(--fs-eyebrow); color: var(--tx-mute); display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+.sess-time { color: var(--tx-dim); font-variant-numeric: tabular-nums; }
+.sd-time { color: var(--tx-dim); font-variant-numeric: tabular-nums; }
 .tag-agg { font-size: 9px; background: var(--chip); padding: 0 5px; border-radius: 3px; color: var(--warn); }
 
 /* 会话列表工具条 + 项目分组 */
