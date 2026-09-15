@@ -23,13 +23,34 @@ function visTag(v) {
     : '<span class="vis-tag vis-private">私有</span>';
 }
 
+const SOURCE_INFO = {
+  claude: { name: "Claude Code", icon: "assets/claude.png" },
+  codex: { name: "Codex", icon: "assets/codex.png" },
+  grok: { name: "Grok", icon: "assets/grok.png" },
+  omp: { name: "Oh My Pi", icon: "assets/omp.png" },
+  pi: { name: "Pi", icon: "assets/pi.png" },
+  opencode: { name: "OpenCode", icon: "assets/opencode.png" },
+};
+function getSourceInfo(source) {
+  const s = String(source || "claude").toLowerCase().trim();
+  return SOURCE_INFO[s] || { name: s || "Claude Code", icon: "assets/claude.png" };
+}
+function sourceBadgeHTML(source, showName = true) {
+  const info = getSourceInfo(source);
+  return `<span class="source-badge" title="Agent 数据源：${escapeHTML(info.name)}"><img class="source-icon" src="${info.icon}" alt="${escapeHTML(info.name)}" />${showName ? `<span class="source-name">${escapeHTML(info.name)}</span>` : ""}</span>`;
+}
+function sourceIconHTML(source, cls = "source-icon-inline") {
+  const info = getSourceInfo(source);
+  return `<img class="${cls}" src="${info.icon}" alt="${escapeHTML(info.name)}" title="Agent 数据源：${escapeHTML(info.name)}" />`;
+}
+
 function sessItemHTML(s) {
   const timeBadge = s.ts
     ? `<span class="sess-time" title="${fmt.datetime(s.ts)}">${fmt.time(s.ts)}</span>`
     : "";
   return `
     <div class="sess-item" data-id="${s.id}">
-      <div class="sess-t">${escapeHTML(s.title)}${s.aggregate_only ? ' <span class="tag-agg">仅聚合</span>' : ""}</div>
+      <div class="sess-t">${sourceIconHTML(s.source, "source-icon-xs")}<span class="sess-title-text">${escapeHTML(s.title)}</span>${s.aggregate_only ? ' <span class="tag-agg">仅聚合</span>' : ""}</div>
       <div class="sess-m"><span>${escapeHTML(s.person)}</span><span>${escapeHTML(s.project)}</span>${timeBadge}<span>${fmt.money(s.cost_usd)}</span>${visTag(s.visibility)}</div>
     </div>`;
 }
@@ -272,10 +293,15 @@ function paintSessionDetail() {
     ? ` · <span class="sd-time" title="会话时间">${fmt.datetime(d.ts)}</span>`
     : "";
 
+  const srcBadge = sourceBadgeHTML(d.source, true);
+  const srcIcon = sourceIconHTML(d.source, "source-icon-main");
+
   el.innerHTML = `
     <div class="sd-head">
-      <div><div class="sd-title">${escapeHTML(d.title || d.session_id || "会话")}${d.aggregate_only ? ' <span class="tag-agg">仅聚合</span>' : ""}</div>
-        <div class="sd-sub">${escapeHTML(d.project || "—")} · ${escapeHTML(d.person || "—")}${timeSub} ${visTag(vis)}</div></div>
+      <div>
+        <div class="sd-title">${srcIcon}<span class="sd-title-text">${escapeHTML(d.title || d.session_id || "会话")}</span>${d.aggregate_only ? ' <span class="tag-agg">仅聚合</span>' : ""}</div>
+        <div class="sd-sub">${escapeHTML(d.project || "—")} · ${escapeHTML(d.person || "—")} · ${srcBadge}${timeSub} ${visTag(vis)}</div>
+      </div>
       <div class="sd-head-r">
         ${visCtl}
         <div class="mode-toggle">
@@ -286,12 +312,52 @@ function paintSessionDetail() {
     </div>
     ${cols}
     ${body}`;
-
   el.querySelectorAll(".mode-toggle button").forEach((b) =>
     b.addEventListener("click", () => { S.sdMode = b.dataset.mode; paintSessionDetail(); }));
   const vt = el.querySelector("#vis-toggle");
   if (vt) vt.querySelectorAll("button").forEach((b) =>
     b.addEventListener("click", () => setSessionVisibility(d.id, b.dataset.vis)));
+
+  // 绑定左侧快速导航点点击与视野高亮联动
+  const navDots = el.querySelectorAll(".tr-nav-dot");
+  if (navDots.length) {
+    navDots.forEach((dot) => {
+      dot.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const targetId = dot.dataset.target;
+        const targetEl = el.querySelector("#" + targetId);
+        if (targetEl) {
+          navDots.forEach((d) => d.classList.remove("active"));
+          dot.classList.add("active");
+          targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+          targetEl.classList.add("turn-highlight");
+          setTimeout(() => targetEl.classList.remove("turn-highlight"), 1200);
+        }
+      });
+    });
+
+    // 滚动监听：进入视野时自动切换高亮激活点
+    if (typeof IntersectionObserver !== "undefined") {
+      const obs = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            const id = entry.target.id;
+            const matchedDot = el.querySelector(`.tr-nav-dot[data-target="${id}"]`);
+            if (matchedDot) {
+              navDots.forEach((d) => d.classList.remove("active"));
+              matchedDot.classList.add("active");
+              break;
+            }
+          }
+        }
+      }, {
+        root: el,
+        rootMargin: "0px 0px -75% 0px",
+        threshold: 0.05
+      });
+      el.querySelectorAll(".turn[id]").forEach((t) => obs.observe(t));
+    }
+  }
 }
 
 // escapeHTML 由 core.js 提供（全局）
@@ -356,99 +422,247 @@ function transcriptHTML(conv) {
     if (last && last.role === role) last.blocks.push(b);
     else groups.push({ role, blocks: [b] });
   }
-  const turns = groups.map((g) => {
+
+  const navDots = [];
+  const turns = groups.map((g, idx) => {
+    const turnId = `turn-${idx}`;
     const blocks = g.blocks.map(blockHTML).join("");
-    return `<div class="turn ${g.role}">
+
+    // 识别导航点：用户输入点 (green) 与 LLM 的 markdown 文本回复点 (blue)
+    if (g.role === "user") {
+      const userTxt = g.blocks
+        .filter((b) => b.type === "text")
+        .map((b) => b.text || "")
+        .join(" ")
+        .trim();
+      const snippet = userTxt ? userTxt.slice(0, 80) : "用户输入";
+      navDots.push({
+        id: turnId,
+        type: "user",
+        title: `用户: ${snippet}`,
+      });
+    } else if (g.role === "assistant" && g.blocks.some((b) => b.type === "text")) {
+      const asstTxt = g.blocks
+        .filter((b) => b.type === "text")
+        .map((b) => b.text || "")
+        .join(" ")
+        .trim();
+      const snippet = asstTxt ? asstTxt.slice(0, 80) : "回复";
+      navDots.push({
+        id: turnId,
+        type: "assistant",
+        title: `助手: ${snippet}`,
+      });
+    }
+
+    return `<div class="turn ${g.role}" id="${turnId}">
       <div class="turn-ic ic-${g.role}">${ROLE_SVG[g.role]}</div>
       <div class="turn-body">${blocks}</div>
     </div>`;
   }).join("");
-  return `<div class="tr">${turns || '<div class="empty">该会话无可展示的对话内容</div>'}</div>`;
+
+  if (!turns) return '<div class="empty">该会话无可展示的对话内容</div>';
+  if (!navDots.length) return `<div class="tr">${turns}</div>`;
+
+  const dotsHTML = navDots.map((d, i) => `
+    <div class="tr-nav-dot dot-${d.type} ${i === 0 ? "active" : ""}"
+         data-target="${d.id}"
+         title="${escapeHTML(d.title)}"></div>
+  `).join("");
+
+  return `
+    <div class="tr-wrap">
+      <div class="tr-nav" id="tr-nav" title="快速导航（绿：用户提问 · 蓝：助手回复）">
+        ${dotsHTML}
+      </div>
+      <div class="tr">${turns}</div>
+    </div>`;
 }
 
-// 工具入参对象 → 紧凑单行摘要（长值截断，避免 Bash/Write 的大段内容撑爆气泡）。
+const CODE_PARAM_KEYS = new Set([
+  "path", "file_path", "filepath", "pattern", "command", "cmd", "file",
+  "query", "target", "dir", "cwd", "workdir", "symbol", "regex", "selector",
+  "url", "new_name"
+]);
+
+// 工具入参对象 → 紧凑摘要（跳过已呈现在标题的 i/intent；关键路径/命令采用 <code> 格式化）
 function toolArgs(input) {
   if (input == null) return "";
-  if (typeof input !== "object")
-    return escapeHTML(String(input).slice(0, 300));
-  return Object.entries(input).map(([k, v]) => {
+  let obj = input;
+  if (typeof obj === "string") {
+    try {
+      const parsed = JSON.parse(obj);
+      if (parsed && typeof parsed === "object") obj = parsed;
+    } catch (_) {}
+  }
+  if (typeof obj !== "object")
+    return `<code class="blk-tool-code">${escapeHTML(String(obj).slice(0, 300))}</code>`;
+
+  const entries = Object.entries(obj).filter(([k]) => k !== "i" && k !== "intent");
+  if (!entries.length) return "";
+
+  return entries.map(([k, v]) => {
     let s = typeof v === "object" ? JSON.stringify(v) : String(v);
-    if (s.length > 200) s = s.slice(0, 200) + "…";
-    return `${escapeHTML(k)}: ${escapeHTML(s)}`;
+    const isCode = CODE_PARAM_KEYS.has(k.toLowerCase());
+    if (s.length > 240) s = s.slice(0, 240) + "…";
+    const valHTML = isCode
+      ? `<code class="blk-tool-code">${escapeHTML(s)}</code>`
+      : escapeHTML(s);
+    return `<span class="blk-arg-item"><span class="arg-k">${escapeHTML(k)}:</span> ${valHTML}</span>`;
   }).join(" · ");
 }
 
-// 提取结构化待办列表（适配 Claude / Grok / OpenCode / Codex / omp / Pi 的多种待办入参形态）
-function extractTodoList(input) {
-  if (!input) return null;
-  if (Array.isArray(input)) return input;
-  if (typeof input !== "object") return null;
+// 规范化单条待办项
+function normTodoItem(it) {
+  let content = "";
+  let status = "pending";
+  if (typeof it === "string") {
+    content = it;
+  } else if (it && typeof it === "object") {
+    content = it.content || it.task || it.step || it.title || it.text || JSON.stringify(it);
+    const st = String(it.status || it.state || it.action || "").toLowerCase();
+    if (st.includes("done") || st.includes("complete") || st.includes("finish") || it.completed === true) {
+      status = "completed";
+    } else if (st.includes("progress") || st.includes("active") || st.includes("doing") || st.includes("start")) {
+      status = "in_progress";
+    } else if (st.includes("cancel") || st.includes("drop") || st.includes("block")) {
+      status = "cancelled";
+    } else {
+      status = "pending";
+    }
+  }
+  return { content, status };
+}
 
+// 提取结构化待办列表，全面支持分阶段 Phase 树、扁平数组、单条任务操作与 JSON 字符串容错
+function parseTodoData(input) {
+  if (!input) return null;
+  let obj = input;
+  if (typeof obj === "string") {
+    try {
+      const p = JSON.parse(obj);
+      if (p && typeof p === "object") obj = p;
+    } catch (_) {}
+  }
+  if (Array.isArray(obj)) {
+    return { op: "", phases: [{ phase: "", items: obj.map(normTodoItem) }] };
+  }
+  if (typeof obj !== "object") return null;
+
+  const op = obj.op || obj.action || "";
+
+  // 1. 检查 list 字段（omp/pi 分 phase 格式：list: [ { phase: "...", items: [...] } ]）
+  let listVal = obj.list;
+  if (typeof listVal === "string") {
+    try {
+      const p = JSON.parse(listVal);
+      if (Array.isArray(p)) listVal = p;
+    } catch (_) {}
+  }
+  if (Array.isArray(listVal) && listVal.length) {
+    const isPhased = listVal.some((p) => p && typeof p === "object" && (Array.isArray(p.items) || Array.isArray(p.tasks)));
+    if (isPhased) {
+      const phases = listVal.map((p) => {
+        const phName = (p && typeof p === "object") ? (p.phase || p.name || "") : "";
+        const rawItems = (p && typeof p === "object") ? (p.items || p.tasks || []) : [];
+        return {
+          phase: phName,
+          items: Array.isArray(rawItems) ? rawItems.map(normTodoItem) : [normTodoItem(p)],
+        };
+      });
+      return { op, phases };
+    }
+    return { op, phases: [{ phase: "", items: listVal.map(normTodoItem) }] };
+  }
+
+  // 2. 检查常规数组字段：todos, plan, tasks, steps, items
   for (const k of ["todos", "plan", "tasks", "steps", "items"]) {
-    if (Array.isArray(input[k]) && input[k].length) return input[k];
+    let arr = obj[k];
+    if (typeof arr === "string") {
+      try {
+        const p = JSON.parse(arr);
+        if (Array.isArray(p)) arr = p;
+      } catch (_) {}
+    }
+    if (Array.isArray(arr) && arr.length) {
+      return { op, phases: [{ phase: "", items: arr.map(normTodoItem) }] };
+    }
   }
-  // 单任务操作（例如 omp 的 todo 工具：{ action: "start", task: "..." } 或 { action: "done", task: "..." }）
-  if (input.task || input.content) {
-    return [{ content: input.task || input.content, status: input.action || input.status || "in_progress" }];
+
+  // 3. 单任务操作（例如 omp 的 todo 工具：{ action: "start", task: "..." }）
+  if (obj.task || obj.content) {
+    return {
+      op,
+      phases: [{
+        phase: "",
+        items: [{ content: obj.task || obj.content, status: obj.action || obj.status || "in_progress" }],
+      }],
+    };
   }
+
   return null;
 }
 
 function renderTodoBlock(input) {
-  const list = extractTodoList(input);
-  if (!list || !list.length) return "";
+  const data = parseTodoData(input);
+  if (!data || !data.phases || !data.phases.length) return "";
 
+  let total = 0;
   let doneCount = 0;
   let inProgCount = 0;
 
-  const itemsHTML = list.map((it) => {
-    let content = "";
-    let status = "pending";
-
-    if (typeof it === "string") {
-      content = it;
-    } else if (it && typeof it === "object") {
-      content = it.content || it.task || it.step || it.title || it.text || JSON.stringify(it);
-      const st = String(it.status || it.state || it.action || "").toLowerCase();
-      if (st.includes("done") || st.includes("complete") || st.includes("finish") || it.completed === true) {
-        status = "completed";
-      } else if (st.includes("progress") || st.includes("active") || st.includes("doing") || st.includes("start")) {
-        status = "in_progress";
-      } else if (st.includes("cancel") || st.includes("drop") || st.includes("block")) {
-        status = "cancelled";
-      } else {
-        status = "pending";
-      }
+  for (const ph of data.phases) {
+    for (const it of ph.items) {
+      total++;
+      if (it.status === "completed") doneCount++;
+      else if (it.status === "in_progress") inProgCount++;
     }
+  }
+  if (!total) return "";
 
-    if (status === "completed") doneCount++;
-    else if (status === "in_progress") inProgCount++;
+  const iconMap = {
+    completed: '<span class="todo-ic todo-done" title="已完成">✓</span>',
+    in_progress: '<span class="todo-ic todo-doing" title="进行中">▶</span>',
+    cancelled: '<span class="todo-ic todo-cancel" title="已取消">✕</span>',
+    pending: '<span class="todo-ic todo-pending" title="待处理">○</span>',
+  };
 
-    const iconMap = {
-      completed: '<span class="todo-ic todo-done" title="已完成">✓</span>',
-      in_progress: '<span class="todo-ic todo-doing" title="进行中">▶</span>',
-      cancelled: '<span class="todo-ic todo-cancel" title="已取消">✕</span>',
-      pending: '<span class="todo-ic todo-pending" title="待处理">○</span>',
-    };
+  const phasesHTML = data.phases.map((ph) => {
+    const phTotal = ph.items.length;
+    const phDone = ph.items.filter((x) => x.status === "completed").length;
+    const phaseHeader = ph.phase
+      ? `<div class="todo-phase-h">
+           <span class="todo-phase-tag">阶段</span>
+           <span class="todo-phase-name">${escapeHTML(ph.phase)}</span>
+           <span class="todo-phase-count">${phDone}/${phTotal}</span>
+         </div>`
+      : "";
 
-    return `<div class="todo-item todo-${status}">
-      ${iconMap[status] || iconMap.pending}
-      <span class="todo-text">${escapeHTML(content)}</span>
-    </div>`;
+    const itemsHTML = ph.items.map((it) => `
+      <div class="todo-item todo-${it.status}">
+        ${iconMap[it.status] || iconMap.pending}
+        <span class="todo-text">${escapeHTML(it.content)}</span>
+      </div>
+    `).join("");
+
+    return `<div class="todo-phase-block">${phaseHeader}<div class="blk-todo-list">${itemsHTML}</div></div>`;
   }).join("");
 
-  const total = list.length;
   const pct = Math.round((doneCount / total) * 100);
+  const opTag = data.op ? `<span class="blk-todo-op">操作: ${escapeHTML(data.op)}</span>` : "";
 
   return `<div class="blk-todo-card">
     <div class="blk-todo-header">
       <div class="blk-todo-stat">
         <span class="blk-todo-title">任务清单</span>
-        <span class="blk-todo-badge">${doneCount}/${total} 完成${inProgCount ? ` · ${inProgCount} 进行中` : ""}</span>
+        <div class="blk-todo-meta">
+          ${opTag}
+          <span class="blk-todo-badge">${doneCount}/${total} 完成${inProgCount ? ` · ${inProgCount} 进行中` : ""}</span>
+        </div>
       </div>
       <div class="blk-todo-bar"><div class="blk-todo-bar-fill" style="width: ${pct}%"></div></div>
     </div>
-    <div class="blk-todo-list">${itemsHTML}</div>
+    <div class="blk-todo-phases">${phasesHTML}</div>
   </div>`;
 }
 
@@ -470,13 +684,29 @@ function blockHTML(b) {
     </details>`;
   }
   if (b.type === "tool_use") {
+    let inputObj = b.input;
+    if (typeof inputObj === "string") {
+      try {
+        const p = JSON.parse(inputObj);
+        if (p && typeof p === "object") inputObj = p;
+      } catch (_) {}
+    }
+    const intent = (inputObj && typeof inputObj === "object")
+      ? (inputObj.i || inputObj.intent || "")
+      : "";
+
     const isTodo = b.name && /todo|plan/i.test(b.name);
-    const todoHTML = isTodo ? renderTodoBlock(b.input) : "";
-    const args = todoHTML ? "" : toolArgs(b.input);
+    const todoHTML = isTodo ? renderTodoBlock(inputObj) : "";
+    const args = todoHTML ? "" : toolArgs(inputObj);
+
     return `<div class="blk blk-tool">
-      <div class="blk-tool-head"><span class="blk-tool-ic">${toolSVG(b.name)}</span>
-        <span class="blk-tool-name">${escapeHTML(b.name || "工具")}</span></div>
-      ${todoHTML || (args ? `<div class="blk-tool-arg">${args}</div>` : "")}</div>`;
+      <div class="blk-tool-head">
+        <span class="blk-tool-ic">${toolSVG(b.name)}</span>
+        <span class="blk-tool-name">${escapeHTML(b.name || "工具")}</span>
+        ${intent ? `<span class="blk-tool-intent">${escapeHTML(intent)}</span>` : ""}
+      </div>
+      ${todoHTML || (args ? `<div class="blk-tool-arg">${args}</div>` : "")}
+    </div>`;
   }
   if (b.type === "tool_result") {
     const err = b.is_error === true;
