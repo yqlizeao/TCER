@@ -150,6 +150,59 @@ function escapeHTML(s) {
     .replace(/'/g, "&#39;");
 }
 
+// 轻量安全 Markdown 渲染（先转义 HTML 杜绝 XSS，再解析代码块、行内代码、标题、粗斜体、列表、引用）
+function renderMarkdown(text) {
+  if (text == null) return "";
+  const raw = String(text);
+  if (!raw.trim()) return "";
+
+  // 1. 提取多行代码块并占位（防止代码块内部字符被 Markdown 行内规则误改）
+  const codeBlocks = [];
+  let s = raw.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push({ lang: (lang || "").trim(), code });
+    return `@@MD_CODE_${idx}@@`;
+  });
+
+  // 2. 先执行 HTML 转义（安全红线）
+  s = escapeHTML(s);
+
+  // 3. 行内代码 `code`
+  s = s.replace(/`([^`\n]+)`/g, (_, code) => `<code class="md-code">${code}</code>`);
+
+  // 4. 标题 (#, ##, ###)
+  s = s.replace(/^###\s+(.+)$/gm, '<div class="md-h3">$1</div>');
+  s = s.replace(/^##\s+(.+)$/gm, '<div class="md-h2">$1</div>');
+  s = s.replace(/^#\s+(.+)$/gm, '<div class="md-h1">$1</div>');
+
+  // 5. 粗体与斜体
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^\*])\*([^*]+)\*([^\*]|$)/g, '$1<em>$2</em>$3');
+
+  // 6. 引用块
+  s = s.replace(/^&gt;\s+(.+)$/gm, '<blockquote class="md-quote">$1</blockquote>');
+
+  // 7. 无序列表 (- 或 * 开头)
+  s = s.replace(/^[*-]\s+(.+)$/gm, '<div class="md-li"><span class="md-bullet">•</span><span>$1</span></div>');
+
+  // 8. 有序列表 (数字. 开头)
+  s = s.replace(/^(\d+)\.\s+(.+)$/gm, '<div class="md-li"><span class="md-num">$1.</span><span>$2</span></div>');
+
+  // 9. 段落与普通换行
+  s = s.replace(/\n\n+/g, '<div class="md-p-gap"></div>');
+  s = s.replace(/([^>])\n([^<])/g, '$1<br>$2');
+
+  // 10. 还原代码块（代码块内部独立转义）
+  s = s.replace(/@@MD_CODE_(\d+)@@/g, (_, idx) => {
+    const b = codeBlocks[Number(idx)];
+    if (!b) return "";
+    const langLabel = b.lang ? `<div class="md-code-lang">${escapeHTML(b.lang)}</div>` : "";
+    return `<div class="md-code-box">${langLabel}<pre class="md-code-pre"><code>${escapeHTML(b.code)}</code></pre></div>`;
+  });
+
+  return s;
+}
+
 
 // ------------------------- 多选下拉（tag 占位） -------------------------
 // 通用多选组件：一个下拉框，未选时显示占位符，选中项以可删除的 tag 形式占位在框内，

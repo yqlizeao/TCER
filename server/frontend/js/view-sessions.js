@@ -303,10 +303,34 @@ const TOOL_ICON = {
   Write: '<path d="M12 4v16"/><path d="M4 8h16"/>',
   Bash: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3"/><path d="M13 15h4"/>',
   Grep: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4-4"/>',
+  Glob: '<path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>',
+  TodoWrite: '<rect x="3" y="4" width="6" height="6" rx="1.5"/><path d="M5 7l1 1 2-2"/><path d="M12 7h9M12 17h9"/><rect x="3" y="14" width="6" height="6" rx="1.5"/><path d="M5 17l1 1 2-2"/>',
+  Task: '<circle cx="12" cy="5" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M12 7.5v4M7.8 16l2.7-3M16.2 16l-2.7-3M10.5 11.5h3"/>',
+  AskUserQuestion: '<path d="M21 11.5a8.5 8.5 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.5 8.5 0 01-3.8-.9L3 21l1.9-5.7a8.5 8.5 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.5 8.5 0 013.8-.9h.5a8.5 8.5 0 018 8v.5z"/><path d="M12 8.5a1.5 1.5 0 011.5 1.5c0 1-1.5 1.5-1.5 2"/><circle cx="12" cy="15" r=".5" fill="currentColor"/>',
+  WebSearch: '<circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 000 18M12 3a14 14 0 010 18"/>',
+  LSP: '<path d="M7 8l-4 4 4 4"/><path d="M17 8l4 4-4 4"/><path d="M14 4l-4 16"/>',
+  Skill: '<path d="M12 2l2.4 6.8H21l-5.5 4.3 2.1 6.9-5.6-4.2-5.6 4.2 2.1-6.9L3 8.8h6.6z"/>',
   _default: '<circle cx="12" cy="12" r="8"/><path d="M12 8v8"/>',
 };
 function toolSVG(name) {
-  const p = TOOL_ICON[name] || TOOL_ICON._default;
+  if (!name) return `<svg viewBox="0 0 24 24">${TOOL_ICON._default}</svg>`;
+  const n = String(name).trim();
+  if (TOOL_ICON[n]) return `<svg viewBox="0 0 24 24">${TOOL_ICON[n]}</svg>`;
+  const lower = n.toLowerCase();
+  let key = "_default";
+  if (lower.includes("todo") || lower.includes("plan")) key = "TodoWrite";
+  else if (lower.includes("glob") || lower.includes("find") || lower === "list_dir" || lower === "ls" || lower === "list") key = "Glob";
+  else if (lower.includes("grep") || lower.includes("search")) key = "Grep";
+  else if (lower.includes("read") || lower === "view" || lower === "view_image") key = "Read";
+  else if (lower.includes("edit") || lower.includes("patch")) key = "Edit";
+  else if (lower.includes("write") || lower.includes("create")) key = "Write";
+  else if (lower.includes("bash") || lower.includes("terminal") || lower.includes("shell") || lower === "exec" || lower === "eval" || lower === "run") key = "Bash";
+  else if (lower.includes("task") || lower.includes("subagent") || lower.includes("agent")) key = "Task";
+  else if (lower.includes("ask") || lower.includes("question") || lower.includes("user_input")) key = "AskUserQuestion";
+  else if (lower.includes("web") || lower.includes("fetch")) key = "WebSearch";
+  else if (lower.includes("lsp")) key = "LSP";
+  else if (lower.includes("skill")) key = "Skill";
+  const p = TOOL_ICON[key] || TOOL_ICON._default;
   return `<svg viewBox="0 0 24 24">${p}</svg>`;
 }
 const ROLE_SVG = {
@@ -354,23 +378,120 @@ function toolArgs(input) {
   }).join(" · ");
 }
 
+// 提取结构化待办列表（适配 Claude / Grok / OpenCode / Codex / omp / Pi 的多种待办入参形态）
+function extractTodoList(input) {
+  if (!input) return null;
+  if (Array.isArray(input)) return input;
+  if (typeof input !== "object") return null;
+
+  for (const k of ["todos", "plan", "tasks", "steps", "items"]) {
+    if (Array.isArray(input[k]) && input[k].length) return input[k];
+  }
+  // 单任务操作（例如 omp 的 todo 工具：{ action: "start", task: "..." } 或 { action: "done", task: "..." }）
+  if (input.task || input.content) {
+    return [{ content: input.task || input.content, status: input.action || input.status || "in_progress" }];
+  }
+  return null;
+}
+
+function renderTodoBlock(input) {
+  const list = extractTodoList(input);
+  if (!list || !list.length) return "";
+
+  let doneCount = 0;
+  let inProgCount = 0;
+
+  const itemsHTML = list.map((it) => {
+    let content = "";
+    let status = "pending";
+
+    if (typeof it === "string") {
+      content = it;
+    } else if (it && typeof it === "object") {
+      content = it.content || it.task || it.step || it.title || it.text || JSON.stringify(it);
+      const st = String(it.status || it.state || it.action || "").toLowerCase();
+      if (st.includes("done") || st.includes("complete") || st.includes("finish") || it.completed === true) {
+        status = "completed";
+      } else if (st.includes("progress") || st.includes("active") || st.includes("doing") || st.includes("start")) {
+        status = "in_progress";
+      } else if (st.includes("cancel") || st.includes("drop") || st.includes("block")) {
+        status = "cancelled";
+      } else {
+        status = "pending";
+      }
+    }
+
+    if (status === "completed") doneCount++;
+    else if (status === "in_progress") inProgCount++;
+
+    const iconMap = {
+      completed: '<span class="todo-ic todo-done" title="已完成">✓</span>',
+      in_progress: '<span class="todo-ic todo-doing" title="进行中">▶</span>',
+      cancelled: '<span class="todo-ic todo-cancel" title="已取消">✕</span>',
+      pending: '<span class="todo-ic todo-pending" title="待处理">○</span>',
+    };
+
+    return `<div class="todo-item todo-${status}">
+      ${iconMap[status] || iconMap.pending}
+      <span class="todo-text">${escapeHTML(content)}</span>
+    </div>`;
+  }).join("");
+
+  const total = list.length;
+  const pct = Math.round((doneCount / total) * 100);
+
+  return `<div class="blk-todo-card">
+    <div class="blk-todo-header">
+      <div class="blk-todo-stat">
+        <span class="blk-todo-title">任务清单</span>
+        <span class="blk-todo-badge">${doneCount}/${total} 完成${inProgCount ? ` · ${inProgCount} 进行中` : ""}</span>
+      </div>
+      <div class="blk-todo-bar"><div class="blk-todo-bar-fill" style="width: ${pct}%"></div></div>
+    </div>
+    <div class="blk-todo-list">${itemsHTML}</div>
+  </div>`;
+}
+
 function blockHTML(b) {
   if (b.type === "text")
-    return `<div class="blk blk-text">${escapeHTML(b.text || "")}</div>`;
-  if (b.type === "thinking")
-    return `<div class="blk blk-thinking">💭 ${escapeHTML(b.text || "")}</div>`;
+    return `<div class="blk blk-text">${renderMarkdown(b.text || "")}</div>`;
+  if (b.type === "thinking") {
+    const rawTxt = (b.text || "").trim();
+    const len = rawTxt.length;
+    const lenLabel = len >= 1000 ? (len / 1000).toFixed(1) + "k" : String(len);
+    const isLong = len > 140;
+    return `<details class="blk blk-thinking" ${isLong ? "" : "open"}>
+      <summary class="blk-thinking-summary">
+        <span class="blk-thinking-title">💭 思考过程</span>
+        <span class="blk-thinking-len">（${lenLabel} 字）</span>
+        <span class="blk-toggle-cue"></span>
+      </summary>
+      <div class="blk-thinking-body">${renderMarkdown(rawTxt) || escapeHTML(rawTxt)}</div>
+    </details>`;
+  }
   if (b.type === "tool_use") {
-    const args = toolArgs(b.input);
+    const isTodo = b.name && /todo|plan/i.test(b.name);
+    const todoHTML = isTodo ? renderTodoBlock(b.input) : "";
+    const args = todoHTML ? "" : toolArgs(b.input);
     return `<div class="blk blk-tool">
       <div class="blk-tool-head"><span class="blk-tool-ic">${toolSVG(b.name)}</span>
         <span class="blk-tool-name">${escapeHTML(b.name || "工具")}</span></div>
-      ${args ? `<div class="blk-tool-arg">${args}</div>` : ""}</div>`;
+      ${todoHTML || (args ? `<div class="blk-tool-arg">${args}</div>` : "")}</div>`;
   }
   if (b.type === "tool_result") {
     const err = b.is_error === true;
-    return `<div class="blk blk-result ${err ? "err" : ""}">
-      <div class="blk-result-head">${toolSVG(b.name)} 工具结果 ${err ? "· 失败" : "· 成功"}</div>
-      <pre>${escapeHTML(b.text || "")}</pre></div>`;
+    const txt = b.text || "";
+    const lines = txt.split("\n");
+    const lineCount = lines.length;
+    const isLong = lineCount > 8 || txt.length > 500;
+    const metaInfo = lineCount > 1 ? ` · ${lineCount} 行` : "";
+    return `<details class="blk blk-result ${err ? "err" : ""}" ${isLong ? "" : "open"}>
+      <summary class="blk-result-head">
+        <span class="blk-result-title">${toolSVG(b.name)} 工具结果 ${err ? "· 失败" : "· 成功"}<span class="blk-result-meta">${metaInfo}</span></span>
+        <span class="blk-toggle-cue"></span>
+      </summary>
+      <div class="blk-result-body"><pre>${escapeHTML(txt)}</pre></div>
+    </details>`;
   }
   return `<div class="blk blk-text">${escapeHTML(JSON.stringify(b))}</div>`;
 }
