@@ -216,7 +216,7 @@ def test_millisecond_timestamp_normalization_and_migration(db):
     try:
         ts = conn.execute("SELECT ts FROM uploads WHERE session_id='s_ms'").fetchone()["ts"]
         assert ts == 1_710_000_000
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     finally:
         conn.close()
 
@@ -226,5 +226,100 @@ def test_millisecond_timestamp_normalization_and_migration(db):
     try:
         ts = conn.execute("SELECT ts FROM uploads WHERE session_id='s_ms'").fetchone()["ts"]
         assert ts == 1_710_000_000
+    finally:
+        conn.close()
+
+
+def test_aggregate_cleaned_up_when_sessions_uploaded(db):
+    """当某项目先上传了仅聚合记录，随后又上传了带明细会话时：
+    1. 旧的 aggregate 记录必须被清理/抑制，不能在会话列表中以「仅聚合」假会话残留；
+    2. _fetch_rows 不能对该项目既取 aggregate 又取 sessions 造成双重计数。
+    """
+    agg_row = {
+        "title": "projA",
+        "net_loc": 500,
+        "total_tokens": 5_000_000,
+        "code_added": 500,
+        "cost_usd": 5.0,
+        "tcer": 100.0,
+    }
+    # 第一次：仅聚合上传
+    db.insert_records(
+        uploaded_by="alice",
+        person="alice",
+        project="projA",
+        aggregate=agg_row,
+        sessions=None,
+        generated_at=1_700_000_000,
+    )
+    lst1 = db.sessions_list(viewer="alice")
+    assert len(lst1["sessions"]) == 1
+    assert lst1["sessions"][0]["aggregate_only"] is True
+
+    # 第二次：带会话明细上传（不同批次）
+    db.insert_records(
+        uploaded_by="alice",
+        person="alice",
+        project="projA",
+        aggregate=agg_row,
+        sessions=[_session_row("s1"), _session_row("s2")],
+        generated_at=1_700_001_000,
+    )
+    lst2 = db.sessions_list(viewer="alice")
+    # 会话列表中只能看到真实会话 s1, s2，旧的「仅聚合」必须消失
+    sids = [s["session_id"] for s in lst2["sessions"]]
+    assert set(sids) == {"s1", "s2"}
+    assert all(not s["aggregate_only"] for s in lst2["sessions"])
+
+    # 数据库中已没有该项目的 kind='aggregate' 冗余行
+    conn = db.connect()
+    try:
+        aggs = conn.execute("SELECT id FROM uploads WHERE kind='aggregate' AND project='projA'").fetchall()
+        assert len(aggs) == 0
+    finally:
+        conn.close()
+
+
+def test_historical_aggregate_cleanup_migration(db):
+    """模拟在修复前已经处于 user_version=1 的老数据库：
+    存在因为历史跨批次上传遗留的 orphan aggregate 记录。
+    执行 init_db() 应该自动迁移到 user_version=2 并清除该冗余记录。
+    """
+    conn = db.connect()
+    try:
+        # 手动构造 user_version=1 的库状态，并插入一对冲突的 aggregate 与 session
+        conn.execute("PRAGMA user_version = 1")
+        conn.execute(
+            "INSERT INTO uploads(batch_id, uploaded_at, uploaded_by, person, project, kind, ts, raw_json) "
+            "VALUES('b_old', 1700000000, 'alice', 'alice', 'projOld', 'aggregate', 1700000000, '{}')"
+        )
+        conn.execute(
+            "INSERT INTO uploads(batch_id, uploaded_at, uploaded_by, person, project, kind, session_id, ts, raw_json) "
+            "VALUES('b_new', 1700001000, 'alice', 'alice', 'projOld', 'session', 'sess_old', 1700001000, '{}')"
+        )
+        # 另一个项目只有 aggregate（合法保留）
+        conn.execute(
+            "INSERT INTO uploads(batch_id, uploaded_at, uploaded_by, person, project, kind, ts, raw_json) "
+            "VALUES('b_only_agg', 1700000000, 'bob', 'bob', 'projOnlyAgg', 'aggregate', 1700000000, '{}')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 触发 init_db()
+    db.init_db()
+
+    conn = db.connect()
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # projOld 的 aggregate 应该已被删除
+        rem_old = conn.execute("SELECT id FROM uploads WHERE project='projOld' AND kind='aggregate'").fetchall()
+        assert len(rem_old) == 0
+        # projOld 的 session 完好保留
+        rem_sess = conn.execute("SELECT id FROM uploads WHERE project='projOld' AND kind='session'").fetchall()
+        assert len(rem_sess) == 1
+        # projOnlyAgg 没有任何 session，其 aggregate 必须保留
+        rem_bob = conn.execute("SELECT id FROM uploads WHERE project='projOnlyAgg' AND kind='aggregate'").fetchall()
+        assert len(rem_bob) == 1
     finally:
         conn.close()

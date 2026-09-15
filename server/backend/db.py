@@ -205,14 +205,20 @@ def init_db() -> None:
             for name, decl in cols.items():
                 if name not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-        # 历史数据时间戳自愈迁移：将存入的毫秒级时间戳（>10^10）自动纠正为秒级
-        # 时间戳。PRAGMA user_version=1 打标，避免每次启动都跑一遍全表 UPDATE
-        # （迁移幂等无害，但没必要常驻开销）。
-        if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+        # 历史数据自愈迁移：
+        # 1. 将存入的毫秒级时间戳（>10^10）自动纠正为秒级时间戳；
+        # 2. 清理已被 session 覆盖的旧 aggregate 记录（避免历史残留导致的「仅聚合」假会话与双重计数）。
+        # PRAGMA user_version=2 打标，避免每次启动都跑一遍全表扫描。
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
             conn.execute(
                 "UPDATE uploads SET ts = ts / 1000 WHERE ts IS NOT NULL AND ts > 10000000000"
             )
-            conn.execute("PRAGMA user_version = 1")
+            conn.execute(
+                "DELETE FROM uploads WHERE kind='aggregate' AND EXISTS ("
+                "SELECT 1 FROM uploads s WHERE s.kind='session' "
+                "AND s.person IS uploads.person AND s.project IS uploads.project)"
+            )
+            conn.execute("PRAGMA user_version = 2")
         conn.commit()
     finally:
         conn.close()
@@ -531,6 +537,13 @@ def insert_records(
                 for r in conn.execute(q, (*sids, person, project)):
                     existing_ids[r["session_id"]] = r["id"]
 
+        # 当有 session 明细上传时，旧的同项目 aggregate 记录已彻底被真实明细取代，
+        # 必须清理掉，避免历史残留产生「仅聚合」假会话并在聚合时双重计数。
+        if sessions:
+            conn.execute(
+                "DELETE FROM uploads WHERE kind='aggregate' AND person IS ? AND project IS ?",
+                (person, project),
+            )
         n_changed = 0
         # The aggregate row is dead weight when sessions are present (queries
         # re-derive the aggregate by summing session rows and drop it), so only
@@ -710,7 +723,8 @@ def _fetch_rows(
     """
     where = [
         "(kind='session' OR (kind='aggregate' AND NOT EXISTS ("
-        "SELECT 1 FROM uploads s WHERE s.batch_id=u.batch_id AND s.kind='session')))"
+        "SELECT 1 FROM uploads s WHERE s.kind='session' "
+        "AND s.person IS u.person AND s.project IS u.project)))"
     ]
     params: list = []
     if start_ts is not None:

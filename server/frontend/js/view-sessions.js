@@ -255,7 +255,9 @@ function paintSessionDetail() {
   const body = S.sdMode === "json"
     ? `<pre class="raw">${escapeHTML(JSON.stringify(raw, null, 2))}</pre>`
     : (hasConv ? transcriptHTML(conv)
-        : `<div class="empty">该会话未附带逐回合明细（仅聚合上传）</div>`);
+        : (d.aggregate_only
+            ? `<div class="empty">该记录为项目聚合数据（未附带逐会话明细）</div>`
+            : `<div class="empty">该会话未附带逐回合对话内容</div>`));
 
   // 右上角：owner 可切私有/公开；非 owner 只读显示当前可见性标签。
   const vis = d.visibility || "private";

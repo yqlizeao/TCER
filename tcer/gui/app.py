@@ -1690,6 +1690,9 @@ class TcerGui:
                     project=ref.key, source=ref.source, project_ref=ref,
                     **analysis_args,
                 )
+                if not a.reports and a.n_sessions == 0:
+                    errors.append(f"{label}: 选定范围内无会话，跳过")
+                    continue
                 total_inserted += upload_client.token_upload(
                     server_url=server_url, auth_token=auth_token,
                     aggregate=a.aggregate, reports=a.reports,
