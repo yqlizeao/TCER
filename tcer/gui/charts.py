@@ -243,25 +243,25 @@ class MetricTrendSelector:
         self._vars: dict[str, tk.BooleanVar] = {}
         self._rows: dict[str, CheckRow] = {}
 
-        # 叠加模式：整个框就是开关——点击切换。开启=ACCENT 蓝框（默认），
-        # 关闭=灰框。框内只有标题+状态+说明，不再有内嵌勾选行，避免「框已蓝
-        # 还得再点里面」的双层操作。tk 点击不冒泡，整框（含所有子）递归绑定。
+        # 叠加模式：精致微型药丸栏替代原本刺眼的 2px 电光蓝大框
         from .views import ui_icon as _ui_icon
-        self._overlay_box = tk.Frame(parent, bg=theme.PANEL, highlightthickness=2,
-                                     highlightbackground=theme.ACCENT, cursor=CLICK_CURSOR)
-        self._overlay_box.pack(fill="x", padx=2, pady=(4, 6))
-        head = tk.Frame(self._overlay_box, bg=theme.PANEL)
-        head.pack(fill="x", padx=8, pady=(4, 0))
-        tk.Label(head, image=_ui_icon(head, "layers"), bg=theme.PANEL).pack(side="left", padx=(0, 4))
-        tk.Label(head, text="叠加模式", bg=theme.PANEL, fg=theme.FG,
+        self._overlay_box = tk.Frame(parent, bg=theme.PANEL_2, height=30, cursor=CLICK_CURSOR)
+        self._overlay_box.pack(fill="x", padx=2, pady=(2, 4))
+        self._overlay_box.pack_propagate(False)
+
+        _ico = _ui_icon(self._overlay_box, "layers")
+        if _ico is not None:
+            tk.Label(self._overlay_box, image=_ico, bg=theme.PANEL_2).pack(side="left", padx=(8, 4))
+        tk.Label(self._overlay_box, text="叠加对比", bg=theme.PANEL_2, fg=theme.FG,
                  font=theme.FONT_UI_SMALL_BOLD).pack(side="left")
-        self._overlay_state_lbl = tk.Label(head, text="已开启", bg=theme.PANEL,
-                                           fg=theme.SUCCESS, font=theme.FONT_UI_SMALL)
-        self._overlay_state_lbl.pack(side="right")
-        tk.Label(self._overlay_box, text="点击切换。开启时可同时勾选最多 4 个指标叠加对比。",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                 anchor="w", justify="left", wraplength=160).pack(
-                     fill="x", padx=10, pady=(2, 5))
+
+        self._overlay_state_lbl = tk.Label(
+            self._overlay_box, text="已开启", bg=theme.CONTROL_BG,
+            fg=theme.SUCCESS, font=theme.FONT_UI_SMALL_BOLD, padx=8, pady=2)
+        self._overlay_state_lbl.pack(side="right", padx=8)
+
+        Tooltip(self._overlay_box, "点击切换：开启叠加模式可同时勾选最多 4 个指标；关闭时为单选。")
+        Tooltip(self._overlay_state_lbl, "点击切换：开启叠加模式可同时勾选最多 4 个指标；关闭时为单选。")
 
         def _bind_toggle(node):
             node.bind("<Button-1>", lambda e: self._toggle_overlay(), add="+")
@@ -275,12 +275,23 @@ class MetricTrendSelector:
         inner = sf.inner
 
         for group in GROUPS:
-            hdr = tk.Frame(inner, bg=theme.GROUP_COLORS.get(group.id, theme.PANEL),
-                           padx=4, pady=2)
-            hdr.pack(fill="x", pady=(2, 0))
-            tk.Label(hdr, text=f"▼ {group.name}",
-                     bg=hdr["bg"], fg=theme.FG,
-                     font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(fill="x")
+            g_col = theme.GROUP_COLORS.get(group.id, theme.ACCENT)
+            g_wrap = tk.Frame(inner, bg=theme.PANEL)
+            g_wrap.pack(fill="x", pady=(2, 0))
+
+            hdr = tk.Frame(g_wrap, bg=theme.PANEL_2, height=26, cursor=CLICK_CURSOR)
+            hdr.pack(fill="x")
+            hdr.pack_propagate(False)
+
+            # 宝石色指示条
+            tk.Frame(hdr, bg=g_col, width=3).pack(side="left", fill="y")
+            arrow_lbl = tk.Label(hdr, text=f"▾ {group.name}",
+                                 bg=theme.PANEL_2, fg=theme.FG,
+                                 font=theme.FONT_UI_BOLD, anchor="w", cursor=CLICK_CURSOR)
+            arrow_lbl.pack(side="left", fill="y", padx=(6, 4))
+
+            body = tk.Frame(g_wrap, bg=theme.PANEL)
+            body.pack(fill="x")
 
             for m in group.metrics:
                 if m.key in _NON_PLOTTABLE:
@@ -289,10 +300,23 @@ class MetricTrendSelector:
                 self._vars[m.key] = var
                 label = m.name + (f"（{m.unit}）" if m.unit else "")
                 self._rows[m.key] = CheckRow(
-                    inner, label, var,
+                    body, label, var,
                     on_toggle=lambda k=m.key: self._on_toggle(k),
                     tooltip=m.tip,
                 )
+
+            def _toggle_g(b=body, al=arrow_lbl, gname=group.name):
+                is_vis = b.winfo_ismapped()
+                if is_vis:
+                    b.pack_forget()
+                    al.config(text=f"▸ {gname}")
+                else:
+                    b.pack(fill="x")
+                    al.config(text=f"▾ {gname}")
+                self._scroll.update_scroll()
+
+            for w in (hdr, arrow_lbl):
+                w.bind("<Button-1>", lambda _e, fn=_toggle_g: fn(), add="+")
 
         self._scroll.update_scroll(reset=True)
 
@@ -302,11 +326,13 @@ class MetricTrendSelector:
             row._draw()
 
     def _update_overlay_box(self) -> None:
-        """同步叠加框视觉：开启=ACCENT 蓝框 + 绿色「已开启」；关闭=灰框 + 灰「已关闭」。"""
+        """同步叠加框视觉：开启=绿色「已开启」；关闭=灰字「单选」。"""
         on = self._overlay_mode
-        self._overlay_box.config(highlightbackground=theme.ACCENT if on else theme.BORDER)
-        self._overlay_state_lbl.config(text="已开启" if on else "已关闭",
-                                       fg=theme.SUCCESS if on else theme.MUTED)
+        self._overlay_state_lbl.config(
+            text="已开启" if on else "单选",
+            fg=theme.SUCCESS if on else theme.MUTED,
+            bg=theme.CONTROL_BG,
+        )
 
     def _toggle_overlay(self) -> None:
         self._overlay_mode = not self._overlay_mode
@@ -371,17 +397,18 @@ class _ChartTooltip:
         ry = self._canvas.winfo_rooty()
         cx = rx + x + 16
         cy = ry + y - 10
-        sw = self._canvas.winfo_screenwidth()
-        sh = self._canvas.winfo_screenheight()
+        from .platform import get_monitor_work_area
+        m_left, m_top, m_right, m_bottom = get_monitor_work_area(self._canvas)
+
         cw = self._canvas.winfo_width()
-        if (cx + self._tw > sw - 4) or (cw > 200 and x + 16 + self._tw > cw):
+        if (cx + self._tw > m_right - 4) or (cw > 200 and x + 16 + self._tw > cw):
             cx = rx + x - self._tw - 12
-        if cy + self._th > sh - 4:
+        if cy + self._th > m_bottom - 4:
             cy = ry + y - self._th - 12
-        if cx < 4:
-            cx = 4
-        if cy < 4:
-            cy = 4
+        if cx < m_left + 4:
+            cx = m_left + 4
+        if cy < m_top + 4:
+            cy = m_top + 4
         self._win.wm_geometry(f"+{cx}+{cy}")
 
     def show(self, x: int, y: int, lines: list[str],
@@ -446,8 +473,8 @@ class TrendChart:
 
     _PAD_L = 62
     _PAD_R = 20
-    _PAD_T = 30
-    _PAD_B = 36
+    _PAD_T = 44
+    _PAD_B = 44
     _HIT_RADIUS = 8
 
     def __init__(self, parent, controller=None) -> None:
@@ -487,11 +514,11 @@ class TrendChart:
         """Build the shared '趋势分析' group header with a segmented mode switcher
         (趋势图 / 散点图 / 仪表板 / 时段) — 深色 pill，选中 ACCENT，替代老式
         Radiobutton。各子模式重建 _content，调用方把额外控件塞进返回的 header。"""
-        gc = theme.GROUP_COLORS["G_NEUTRAL"]
+        gc = theme.PANEL_2
         header = tk.Frame(parent, bg=gc, padx=6, pady=3)
         header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text="▼ 趋势分析", bg=gc, fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        tk.Label(header, text="▾ 趋势分析", bg=gc, fg=theme.FG,
+                 font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
         from .views import ui_icon
         seg = tk.Frame(header, bg=theme.CONTROL_BG, padx=2, pady=2)
         seg.pack(side="left", padx=(10, 0))
@@ -560,7 +587,7 @@ class TrendChart:
 
         # Mode buttons in group header
         mode_header = self._add_mode_buttons(right)
-        self._legend_frame = tk.Frame(mode_header, bg=theme.GROUP_COLORS["G_NEUTRAL"])
+        self._legend_frame = tk.Frame(mode_header, bg=theme.PANEL_2)
         self._legend_frame.pack(side="right")
         from .views import ui_icon as _ui_icon
         self._zoom_reset_btn = flat_button(mode_header, "重置缩放",
@@ -585,10 +612,10 @@ class TrendChart:
         self.canvas.focus_set()
 
         # Stats in group header
-        stats_header = tk.Frame(right, bg=theme.GROUP_COLORS["G6"], padx=6, pady=3)
+        stats_header = tk.Frame(right, bg=theme.PANEL_2, padx=6, pady=3)
         stats_header.pack(fill="x", pady=(1, 0))
-        tk.Label(stats_header, text="▼ 统计", bg=theme.GROUP_COLORS["G6"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        tk.Label(stats_header, text="▾ 统计", bg=theme.PANEL_2, fg=theme.FG,
+                 font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
         self._stats_frame = tk.Frame(right, bg=theme.PANEL, padx=6, pady=3)
         self._stats_frame.pack(fill="x")
         self._stats_labels = []
@@ -600,7 +627,7 @@ class TrendChart:
 
         # Mode buttons in group header (same as trend)
         mode_header = self._add_mode_buttons(right)
-        tk.Label(mode_header, text="6 组代表指标总览", bg=theme.GROUP_COLORS["G_NEUTRAL"],
+        tk.Label(mode_header, text="6 组代表指标总览", bg=theme.PANEL_2,
                  fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left", padx=8)
 
         self._dashboard = DashboardChart(right)
@@ -1377,9 +1404,8 @@ class TrendChart:
 
     # -- legend & stats ---------------------------------------------------
     def _update_legend(self) -> None:
-        # 图例与所在头部同底色：旧值 theme.BG（近黑）会与头部的 G_NEUTRAL 灰底冲突，
-        # 在图例四周显出一圈更深的矩形色块，与主题不一致。
-        bg = theme.GROUP_COLORS["G_NEUTRAL"]
+        # 图例与所在头部同底色（PANEL_2 组头），四周不显异色矩形块。
+        bg = theme.PANEL_2
         for w in self._legend_frame.winfo_children():
             w.destroy()
         for i, ol in enumerate(self._overlay):
@@ -1392,7 +1418,7 @@ class TrendChart:
             # 不让子 Frame 随内容收缩，固定为 10×10 色块。
             swatch.pack_propagate(False)
             lbl = tk.Label(wrap, text=ol.name, fg=theme.FG,
-                           bg=bg, font=theme.FONT_UI_SMALL)
+                           bg=bg, font=theme.FONT_UI)
             lbl.pack(side="left")
 
     def _update_stats(self, items: list[tuple]) -> None:

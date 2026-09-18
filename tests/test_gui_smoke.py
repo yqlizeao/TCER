@@ -169,18 +169,18 @@ def test_metric_panel_group_collapse(root, reports):
     assert panel._groups
     gs = panel._groups[0]                       # G1 会话概况：默认展开
     assert not gs.collapsed and gs.body.winfo_manager() != ""
-    g4 = panel._groups[3]                       # G4 代码产出与质量：默认折叠
-    assert g4.collapsed and g4.body.winfo_manager() == ""
-    assert g4.arrow.cget("text").startswith("▶")
+    g4 = panel._groups[3]                       # G4 代码产出与质量：默认展开
+    assert not g4.collapsed and g4.body.winfo_manager() != ""
+    assert g4.arrow.cget("text")[0] in ("▼", "▾")
     panel._toggle_group(gs)
     root.update_idletasks()
     assert gs.collapsed
     assert gs.body.winfo_manager() == ""        # pack_forget → 未被几何管理器管理
-    assert gs.arrow.cget("text").startswith("▶")
+    assert gs.arrow.cget("text")[0] in ("▶", "▸")
     panel._toggle_group(gs)
     root.update_idletasks()
     assert not gs.collapsed and gs.body.winfo_manager() != ""
-    assert gs.arrow.cget("text").startswith("▼")
+    assert gs.arrow.cget("text")[0] in ("▼", "▾")
     frame.destroy()
 
 
@@ -195,14 +195,14 @@ def test_model_compare_group_collapse(root, reports):
     root.update_idletasks()
     qual = next((g for g in cv._groups if "代码质量" in g.name), None)
     assert qual is not None
-    assert qual.collapsed and qual.body.winfo_manager() == ""   # M_QUAL 默认折叠
-    assert qual.arrow.cget("text").startswith("▶")
+    assert not qual.collapsed and qual.body.winfo_manager() != ""  # 默认展开
+    assert qual.arrow.cget("text")[0] in ("▼", "▾")
     cv._toggle_group(qual, "M_QUAL")
     root.update_idletasks()
-    assert not qual.collapsed and qual.body.winfo_manager() != ""
-    assert cv._group_collapsed["M_QUAL"] is False                # 状态记入 dict
+    assert qual.collapsed and qual.body.winfo_manager() == ""       # 折叠
+    assert cv._group_collapsed["M_QUAL"] is True                   # 状态记入 dict
     other = next(g for g in cv._groups if "代码质量" not in g.name)
-    assert not other.collapsed                                   # 其他组默认展开
+    assert not other.collapsed
     frame.destroy()
 
 
@@ -434,8 +434,8 @@ def test_ranking_insights_section_renders(root, reports):
     _walk_labels(view._decomp_inner, texts)
     # 章节标题出现（CollapsibleSection 头部可能带 ▼ 前缀，故用 in）
     assert any("洞察与意见" in t for t in texts)
-    # 至少一条洞察带行首标记（\u2713 亮点 / ! 拖累 / \u2192 改进）
-    assert any(t[:1] in ("\u2713", "!", "\u2192") for t in texts)
+    # 至少一条洞察带行首标记（✓ 亮点 / ! 拖累 / → 改进）
+    assert any(t[:1] in ("✓", "!", "→") for t in texts)
     frame.destroy()
 
 
@@ -667,33 +667,8 @@ def test_claude_user_messages_excludes_subagent_prompts(tmp_path):
     assert not any(m.startswith("You are ") for m in msgs)
 
 
-def test_calendar_popup_renders_and_picks(root):
-    """CalendarPopup 构建 + 月份切换 + 选日期/清除回调不崩（拦 Toplevel 回归）。"""
-    from tcer.gui.widgets import CalendarPopup
-
-    picked: list = []
-    anchor = tk.Label(root, text="x")
-    anchor.pack()
-    root.update_idletasks()
-    p = CalendarPopup(anchor, lambda s: picked.append(s), anchor=anchor,
-                      initial="2026-07-15")
-    root.update_idletasks()
-    assert p._year == 2026 and p._month == 7   # initial 解析定位到该月
-    p._shift(-1)                                # ← 6 月
-    assert p._month == 6
-    p._shift(1)                                 # → 回 7 月
-    p._pick(1)                                  # 点选 7/1 → 回调并关闭
-    assert picked == ["2026-07-01"]
-
-    p2 = CalendarPopup(anchor, lambda s: picked.append(s), anchor=anchor, initial="")
-    root.update_idletasks()
-    p2._clear()                                 # ✕ 清除 → 空串回调
-    assert picked[-1] == ""
-    anchor.destroy()
-
-
 def test_filter_bar_presets_today(root):
-    """FilterBar 预设：今天 → since=今日；全部 → 起止归空。"""
+    """FilterBar 预设：启动默认今天；换档更新日期、胶囊文本与 _current_preset。"""
     from datetime import datetime
     from tcer.gui.views import FilterBar
 
@@ -707,14 +682,23 @@ def test_filter_bar_presets_today(root):
     frame = tk.Frame(root)
     frame.pack()
     bar = FilterBar(frame, _Ctl())
+    bar.mount_sidebar(frame)                    # 挂载胶囊后才能验证下拉显示
     root.update_idletasks()
 
-    bar._set_preset("today")
+    # 启动默认即「今天」（不恢复旧偏好的 since/until）
+    assert bar._current_preset == "today"
     assert bar.since_var.get() == datetime.now().strftime("%Y-%m-%d")
     assert bar.until_var.get() == ""
 
+    bar._set_preset("week")
+    assert bar.since_var.get() != ""
+    assert "本周" in bar._time_lbl.cget("text")  # 胶囊文字必须跟随换档
+    assert bar._current_preset == "week"
+
     bar._set_preset("all")
     assert bar.since_var.get() == "" and bar.until_var.get() == ""
+    assert "全部" in bar._time_lbl.cget("text")
+    assert bar._current_preset == "all"
     frame.destroy()
 
 
@@ -758,7 +742,7 @@ def test_project_column_set_hidden(root):
 
 
 def test_filter_bar_since_routes_to_apply_time_filter(root):
-    """起始日期变化走 apply_time_filter；结束日期/任务类型走 reanalyze。"""
+    """时间预设变化走 apply_time_filter；任务类型变化走 reanalyze。"""
     from tcer.gui.views import FilterBar
 
     class _Ctl:
@@ -787,11 +771,8 @@ def test_filter_bar_since_routes_to_apply_time_filter(root):
     bar._set_preset("today")
     assert ctl.calls == ["apply"]
     ctl.calls.clear()
-    bar._validate_and_reanalyze(bar.since_var)
+    bar._set_preset("all")
     assert ctl.calls == ["apply"]
-    ctl.calls.clear()
-    bar._validate_and_reanalyze(bar.until_var)
-    assert ctl.calls == ["reanalyze"]
     ctl.calls.clear()
     bar._on_task_type_change(None)
     assert ctl.calls == ["reanalyze"]
@@ -948,6 +929,88 @@ def test_session_column_pin_flag_marks(root, reports):
     col._filter_var.set("")
     root.update_idletasks()
 
+
+
+def test_session_card_mark_icon_bg_tracks_card(root, reports):
+    """标记图标底色随卡片 hover/选中联动（历史 bug：硬编码 PANEL_2 色斑），
+    且左键 toggle 不触发卡片选中（track_bg 只联动变色不绑事件）。"""
+    from tcer.gui.views import SessionColumn
+    from tcer.gui import theme
+
+    class _Ctl:
+        def __getattr__(self, name):
+            return lambda *a, **kw: None
+
+    col = SessionColumn(root, _Ctl())
+    col.update(reports, pinned={"s1"})          # s1 常驻 pin 图标
+    root.update_idletasks()
+
+    def _marks_row(card):
+        row1 = next(w for w in card.frame.winfo_children() if w is not card.rail)
+        return next(w for w in row1.winfo_children() if isinstance(w, tk.Frame))
+
+    # 置顶卡（排第一）：图标常驻，底色随卡片联动
+    card = col._cards[0]
+    icons = _marks_row(card).winfo_children()
+    assert len(icons) == 2                       # pin + flag
+
+    card._on_hover()
+    root.update_idletasks()
+    assert all(w.cget("bg") == theme.HOVER_BG for w in icons)
+
+    card.set_selected(True)
+    root.update_idletasks()
+    assert all(w.cget("bg") == theme.SEL_ROW_ACTIVE for w in icons)
+    card.set_selected(False)
+    card._on_unhover()
+
+    # 未标记卡：marks_row 初始隐藏（悬浮才显示）
+    card2 = col._cards[1]
+    assert _marks_row(card2).winfo_manager() == ""
+
+
+def test_metric_panel_deck_chips_ssot(root):
+    """deck 摘要与 chip：单 Label 摘要不被 sub 擦除（历史 bug 四摘要永久空白）；
+    chip 取值走 SSOT display（Codex 源 cache_write 显示「不适用」并置灰）；
+    Token 分布条已删（全宽高饱和色条，防照旧 README 抄回）。"""
+    from tcer.gui.views import MetricPanel
+    from tcer.gui.metric_defs import UNSUPPORTED_LABEL
+    from tcer.gui import theme
+
+    class _Ctl:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    frame = tk.Frame(root)
+    frame.pack()
+    mp = MetricPanel(frame, _Ctl())
+    root.update_idletasks()
+
+    # 分布条守卫：_seg_* 与 _ratio_bar_frame 不得复活
+    for attr in ("_seg_cr", "_seg_in", "_seg_cw", "_seg_out", "_ratio_bar_frame",
+                 "_ratio_segments"):
+        assert not hasattr(mp, attr), attr
+
+    rep = _report("deck-ssot")
+    mp.update(rep)
+    root.update_idletasks()
+    # deck 头部摘要非空（别名 wipe 曾让四个摘要永久空白）
+    for k in ("_sum_token", "_sum_code", "_sum_prompt", "_sum_agent"):
+        v_lbl, _ = mp._chips[k]
+        assert v_lbl.cget("text").strip(), f"摘要 {k} 空白"
+    # claude 源：缓存写入是支持指标 → 显示数字而非「不适用」
+    v_lbl, _ = mp._chips["cache_write"]
+    assert v_lbl.cget("text") not in ("", "-", UNSUPPORTED_LABEL)
+
+    # Codex 源：cache_write / output_tps 不支持（_SOURCE_SUPPORT）→ 「不适用」置灰
+    rep.meta.source = "codex"
+    mp.update(rep)
+    root.update_idletasks()
+    for k in ("cache_write", "output_tps"):
+        v_lbl, _ = mp._chips[k]
+        assert v_lbl.cget("text") == UNSUPPORTED_LABEL, k
+        assert v_lbl.cget("fg") == theme.MUTED, k
+    frame.destroy()
 
 
 def test_session_column_right_click_menu(root, reports, monkeypatch):
@@ -1216,7 +1279,7 @@ def test_llm_reports_view(root, monkeypatch, tmp_path):
                         lambda: tmp_path / "llm_reports.json")
     v = LlmReportsView(root)
     assert isinstance(v._paned_ref, tk.PanedWindow)
-    assert v._sash_target == 330
+    assert isinstance(v._sash_target, int) and v._sash_target > 100
     v.on_show()
     assert "暂无报告" in v._body_lbl.get("1.0", "end")
 
@@ -1669,21 +1732,25 @@ def test_app_session_llm_confirm_every_time(root, reports, monkeypatch, tmp_path
     assert len(answers2) == 1 and len(calls) == 1, "第二次派发也要先确认，拒绝则零新增请求"
 
 
-def test_llm_reports_append_thread_safe(tmp_path):
+def test_llm_reports_append_thread_safe(tmp_path, monkeypatch):
     """并发 append 不丢报告（模块锁回归：曾无锁丢更新 + Windows PermissionError）。"""
     import threading
     from tcer.core import llm_reports
 
-    llm_reports._path = lambda: tmp_path / "reports.json"
+    monkeypatch.setattr(llm_reports, "_path", lambda: tmp_path / "reports.json")
     n_threads, per_thread = 6, 8
     barrier = threading.Barrier(n_threads)
+    errs = []
 
     def worker(tid: int):
-        barrier.wait()  # 强制交错
-        for i in range(per_thread):
-            llm_reports.append({
-                "id": f"r-{tid}-{i}", "created_at": 1_000_000 + tid * 100 + i,
-                "kind": "session", "title": f"t{tid}-{i}", "text": "x"})
+        try:
+            barrier.wait(timeout=10)  # 强制交错
+            for i in range(per_thread):
+                llm_reports.append({
+                    "id": f"r-{tid}-{i}", "created_at": 1_000_000 + tid * 100 + i,
+                    "kind": "session", "title": f"t{tid}-{i}", "text": "x"})
+        except Exception as e:
+            errs.append(e)
 
     threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
     for t in threads:
@@ -1691,6 +1758,7 @@ def test_llm_reports_append_thread_safe(tmp_path):
     for t in threads:
         t.join(10)
 
+    assert not errs, f"Threads encountered errors: {errs}"
     ids = {r["id"] for r in llm_reports.load()}
     assert len(ids) == n_threads * per_thread, f"并发 append 丢报告: 仅 {len(ids)}"
 
@@ -1746,15 +1814,17 @@ def test_session_column_batched_build_and_pending_select(root):
             return lambda *a, **k: None
 
     def mk(i):
+        from tcer.core.models import ModelUsage
         return SimpleNamespace(
             meta=SimpleNamespace(session_id=f"sess-{i:03d}", title=f"标题{i}",
                                  path=SimpleNamespace(stem=f"s{i}"),
                                  is_subagent=False),
             usage=SimpleNamespace(started_at=1_770_000_000_000 + i * 3600_000,
                                   ended_at=None, models=set(),
-                                  per_model={"m": SimpleNamespace(total=1)},
-                                  session_duration_ms=60_000),
-            tier=None, cost=0.0,
+                                  per_model={"m": ModelUsage(input_tokens=1)},
+                                  session_duration_ms=60_000,
+                                  assistant_msgs=2),
+            tier=None, cost=0.0, net_loc=5, churn_ratio=0.0,
             files_touched_details=None, high_churn_details=None)
 
     frame = tk.Frame(root)
@@ -1907,13 +1977,16 @@ def test_llm_reports_audit_badge(root, monkeypatch, tmp_path):
 
     v = LlmReportsView(root)
     v.on_show()
-
+    root.update_idletasks()
     v.select_report("a1")
+    root.update_idletasks()
     assert "2 项警示" in v._audit_badge.cget("text")
     assert "笼统表扬" in v._audit_tip.text
 
     v.select_report("a2")
+    root.update_idletasks()
     assert "通过" in v._audit_badge.cget("text")
 
     v.select_report("a3")
+    root.update_idletasks()
     assert v._audit_badge.cget("text") == ""

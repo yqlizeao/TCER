@@ -45,7 +45,7 @@ class SessionComparePopup:
             self._labels.append(base if n == 1 else f"{base} ({n})")
         self._by_label = dict(zip(self._labels, self._reports))
 
-        win = _new_window(parent, "会话对比", "980x720")
+        win = _new_window(parent, "会话对比", "1040x680")
         bar = tk.Frame(win, bg=theme.BG, padx=10, pady=8)
         bar.pack(fill="x")
         tk.Label(bar, text="会话对比", bg=theme.BG, fg=theme.FG,
@@ -318,7 +318,7 @@ class SessionTimelinePopup:
         self._view = "timeline"
 
         sid = (report.meta.session_id or report.meta.path.stem)[:16]
-        win = _new_window(parent, f"会话时间线 · {sid}…", "900x560")
+        win = _new_window(parent, f"会话时间线 · {sid}…", "1040x680")
         self._win = win
         self._after_host = parent
         import queue as _queue
@@ -419,8 +419,9 @@ class SessionTimelinePopup:
             return
         c.delete("all")
         self._aa_imgs = []  # _aa_layer 照片引用防 GC，每帧重置（charts.py 约定）
-        w, h = c.winfo_width(), c.winfo_height()
-        if w < 40 or h < 40 or not self._stats:
+        w = c.winfo_width() if c.winfo_width() >= 40 else 1000
+        h = c.winfo_height() if c.winfo_height() >= 40 else 400
+        if not self._stats:
             return
         n = len(self._stats)
         conv = self._view == "converge"
@@ -883,11 +884,12 @@ class SessionTimelinePopup:
         # 放入线程安全队列，由主线程 _poll_ui_queue 立即调度（彻底根除 Windows 跨线程 after 丢失）
         self._ui_queue.put(lambda: self._llm_done(ok, payload, scope, is_dynamics))
         try:
-            self._after_host.after(0, lambda: None)  # 尝试唤醒事件循环
+            self._after_host.after(0, self._drain_ui_queue)  # 立即调度单次排空队列
         except Exception:
             pass
-    def _poll_ui_queue(self) -> None:
-        """主线程定时轮询队列，安全执行跨线程 UI 回调（防 Windows 跨线程 after 丢失）。"""
+
+    def _drain_ui_queue(self) -> None:
+        """单次排空队列，不产生重复自循环轮询。"""
         import queue as _queue
         try:
             while True:
@@ -900,6 +902,10 @@ class SessionTimelinePopup:
             pass
         except Exception:
             pass
+
+    def _poll_ui_queue(self) -> None:
+        """主线程定时轮询队列，安全执行跨线程 UI 回调（防 Windows 跨线程 after 丢失）。"""
+        self._drain_ui_queue()
         try:
             if self._win.winfo_exists():
                 self._win.after(60, self._poll_ui_queue)
@@ -925,7 +931,7 @@ class SessionTimelinePopup:
                 for w_ in self._llm_panel.winfo_children():
                     w_.destroy()
                 tk.Label(self._llm_panel, text=f"× {payload}", bg=theme.PANEL,
-                         fg=theme.ERROR, font=theme.FONT_UI_SMALL,
+                         fg=theme.ERROR, font=theme.FONT_UI,
                          justify="left", wraplength=840).pack(
                              fill="x", padx=6, pady=4)
                 self._llm_panel.pack(fill="x", padx=10, pady=(0, 6), before=self.canvas)
@@ -988,7 +994,7 @@ class SessionTimelinePopup:
                     for w_ in self._llm_panel.winfo_children():
                         w_.destroy()
                     tk.Label(self._llm_panel, text=f"× 处理响应失败：{e}", bg=theme.PANEL,
-                             fg=theme.ERROR, font=theme.FONT_UI_SMALL,
+                             fg=theme.ERROR, font=theme.FONT_UI,
                              justify="left", wraplength=840).pack(fill="x", padx=6, pady=4)
                     self._llm_panel.pack(fill="x", padx=10, pady=(0, 6), before=self.canvas)
             except Exception:
@@ -1015,7 +1021,7 @@ class ProjectOverviewPopup:
     def __init__(self, parent, rows) -> None:
         from .views import project_label, project_source_label
 
-        win = _new_window(parent, "项目总览", "1000x560")
+        win = _new_window(parent, "项目总览", "1040x680")
         self._sort_col = "cost"
         self._sort_desc = True
 
@@ -1217,7 +1223,7 @@ class ToolSequencePopup:
 
     def __init__(self, parent, usage, suffix: str = "") -> None:
         ops = list(usage.tool_ops)
-        win = _new_window(parent, f"工具序列{suffix}", "640x620")
+        win = _new_window(parent, f"工具序列{suffix}", "1040x680")
         tk.Label(win, text="工具序列（相邻调用转移）", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=8).pack()
 
@@ -1293,7 +1299,7 @@ class ProjectProfilePopup:
     def __init__(self, parent, analysis) -> None:
         from tcer.core import analyze as _analyze
 
-        win = _new_window(parent, "项目画像", "860x640")
+        win = _new_window(parent, "项目画像", "1040x680")
         head = tk.Frame(win, bg=theme.BG, padx=10, pady=8)
         head.pack(fill="x")
         tk.Label(head, text="项目画像", bg=theme.BG, fg=theme.FG,
@@ -1413,7 +1419,7 @@ class CrossSourceModelsPopup:
         from .views import source_label
         from tcer.core.analyze import CROSS_SOURCE_MIN_CELL
 
-        win = _new_window(parent, "同模型跨源对照", "980x560")
+        win = _new_window(parent, "同模型跨源对照", "1040x680")
         n_cells = sum(len(m["sources"]) for m in models)
         head = tk.Frame(win, bg=theme.BG, padx=10, pady=8)
         head.pack(fill="x")

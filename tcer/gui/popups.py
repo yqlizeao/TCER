@@ -42,7 +42,7 @@ class UpdatePopup:
         self._controller = controller
         self._current = current_version
         self._release = release
-        win = _new_window(parent, "检查更新", "440x360")
+        win = _new_window(parent, "检查更新", "520x360")
         self._win = win
         win.grab_release()  # 非模态:不阻塞主界面(检查更新是辅助动作)
 
@@ -142,7 +142,7 @@ class SessionDetailPopup:
         r = report
         u = r.usage
         sid = (r.meta.session_id or r.meta.path.stem)[:16]
-        win = _new_window(parent, f"会话详情 · {sid}…", "580x600")
+        win = _new_window(parent, f"会话详情 · {sid}…", "740x540")
         tk.Label(win, text="会话详情", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
 
@@ -244,7 +244,7 @@ class ToolCallsPopup:
     }
 
     def __init__(self, parent, usage, title_suffix: str = "") -> None:
-        win = _new_window(parent, f"工具调用统计{title_suffix}", "520x600")
+        win = _new_window(parent, f"工具调用统计{title_suffix}", "740x540")
         tk.Label(win, text="工具调用详情", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
         tk.Label(win, text="Claude Code 在此会话中调用的工具及次数", bg=theme.BG,
@@ -337,7 +337,7 @@ class ModelsPopup:
         from tcer.core.format import fmt_money
         from tcer.core.pricing import label as model_label
 
-        win = _new_window(parent, f"模型使用详情{title_suffix}", "620x620")
+        win = _new_window(parent, f"模型使用详情{title_suffix}", "740x540")
         tk.Label(win, text="模型使用详情", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
         tk.Label(win, text="各模型的 Token 用量、成本及四类 Token 构成", bg=theme.BG,
@@ -452,7 +452,7 @@ class CostBreakdownPopup:
         from tcer.core.format import fmt_money
         from tcer.core.pricing import label as model_label
 
-        win = _new_window(parent, f"成本明细{title_suffix}", "560x560")
+        win = _new_window(parent, f"成本明细{title_suffix}", "740x540")
         tk.Label(win, text="成本明细", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
         tk.Label(win, text="各模型成本、Token 效率（每美元 Token 数）", bg=theme.BG,
@@ -579,7 +579,7 @@ class BaselinesPopup:
         self._on_apply = on_apply
         self._result = None  # 最近一次计算结果（用于应用）
 
-        win = _new_window(parent, "计算个人基准", "480x640")
+        win = _new_window(parent, "计算个人基准", "740x540")
         self._win = win
         tk.Label(win, text="计算个人基准", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING).pack(pady=(8, 4))
@@ -788,7 +788,7 @@ class BaselinesPopup:
             else:
                 SelectableLabel(self._result_frame,
                                 text=info.get("reason", "样本不足，跳过"),
-                                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL
+                                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI
                                 ).pack(fill="x", padx=10)
         if n_ok:
             self._set_apply_enabled(True)
@@ -836,7 +836,7 @@ class BaselinesPopup:
             else:
                 SelectableLabel(self._result_frame,
                                 text=info.get("reason", "样本不足，跳过"),
-                                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL
+                                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI
                                 ).pack(fill="x", padx=10)
         if n_ok:
             self._set_apply_enabled(True)
@@ -892,7 +892,7 @@ class HtmlSectionsPopup:
 
     def __init__(self, parent, on_ok) -> None:
         from .html_report import PROJECT_SECTIONS, _SECTION_LABELS
-        win = _new_window(parent, "HTML 报告章节", "380x300")
+        win = _new_window(parent, "HTML 报告章节", "520x360")
         tk.Label(win, text="选择要包含的章节", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
 
@@ -920,7 +920,7 @@ class AdvancedPopup:
     """高级选项 — 跳过 LOC 开关（产品定位：只分析会话数据，无仓库扫描项）。"""
 
     def __init__(self, parent, no_loc: bool, on_apply) -> None:
-        win = _new_window(parent, "高级选项", "460x220")
+        win = _new_window(parent, "高级选项", "520x360")
         tk.Label(win, text="高级选项", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
 
@@ -960,7 +960,7 @@ class UserMsgsPopup:
         groups = self._normalize(messages)
         total = sum(len(msgs) for _, msgs in groups)
         total_chars = sum(len(m) for _, msgs in groups for m in msgs)
-        win = _new_window(parent, "用户消息", "620x500")
+        win = _new_window(parent, "用户消息", "740x540")
         tk.Label(win, text="用户消息", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
 
@@ -1046,7 +1046,7 @@ class FilesTouchedPopup:
 
     def __init__(self, parent, details: dict[str, int],
                  searched: dict[str, int] | None = None) -> None:
-        win = _new_window(parent, "涉及文件", "560x480")
+        win = _new_window(parent, "涉及文件", "740x540")
         tk.Label(win, text=f"涉及文件（共 {len(details)} 个）", bg=theme.BG,
                  fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
         SelectableLabel(win, text="会话中被读取、写入或编辑过的文件及操作次数。",
@@ -1175,7 +1175,7 @@ class MemoryFilesPopup:
         from .platform import open_in_file_manager, FILE_MANAGER_NAME
 
         count = len(files)
-        win = _new_window(parent, "项目记忆文件", "560x460")
+        win = _new_window(parent, "项目记忆文件", "740x540")
         tk.Label(win, text=f"项目记忆文件（{count} 个）", bg=theme.BG,
                  fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
         SelectableLabel(win, text=f"路径：{memory_dir}",
@@ -1280,7 +1280,7 @@ class RadarPopup:
         from .metric_defs import display as metric_display, METRIC_BY_KEY
 
         sid = (report.meta.session_id or report.meta.path.stem)[:16]
-        win = _new_window(parent, f"效率雷达 · {sid}…", "460x560")
+        win = _new_window(parent, f"效率雷达 · {sid}…", "520x560")
         win.bind("<Escape>", lambda e: win.destroy())  # 无显式关闭按钮,Esc 兜底
         tk.Label(win, text="六维效率雷达", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=8).pack()
@@ -1389,7 +1389,7 @@ class ConfirmDeletePopup:
     _DANGER_ACTIVE = theme.DANGER_ACTIVE
 
     def __init__(self, parent, *, title: str, session_id: str, on_confirm) -> None:
-        win = _new_window(parent, "删除会话", "460x250")
+        win = _new_window(parent, "删除会话", "520x360")
         win.transient(parent)
         win.resizable(False, False)
 
@@ -1459,7 +1459,7 @@ class UploadDialog:
         self._projects = projects
         self._default_url = str(config.get("default_url") or "")
 
-        win = _new_window(parent, "上传到 TCER Server", "480x620")
+        win = _new_window(parent, "上传到 TCER Server", "740x540")
         self._win = win
         tk.Label(win, text="上传到 TCER Server", bg=theme.BG, fg=theme.FG,
                  font=theme.FONT_HEADING, pady=10).pack()
@@ -1585,7 +1585,8 @@ class UploadDialog:
         win_h = max(360, min(top + inner_h + status_h + action_h + 14, 720))
         cur_h = win.winfo_height()
         adj = (cur_h - win_h) // 2 if cur_h > 200 else 0
-        win.geometry(f"480x{int(win_h)}+{int(win.winfo_x())}+{int(win.winfo_y() + adj)}")
+        cur_w = win.winfo_width() if win.winfo_width() > 300 else 740
+        win.geometry(f"{cur_w}x{int(win_h)}+{int(win.winfo_x())}+{int(win.winfo_y() + adj)}")
 
     # -- prefs / status --
     def _collect(self) -> dict:
@@ -1627,7 +1628,7 @@ class LlmConfigPopup:
         self._llm_prefs = llm_prefs
         self._on_save = on_save
 
-        win = _new_window(parent, "LLM 设置", "500x560")
+        win = _new_window(parent, "LLM 设置", "540x480")
         self._win = win
         import queue as _queue
         self._ui_queue: _queue.Queue = _queue.Queue()
@@ -1733,7 +1734,17 @@ class LlmConfigPopup:
                         target_frame.config(highlightbackground=theme.BORDER_HOVER)
                     except tk.TclError:
                         pass
-                def _leave(_e):
+                def _leave(e):
+                    if e is not None:
+                        try:
+                            under = e.widget.winfo_containing(e.x_root, e.y_root)
+                            curr = under
+                            while curr is not None:
+                                if curr == target_frame:
+                                    return
+                                curr = getattr(curr, "master", None)
+                        except Exception:
+                            pass
                     try:
                         target_frame.config(highlightbackground=theme.BORDER)
                     except tk.TclError:
@@ -1844,12 +1855,42 @@ class LlmConfigPopup:
     def _fit_window(self) -> None:
         win = self._win
         win.update_idletasks()
+        from .platform import get_monitor_work_area
+        m_left, m_top, m_right, m_bottom = get_monitor_work_area(win)
+        m_h = m_bottom - m_top
+
+        top_win = win.master.winfo_toplevel()
+        top_win.update_idletasks()
+
         inner_h = self._sf.inner.winfo_reqheight()
         status_h = self._status.winfo_reqheight()
         action_h = self._action_frame.winfo_reqheight()
         needed_h = 45 + inner_h + status_h + action_h + 30
-        win_h = max(420, min(needed_h, 720))
-        win.geometry(f"500x{int(win_h)}+{int(win.winfo_x())}+{int(win.winfo_y())}")
+
+        # 最大高度留足任务栏与屏幕边距（留出 120px 安全区）
+        max_h = min(620, m_h - 120)
+        win_h = max(440, min(needed_h, max_h))
+        win_w = 540
+
+        # 重新根据实际高度居中计算 x 与 y（绝不向下溢出穿透任务栏）
+        pw = top_win.winfo_width()
+        ph = top_win.winfo_height()
+        px = top_win.winfo_rootx()
+        py = top_win.winfo_rooty()
+
+        x = px + (pw - win_w) // 2
+        y = py + (ph - win_h) // 2
+
+        if y + win_h > m_bottom - 10:
+            y = max(m_top + 25, m_bottom - 10 - win_h)
+        if x + win_w > m_right - 10:
+            x = max(m_left + 10, m_right - win_w - 10)
+        if x < m_left + 10:
+            x = m_left + 10
+        if y < m_top + 25:
+            y = m_top + 25
+
+        win.geometry(f"{win_w}x{int(win_h)}+{int(x)}+{int(y)}")
         win.update_idletasks()
         self._sf._apply_scrollregion()
     def _poll_ui_queue(self) -> None:

@@ -21,14 +21,52 @@ class Tooltip:
         self.text = text
         self.tip = None
         self.bind_widget(widget)
+        try:
+            widget.bind("<Destroy>", lambda _e: self._on_destroy(), add="+")
+        except tk.TclError:
+            pass
+
+    def _on_destroy(self) -> None:
+        self._cancel_pending()
+        self._hide()
 
     def bind_widget(self, w) -> None:
         """将同一个 Tooltip 实例绑定到多个子部件（如容器 Frame 与其内部 Label）。"""
         w.bind("<Enter>", self._show, add="+")
         w.bind("<Leave>", self._hide, add="+")
+        w.bind("<Button-1>", self._hide, add="+")  # 点击即隐，避免遮挡后续 UI
+
+    # VS Code 式 hover 延迟（workbench.hover.delay 默认 300ms）：
+    # 立即弹出会在扫读列表时闪烁（尤其多行 tooltip）。
+    _DELAY_MS = 300
 
     def _show(self, _event=None) -> None:
+        self._cancel_pending()  # 重入（在绑定链上滑过多个子件）不叠加定时器
         if self.tip or not self.text:
+            return
+        try:
+            widget = self.widget
+            self._after_id = widget.after(self._DELAY_MS, self._spawn)
+        except tk.TclError:
+            pass  # widget 已销毁
+
+    def _cancel_pending(self) -> None:
+        aid = getattr(self, "_after_id", None)
+        if aid is not None:
+            try:
+                self.widget.after_cancel(aid)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _spawn(self) -> None:
+        self._after_id = None
+        if self.tip or not self.text:
+            return
+        try:
+            if not self.widget.winfo_exists():
+                return
+        except tk.TclError:
             return
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
@@ -43,22 +81,24 @@ class Tooltip:
 
         x = self.widget.winfo_rootx() + 16
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-        sw = self.widget.winfo_screenwidth()
-        sh = self.widget.winfo_screenheight()
+
+        from .platform import get_monitor_work_area
+        m_left, m_top, m_right, m_bottom = get_monitor_work_area(self.widget)
 
         # 屏幕右边缘避让：若向右展开越界，则翻转与 widget 右边缘对齐向左展开
-        if x + tip_w > sw - 10:
+        if x + tip_w > m_right - 10:
             x = self.widget.winfo_rootx() + self.widget.winfo_width() - tip_w
-        if x < 4:
-            x = 4
+        if x < m_left + 4:
+            x = m_left + 4
         # 屏幕下边缘避让：若向下展开越界，则翻转至 widget 上方
-        if y + tip_h > sh - 10:
+        if y + tip_h > m_bottom - 10:
             y = self.widget.winfo_rooty() - tip_h - 6
-        if y < 4:
-            y = 4
+        if y < m_top + 4:
+            y = m_top + 4
         self.tip.wm_geometry(f"+{x}+{y}")
 
     def _hide(self, _event=None) -> None:
+        self._cancel_pending()
         if self.tip:
             self.tip.destroy()
             self.tip = None
@@ -132,7 +172,17 @@ class CheckRow:
             except tk.TclError:
                 pass
 
-    def _on_leave(self, _e=None) -> None:
+    def _on_leave(self, e=None) -> None:
+        if e is not None:
+            try:
+                under = e.widget.winfo_containing(e.x_root, e.y_root)
+                curr = under
+                while curr is not None:
+                    if curr == self._row:
+                        return  # 鼠标仍在行内，不触发离开
+                    curr = getattr(curr, "master", None)
+            except Exception:
+                pass
         self._apply()
 
     def _draw(self) -> None:
@@ -140,48 +190,107 @@ class CheckRow:
         self._apply()
 
 
-class CollapsibleSection:
-    """可折叠区：彩色标题(header,可点击)+ 内容容器(content frame)。
+class AccordionSection:
+    """Monokai Dimmed 手风琴折叠区块。
 
-    调用方把实际控件 pack 进 ``content``；点标题 toggle content 显隐。
-    用于把排名页/得分构成等「▼ 装饰标题」统一赋予折叠能力（与指标分类、
-    模型对比的分组折叠一致）。``expand`` 控制 content 是否占满剩余空间。
+    表头高度固定 28px，底色 theme.CARD_HEADER_BG / theme.ACTIVITY_BG (#353535)；
+    左侧折叠箭头（▾ / ▸），中间标题，右侧数量/操作胶囊；
+    content 容器自动展开/折叠。
     """
 
-    def __init__(self, parent, title, color, *, expand: bool = True) -> None:
+    def __init__(self, parent, title: str, color: str | None = None, *,
+                 badge: str = "", expand: bool = True, default_open: bool = True,
+                 on_toggle=None) -> None:
         self._title = title
+        self._badge = badge
         self._expand = expand
-        self._collapsed = False
-        # header 与 content 都放进一个容器 frame（对齐 MetricPanel 的 gframe 做法）：
-        # 折叠只在容器内 pack_forget/pack content，位置永远正确——不会像「header 与
-        # content 直接做 parent 的兄弟」那样，重新 pack 时被追加到父容器末尾而错位。
+        self._collapsed = not default_open
+        self._on_toggle = on_toggle
+        self._color = color or theme.CARD_HEADER_BG
+        self._header_bg = theme.PANEL_2
+        rail_col = color if (color and color not in (theme.CARD_HEADER_BG, theme.BG)) else theme.BORDER
+
         self.frame = tk.Frame(parent, bg=theme.BG)
         self.frame.pack(fill="both" if expand else "x", expand=expand)
-        self.header = tk.Frame(self.frame, bg=color, padx=6, pady=3)
-        self.header.pack(fill="x", pady=(1, 0))
-        self._arrow = tk.Label(self.header, text=f"▼ {title}", bg=color, fg=theme.FG,
-                               font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor=CLICK_CURSOR)
-        self._arrow.pack(side="left")
-        self.content = tk.Frame(self.frame, bg=theme.BG)
-        self.content.pack(fill="both", expand=expand)
-        for w in (self.header, self._arrow):
-            w.bind("<Button-1>", lambda e: self.toggle(), add="+")
 
+        # 26px 固定高度手风琴表头
+        self.header = tk.Frame(self.frame, bg=self._header_bg, height=26, cursor=CLICK_CURSOR)
+        self.header.pack(fill="x", pady=(1, 0))
+        self.header.pack_propagate(False)
+
+        # 3px 左侧强调色条
+        self.rail = tk.Frame(self.header, bg=rail_col, width=3)
+        self.rail.pack(side="left", fill="y")
+        self.rail.pack_propagate(False)
+
+        arrow_char = "▾" if default_open else "▸"
+        self._arrow = tk.Label(self.header, text=arrow_char, bg=self._header_bg, fg=theme.FG_WHITE,
+                               font=theme.FONT_UI_BOLD, cursor=CLICK_CURSOR, padx=4)
+        self._arrow.pack(side="left", padx=(2, 2))
+
+        self._title_lbl = tk.Label(self.header, text=title, bg=self._header_bg, fg=theme.FG_WHITE,
+                                   font=theme.FONT_UI_BOLD, anchor="w", cursor=CLICK_CURSOR)
+        self._title_lbl.pack(side="left", fill="x", expand=True)
+
+        self._badge_lbl = tk.Label(self.header, text=badge, bg=self._header_bg, fg=theme.MUTED,
+                                   font=theme.FONT_UI_SMALL, anchor="e", cursor=CLICK_CURSOR)
+        if badge:
+            self._badge_lbl.pack(side="right", padx=(0, 8))
+
+        self.content = tk.Frame(self.frame, bg=theme.BG)
+        if default_open:
+            self.content.pack(fill="both" if expand else "x", expand=expand)
+
+        for w in (self.header, self._arrow, self._title_lbl, self._badge_lbl):
+            w.bind("<Button-1>", lambda e: self.toggle(), add="+")
+            w.bind("<Enter>", lambda _e: self._on_header_hover(True), add="+")
+            w.bind("<Leave>", lambda e: self._on_header_hover(False, e), add="+")
+
+    def _on_header_hover(self, is_hover: bool, event=None) -> None:
+        if not is_hover and event is not None:
+            try:
+                under = event.widget.winfo_containing(event.x_root, event.y_root)
+                curr = under
+                while curr is not None:
+                    if curr == self.header:
+                        return  # 仍在 header 内部，不触发取消
+                    curr = getattr(curr, "master", None)
+            except Exception:
+                pass
+        bg = theme.HOVER_BG if is_hover else self._header_bg
+        self.header.configure(bg=bg)
+        self._arrow.configure(bg=bg)
+        self._title_lbl.configure(bg=bg)
+        self._badge_lbl.configure(bg=bg)
     def set_title(self, title: str) -> None:
-        """更新标题文字（保留当前折叠状态）。用于随视角切换重命名区块。"""
+        """更新标题文字（保留当前折叠状态）。"""
         self._title = title
-        self._arrow.config(text=f"{'▶' if self._collapsed else '▼'} {title}")
+        self._title_lbl.configure(text=title)
+
+    def set_badge(self, badge: str) -> None:
+        """更新右侧徽标/数量胶囊。"""
+        self._badge = badge
+        self._badge_lbl.configure(text=badge)
+        if badge and not self._badge_lbl.winfo_ismapped():
+            self._badge_lbl.pack(side="right", padx=(0, 8))
+        elif not badge and self._badge_lbl.winfo_ismapped():
+            self._badge_lbl.pack_forget()
 
     def toggle(self) -> None:
         self._collapsed = not self._collapsed
-        self._arrow.config(text=f"{'▶' if self._collapsed else '▼'} {self._title}")
+        arrow_char = "▸" if self._collapsed else "▾"
+        self._arrow.configure(text=arrow_char)
         if self._collapsed:
             self.content.pack_forget()
         else:
-            # content 始终紧跟 header（after=）：即使父容器里有其它后续控件，
-            # 重新展开也不会跑到末尾。
-            self.content.pack(fill="both", expand=self._expand, after=self.header)
+            self.content.pack(fill="both" if self._expand else "x",
+                              expand=self._expand, after=self.header)
+        if self._on_toggle:
+            self._on_toggle(not self._collapsed)
 
+
+# 兼容别名
+CollapsibleSection = AccordionSection
 
 class ScrollFrame:
     """A scrolled container. Pack children into ``self.inner``.
@@ -245,10 +354,19 @@ class ScrollFrame:
         self.canvas.yview_scroll(units, "units")
 
     def _on_leave(self, _event=None) -> None:
+        # Tk 陷阱：指针移入嵌入子窗（inner 里的卡片）时 canvas 也收到 <Leave>。
+        # 只有指针真的离开 canvas 矩形才解绑滚轮，否则卡片正上方滚轮会失效。
+        try:
+            px, py = self.canvas.winfo_pointerx(), self.canvas.winfo_pointery()
+            cx, cy = self.canvas.winfo_rootx(), self.canvas.winfo_rooty()
+            if cx <= px < cx + self.canvas.winfo_width() \
+                    and cy <= py < cy + self.canvas.winfo_height():
+                return
+        except tk.TclError:
+            pass
         if self._unbind_wheel:
             self._unbind_wheel()
             self._unbind_wheel = None
-
     def update_scroll(self, *, reset: bool = False) -> None:
         self._reset_pending = reset
         self.inner.update_idletasks()
@@ -264,50 +382,150 @@ class ScrollFrame:
 
 
 class Card:
-    """A selectable list card. Selection highlight via ``set_selected``.
+    """A selectable list card with solid elevation, state rail, and hover feedback.
 
     Build content into ``self.frame``; register any child widget that should
-    also trigger selection via ``bind_to``.
+    also trigger selection and match hover/selection styling via ``bind_to``.
     """
 
     def __init__(self, parent, on_click, on_right_click=None,
-                 bg: str = theme.PANEL_2, padx: int = 2, pady: int = 2) -> None:
-        self.frame = tk.Frame(parent, bg=bg, relief="flat", borderwidth=1,
-                              highlightthickness=1, highlightbackground=theme.BORDER,
-                              # 防御性封死聚焦态：即使卡片经 Tab 遍历拿到焦点，
-                              # 聚焦环也画成边框色（视觉不可见）——规范⑥聚焦环全局消除。
-                              highlightcolor=theme.BORDER,
-                              cursor=CLICK_CURSOR)
-        self.frame.pack(fill="x", padx=padx, pady=pady)
+                 bg: str = theme.PANEL_2, padx: int = 4, pady: int = 2, radius: int = 5) -> None:
+        self._bg = bg
+        self._parent_bg = parent.cget("bg") if hasattr(parent, "cget") else theme.PANEL
         self._on_click = on_click
         self._on_right_click = on_right_click
         self._selected = False
+        self._hovered = False
+        self._state_rail_color: str | None = None
+        self._registered_widgets: list[tk.Widget] = []
+        self._label_fgs: dict[tk.Widget, str] = {}
+        self._radius = radius
+
+        # 自绘抗锯齿圆角底 Canvas 替代生硬直角
+        self.frame = tk.Canvas(parent, bg=self._parent_bg, highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
+        self.frame.pack(fill="x", padx=padx, pady=pady)
+        self.frame.bind("<Configure>", self._redraw_bg)
+
+        # 3px 垂直状态高光条 (State Rail)
+        self.rail = tk.Frame(self.frame, width=theme.RAIL_W, bg=bg)
+        self.rail.pack(side="left", fill="y", padx=(2, 0), pady=3)
+        self.rail.pack_propagate(False)
+
         self.frame.bind("<Button-1>", lambda e: on_click(self))
-        # hover 反馈：未选中时边框提亮，可点击感（Enter/Leave 覆盖整卡含子组件）。
         self.frame.bind("<Enter>", self._on_hover, add="+")
         self.frame.bind("<Leave>", self._on_unhover, add="+")
         if on_right_click:
             self.frame.bind("<Button-3>", on_right_click)
 
+    def _redraw_bg(self, _event=None) -> None:
+        w = self.frame.winfo_width()
+        h = self.frame.winfo_height()
+        if w < 10 or h < 10:
+            return
+        self.frame.delete("card_bg")
+        fill_col = theme.SEL_ROW_ACTIVE if self._selected else (theme.HOVER_BG if self._hovered else self._bg)
+        self._bg_img = get_rounded_rect_img(self.frame, w, h, self._radius, fill_col, self._parent_bg)
+        if self._bg_img is not None:
+            self.frame.create_image(0, 0, anchor="nw", image=self._bg_img, tags="card_bg")
+        else:
+            self.frame.create_rectangle(0, 0, w, h, fill=fill_col, outline="", tags="card_bg")
+        self.frame.tag_lower("card_bg")
+
+    def set_state_rail(self, color: str | None) -> None:
+        """设置左侧状态条颜色（例如收敛向心绿、逃逸橙红等）。"""
+        self._state_rail_color = color
+        rail_col = color if color else (theme.HOVER_BG if self._hovered else self._bg)
+        if self._selected:
+            rail_col = color or theme.ACCENT
+        self.rail.configure(bg=rail_col)
+
     def _on_hover(self, _e=None) -> None:
+        self._hovered = True
         if not self._selected:
-            self.frame.configure(highlightbackground=theme.BORDER_HOVER)
+            self._apply_bg(theme.HOVER_BG)
 
-    def _on_unhover(self, _e=None) -> None:
+    def _on_unhover(self, e=None) -> None:
+        if e is not None:
+            try:
+                under = e.widget.winfo_containing(e.x_root, e.y_root)
+                curr = under
+                while curr is not None:
+                    if curr == self.frame:
+                        return  # 鼠标仍在卡片范围内，不触发 unhover
+                    curr = getattr(curr, "master", None)
+            except Exception:
+                pass
+        self._hovered = False
         if not self._selected:
-            self.frame.configure(highlightbackground=theme.BORDER)
+            self._apply_bg(self._bg)
 
-    def bind_to(self, widget) -> None:
-        widget.bind("<Button-1>", lambda e: self._on_click(self))
+    def _apply_bg(self, bg_color: str) -> None:
+        self._redraw_bg()
+        rail_col = self._state_rail_color or (theme.ACCENT if self._selected else bg_color)
+        try:
+            self.rail.configure(bg=rail_col)
+        except tk.TclError:
+            pass
+        for w in self._registered_widgets:
+            try:
+                w.configure(bg=bg_color)
+            except tk.TclError:
+                pass
+
+    def bind_to(self, widget) -> tk.Widget:
+        """Register a child widget to share click, hover, and selection styles."""
+        self._registered_widgets.append(widget)
+        if isinstance(widget, tk.Label):
+            try:
+                self._label_fgs[widget] = widget.cget("fg")
+            except tk.TclError:
+                pass
+        curr_bg = theme.SEL_ROW_ACTIVE if self._selected else (theme.HOVER_BG if self._hovered else self._bg)
+        try:
+            widget.configure(bg=curr_bg)
+        except tk.TclError:
+            pass
+        if self._selected and isinstance(widget, tk.Label):
+            try:
+                orig_fg = self._label_fgs.get(widget, "")
+                if orig_fg in (theme.FG, theme.MUTED):
+                    widget.configure(fg=theme.FG_WHITE)
+            except tk.TclError:
+                pass
+        widget.bind("<Button-1>", lambda e: self._on_click(self), add="+")
         if self._on_right_click:
-            widget.bind("<Button-3>", self._on_right_click)
+            widget.bind("<Button-3>", self._on_right_click, add="+")
+        return widget
+
+    def track_bg(self, widget) -> tk.Widget:
+        """Register a child widget to share hover/selection *background only*.
+
+        Unlike ``bind_to``: no click/hover bindings — for widgets that handle
+        their own events (e.g. mark icons toggling state without selecting
+        the card) but must recolor together with the card.
+        """
+        self._registered_widgets.append(widget)
+        widget.configure(bg=theme.SEL_ROW_ACTIVE if self._selected
+                         else (theme.HOVER_BG if self._hovered else self._bg))
         return widget
 
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
-        self.frame.configure(highlightbackground=theme.ACCENT if selected else theme.BORDER,
-                             highlightthickness=2 if selected else 1)
-
+        if selected:
+            self._apply_bg(theme.SEL_ROW_ACTIVE)
+            for w, orig_fg in self._label_fgs.items():
+                try:
+                    if orig_fg in (theme.FG, theme.MUTED):
+                        w.configure(fg=theme.FG_WHITE)
+                except tk.TclError:
+                    pass
+        else:
+            self._apply_bg(self._bg)
+            for w, orig_fg in self._label_fgs.items():
+                try:
+                    w.configure(fg=orig_fg)
+                except tk.TclError:
+                    pass
 
 class MetricCell:
     """One metric tile: colored title + value (StringVar) + unit + tooltip.
@@ -322,20 +540,21 @@ class MetricCell:
                  approx: bool = False) -> None:
         self.metric = metric
         self._approx = approx
-        self.frame = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=0)
+        self.frame = tk.Frame(parent, bg=theme.PANEL, padx=8, pady=4)  # 与 deck chip 同节奏（8px 网格）
         color = theme.LEVEL_COLORS.get(metric.level, theme.LEVEL_BASIC)
-
-        # Title with unit inlined: "TCER（行/百万）" or just "缓存命中率"
         title_text = f"{metric.name}（{metric.unit}）" if metric.unit else metric.name
-        self.title = tk.Label(self.frame, text=title_text, bg=theme.PANEL, fg=color,
-                              font=theme.FONT_UI_SMALL, anchor="w")
+        # 标题按指标层级着色（core/compound 黄色信号等）；此前算了没用、恒灰
+        title_fg = theme.LEVEL_COLORS.get(metric.level, theme.LEVEL_BASIC)
+        # 指标名是用户主扫读对象：9pt（8pt 黄/白小字在暗底可读性差）
+        self.title = tk.Label(self.frame, text=title_text, bg=theme.PANEL, fg=title_fg,
+                              font=theme.FONT_UI, anchor="w")
         self.title.pack(anchor="w")
 
         self.var = tk.StringVar(value="-")
         value_fg = theme.VALUE_NEUTRAL
         if approx:
             row = tk.Frame(self.frame, bg=theme.PANEL)
-            row.pack(anchor="w")
+            row.pack(anchor="w", pady=(1, 0))
             self.value = tk.Label(row, textvariable=self.var, bg=theme.PANEL,
                                   fg=value_fg, font=theme.FONT_VALUE, anchor="w")
             self.value.pack(side="left")
@@ -346,7 +565,7 @@ class MetricCell:
         else:
             self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
                                   fg=value_fg, font=theme.FONT_VALUE, anchor="w")
-            self.value.pack(anchor="w")
+            self.value.pack(anchor="w", pady=(1, 0))
             self.approx_lbl = None
             widgets = (self.frame, self.title, self.value)
 
@@ -356,9 +575,26 @@ class MetricCell:
             self.value.bind("<Button-1>", lambda e: on_click())
             self.title.bind("<Button-1>", lambda e: on_click())
 
+            def _on_enter(_e):
+                self.title.configure(fg=theme.ACCENT)
+
+            def _on_leave(_e):
+                self.title.configure(fg=color)
+
+            for _w in (self.frame, self.title, self.value):
+                _w.bind("<Enter>", _on_enter, add="+")
+                _w.bind("<Leave>", _on_leave, add="+")
+            if self.approx_lbl:
+                self.approx_lbl.bind("<Enter>", _on_enter, add="+")
+                self.approx_lbl.bind("<Leave>", _on_leave, add="+")
+
         tip = f"{metric.name}\n{metric.tip}"
         for w in widgets:
             Tooltip(w, tip)
+
+    @property
+    def key(self) -> str:
+        return self.metric.key
 
     def set_value(self, text: str) -> None:
         """Update displayed value and apply sentiment-based coloring."""
@@ -374,17 +610,18 @@ class MetricCell:
             # 数据源不提供该字段 — 弱化显示，与「无数据 -」区分。
             self.value.config(fg=theme.MUTED)
             return
-        sentiment = self.metric.sentiment
-        if not sentiment or text in ("-", "0", "0.0", "0.00", "0.000"):
+        if text in ("-", "0", "0.0", "0.00", "0.000"):
             fg = theme.VALUE_NEUTRAL
         else:
-            # Try to parse numeric value for directional coloring
             try:
+                # 注意 num 是显示标度：pct/pct4 格式已 ×100（"35.2%" → 35.2）。
+                # 「异常才着色」纪律：无绿色奖励、无非零即色；只有真异常阈值
+                # （高返工 / 工具报错）才允许警示色，其余一律中性。
                 num = float(text.replace(",", "").replace("%", "").replace("$", ""))
-                if sentiment == "up":
-                    fg = theme.VALUE_GOOD if num > 0 else theme.VALUE_BAD
-                elif sentiment == "down":
-                    fg = theme.VALUE_BAD if num > 0 else theme.VALUE_GOOD
+                if self.metric.key == "churn":
+                    fg = theme.ERROR if num >= 35 else (theme.WARNING if num >= 15 else theme.VALUE_NEUTRAL)
+                elif self.metric.key == "tool_error_rate":
+                    fg = theme.ERROR if num >= 10 else (theme.WARNING if num > 0 else theme.VALUE_NEUTRAL)
                 else:
                     fg = theme.VALUE_NEUTRAL
             except (ValueError, TypeError):
@@ -469,9 +706,13 @@ class SelectableLabel(tk.Text):
     def _arm(cls, delay: int | None = None) -> None:
         """（重新）武装合并测量定时器；锚死自愈。"""
         anchor = cls._ANCHOR
-        if anchor is not None and not anchor.winfo_exists():
+        try:
+            if anchor is not None and not anchor.winfo_exists():
+                anchor = None
+                cls._PENDING_AFTER = None  # 锚已死：旧定时器必失效，重排
+        except tk.TclError:
             anchor = None
-            cls._PENDING_AFTER = None  # 锚已死：旧定时器必失效，重排
+            cls._PENDING_AFTER = None
         if anchor is None:
             if not cls._PENDING:
                 return
@@ -532,7 +773,7 @@ class _MacButton(tk.Label):
     macOS Tk 的 Aqua 主题忽略 ``tk.Button`` 的 ``bg``（bpo-44243 → 白按钮）；
     视角切换 pill 早已用 tk.Label 绕开此限制，flat_button 在 mac 上同此处理。
     兼容 tk.Button 的 ``command``（构造时传入与 ``.config(command=)`` 重设），
-    供依赖该 API 的菜单按钮（``views._make_tool_menu`` 等）使用。
+    供依赖该 API 的 flat_button 调用方（弹窗按钮等）使用。
     """
 
     def __init__(self, master, *, command=None, base_bg, hover_bg, **kw):
@@ -607,19 +848,19 @@ class FlatMenu:
         self._closed = False
         self._top = tk.Toplevel(parent)
         self._top.overrideredirect(True)
-        self._top.configure(bg=theme.BORDER)               # 1px 外框色
-        self._body = tk.Frame(self._top, bg=theme.PANEL)
+        self._top.configure(bg=theme.BORDER_HOVER)               # 1px 浮起微亮外框
+        self._body = tk.Frame(self._top, bg=theme.PANEL_2)      # 抬升菜单底色，与工作台层级清晰区分
         self._body.pack(fill="both", expand=True, padx=1, pady=1)  # 1px 露出外框
         self._top.withdraw()
 
     def add_command(self, label="", command=None, image=None, compound=None,
                     state="normal", **_kw):
         disabled = (state == "disabled")
-        row = tk.Frame(self._body, bg=theme.PANEL)
+        row = tk.Frame(self._body, bg=theme.PANEL_2)
         row.pack(fill="x")
         fg = theme.MUTED if disabled else theme.FG
         lbl = tk.Label(row, text=label, image=image, compound="left",
-                       bg=theme.PANEL, fg=fg, font=theme.FONT_UI,
+                       bg=theme.PANEL_2, fg=fg, font=theme.FONT_UI,
                        padx=14, pady=4, anchor="w")
         lbl.pack(fill="x")
         if not disabled:
@@ -627,8 +868,8 @@ class FlatMenu:
                 row.configure(bg=theme.ACCENT)
                 lbl.configure(bg=theme.ACCENT, fg=theme.FG_WHITE)
             def leave(_e):
-                row.configure(bg=theme.PANEL)
-                lbl.configure(bg=theme.PANEL, fg=theme.FG)
+                row.configure(bg=theme.PANEL_2)
+                lbl.configure(bg=theme.PANEL_2, fg=theme.FG)
             def click(_e):
                 self._close()
                 if command is not None:
@@ -643,19 +884,18 @@ class FlatMenu:
     def add_radiobutton(self, label="", variable=None, value=None, command=None, **_kw):
         selected = variable is not None and variable.get() == value
         prefix = "●  " if selected else "    "
-        row = tk.Frame(self._body, bg=theme.PANEL)
+        row = tk.Frame(self._body, bg=theme.PANEL_2)
         row.pack(fill="x")
-        lbl = tk.Label(row, text=prefix + label, bg=theme.PANEL, fg=theme.FG,
+        lbl = tk.Label(row, text=prefix + label, bg=theme.PANEL_2, fg=theme.FG,
                        font=theme.FONT_UI, padx=14, pady=4, anchor="w")
         lbl.pack(fill="x")
-
         def enter(_e):
             row.configure(bg=theme.ACCENT)
             lbl.configure(bg=theme.ACCENT, fg=theme.FG_WHITE)
 
         def leave(_e):
-            row.configure(bg=theme.PANEL)
-            lbl.configure(bg=theme.PANEL, fg=theme.FG)
+            row.configure(bg=theme.PANEL_2)
+            lbl.configure(bg=theme.PANEL_2, fg=theme.FG)
 
         def click(_e):
             if variable is not None:
@@ -672,23 +912,42 @@ class FlatMenu:
         return row
 
     def add_separator(self):
-        tk.Frame(self._body, bg=theme.BORDER, height=1).pack(fill="x", padx=2, pady=2)
+        tk.Frame(self._body, bg=theme.BORDER, height=1).pack(fill="x", padx=4, pady=3)
 
     def tk_popup(self, x, y, *_args):
         self._top.deiconify()
         self._top.update_idletasks()
         w, h = self._top.winfo_reqwidth(), self._top.winfo_reqheight()
-        sw, sh = self._top.winfo_screenwidth(), self._top.winfo_screenheight()
-        if x + w > sw:
-            x = max(0, sw - w)
-        if y + h > sh:
-            y = max(0, sh - h)
+        from .platform import get_monitor_work_area
+        m_left, m_top, m_right, m_bottom = get_monitor_work_area(x, y)
+
+        # 计算垂直与水平安全边界：优先约束在宿主窗口内，外层兜底所属显示器工作区
+        max_y = m_bottom - 10
+        min_y = m_top + 10
+        try:
+            top_win = self._top.master.winfo_toplevel()
+            win_top = top_win.winfo_rooty()
+            win_bot = win_top + top_win.winfo_height() - 6
+            if win_bot > win_top + 100:
+                max_y = min(max_y, win_bot)
+                min_y = max(min_y, win_top + 10)
+        except Exception:
+            pass
+
+        if x + w > m_right - 10:
+            x = max(m_left + 10, m_right - w - 10)
+        if x < m_left + 10:
+            x = m_left + 10
+        if y + h > max_y:
+            # 向下溢出时自动向上翻转（底对齐，防窗口下边缘与任务栏截断）
+            y = max(min_y, max_y - h)
+        if y < min_y:
+            y = min_y
         self._top.geometry(f"+{x}+{y}")
         self._top.grab_set_global()
         self._top.bind("<Button-1>", self._on_top_click, add="+")
         self._top.bind("<Escape>", lambda _e: self._close())
         self._top.focus_set()
-
     def _on_top_click(self, e):
         if self._closed:
             return
@@ -845,25 +1104,551 @@ class CalendarPopup:
             pass
 
 
+class WorkbenchTab(tk.Frame):
+    """单窗口工作台页签内容容器（代理 Toplevel 常用生命周期方法）。"""
+
+    def __init__(self, parent, manager, tab_id: str, title: str, icon_name: str = "tools"):
+        super().__init__(parent, bg=theme.BG)
+        self.manager = manager
+        self.tab_id = tab_id
+        self._title = title
+        self._icon_name = icon_name
+        self._closing = False
+
+    def title(self, new_title: str | None = None) -> str:
+        if new_title is not None:
+            self._title = new_title
+            self.manager.update_tab_title(self.tab_id, new_title)
+        return self._title
+
+    def geometry(self, geom_str: str | None = None) -> None:
+        pass  # 工作台页签自适应布局，忽略尺寸命令
+
+    def transient(self, master=None) -> None:
+        pass
+
+    def resizable(self, w=None, h=None) -> None:
+        pass
+
+    def grab_set(self) -> None:
+        pass
+
+    def grab_release(self) -> None:
+        pass
+
+    def lift(self, aboveThis=None) -> None:
+        self.manager.select_tab(self.tab_id)
+
+    def focus_set(self) -> None:
+        super().focus_set()
+
+    def destroy(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        if hasattr(self, "manager") and self.manager and self.manager.winfo_exists():
+            try:
+                self.manager.close_tab(self.tab_id)
+            except Exception:
+                pass
+        super().destroy()
+
+
+_ROUNDED_IMG_CACHE: dict[tuple, object] = {}
+
+
+def get_rounded_rect_img(master, w: int, h: int, r: int, fill: str, bg: str,
+                         outline: str | None = None, outline_width: int = 1):
+    """生成并缓存 2x 超采样抗锯齿圆角矩形背景图。"""
+    tk_id = id(getattr(master, "tk", None))
+    key = (tk_id, w, h, r, fill, bg, outline, outline_width)
+    if key in _ROUNDED_IMG_CACHE:
+        return _ROUNDED_IMG_CACHE[key]
+    try:
+        from PIL import Image, ImageDraw, ImageTk
+    except ImportError:
+        return None
+    ss = 2
+    W, H, R = max(1, w * ss), max(1, h * ss), max(1, r * ss)
+    im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    if outline:
+        d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill,
+                            outline=outline, width=outline_width * ss)
+    else:
+        d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill)
+    im = im.resize((w, h), Image.Resampling.LANCZOS)
+    photo = ImageTk.PhotoImage(im, master=master)
+    _ROUNDED_IMG_CACHE[key] = photo
+    return photo
+
+
+class RoundedPill(tk.Canvas):
+    """带抗锯齿圆角的胶囊按钮/标签：自绘圆角底，支持图标与文字。"""
+
+    def __init__(self, parent, text: str = "", icon=None, command=None, *,
+                 width: int = 76, height: int = 22, radius: int = 5,
+                 fill: str = theme.CONTROL_BG, hover_fill: str = theme.HOVER_BG,
+                 bg: str = theme.PANEL, fg: str = theme.FG,
+                 font=theme.FONT_UI_SMALL, **kw) -> None:
+        super().__init__(parent, width=width, height=height, bg=bg,
+                         highlightthickness=0, bd=0, cursor=CLICK_CURSOR if command else "arrow", **kw)
+        self._width_px = width
+        self._height_px = height
+        self._radius = radius
+        self._fill = fill
+        self._normal_fill = fill
+        self._hover_fill = hover_fill
+        self._bg_col = bg
+        self._fg = fg
+        self._font = font
+        self._text = text
+        self._icon = icon
+        self._command = command
+
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        if command:
+            def _on_click(_e):
+                try:
+                    command(self)
+                except TypeError:
+                    command()
+            self.bind("<Button-1>", _on_click)
+        self._redraw()
+
+    def set_state(self, *, fill: str | None = None, fg: str | None = None, text: str | None = None) -> None:
+        if fill is not None:
+            self._fill = fill
+            self._normal_fill = fill
+        if fg is not None:
+            self._fg = fg
+        if text is not None:
+            self._text = text
+            import tkinter.font as tkfont
+            txt_w = tkfont.Font(font=self._font).measure(text)
+            ico_extra = (getattr(self._icon, "width", lambda: 16)() + 4) if self._icon else 0
+            needed_w = txt_w + ico_extra + 20
+            if needed_w > self._width_px:
+                self._width_px = needed_w
+                super().configure(width=needed_w)
+        self._redraw()
+
+    def set_fill(self, fill: str) -> None:
+        self._fill = fill
+        self._normal_fill = fill
+        self._redraw()
+
+    def set_fg(self, fg: str) -> None:
+        self._fg = fg
+        self._redraw()
+
+    def set_text(self, text: str) -> None:
+        self._text = text
+        import tkinter.font as tkfont
+        txt_w = tkfont.Font(font=self._font).measure(text)
+        ico_extra = (getattr(self._icon, "width", lambda: 16)() + 4) if self._icon else 0
+        needed_w = txt_w + ico_extra + 20
+        if needed_w > self._width_px:
+            self._width_px = needed_w
+            super().configure(width=needed_w)
+        self._redraw()
+
+    def cget(self, attr: str):
+        if attr in ("bg", "background"):
+            return self._fill
+        if attr in ("fg", "foreground"):
+            return self._fg
+        if attr == "text":
+            return self._text
+        if attr == "font":
+            return self._font
+        return super().cget(attr)
+
+    def configure(self, cnf=None, **kw):
+        if cnf in ("bg", "background"):
+            return self._fill
+        if cnf in ("fg", "foreground"):
+            return self._fg
+        if cnf == "text":
+            return self._text
+        if cnf == "font":
+            return self._font
+        if "bg" in kw or "background" in kw:
+            self._fill = kw.pop("bg", kw.pop("background", None))
+            self._normal_fill = self._fill
+        if "fg" in kw or "foreground" in kw:
+            self._fg = kw.pop("fg", kw.pop("foreground", None))
+        if "text" in kw:
+            self._text = kw.pop("text")
+        if "font" in kw:
+            self._font = kw.pop("font")
+        self._redraw()
+        if kw:
+            super().configure(**kw)
+    config = configure
+
+    def _on_enter(self, _e) -> None:
+        if self._fill == self._normal_fill and self._hover_fill and self._command:
+            self._fill = self._hover_fill
+            self._redraw()
+
+    def _on_leave(self, _e) -> None:
+        if self._hover_fill and self._command:
+            self._fill = self._normal_fill
+            self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        self._img = get_rounded_rect_img(self, self._width_px, self._height_px,
+                                          self._radius, self._fill, self._bg_col)
+        if self._img is not None:
+            self.create_image(0, 0, anchor="nw", image=self._img)
+        else:
+            self.create_rectangle(0, 0, self._width_px, self._height_px, fill=self._fill, outline="")
+        if self._icon and self._text:
+            import tkinter.font as tkfont
+            ico_w = getattr(self._icon, "width", lambda: 16)()
+            gap = 4
+            text_w = tkfont.Font(font=self._font).measure(self._text)
+            start_x = max(5, (self._width_px - (ico_w + gap + text_w)) // 2)
+            self.create_image(start_x, self._height_px // 2, anchor="w", image=self._icon)
+            self.create_text(start_x + ico_w + gap, self._height_px // 2, anchor="w",
+                             text=self._text, fill=self._fg, font=self._font)
+        elif self._text:
+            self.create_text(self._width_px // 2, self._height_px // 2, anchor="center",
+                             text=self._text, fill=self._fg, font=self._font)
+
+class RoundedSearchBox(tk.Canvas):
+    """带抗锯齿圆角的搜索框：底板为圆角底，内嵌搜索图标与扁平 Entry。"""
+
+    def __init__(self, parent, textvariable, *, width: int = 110, height: int = 22,
+                 radius: int = 5, fill: str = theme.CONTROL_BG,
+                 bg: str = theme.SECTION_HEADER_BG, fg: str = theme.FG,
+                 icon=None, **kw) -> None:
+        super().__init__(parent, width=width, height=height, bg=bg,
+                         highlightthickness=0, bd=0, **kw)
+        self._width_px = width
+        self._height_px = height
+        self._radius = radius
+        self._fill = fill
+        self._bg_col = bg
+        self._fg = fg
+        self._icon = icon
+
+        self.entry = tk.Entry(self, textvariable=textvariable, bg=fill, fg=fg,
+                              insertbackground=fg, relief="flat", borderwidth=0,
+                              highlightthickness=0, font=theme.FONT_UI)
+        def _clear(_e=None):
+            textvariable.set("")
+            self.entry.delete(0, "end")
+            return "break"
+        self.entry.bind("<Escape>", _clear)
+        self.bind("<Button-1>", lambda _e: self.entry.focus_set())
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("bg")
+        self.delete("icon")
+        self._img = get_rounded_rect_img(self, self._width_px, self._height_px,
+                                          self._radius, self._fill, self._bg_col)
+        if self._img is not None:
+            self.create_image(0, 0, anchor="nw", image=self._img, tags="bg")
+        else:
+            self.create_rectangle(0, 0, self._width_px, self._height_px, fill=self._fill, outline="", tags="bg")
+        self.tag_lower("bg")
+        x_entry = 8
+        if self._icon:
+            self.create_image(6, self._height_px // 2, anchor="w", image=self._icon, tags="icon")
+            ico_w = getattr(self._icon, "width", lambda: 16)()
+            x_entry = 6 + ico_w + 4
+        entry_w = self._width_px - x_entry - 6
+        if not self.find_withtag("entry_win"):
+            self.create_window(x_entry, self._height_px // 2, anchor="w",
+                               window=self.entry, width=entry_w, tags="entry_win")
+        else:
+            self.coords("entry_win", x_entry, self._height_px // 2)
+            self.itemconfigure("entry_win", width=entry_w)
+        self.tag_bind("bg", "<Button-1>", lambda _e: self.entry.focus_set())
+        self.tag_bind("icon", "<Button-1>", lambda _e: self.entry.focus_set())
+
+class RoundedKpiChip(tk.Canvas):
+    """带抗锯齿圆角的头部 KPI 徽标胶囊：标签灰度小字 + 数值粗体，支持悬停提亮与点击回调。"""
+
+    def __init__(self, parent, label: str, value: str = "-", *, command=None,
+                 tip: str = "", width: int = 95, height: int = 24, radius: int = 5,
+                 fill: str = theme.CONTROL_BG, hover_fill: str = theme.HOVER_BG,
+                 bg: str = theme.BG, fg: str = theme.FG, **kw) -> None:
+        super().__init__(parent, width=width, height=height, bg=bg,
+                         highlightthickness=0, bd=0,
+                         cursor=CLICK_CURSOR if command else "arrow", **kw)
+        self._width_px = width
+        self._height_px = height
+        self._radius = radius
+        self._fill = fill
+        self._normal_fill = fill
+        self._hover_fill = hover_fill
+        self._bg_col = bg
+        self._fg = fg
+        self._label = label
+        self._value = value
+        self._extra = ""
+        self._command = command
+
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        if command:
+            self.bind("<Button-1>", lambda _e: command(self))
+        if tip:
+            Tooltip(self, tip)
+        self._redraw()
+
+    def set_value(self, value: str, extra: str = "", fg: str | None = None) -> None:
+        self._value = value
+        self._extra = extra
+        if fg is not None:
+            self._fg = fg
+        self._redraw()
+
+    def cget(self, attr: str):
+        if attr in ("bg", "background"):
+            return self._fill
+        if attr in ("fg", "foreground"):
+            return self._fg
+        if attr == "text":
+            return f"{self._value} {self._extra}".strip()
+        return super().cget(attr)
+
+    def configure(self, cnf=None, **kw):
+        if cnf == "text":
+            return f"{self._value} {self._extra}".strip()
+        if "text" in kw:
+            self._value = kw.pop("text")
+        if "fg" in kw:
+            self._fg = kw.pop("fg")
+        self._redraw()
+        if kw:
+            super().configure(**kw)
+
+    config = configure
+
+    def _on_enter(self, _e) -> None:
+        if self._hover_fill and self._command:
+            self._fill = self._hover_fill
+            self._redraw()
+
+    def _on_leave(self, _e) -> None:
+        self._fill = self._normal_fill
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        self._img = get_rounded_rect_img(self, self._width_px, self._height_px,
+                                          self._radius, self._fill, self._bg_col)
+        if self._img is not None:
+            self.create_image(0, 0, anchor="nw", image=self._img)
+        else:
+            self.create_rectangle(0, 0, self._width_px, self._height_px, fill=self._fill, outline="")
+        self.create_text(8, self._height_px // 2, text=self._label, fill=theme.MUTED,
+                         font=theme.FONT_UI_SMALL, anchor="w")
+        # 右侧数值（等宽/粗体 FG）
+        val_full = f"{self._value} {self._extra}".strip()
+        self.create_text(self._width_px - 8, self._height_px // 2, text=val_full,
+                         fill=self._fg, font=theme.FONT_VALUE, anchor="e")
+
+
 def new_window(parent, title, size, bg=theme.BG):
-    """Create a centered Toplevel relative to *parent* (shared popup shell)."""
+    """创建居中 Toplevel 子窗口（原生弹窗，支持深色标题栏与 Esc 快捷关闭）。"""
     import tkinter as tk
 
     win = tk.Toplevel(parent)
     win.title(title)
     win.configure(bg=bg)
     parent.update_idletasks()
-    pw = parent.winfo_width()
-    ph = parent.winfo_height()
-    px = parent.winfo_rootx()
-    py = parent.winfo_rooty()
     wpx, hpx = (int(x) for x in size.split("x"))
+
+    from .platform import get_monitor_work_area
+    m_left, m_top, m_right, m_bottom = get_monitor_work_area(parent)
+    m_width = m_right - m_left
+    m_height = m_bottom - m_top
+
+    # 屏幕工作区最大高度限制（自适应当前显示器可用高）
+    max_h = max(300, m_height - 60)
+    hpx = min(hpx, max_h)
+
+    top_win = parent.winfo_toplevel()
+    top_win.update_idletasks()
+    pw = top_win.winfo_width()
+    ph = top_win.winfo_height()
+    px = top_win.winfo_rootx()
+    py = top_win.winfo_rooty()
+
     x = px + (pw - wpx) // 2
     y = py + (ph - hpx) // 2
-    win.geometry(f"{wpx}x{hpx}+{x}+{y}")
+
+    # 屏缘防溢出校正（确保弹窗底边绝不穿透任务栏、顶栏绝不出界，跨多屏安全）
+    if x + wpx > m_right - 10:
+        x = max(m_left + 10, m_right - wpx - 10)
+    if x < m_left + 10:
+        x = m_left + 10
+    if y + hpx > m_bottom - 10:
+        y = max(m_top + 25, m_bottom - 10 - hpx)
+    if y < m_top + 25:
+        y = m_top + 25
+    win.geometry(f"{wpx}x{hpx}+{int(x)}+{int(y)}")
     from .platform import apply_dark_titlebar
     apply_dark_titlebar(win)   # 创建即设
-    # 部分子窗口首次显示时尚未完成映射，DWM 属性可能没生效；<Map> 时再设一次兜底，
-    # 确保每个子窗口实际显示时标题栏与主窗口一致。
     win.bind("<Map>", lambda e: apply_dark_titlebar(win), add="+")
+    win.bind("<Escape>", lambda e: win.destroy(), add="+")
     return win
+
+
+class ModalShell:
+    """Monokai Dimmed 规范模态弹窗外壳基类。
+
+    约束 3 档规范几何：
+    - compact: 520x360 （配置/向导/简易输入）
+    - standard: 740x540 （单会话钻取/明细/时间线）
+    - wide: 1040x680 （多维矩阵/对比/雷达/全景）
+
+    结构：
+    - 头部 Header：40px 高度，ACTIVITY_BG (#353535) 底色，11pt 粗体标题 + 副标 + ✕ 关闭
+    - 内容容器 Content：BG (#1e1e1e) 底色，内边距 PAD_L (12px)
+    - 底部操作栏 Action Bar（可选）：40px 高度，PANEL 底色，1px 顶边 BORDER
+    """
+
+    GEOMETRIES = {
+        "compact": (520, 360),
+        "standard": (740, 540),
+        "wide": (1040, 680),
+    }
+
+    def __init__(self, parent, title: str, subtitle: str = "", *,
+                 tier: str = "standard", geometry: str | None = None,
+                 with_action_bar: bool = False, bg: str = theme.BG) -> None:
+        self.parent = parent
+        self.win = tk.Toplevel(parent)
+        self.win.title(title)
+        self.win.configure(bg=bg)
+
+        if geometry is not None:
+            wpx, hpx = (int(x) for x in geometry.split("x"))
+        else:
+            wpx, hpx = self.GEOMETRIES.get(tier, self.GEOMETRIES["standard"])
+
+        parent.update_idletasks()
+        from .platform import get_monitor_work_area
+        m_left, m_top, m_right, m_bottom = get_monitor_work_area(parent)
+        top_win = parent.winfo_toplevel()
+        top_win.update_idletasks()
+        pw, ph = top_win.winfo_width(), top_win.winfo_height()
+        px, py = top_win.winfo_rootx(), top_win.winfo_rooty()
+        x = px + (pw - wpx) // 2
+        y = py + (ph - hpx) // 2
+        if x + wpx > m_right - 10:
+            x = max(m_left + 10, m_right - wpx - 10)
+        if x < m_left + 10:
+            x = m_left + 10
+        if y + hpx > m_bottom - 10:
+            y = max(m_top + 25, m_bottom - 10 - hpx)
+        if y < m_top + 25:
+            y = m_top + 25
+        self.win.geometry(f"{wpx}x{hpx}+{int(x)}+{int(y)}")
+
+        from .platform import apply_dark_titlebar
+        apply_dark_titlebar(self.win)
+        self.win.bind("<Map>", lambda e: apply_dark_titlebar(self.win), add="+")
+        self.win.bind("<Escape>", lambda _e: self.close())
+
+        # 1. 顶部 Header (40px)
+        self.header = tk.Frame(self.win, bg=theme.ACTIVITY_BG, height=40)
+        self.header.pack(fill="x")
+        self.header.pack_propagate(False)
+
+        title_box = tk.Frame(self.header, bg=theme.ACTIVITY_BG)
+        title_box.pack(side="left", fill="both", expand=True, padx=theme.PAD_L)
+
+        self.title_lbl = tk.Label(title_box, text=title, bg=theme.ACTIVITY_BG,
+                                  fg=theme.FG_WHITE, font=(theme.FONT_CJK, 11, "bold"), anchor="w")
+        if subtitle:
+            self.title_lbl.pack(side="top", anchor="w", pady=(3, 0))
+            self.sub_lbl = tk.Label(title_box, text=subtitle, bg=theme.ACTIVITY_BG,
+                                    fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+            self.sub_lbl.pack(side="top", anchor="w", pady=(0, 2))
+        else:
+            self.title_lbl.pack(side="left", fill="both", expand=True)
+            self.sub_lbl = None
+
+        close_btn = tk.Label(self.header, text=" ✕ ", bg=theme.ACTIVITY_BG,
+                             fg=theme.MUTED, font=theme.FONT_UI_BOLD, cursor=CLICK_CURSOR)
+        close_btn.pack(side="right", padx=theme.PAD_M)
+        close_btn.bind("<Button-1>", lambda _e: self.close())
+        close_btn.bind("<Enter>", lambda _e: close_btn.configure(fg=theme.FG_WHITE, bg=theme.HOVER_BG))
+        close_btn.bind("<Leave>", lambda _e: close_btn.configure(fg=theme.MUTED, bg=theme.ACTIVITY_BG))
+
+        tk.Frame(self.win, bg=theme.BORDER, height=1).pack(fill="x")
+
+        # 2. 底部 Action Bar (可选)
+        if with_action_bar:
+            self.action_bar = tk.Frame(self.win, bg=theme.PANEL, height=40)
+            self.action_bar.pack(side="bottom", fill="x")
+            self.action_bar.pack_propagate(False)
+            tk.Frame(self.action_bar, bg=theme.BORDER, height=1).pack(side="top", fill="x")
+            self.action_inner = tk.Frame(self.action_bar, bg=theme.PANEL)
+            self.action_inner.pack(fill="both", expand=True, padx=theme.PAD_L, pady=theme.PAD_S)
+        else:
+            self.action_bar = None
+            self.action_inner = None
+
+        # 3. 中部 Content 容器
+        self.content = tk.Frame(self.win, bg=bg, padx=theme.PAD_L, pady=theme.PAD_L)
+        self.content.pack(fill="both", expand=True)
+
+    def close(self) -> None:
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
+class ProgressBarWidget:
+    """统一紧凑比例条组件。
+
+    高度固定 6px（可定制），槽底色 theme.BORDER (#303030)；
+    监听 <Configure> 动态响应宽度；
+    支持 set_segments([(weight/ratio, hex_color), ...])。
+    """
+
+    def __init__(self, parent, *, height: int = 6, bg: str = theme.BORDER) -> None:
+        self._height = height
+        self._bg = bg
+        self._segments: list[tuple[float, str]] = []
+        self.canvas = tk.Canvas(parent, height=height, bg=bg, highlightthickness=0)
+        self.canvas.pack(fill="x", expand=True)
+        self.canvas.bind("<Configure>", lambda _e: self._draw())
+
+    def set_segments(self, segments: list[tuple[float, str]]) -> None:
+        """Set segments as [(weight/ratio, hex_color), ...]."""
+        self._segments = segments
+        self._draw()
+
+    def _draw(self) -> None:
+        self.canvas.delete("all")
+        w = self.canvas.winfo_width()
+        h = self._height
+        if w <= 1 or not self._segments:
+            return
+
+        total = sum(max(0.0, s[0]) for s in self._segments)
+        if total <= 0:
+            return
+
+        x = 0.0
+        for weight, color in self._segments:
+            if weight <= 0:
+                continue
+            seg_w = (weight / total) * w
+            x1 = min(float(w), x + seg_w)
+            if x1 > x:
+                self.canvas.create_rectangle(int(x), 0, int(x1), h, fill=color, outline="")
+            x = x1

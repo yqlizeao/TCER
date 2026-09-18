@@ -1,3 +1,45 @@
+# TCER v1.9.0
+
+视觉交互重大升级：**Monokai Dimmed 工作台 2.0 (Workbench 2.0)**。重塑桌面端拓扑架构、视觉阶梯与交互动线，并经 7 路独立代码审查完成全量缺陷闭环修复。656 项自动化测试全部通过（0 failed）。
+
+## 1. 工作台 2.0 拓扑架构重构
+
+- **44px 左侧活动栏（Activity Bar）**：收拢指标看板（`ui-dashboard`）、模型对比（`ui-model`）、效率榜（`ui-rank`）、趋势分析（`ui-trend`）、项目聚合（`ui-layers`）、LLM 报告（`ui-sparkle`）六大核心视图导航，底部集成上传、导出与设置入口；
+- **主侧边栏（Primary Sidebar）一体化**：整合项目与会话两级资源管理器，顶部集成数据源筛选、日期范围选择、视角切换与刷新；
+- **主工作区顶格无界化**：彻底废除横跨全屏的顶部横向页签栏，将宝贵的 30px+ 纵向黄金高度全部归还给数据图表与指标网格；
+- **原生子窗口与沉浸弹窗体系**：详情、设置、时间线、雷达、上传弹窗统一采用系统原生居中 `Toplevel` 子窗口（`widgets.new_window`），支持深色沉浸式标题栏与 `<Escape>` 快捷关闭；
+- **官方 Codicons 图标体系**：全面替换历史 emoji 图标，统一采用 VS Code 官方 Codicons 16×16 极细矢量白线图标（4× 超采样高清光栅化，存 `tcer/gui/assets/ui-*.png`）。
+
+## 2. 视觉降噪与表面明度阶梯 (Quiet Chrome & Calm Data)
+
+- **四级灰度收敛**：`BG` (#1e1e1e) → `PANEL` (#272727) → `PANEL_2` (#303030) → `CONTROL` (#3c3c3c)，以自然的物理明度差实现层级浮动，消灭方格网边框囚笼；
+- **色彩语义克制**：常规数据保持高对比度中性白（`#e6edf3`），仅在触碰极端阈值时点缀警示色，彻底消除圣诞树效应；
+- **样式契约收紧（Style Contract）**：历史残留 hex 收紧至 2 个（画布暗刻度），禁止任何手写 `tk.Button` / `tk.Menu` / `Checkbutton`，全工程色值统一走 `theme.py` SSOT。
+
+## 3. 代码审查专项闭环修复
+
+- **零依赖与启动防护**：修复 `get_rounded_rect_img` 无条件导入 PIL 的问题，未安装 Pillow 时优雅回退至标准 Canvas 纯色矩形，维护纯标准库零依赖承诺；
+- **交互与功能修复**：
+  - 修复 `FlatMenu.add_radiobutton` 丢失布局导致单选菜单项高度 1px 隐形的问题；
+  - 修复 `LlmReportsView` 工具栏遗漏的后台任务取消按钮并恢复 smoke 测试；
+  - 修复 `SessionColumn` 异步分批构建与 `app.py` 选择会话的状态脱节；
+  - 修复 `UploadDialog._fit_window` 尺寸缩回与居中偏移缺陷；
+  - 修复 `ModelCompareView` 表头与数据行指标名称宽度不一导致的列错位；
+  - 修复 `SessionTimelinePopup` Canvas 尺寸回退错误及重复轮询循环；
+  - 修复 `format_card_title` 处理包含空格的文件路径时的误解析；
+- **多显示器与平台层**：
+  - 修复 64 位 Windows 下 `MonitorFromPoint` 与 `GetMonitorInfoW` 句柄类型未声明导致的负坐标副屏定位截断；
+  - 将 ctypes 结构体移出高频鼠标移动回调，消除持续 GC 压力；
+  - `ModalShell` 补全负坐标与屏幕工作区边界安全约束；
+  - `root.minsize` 增加屏幕分辨率自适应钳位；
+- **事件与内存泄漏治理**：
+  - 修复 `StatusIconBtn`、`ActivityBar` 及搜索徽标在刷新时重复创建 Tooltip 和事件绑定的内存泄漏；
+  - `Tooltip` 增加宿主 `<Destroy>` 自动注销与 `winfo_exists` 安全检查；
+  - `app.py` 窗口关闭时增加 sash 坐标异常防护，确保用户偏好（窗口几何、项目选择、图钉红旗）100% 安全落盘；
+- **配色与对比度校正**：
+  - 分离 `LEVEL_COMPOUND` (#eab308) 与 `WARNING` (#f59e0b)，彻底消除 Token 堆叠图中 `cache_write` 与 `output` 同色撞车；
+  - 调整 `BORDER` 与 `STATUS_BG`，满足 WCAG 2.1 AA 文本对比度标准。
+
 # TCER v1.8.4
 
 代码审查修复专项 + LLM 解读审计化重做专项。两部分：其一，对 v1.8.0 以来 21 个提交做全量代码审查并修复全部确认问题——崩溃级 3 项（LLM 失败路径死代码、相图空轨迹崩溃、卫星绘制嵌套错位）、静默错数据 2 项（水床因果链回合号错位、U 标签接地错配）、并发与健壮性一批（收信箱任务注册表重构、报告落盘加锁、畸形遥测容错），并根除测试套件的 Tk 双 root 静默 skip；其二，按用户四点实测反馈重做 LLM 解读层——反谄媚审计立场与转折责任归因、全面术语平实化（面向非技术本科生）、三档过程数据供给（适配 1M 上下文模型）、输出扩容与机械审计校验，并针对实测机型 gemini-3.8-flash 做参数兼容修正。653 项测试通过，全项目闭环审计 100% PASS。

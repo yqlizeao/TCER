@@ -26,7 +26,7 @@ from tcer.core.paths import (
 from tcer.core.reader import discover_jsonl
 from . import html_report, popups, theme, views
 from .views import ScoreRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
-
+from .widgets import Tooltip, flat_button
 
 # 发布版(PyInstaller 打包,sys.frozen=True)默认开启「启动时自动检查更新」;
 # 源码运行(python -m tcer,frozen 不存在)默认关闭——开发者无需每次启动查更新。
@@ -93,17 +93,53 @@ class TcerGui:
             w, h = min(1600, int(sx * 0.92)), min(900, int(sy * 0.86))
             root.geometry(f"{w}x{h}+{(sx - w) // 2}+{max(0, (sy - h) // 2 - 40)}")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # 最小窗口尺寸：分栏 minsize 只约束 sash 拖动，窗口缩到极小时 panes 会被
+        # 挤过 minsize 产生重叠——VS Code 同样锁最小窗口（44 活动栏+260 侧栏+760 主区）。
+        root.minsize(min(1080, sx), min(540, sy))
+        # 全局快捷键（VS Code 习惯的最小集）：Ctrl+F 聚焦会话搜索（全选便于覆盖
+        # 输入），F5/Ctrl+R 刷新项目。Entry 的 Ctrl+F 默认无绑定，bind_all 不受
+        # takefocus=0 影响。
+        root.bind_all("<Control-f>", self._hotkey_search)
+        root.bind_all("<F5>", lambda _e: self.refresh_projects())
+        root.bind_all("<Control-r>", lambda _e: self.refresh_projects())
 
+        # 1. 底部全宽状态栏 (22px 高)
+        self.status_bar = views.StatusBar(root, self)
+
+        # 2. 核心工作台主体容器 (顶格到顶，零冗余横梁)
+        self._workbench = tk.Frame(root, bg=theme.BG)
+        self._workbench.pack(fill="both", expand=True)
+
+        # 2a. 左侧活动栏 (44px 宽)
+        self.activity_bar = views.ActivityBar(self._workbench, self)
+
+        # 2b. 过滤器与动作控制器 (零冗余面板融合)
         self.filter = FilterBar(root, self)
         self.filter.restore_prefs(self._ui_prefs)
-        self._build_body(root)
+
+        # 2c. 主体分栏 (全高侧边栏 + 编辑区)
+        self._build_body(self._workbench)
         self.refresh_projects()
         root.after(100, self._poll)
         if self._ui_prefs.get("check_update_on_start"):
             # opt-in 启动自动检查更新:延后 2s 避开启动繁忙,仅「有新版」才弹窗
             root.after(2000, lambda: self.check_for_update(silent=True))
+    def _hotkey_search(self, _event=None) -> None:
+        """Ctrl+F：聚焦搜索框并全选（焦点在项目区则搜项目，否则搜会话）。"""
+        try:
+            focus = self.root.focus_get()
+            if hasattr(self, "project_col") and hasattr(self.project_col, "search_entry"):
+                p_win = getattr(self.project_col, "container", None)
+                if focus and p_win and (str(focus).startswith(str(self.project_col.search_entry)) or str(focus).startswith(str(p_win))):
+                    self.project_col.search_entry.focus_set()
+                    self.project_col.search_entry.select_range(0, "end")
+                    return
+            entry = self.session_col.search_entry
+            entry.focus_set()
+            entry.select_range(0, "end")
+        except (AttributeError, tk.TclError):
+            pass
 
-    # ------------------------------------------------------- update checking
     def check_for_update(self, silent: bool = False) -> None:
         """后台查 GitHub 最新版,回主线程弹「检查更新」窗口。
 
@@ -190,9 +226,19 @@ class TcerGui:
         try:
             proj = self._selected_project()
             params = self.filter.get_params()
+            sashes = []
+            try:
+                sashes.append(self._paned.sash_coord(0)[0])
+            except Exception:
+                sashes.append(420)
+            if hasattr(self, "sidebar_paned"):
+                try:
+                    sashes.append(self.sidebar_paned.sash_coord(0)[1])
+                except Exception:
+                    sashes.append(220)
             self._ui_prefs.update({
                 "geometry": self.root.geometry(),
-                "sashes": [self._paned.sash_coord(i)[0] for i in (0, 1)],
+                "sashes": sashes,
                 "source": self.filter.get_source(),
                 "task_type": params.get("task_type"),
                 "until": params.get("until"),
@@ -202,57 +248,81 @@ class TcerGui:
                 "flagged_sessions": self._flagged_keys,
             })
             ui_prefs.save(self._ui_prefs)
-        except tk.TclError:
+        except Exception:
             pass
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
-    # --------------------------------------------------------------- layout
-    def _build_body(self, root) -> None:
-        paned = tk.PanedWindow(root, orient="horizontal", bg=theme.BG, sashwidth=4)
-        paned.pack(fill="both", expand=True, padx=8, pady=4)
+    def _build_body(self, container) -> None:
+        paned = tk.PanedWindow(container, orient="horizontal", bg=theme.BG, sashwidth=4)
+        paned.pack(side="left", fill="both", expand=True)
 
-        left_wrap = tk.Frame(paned, bg=theme.BG)
-        paned.add(left_wrap, minsize=160)
-        self.project_col = ProjectColumn(left_wrap, self)
+        # 左侧全高侧边栏 (Primary Sidebar，通顶)
+        sidebar = tk.Frame(paned, bg=theme.PANEL)
+        paned.add(sidebar, minsize=260, width=320)
 
-        mid_wrap = tk.Frame(paned, bg=theme.BG)
-        paned.add(mid_wrap, minsize=200)
-        self.session_col = SessionColumn(mid_wrap, self)
+        # 侧栏顶部标题条
+        sb_head = tk.Frame(sidebar, bg=theme.PANEL, height=28)
+        sb_head.pack(fill="x", padx=6, pady=(4, 2))
+        sb_head.pack_propagate(False)
+        rf_btn = flat_button(sb_head, "", self.refresh_projects,
+                             image=views.ui_icon(sb_head, "refresh"), padx=3, pady=2)
+        rf_btn.pack(side="right")
+        Tooltip(rf_btn, "重新扫描并刷新全部项目")
 
-        right = tk.Frame(paned, bg=theme.BG, width=900)
-        paned.add(right, minsize=760)
+        # 数据来源与时间预设胶囊挂载在侧栏顶部标题条
+        self.filter.mount_sidebar(sb_head)
+        # 挂载项目/会话视角切换按钮（取代原“资源管理器”文本）
+        self.filter.mount_view_switcher(sb_head)
 
-        nb = ttk.Notebook(right)
+        self.sidebar_paned = tk.PanedWindow(sidebar, orient="vertical", bg=theme.PANEL, sashwidth=4)
+        self.sidebar_paned.pack(fill="both", expand=True)
+
+        proj_pane = tk.Frame(self.sidebar_paned, bg=theme.PANEL)
+        self.sidebar_paned.add(proj_pane, minsize=120)
+        self.project_col = ProjectColumn(proj_pane, self)
+
+        sess_pane = tk.Frame(self.sidebar_paned, bg=theme.PANEL)
+        self.sidebar_paned.add(sess_pane, minsize=140)
+        self.session_col = SessionColumn(sess_pane, self)
+
+        # 右侧主工作区 (Editor Container)
+        editor = tk.Frame(paned, bg=theme.BG)
+        paned.add(editor, minsize=760)
+
+        nb = views.EditorWorkbench(editor, controller=self)
         nb.pack(fill="both", expand=True)
         self._nb = nb
-        self._dirty_tabs: dict[int, bool] = {}  # 页签 → 待补渲染是否需重灌数据
-        # 切页签时补渲染被惰性跳过的视图（见 _render_active_tab）。
-        nb.bind("<<NotebookTabChanged>>", lambda _e: self._render_tab(
-            self._nb.index(self._nb.select())))
+        self.root._workbench = nb
+        self._dirty_tabs: dict[int, bool] = {}
+        # 切页时补渲染被惰性跳过的视图，并同步活动栏页组高亮。
+        nb.bind("<<NotebookTabChanged>>", lambda _e=None: (
+            self.activity_bar.set_page_active(self._nb.index(self._nb.select())),
+            self._render_tab(self._nb.index(self._nb.select())),
+        ))
         tab_m = tk.Frame(nb, bg=theme.BG)
+        tab_c = tk.Frame(nb, bg=theme.PANEL)
         tab_b = tk.Frame(nb, bg=theme.PANEL)
         tab_t = tk.Frame(nb, bg=theme.PANEL)
-        tab_c = tk.Frame(nb, bg=theme.PANEL)
         tab_r = tk.Frame(nb, bg=theme.PANEL)
         tab_l = tk.Frame(nb, bg=theme.BG)
-        def _add_tab(child, text, icon_key):
-            img = views.ui_icon(nb, icon_key)
-            if img is not None:
-                nb.add(child, text=text, image=img, compound="left")
-            else:
-                nb.add(child, text=text)
-
-        _add_tab(tab_m, "指标分类", "grid")
-        _add_tab(tab_c, "模型对比", "compare")
-        _add_tab(tab_b, "效率榜", "rank")
-        _add_tab(tab_t, "趋势", "trend")
-        _add_tab(tab_r, "项目聚合", "layers")
-        _add_tab(tab_l, "LLM 报告", "chat")
+        tabs_spec = [
+            (tab_m, "指标看板", "grid"),
+            (tab_c, "模型对比", "compare"),
+            (tab_b, "效率榜", "rank"),
+            (tab_t, "趋势分析", "trend"),
+            (tab_r, "项目聚合", "layers"),
+            (tab_l, "LLM 报告", "chat"),
+        ]
+        for child, text, icon in tabs_spec:
+            nb.add(child, text=text, icon=icon)
 
         self.metric_panel = MetricPanel(tab_m, self)
+        self.model_compare = ModelCompareView(tab_c, controller=self)
         self.ranking_view = ScoreRankingView(tab_b, controller=self)
         self.trend_chart = TrendChart(tab_t, controller=self)
-        self.model_compare = ModelCompareView(tab_c, controller=self)
         self.real_projects_view = views.RealProjectsView(tab_r, controller=self)
         self.llm_reports_view = views.LlmReportsView(
             tab_l, controller=self, on_cancel_tasks=self._on_cancel_llm_tasks)
@@ -260,17 +330,25 @@ class TcerGui:
         # 项目聚合页签独立于当前分析（后台扫全部项目），首次切入加载。
         self._realproj_loaded = False
         self._realproj_scanning = False
+        # 初始选中首页（NavStack 不像 Notebook 自动显示首个 tab）
+        nb.select(0)
 
         self._paned = paned
-        root.update_idletasks()
-        paned.sash_place(0, 190, 0)
-        paned.sash_place(1, 420, 0)
+        container.update_idletasks()
+        try:
+            paned.sash_place(0, 280, 0)
+            self.sidebar_paned.sash_place(0, 0, 220)
+        except (TypeError, ValueError, tk.TclError):
+            pass
         # 恢复上次的分栏位置（覆盖默认值；数据异常则保持默认）。
         saved = self._ui_prefs.get("sashes")
-        if isinstance(saved, list) and len(saved) == 2:
+        if isinstance(saved, list):
             try:
-                paned.sash_place(0, int(saved[0]), 0)
-                paned.sash_place(1, int(saved[1]), 0)
+                if len(saved) >= 1:
+                    paned.sash_place(0, int(saved[0]), 0)
+                if len(saved) >= 2 and hasattr(self, "sidebar_paned"):
+                    s1 = min(250, max(140, int(saved[1])))
+                    self.sidebar_paned.sash_place(0, 0, s1)
             except (TypeError, ValueError, tk.TclError):
                 pass
 
@@ -314,7 +392,8 @@ class TcerGui:
         self.trend_chart.update([])
         self.model_compare.update([])
         self.metric_panel.clear()
-        self._update_tab_names()
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.clear_badges()
 
     def on_select_project(self, idx: int) -> None:
         self._selected_project_idx = idx
@@ -462,16 +541,15 @@ class TcerGui:
                 # which would raise and stop _poll from rescheduling (freezes GUI).
         except queue.Empty:
             pass
-        except Exception:  # noqa: BLE001 — _poll 必须永远重新排程
-            # 渲染期异常（如缺 PIL 时的图表错误）绝不能终止轮询——after 一旦
-            # 不再排程，后续所有分析结果都会静默丢弃、状态栏永久卡「分析中…」。
-            # 结果处理是一条条独立排队的，跳过当前条、继续处理后续条即可。
+        except Exception:  # noqa: BLE001
             try:
                 self.filter.set_status("渲染出错（已跳过一条结果）")
             except Exception:
                 pass
-        self.root.after(120, self._poll)
-
+        try:
+            self.root.after(120, self._poll)
+        except (tk.TclError, RuntimeError):
+            pass
     def _on_analysis(self, a: analyze.ProjectAnalysis) -> None:
         proj = self._selected_project()
         if proj is None:
@@ -494,16 +572,14 @@ class TcerGui:
         # Preserve the prior selection across the refresh when it survived
         # (e.g. a reanalyze triggered indirectly by a date-filter FocusOut
         # firing as a popup closes); otherwise default to the most recent.
-        # select_* set the visual selection only (notify=False) — the unified
-        # render below handles metrics + trend exactly once.
-        if prev_sid and self.session_col.select_by_sid(prev_sid, notify=False):
+        if prev_sid and (self.session_col.select_by_sid(prev_sid, notify=False)
+                         or getattr(self.session_col, "_pending_select_sid", None) == prev_sid):
             self._selected_session_id = prev_sid
         elif a.reports:
             self._selected_session_id = self.session_col.select_first(notify=False)
         # 按页签惰性渲染：切项目只画当前看得见的页签（四视图全画要 ~600ms），
         # 其余标记待渲染，用户切过去时经 <<NotebookTabChanged>> 补上。
         self._refresh_views(full=True)
-        self._update_tab_names()
         status = f"完成 · 共 {a.n_sessions} 个会话"
         if self.filter.get_params().get("task_type") == metrics.AUTO_TASK_TYPE and a.reports:
             from collections import Counter
@@ -518,6 +594,7 @@ class TcerGui:
         if unmatched:
             status += f" · ⚠ {len(unmatched)} 个模型默认价（点「模型」查看）"
         self.filter.set_status(status)
+        self._update_status_bar_metrics()
 
     # --------------------------------------------------------------- sessions / view
     def on_select_session(self, sid: str) -> None:
@@ -529,8 +606,9 @@ class TcerGui:
         self._selected_session_id = sid
         if self.view_mode.get() == "session":
             self._refresh_views(full=False)
-        self._update_tab_names()
-
+        self._update_status_bar_metrics()
+        if hasattr(self, "llm_reports_view"):
+            self.llm_reports_view.select_session_report(sid)
     # --------------------------------------------------------------- session marks
     def _session_mark_key(self, sid):
         proj = self._selected_project()
@@ -620,10 +698,21 @@ class TcerGui:
             self.refresh_projects()
         self.filter.set_status(f"已删除会话 · 移除 {len(removed)} 项磁盘对象")
 
+    def set_view_mode(self, mode: str) -> None:
+        """切换视角 (project / session)。"""
+        if self.view_mode.get() != mode:
+            self.view_mode.set(mode)
+            if hasattr(self, "activity_bar"):
+                self.activity_bar.set_active(mode)
+            self._on_view_change()
+
     def _on_view_change(self) -> None:
         self._refresh_views(full=False)
-        self._update_tab_names()
-
+        self._update_status_bar_metrics()
+        if hasattr(self, "activity_bar"):
+            self.activity_bar.set_active(self.view_mode.get())
+        if hasattr(self, "filter") and hasattr(self.filter, "update_view_btns"):
+            self.filter.update_view_btns()
     # --------------------------------------------------------------- 页签惰性渲染
     def _refresh_views(self, *, full: bool) -> None:
         """四个页签全部标脏，只立即渲染当前页签（其余切到时补）。
@@ -693,21 +782,60 @@ class TcerGui:
         else:
             self.model_compare.update(self._current.reports)
 
-    def _update_tab_names(self) -> None:
-        """页签名加 (项目)/(会话) 后缀 + 彩色视角图标。
+    def _update_status_bar_metrics(self) -> None:
+        if not hasattr(self, "status_bar") or self.status_bar is None:
+            return
+        if not self._current:
+            self.status_bar.clear_badges()
+            return
+        rep = None
+        prefix = "项目"
+        if self.view_mode.get() == "session" and self._selected_session_id:
+            rep = self._session_report(self._selected_session_id)
+            prefix = "会话"
+        if rep is None:
+            rep = self._current.aggregate
+            prefix = "项目"
 
-        ttk 页签无法 per-tab 染文字色，故用 per-tab image 区分：指标分类/模型对比
-        显示彩色视角图标（会话=蓝双气泡、项目=橙文件），排名/趋势保留原功能图标。
-        """
-        mode = self.view_mode.get()
-        is_session = mode == "session" and self._selected_session_id
-        suffix = "(会话)" if is_session else "(项目)"
-        view_icon = views.ui_icon(self._nb, "view-session" if is_session else "view-project")
-        self._nb.tab(0, text=f"指标分类 {suffix}", image=view_icon, compound="left")
-        self._nb.tab(1, text=f"模型对比 {suffix}", image=view_icon, compound="left")
-        self._nb.tab(2, text=f"效率榜 {suffix}", image=view_icon, compound="left")
-        self._nb.tab(3, text="趋势")
+        # 1. 模型徽标（带模型图标，点击弹出模型详情）
+        src = self.filter.get_source()
+        src_name = self.filter._source_display_names.get(src, "")
+        m_name = views.dominant_model_label(rep.usage) or ""
+        meta_parts = []
+        if src != "all" and src_name:
+            meta_parts.append(src_name)
+        if m_name and m_name != "-":
+            meta_parts.append(m_name)
+        meta_str = " · ".join(meta_parts)
+        m_ico = views.ui_icon(self.root, "model") if meta_str else None
 
+        # 2. 回合与耗时徽标（带视角图标，点击弹出时间线）
+        from tcer.core.format import fmt_duration_ms
+        turns = rep.usage.assistant_msgs
+        dur_ms = getattr(rep.usage, "session_duration_ms", 0)
+        dur_str = fmt_duration_ms(dur_ms) if dur_ms else ""
+        turns_parts = [f"{turns:,} 回合"] if turns else []
+        if dur_str and dur_str != "-":
+            turns_parts.append(dur_str)
+        turns_str = f"{prefix}: " + " · ".join(turns_parts) if turns_parts else f"{prefix}"
+        icon_key = "session" if prefix == "会话" else "project"
+        s_ico = views.ui_icon(self.root, icon_key)
+
+        # 3. 成本徽标（极简纯文字无杂乱图标，点击弹出成本明细）
+        cost = getattr(rep, "cost", 0.0) or 0.0
+        cost_str = f"${cost:.2f}"
+        cost_ico = None
+        # 4. 工具调用徽标（带工具图标，点击弹出工具调用统计）
+        n_tools = sum(rep.usage.tool_calls.values()) if hasattr(rep.usage, "tool_calls") and rep.usage.tool_calls else 0
+        tools_str = f"{n_tools:,} 次工具" if n_tools else ""
+        tools_ico = views.ui_icon(self.root, "tools") if tools_str else None
+
+        self.status_bar.update_badges(
+            model_text=meta_str,
+            turns_text=turns_str,
+            cost_text=cost_str,
+            tools_text=tools_str,
+        )
     def _session_report(self, sid: str):
         for r in self._current.reports:
             if (r.meta.session_id or r.meta.path.stem) == sid:
@@ -1289,11 +1417,11 @@ class TcerGui:
         self._llm_tasks[task_id] = {"key": dedup_key, "desc": task_desc, "future": future}
         n_running = len(self._llm_tasks)
         if n_running == 1:
-            self.filter.status.config(
-                text=f"正在请求 {llm_prefs.model()} 生成: {session_title}…", fg=theme.ACCENT)
+            self.filter.set_status(
+                f"正在请求 {llm_prefs.model()} 生成: {session_title}…", fg=theme.ACCENT)
         else:
-            self.filter.status.config(
-                text=f"正在并发生成 {n_running} 项 LLM 报告…", fg=theme.ACCENT)
+            self.filter.set_status(
+                f"正在并发生成 {n_running} 项 LLM 报告…", fg=theme.ACCENT)
 
         print(f"[LLM Task] Started: {task_desc} (Target: {llm_prefs.model()} @ {llm_prefs.base_url()})")
 
@@ -1423,12 +1551,10 @@ class TcerGui:
         self._llm_tasks.pop(task_id, None)
         remain = len(self._llm_tasks)
         if remain > 0:
-            self.filter.status.config(
-                text=f"✓ 入库: {title}（还有 {remain} 项生成中…）",
-                fg=theme.ACCENT)
+            self.filter.set_status(
+                f"✓ 入库: {title}（还有 {remain} 项生成中…）", fg=theme.ACCENT)
         else:
-            self.filter.status.config(
-                text=f"✓ 已入库: {title}", fg=theme.SUCCESS)
+            self.filter.set_status(f"✓ 已入库: {title}", fg=theme.SUCCESS)
         try:
             self.llm_reports_view._refresh_list()
         except Exception as e:
@@ -1442,7 +1568,7 @@ class TcerGui:
         self._llm_tasks.pop(task_id, None)
         remain = len(self._llm_tasks)
         tip = f"× 生成失败: {err_text[:25]}" + (f"（余 {remain} 项）" if remain > 0 else "")
-        self.filter.status.config(text=f"{tip} [{task_desc}]"[:80], fg=theme.ERROR)
+        self.filter.set_status(f"{tip} [{task_desc}]"[:80], fg=theme.ERROR)
 
     def cancel_llm_tasks(self) -> tuple[int, int]:
         """取消全部 LLM 任务：返回 (已取消排队数, 运行中不可中断数)。

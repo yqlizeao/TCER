@@ -139,12 +139,14 @@ _COPY: dict[str, tuple[str, str]] = {
                  "把常用命令写进项目说明，省得它一遍遍试错。"),
     "err_low": ("命令和工具调用几乎不出错", ""),
     "err_ev": ("{n} 次工具调用里有 {v} 失败了", ""),
+    "err_low_ev": ("{n} 次工具调用几乎零报错（错误率仅 {v}）", ""),
 
     "rbw_low": ("经常没看文件内容就直接改",
                 "要求它「先读再动手」——改一个文件前，先把这个文件读一遍，"
                 "不然容易改错地方或漏掉上下文。"),
+    "rbw_low_ev": ("只有 {v} 的改动是先读后改的", ""),
     "rbw_high": ("动手前会先读代码，很少盲改", ""),
-    "rbw_ev": ("只有 {v} 的改动是先读后改的", ""),
+    "rbw_high_ev": ("{v} 的改动都先读过了代码", ""),
 
     "unseen": ("有整个文件被直接覆盖写，可能盖掉原内容",
                "对已经存在的文件，让它用 Edit 局部改，别用 Write 整篇覆盖——"
@@ -174,8 +176,9 @@ _COPY: dict[str, tuple[str, str]] = {
     "chr_low": ("缓存没怎么用上，白花了钱",
                 "让每次对话的开头（系统提示、贴的长文件）尽量保持不变——"
                 "变动越少，越多内容能走便宜的缓存读，成本自然降。"),
+    "chr_low_ev": ("只有 {v} 的输入命中了缓存", ""),
     "chr_high": ("缓存用得很充分，省了成本", ""),
-    "chr_ev": ("只有 {v} 的输入命中了缓存", ""),
+    "chr_high_ev": ("高达 {v} 的输入都命中了缓存", ""),
 
     "edit_low": ("改代码时整篇重写多、局部修改少",
                  "改已有文件时优先用 Edit 只改那几行——比整篇 Write 更准，返工少，也不会误盖别的内容。"),
@@ -327,16 +330,16 @@ def session_insights(report: SessionReport) -> list[Insight]:
             drag.append(Insight("drag", t, ev, a, "tool_error_rate"))
         elif err < _TH.TOOL_ERR_LOW:
             t, a = _c("err_low")
-            good.append(Insight("good", t, _c("err_ev")[0].format(v=_pct(err), n=total_tools), a, "tool_error_rate"))
+            good.append(Insight("good", t, _c("err_low_ev")[0].format(v=_pct(err), n=total_tools), a, "tool_error_rate"))
 
     rbw = report.read_before_write
     if rbw is not None:
         if rbw < _TH.RBW_LOW:
             t, a = _c("rbw_low")
-            drag.append(Insight("drag", t, _c("rbw_ev")[0].format(v=_pct(rbw)), a, "read_before_write"))
+            drag.append(Insight("drag", t, _c("rbw_low_ev")[0].format(v=_pct(rbw)), a, "read_before_write"))
         elif rbw > _TH.RBW_HIGH:
             t, a = _c("rbw_high")
-            good.append(Insight("good", t, _c("rbw_ev")[0].format(v=_pct(rbw)), a, "read_before_write"))
+            good.append(Insight("good", t, _c("rbw_high_ev")[0].format(v=_pct(rbw)), a, "read_before_write"))
 
     if report.unseen_writes > _TH.UNSEEN_WRITES:
         t, a = _c("unseen")
@@ -365,10 +368,10 @@ def session_insights(report: SessionReport) -> list[Insight]:
     if chr_ is not None:
         if chr_ < _TH.CHR_LOW:
             t, a = _c("chr_low")
-            tip.append(Insight("tip", t, _c("chr_ev")[0].format(v=_pct(chr_)), a, "chr"))
+            tip.append(Insight("tip", t, _c("chr_low_ev")[0].format(v=_pct(chr_)), a, "chr"))
         elif chr_ > _TH.CHR_HIGH:
             t, a = _c("chr_high")
-            good.append(Insight("good", t, _c("chr_ev")[0].format(v=_pct(chr_)), a, "chr"))
+            good.append(Insight("good", t, _c("chr_high_ev")[0].format(v=_pct(chr_)), a, "chr"))
 
     edit_ratio = report.edit_ratio
     if (edit_ratio is not None and edit_ratio < _TH.EDIT_RATIO_LOW

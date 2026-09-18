@@ -138,3 +138,82 @@ def apply_dark_titlebar(widget) -> None:
                 target, attr, ctypes.byref(v), ctypes.sizeof(v))
     except (OSError, AttributeError):
         pass
+
+# ---------------------------------------------------------------------------
+# 多显示器工作区检测（精准获取任意控件或坐标所在屏幕的可用工作区）
+# ---------------------------------------------------------------------------
+if PLATFORM == "win32":
+    try:
+        import ctypes
+        from ctypes import wintypes
+        _user32 = ctypes.windll.user32
+
+        class _RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        class _MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", _RECT),
+                ("rcWork", _RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        _user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        _user32.MonitorFromPoint.restype = wintypes.HMONITOR
+        _user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(_MONITORINFO)]
+        _user32.GetMonitorInfoW.restype = wintypes.BOOL
+        _HAS_WIN32_MONITOR = True
+    except Exception:
+        _HAS_WIN32_MONITOR = False
+else:
+    _HAS_WIN32_MONITOR = False
+
+
+def get_monitor_work_area(widget_or_x, y: int | None = None) -> tuple[int, int, int, int]:
+    """获取指定控件或屏幕绝对坐标所在显示器的可用工作区（排除任务栏）。
+
+    返回值：(left, top, right, bottom) 屏幕绝对像素坐标。
+    在多显示器（如副屏在主屏左侧/上方/负坐标扩展屏）环境下，精准返回该屏幕实际边界。
+    非 Windows 或调用失败时回退到主屏安全区域。
+    """
+    if _HAS_WIN32_MONITOR:
+        try:
+            if y is None:
+                w = widget_or_x
+                rx = w.winfo_rootx() + max(1, w.winfo_width() // 2)
+                ry = w.winfo_rooty() + max(1, w.winfo_height() // 2)
+            else:
+                rx = int(widget_or_x)
+                ry = int(y)
+
+            pt = wintypes.POINT(rx, ry)
+            h_monitor = _user32.MonitorFromPoint(pt, 2)  # MONITOR_DEFAULTTONEAREST = 2
+            if h_monitor:
+                mi = _MONITORINFO()
+                mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                if _user32.GetMonitorInfoW(h_monitor, ctypes.byref(mi)):
+                    return (mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom)
+        except Exception:
+            pass
+
+    # 兜底：使用 Tkinter 提供的屏幕尺寸（单屏或非 Windows）
+    try:
+        if hasattr(widget_or_x, "winfo_screenwidth"):
+            sw = widget_or_x.winfo_screenwidth()
+            sh = widget_or_x.winfo_screenheight()
+            return (0, 0, sw, max(300, sh - 40))
+        import tkinter as _tk
+        root = getattr(_tk, "_default_root", None)
+        if root and hasattr(root, "winfo_screenwidth"):
+            sw = root.winfo_screenwidth()
+            sh = root.winfo_screenheight()
+            return (0, 0, sw, max(300, sh - 40))
+    except Exception:
+        pass
+    return (0, 0, 1920, 1040)

@@ -30,16 +30,52 @@ from .metric_defs import (
     model_display, model_raw, model_tip,
 )
 
+
+def format_card_title(title: str, max_len: int = 38) -> str:
+    """智能清洗会话卡片标题（剥除超长本地路径前缀，提炼核心任务或意图）。"""
+    t = (title or "").strip()
+    if not t:
+        return "(无标题)"
+    for prefix in ("查看此会话：", "查看会话：", "查看：", "查看此会话: ", "查看会话: "):
+        if t.startswith(prefix):
+            rest = t[len(prefix):].strip()
+            parts = rest.split()
+            if len(parts) > 1 and any(parts[0].lower().endswith(ext) for ext in (".jsonl", ".json", ".sqlite")):
+                instruction = " ".join(parts[1:]).strip()
+                if instruction:
+                    t = f"会话审查：{instruction}"
+                    break
+            if any(sep in rest for sep in ("\\", "/")):
+                import os
+                fname = os.path.basename(rest.replace("\\", "/").rstrip("/"))
+                t = f"查看会话：{fname}"
+                break
+    return t[:max_len] + "..." if len(t) > max_len else t
+
+
 # 排名页对用户展示的「综合效率分」名称与简称（取自指标 SSOT）。
 _SCORE_NAME = metric_name("score")        # 综合效率分
 _SCORE_SHORT = "效率分"                    # 窄列/徽标用简称
 _SCORE_TIP = metric_tip("score")          # 悬停完整解释
-from .widgets import (CalendarPopup, Card, CollapsibleSection, FlatMenu,
-                      MetricCell, ScrollFrame, SelectableLabel, Tooltip, flat_button)
+from .widgets import (Card, CollapsibleSection, FlatMenu,
+                      MetricCell, ScrollFrame, SelectableLabel, Tooltip, flat_button, WorkbenchTab,
+                      RoundedPill, RoundedSearchBox, RoundedKpiChip, get_rounded_rect_img)
 from .platform import CLICK_CURSOR
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
 
+
+def dominant_model_label(usage) -> str:
+    """会话主模型短名（``per_model`` 中 token 量最大者，经价表归一化）。
+
+    卡片 / 状态栏共用同一口径（曾两处各自 max 复制且权重键取错成恒 0，
+    混合会话显示成首键模型）。规范实现在 ``analyze._dominant_model_key``。
+    """
+    if not usage:
+        return ""
+    from tcer.core import analyze as _analyze, pricing as _pricing
+    key = _analyze._dominant_model_key(usage)
+    return _pricing.label(key) if key else ""
 
 def _short_name(project_hash: str) -> str:
     """Friendlier label for a project-hash folder: strip a leading drive token.
@@ -113,7 +149,10 @@ def source_icon(master, icon_key: str):
     opencode / grok / …）。无对应资源（或 Tk 尚未就绪）返回 None，调用方
     回退到 ``[源名]`` 文字标注。构建期已用 PIL 把原图预缩到 16×16，运行时零依赖。
     """
-    cached = _ICON_CACHE.get(icon_key, _MISSING)
+    tk_app = getattr(master, "tk", None)
+    app_id = id(tk_app) if tk_app is not None else None
+    cache_key = (app_id, icon_key)
+    cached = _ICON_CACHE.get(cache_key, _MISSING)
     if cached is not _MISSING:
         return cached
     path = os.path.join(_ASSETS_DIR, f"{icon_key}.png")
@@ -123,18 +162,37 @@ def source_icon(master, icon_key: str):
             img = tk.PhotoImage(master=master, file=path)
         except tk.TclError:
             img = None
-    _ICON_CACHE[icon_key] = img
+    _ICON_CACHE[cache_key] = img
     return img
 
+def ui_icon(master, name: str, *, opacity: float = 1.0, size: int = 16):
+    """通用 UI 图标（``assets/ui-<name>[-<size>].png``），支持按透明度调光和尺寸。"""
+    tk_app = getattr(master, "tk", None)
+    app_id = id(tk_app) if tk_app is not None else None
+    size_suffix = f"-{size}" if size != 16 else ""
+    cache_key = (app_id, f"ui-{name}{size_suffix}", int(opacity * 100))
+    cached = _ICON_CACHE.get(cache_key, _MISSING)
+    if cached is not _MISSING:
+        return cached
 
-def ui_icon(master, name: str):
-    """16px 通用 UI 图标（``assets/ui-<name>.png``），与 source_icon 同一套模块级缓存。
+    path = os.path.join(_ASSETS_DIR, f"ui-{name}{size_suffix}.png")
+    if not os.path.isfile(path) and size != 16:
+        path = os.path.join(_ASSETS_DIR, f"ui-{name}.png")
 
-    工具栏动作、页签等通用图标经此加载；无资源返回 None，调用方回退文字。
-    来源 Icons8 material-outlined 白色，构建期缩 16×16，运行时零依赖。
-    """
+    if os.path.isfile(path):
+        try:
+            from PIL import Image, ImageTk
+            im = Image.open(path).convert("RGBA")
+            if opacity < 0.99:
+                r, g, b, a = im.split()
+                a = a.point(lambda v: int(v * opacity))
+                im = Image.merge("RGBA", (r, g, b, a))
+            img = ImageTk.PhotoImage(im, master=master)
+            _ICON_CACHE[cache_key] = img
+            return img
+        except Exception:
+            pass
     return source_icon(master, f"ui-{name}")
-
 
 def project_icon_key(project) -> str:
     """项目卡片的图标 key（对应 ``assets/<key>.png``）。
@@ -209,47 +267,680 @@ def _file_manager_label() -> str:
     from .platform import FILE_MANAGER_NAME
     return FILE_MANAGER_NAME
 
+class EditorWorkbench(tk.Frame):
+    """VS Code 风格单窗口工作台编辑器（带顶部页签栏 Editor Tab Bar）。
 
-class FilterBar:
-    """Top control bar: segmented view switch + filters + actions, single row."""
+    统一托管主区域所有页签（6 个内置基础视图 + 动态打开的分析/设置/上传页签），
+    彻底消除弹出式子窗口和全屏模态遮罩，保证始终在唯一主窗口内流畅工作。
+    """
+
+    def __init__(self, parent, controller=None) -> None:
+        super().__init__(parent, bg=theme.BG)
+        self.controller = controller
+
+        # 1. 顶部工作台页签栏（按要求移除：与左侧活动栏图标完全重复，不 pack 以释放 35px 纵向高度）
+        self._tab_bar = tk.Frame(self, bg=theme.PANEL_2, height=0)
+        self._tab_strip = tk.Frame(self._tab_bar, bg=theme.PANEL_2)
+
+        self._tabs: dict[str, dict] = {}
+        self._tab_order: list[str] = []
+        self._active_tab: str | None = None
+        self._history: list[str] = []
+        self._handlers: list = []
+
+        # 全局快捷键：Esc 或 Ctrl+W 关闭当前可关闭页签
+        try:
+            root = parent.winfo_toplevel()
+            root.bind("<Escape>", self._on_escape, add="+")
+            root.bind("<Control-w>", self._on_escape, add="+")
+        except Exception:
+            pass
+
+    def _on_escape(self, _event=None):
+        if self._active_tab and self._tabs.get(self._active_tab, {}).get("closable", False):
+            self.close_tab(self._active_tab)
+            return "break"
+
+    def add(self, child, text: str = "标签", icon: str = "grid", **_kw) -> None:
+        """注册内置基础页签（不可关闭，对齐 Notebook.add 协议）。"""
+        tab_id = f"builtin_{len(self._tab_order)}"
+        self._tab_order.append(tab_id)
+        btn = self._create_tab_widget(tab_id, text, icon, closable=False)
+        self._tabs[tab_id] = {
+            "btn": btn,
+            "frame": child,
+            "title": text,
+            "closable": False,
+            "icon_name": icon,
+            "target_w": 0,
+        }
+
+    def open_tab(self, title: str, size: str = "", bg: str = theme.BG,
+                 key: str | None = None, icon: str | None = None) -> WorkbenchTab:
+        """打开动态页签（弹窗/分析/设置），若同名已开则置顶激活。"""
+        tab_id = key or f"tab_{title}"
+        if tab_id in self._tabs:
+            self.select_tab(tab_id)
+            return self._tabs[tab_id]["frame"]
+
+        if icon is None:
+            if "上传" in title:
+                icon = "upload"
+            elif "设置" in title or "LLM" in title:
+                icon = "sparkle"
+            elif "时间线" in title:
+                icon = "trend"
+            elif "雷达" in title:
+                icon = "target"
+            elif "详情" in title or "会话" in title:
+                icon = "session"
+            elif "文件" in title:
+                icon = "folder"
+            elif "工具" in title:
+                icon = "wrench"
+            elif "模型" in title:
+                icon = "model"
+            elif "成本" in title:
+                icon = "compare"
+            elif "对比" in title:
+                icon = "compare"
+            elif "更新" in title:
+                icon = "refresh"
+            elif "删除" in title:
+                icon = "trash"
+            elif "消息" in title:
+                icon = "chat"
+            elif "记忆" in title:
+                icon = "layers"
+            elif "基准" in title:
+                icon = "dashboard"
+            else:
+                icon = "tools"
+
+        wpx = 0
+        if size:
+            try:
+                wpx = int(size.split("x")[0])
+            except Exception:
+                wpx = 0
+
+        frame = WorkbenchTab(self, self, tab_id, title, icon)
+        btn = self._create_tab_widget(tab_id, title, icon, closable=True)
+
+        self._tab_order.append(tab_id)
+        self._tabs[tab_id] = {
+            "btn": btn,
+            "frame": frame,
+            "title": title,
+            "closable": True,
+            "icon_name": icon,
+            "target_w": wpx,
+        }
+        self.select_tab(tab_id)
+        return frame
+
+    def _create_tab_widget(self, tab_id: str, title: str, icon_name: str, closable: bool) -> tk.Frame:
+        tab_box = tk.Frame(self._tab_strip, bg=theme.PANEL_2, cursor=CLICK_CURSOR)
+        tab_box.pack(side="left", fill="y", padx=(2, 1), pady=(2, 0))
+
+        accent = tk.Frame(tab_box, bg=theme.PANEL_2, height=2)
+        accent.pack(side="top", fill="x")
+
+        content_box = tk.Frame(tab_box, bg=theme.PANEL_2)
+        content_box.pack(side="top", fill="both", expand=True, padx=(10, 8), pady=(4, 6))
+        img = ui_icon(content_box, icon_name, size=16, opacity=0.75)
+        ico = tk.Label(content_box, image=img, bg=theme.PANEL_2)
+        ico.image = img
+        ico.pack(side="left", padx=(0, 6))
+
+        disp_title = title if len(title) <= 16 else title[:14] + "…"
+        lbl = tk.Label(content_box, text=disp_title, bg=theme.PANEL_2, fg=theme.MUTED,
+                       font=theme.FONT_UI)
+        lbl.pack(side="left", padx=(0, 4))
+
+        close_btn = None
+        if closable:
+            close_btn = tk.Label(content_box, text="✕", bg=theme.PANEL_2, fg=theme.MUTED,
+                                 font=(theme.FONT_UI[0], 9), width=2, cursor=CLICK_CURSOR)
+            close_btn.pack(side="right", padx=(2, 0))
+            close_btn.bind("<Button-1>", lambda _e, tid=tab_id: self.close_tab(tid))
+            close_btn.bind("<Enter>", lambda _e, cb=close_btn: cb.configure(fg=theme.FG_WHITE))
+            close_btn.bind("<Leave>", lambda _e, cb=close_btn: cb.configure(fg=theme.MUTED))
+            Tooltip(close_btn, "关闭 (Esc)")
+
+        Tooltip(tab_box, title)
+        Tooltip(content_box, title)
+        Tooltip(lbl, title)
+
+
+        def _on_click(_e):
+            self.select_tab(tab_id)
+
+        for w in (tab_box, content_box, ico, lbl):
+            w.bind("<Button-1>", _on_click)
+
+        if closable:
+            for w in (tab_box, content_box, ico, lbl):
+                w.bind("<Button-2>", lambda _e, tid=tab_id: self.close_tab(tid))
+
+        tab_box._accent = accent
+        tab_box._content_box = content_box
+        tab_box._ico = ico
+        tab_box._lbl = lbl
+        tab_box._close_btn = close_btn
+        tab_box._icon_name = icon_name
+
+        def _on_enter(_e):
+            if self._active_tab != tab_id:
+                bg_col = theme.HOVER_BG
+                tab_box.configure(bg=bg_col)
+                accent.configure(bg=bg_col)
+                content_box.configure(bg=bg_col)
+                ico.configure(bg=bg_col)
+                lbl.configure(bg=bg_col, fg=theme.FG_WHITE)
+                if close_btn:
+                    close_btn.configure(bg=bg_col)
+
+        def _on_leave(e):
+            if self._active_tab != tab_id:
+                if e is not None:
+                    try:
+                        under = e.widget.winfo_containing(e.x_root, e.y_root)
+                        curr = under
+                        while curr is not None:
+                            if curr == tab_box:
+                                return  # 仍在页签容器内，不触发离开态
+                            curr = getattr(curr, "master", None)
+                    except Exception:
+                        pass
+                bg_col = theme.PANEL_2
+                tab_box.configure(bg=bg_col)
+                accent.configure(bg=bg_col)
+                content_box.configure(bg=bg_col)
+                ico.configure(bg=bg_col)
+                lbl.configure(bg=bg_col, fg=theme.MUTED)
+                if close_btn:
+                    close_btn.configure(bg=bg_col)
+
+        for w in (tab_box, content_box, lbl, ico):
+            w.bind("<Enter>", _on_enter, add="+")
+            w.bind("<Leave>", _on_leave, add="+")
+        return tab_box
+
+    def select_tab(self, tab_id: str | int):
+        if isinstance(tab_id, int):
+            if 0 <= tab_id < len(self._tab_order):
+                tab_id = self._tab_order[tab_id]
+            else:
+                return
+        elif not isinstance(tab_id, str) or tab_id.startswith("."):
+            for tid in self._tab_order:
+                if self._tabs[tid]["frame"] is tab_id or str(self._tabs[tid]["frame"]) == str(tab_id):
+                    tab_id = tid
+                    break
+
+        if tab_id not in self._tabs:
+            return
+
+        prev_tab = self._active_tab
+        self._active_tab = tab_id
+        if prev_tab and prev_tab != tab_id and prev_tab not in self._history:
+            self._history.append(prev_tab)
+
+        for tid, tab_info in self._tabs.items():
+            box = tab_info["btn"]
+            if not box.winfo_exists():
+                continue
+            is_active = (tid == tab_id)
+            bg_col = theme.BG if is_active else theme.PANEL_2
+            accent_col = theme.CYAN if is_active else theme.PANEL_2
+            fg_col = theme.FG_WHITE if is_active else theme.MUTED
+            opacity = 1.0 if is_active else 0.7
+
+            box.configure(bg=bg_col)
+            box._accent.configure(bg=accent_col)
+            box._content_box.configure(bg=bg_col)
+            box._ico.configure(bg=bg_col)
+            img = ui_icon(box._content_box, box._icon_name, size=16, opacity=opacity)
+            box._ico.configure(image=img)
+            box._ico.image = img
+            box._lbl.configure(bg=bg_col, fg=fg_col)
+            if box._close_btn:
+                box._close_btn.configure(bg=bg_col)
+
+            frame = tab_info["frame"]
+            if frame.winfo_exists():
+                if is_active:
+                    target_w = tab_info.get("target_w", 0)
+                    if target_w and target_w < 900:
+                        frame.pack(fill="y", expand=True, pady=12)
+                        frame.configure(width=target_w)
+                        frame.pack_propagate(False)
+                    else:
+                        frame.pack(fill="both", expand=True)
+                else:
+                    frame.pack_forget()
+
+        for h in self._handlers:
+            try:
+                h()
+            except Exception:
+                pass
+
+    def close_tab(self, tab_id: str):
+        if tab_id not in self._tabs:
+            return
+        tab_info = self._tabs[tab_id]
+        if not tab_info.get("closable", False):
+            return
+
+        is_active = (self._active_tab == tab_id)
+        frame = tab_info["frame"]
+        btn = tab_info["btn"]
+
+        if getattr(frame, "_closing", False):
+            pass
+        else:
+            frame._closing = True
+
+        del self._tabs[tab_id]
+        if tab_id in self._tab_order:
+            self._tab_order.remove(tab_id)
+        if tab_id in self._history:
+            self._history = [t for t in self._history if t != tab_id]
+
+        if btn.winfo_exists():
+            btn.destroy()
+        if frame.winfo_exists():
+            try:
+                tk.Frame.destroy(frame)
+            except Exception:
+                pass
+
+        if is_active:
+            next_tab = None
+            while self._history:
+                candidate = self._history.pop()
+                if candidate in self._tabs:
+                    next_tab = candidate
+                    break
+            if not next_tab and self._tab_order:
+                next_tab = self._tab_order[0]
+            if next_tab:
+                self.select_tab(next_tab)
+
+    def update_tab_title(self, tab_id: str, new_title: str) -> None:
+        if tab_id in self._tabs:
+            self._tabs[tab_id]["title"] = new_title
+            disp_title = new_title if len(new_title) <= 16 else new_title[:14] + "…"
+            self._tabs[tab_id]["btn"]._lbl.configure(text=disp_title)
+
+    def select(self, ref=None):
+        if ref is None:
+            return self.index("current")
+        self.select_tab(ref)
+
+    def index(self, ref):
+        if ref == "current":
+            if self._active_tab in self._tab_order:
+                return self._tab_order.index(self._active_tab)
+            return 0
+        if ref == "end":
+            return len(self._tab_order)
+        if isinstance(ref, int):
+            return ref
+        for i, tid in enumerate(self._tab_order):
+            if tid == ref or self._tabs[tid]["frame"] is ref or str(self._tabs[tid]["frame"]) == str(ref):
+                return i
+        return 0
+
+    def tabs(self):
+        return [str(self._tabs[tid]["frame"]) for tid in self._tab_order]
+
+    def bind(self, _seq, handler) -> None:
+        self._handlers.append(handler)
+
+
+_NavStack = EditorWorkbench
+
+
+class StatusIconBtn(tk.Frame):
+    """状态栏纯图标小按钮：16x16 极简 Codicon，悬停微圆角底，带 Tooltip 与点击下钻。"""
+
+    def __init__(self, parent, icon_name: str, *, command=None, tip: str = "") -> None:
+        super().__init__(parent, bg=theme.STATUS_BG, cursor=CLICK_CURSOR if command else "arrow")
+        self._command = command
+        self._icon_name = icon_name
+        self._tip = tip
+        self._text = ""
+
+        self._img_dim = ui_icon(self, icon_name, size=16, opacity=0.60)
+        self._img_hov = ui_icon(self, icon_name, size=16, opacity=1.00)
+
+        self._lbl = tk.Label(self, image=self._img_dim, bg=theme.STATUS_BG, padx=4, pady=2)
+        self._lbl.image = self._img_dim
+        self._lbl.pack(side="left")
+
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self._lbl.bind("<Enter>", self._on_enter)
+        self._lbl.bind("<Leave>", self._on_leave)
+
+        if command:
+            self.bind("<Button-1>", lambda _e: command())
+            self._lbl.bind("<Button-1>", lambda _e: command())
+        self._tip_item = Tooltip(self, tip if tip else "")
+        self._tip_lbl = Tooltip(self._lbl, tip if tip else "")
+
+    def set_tip(self, tip: str, text: str = "") -> None:
+        self._tip = tip
+        self._text = text
+        if hasattr(self, "_tip_item"):
+            self._tip_item.text = tip
+        if hasattr(self, "_tip_lbl"):
+            self._tip_lbl.text = tip
+    def cget(self, attr: str):
+        if attr == "text":
+            return self._text
+        return super().cget(attr)
+
+    def configure(self, cnf=None, **kw):
+        if cnf == "text":
+            return self._text
+        if "text" in kw:
+            self._text = kw.pop("text")
+        if kw:
+            super().configure(**kw)
+
+    config = configure
+
+    def _on_enter(self, _e) -> None:
+        if self._command and self._img_hov is not None:
+            self._lbl.configure(image=self._img_hov)
+
+    def _on_leave(self, e) -> None:
+        if e is not None:
+            try:
+                under = e.widget.winfo_containing(e.x_root, e.y_root)
+                curr = under
+                while curr is not None:
+                    if curr == self:
+                        return
+                    curr = getattr(curr, "master", None)
+            except Exception:
+                pass
+        if self._img_dim is not None:
+            self._lbl.configure(image=self._img_dim)
+
+class StatusBar:
+    """底部 22px 状态栏（STATUS_BG #303030 与卡片同阶，明度跳变即分隔——顶边线已删）。
+
+    左侧：● 分析状态（就绪/分析中/已加载 N 会话；状态点允许语义色——状态栏是状态本体）
+    右侧：VS Code 风格纯图标快捷入口群（一堆小 icon，无文字赘述，悬停微圆角高亮，点击呼出二级弹窗）
+    """
 
     def __init__(self, parent, controller) -> None:
         self.controller = controller
-        bar = tk.Frame(parent, bg=theme.BG)
-        bar.pack(side="top", fill="x", padx=8, pady=6)
+        self.frame = tk.Frame(parent, bg=theme.STATUS_BG, height=22)
+        self.frame.pack(side="bottom", fill="x")
+        self.frame.pack_propagate(False)
 
-        # -- View switcher: segmented control --
+        inner = tk.Frame(self.frame, bg=theme.STATUS_BG)
+        inner.pack(fill="both", expand=True, padx=theme.PAD_M)
+
+        # 左侧：分析状态点 + 文本
+        left_box = tk.Frame(inner, bg=theme.STATUS_BG)
+        left_box.pack(side="left", fill="y")
+        self._dot = tk.Label(left_box, text="●", bg=theme.STATUS_BG, fg=theme.SUCCESS,
+                             font=theme.FONT_STAT)
+        self._dot.pack(side="left", padx=(0, 4))
+        self._status_lbl = tk.Label(left_box, text="就绪", bg=theme.STATUS_BG,
+                                    fg=theme.FG, font=theme.FONT_STAT)
+        self._status_lbl.pack(side="left")
+
+        # 右侧：状态栏纯图标快捷入口群（从右向左有序挂载）
+        right_box = tk.Frame(inner, bg=theme.STATUS_BG)
+        right_box.pack(side="right", fill="y")
+        from tcer import __version__
+
+        self._version_lbl = tk.Label(
+            right_box, text=f"v{__version__}", bg=theme.STATUS_BG,
+            fg=theme.MUTED, font=theme.FONT_STAT, cursor=CLICK_CURSOR)
+        self._version_lbl.pack(side="right", padx=(8, 0))
+        self._version_lbl.bind("<Button-1>", lambda _e: getattr(self.controller, "check_for_update", lambda **k: None)(silent=False))
+        self._version_lbl.bind("<Enter>", lambda _e: self._version_lbl.configure(fg=theme.FG_WHITE))
+        self._version_lbl.bind("<Leave>", lambda _e: self._version_lbl.configure(fg=theme.MUTED))
+        Tooltip(self._version_lbl, f"TCER v{__version__} · 点击检查更新")
+
+        self._tools_item = StatusIconBtn(
+            right_box, "tools", command=lambda: getattr(self.controller, "show_tool_calls", lambda: None)(),
+            tip="工具调用统计 · 点击查看调用次数与分布")
+        self._tools_item.pack(side="right", padx=2, fill="y")
+
+        self._cost_item = StatusIconBtn(
+            right_box, "cost", command=lambda: getattr(self.controller, "show_cost_breakdown", lambda: None)(),
+            tip="消耗金额明细 · 点击查看成本与各模型效率")
+        self._cost_item.pack(side="right", padx=2, fill="y")
+
+        self._turns_item = StatusIconBtn(
+            right_box, "session", command=lambda: getattr(self.controller, "show_session_timeline", lambda: None)(),
+            tip="会话时序与耗时 · 点击查看时间线")
+        self._turns_item.pack(side="right", padx=2, fill="y")
+
+        self._model_item = StatusIconBtn(
+            right_box, "model", command=lambda: getattr(self.controller, "show_models", lambda: None)(),
+            tip="主模型与数据源 · 点击查看模型使用详情")
+        self._model_item.pack(side="right", padx=2, fill="y")
+
+        # 兼容原有属性名
+        self._metrics_lbl = self._turns_item
+        self._meta_lbl = self._model_item
+
+    def set_status(self, text: str, *, fg: str | None = None) -> None:
+        clean_text = text.strip()
+        self._status_lbl.configure(text=clean_text)
+        if "错" in clean_text or "失败" in clean_text:
+            dot_color = theme.ERROR
+        elif "中…" in clean_text or "加载" in clean_text or "分析" in clean_text:
+            dot_color = theme.WARNING
+        else:
+            dot_color = theme.SUCCESS
+        self._dot.configure(fg=dot_color)
+        if fg == theme.ACCENT:
+            fg = theme.CYAN  # 防止暗蓝色在深灰底上对比度不足
+        self._status_lbl.configure(fg=fg or theme.FG)
+
+    def update_badges(self, *, model_text: str = "",
+                      turns_text: str = "", cost_text: str = "",
+                      tools_text: str = "", **_kw) -> None:
+        self._model_item.set_tip(f"主模型: {model_text} · 点击查看详情" if model_text else "模型使用详情", text=model_text)
+        self._turns_item.set_tip(f"{turns_text} · 点击查看时间线" if turns_text else "会话时间线", text=turns_text)
+        self._cost_item.set_tip(f"总消耗: {cost_text} · 点击查看成本明细" if cost_text else "成本明细", text=cost_text)
+        self._tools_item.set_tip(f"工具调用: {tools_text} · 点击查看统计" if tools_text else "工具调用统计", text=tools_text)
+
+    def clear_badges(self) -> None:
+        self.update_badges(model_text="", turns_text="", cost_text="", tools_text="")
+
+    def set_meta(self, text: str, icon=None) -> None:
+        self._model_item.set_tip(f"主模型: {text} · 点击查看详情" if text else "模型使用详情", text=text)
+
+    def set_metrics(self, text: str, icon=None) -> None:
+        self._turns_item.set_tip(f"{text} · 点击查看时间线" if text else "会话时间线", text=text)
+class ActivityBar:
+    """VS Code 风格活动栏（44px 宽，停靠在主工作台最左侧）。
+
+    上半部分：核心视角导航
+    - ui-project: 项目视角
+    - ui-session: 会话视角
+    - ui-layers: 全局项目聚合
+    下半部分：系统功能工具
+    - ui-tools: 实用工具菜单
+    - ui-sparkle: LLM 动力学/复盘设置
+    - ui-export: 导出菜单
+    """
+
+    def __init__(self, parent, controller) -> None:
+        self.controller = controller
+        self.frame = tk.Frame(parent, bg=theme.ACTIVITY_BG, width=44)
+        self.frame.pack(side="left", fill="y")
+        self.frame.pack_propagate(False)
+
+        # 1px 右边框
+        border = tk.Frame(self.frame, bg=theme.BORDER, width=1)
+        border.pack(side="right", fill="y")
+
+        inner = tk.Frame(self.frame, bg=theme.ACTIVITY_BG)
+        inner.pack(side="left", fill="both", expand=True)
+
+        self._top_container = tk.Frame(inner, bg=theme.ACTIVITY_BG)
+        self._top_container.pack(side="top", fill="x", pady=4)
+
+        self._bot_container = tk.Frame(inner, bg=theme.ACTIVITY_BG)
+        self._bot_container.pack(side="bottom", fill="x", pady=4)
+
+        self._items: dict[str, tuple] = {}          # 全部项（hover 用）
+        self._nav_keys: set[str] = set()            # 视角组（切换侧栏内容）
+        self._page_keys: set[str] = set()           # 页组（切换主区内容）
+        self._active_key: str = "project"
+        self._active_page: str | None = None
+
+        # 上半区：主视图页组（每图标切换主区一页）
+        for i, (label, icon_name) in enumerate((
+                ("指标看板", "dashboard"), ("模型对比", "model"), ("效率榜", "rank"),
+                ("趋势分析", "trend"), ("项目聚合", "layers"), ("LLM 报告", "sparkle"))):
+            self._add_nav_item(f"page:{i}", icon_name, label,
+                               lambda idx=i: self.controller._nb.select(idx))
+
+        # 下半区工具图标：先导出，最底为设置（标准 VS Code 齿轮在最底规范）
+        from tcer.core import upload_config
+        if upload_config.upload_enabled():
+            self._add_tool_item("upload", "upload", "上传数据至团队后端", self._on_click_upload)
+        self._add_tool_item("export", "export", "导出数据与报告", self._on_click_export)
+        self._add_tool_item("settings", "settings", "设置", self._on_click_tools)
+        self.set_page_active(0)
+    def _add_nav_item(self, key: str, icon_name: str, tip: str, command) -> None:
+        item = tk.Frame(self._top_container, bg=theme.ACTIVITY_BG, height=44, cursor=CLICK_CURSOR)
+        item.pack(fill="x", pady=2)
+        item.pack_propagate(False)
+
+        rail = tk.Frame(item, bg=theme.ACTIVITY_BG, width=2)
+        rail.pack(side="left", fill="y")
+        rail.pack_propagate(False)
+
+        img_active = ui_icon(item, icon_name, opacity=1.0, size=22)
+        img_dim = ui_icon(item, icon_name, opacity=0.65, size=22)
+        img_hov = ui_icon(item, icon_name, opacity=0.90, size=22)
+
+        lbl = tk.Label(item, image=img_dim, bg=theme.ACTIVITY_BG, cursor=CLICK_CURSOR)
+        lbl.image = img_dim
+        lbl.pack(fill="both", expand=True)
+
+        Tooltip(item, tip)
+        Tooltip(lbl, tip)
+
+        for w in (item, lbl):
+            w.bind("<Button-1>", lambda _e: command(), add="+")
+            w.bind("<Enter>", lambda _e, k=key: self._on_hover(k, True, _e), add="+")
+            w.bind("<Leave>", lambda _e, k=key: self._on_hover(k, False, _e), add="+")
+        self._items[key] = (item, rail, lbl, img_active, img_dim, img_hov)
+        (self._page_keys if key.startswith("page:") else self._nav_keys).add(key)
+
+    def _add_tool_item(self, key: str, icon_name: str, tip: str, command) -> None:
+        item = tk.Frame(self._bot_container, bg=theme.ACTIVITY_BG, height=40, cursor=CLICK_CURSOR)
+        item.pack(fill="x", pady=2)
+        item.pack_propagate(False)
+
+        rail = tk.Frame(item, bg=theme.ACTIVITY_BG, width=2)
+        rail.pack(side="left", fill="y")
+        rail.pack_propagate(False)
+
+
+        img_active = ui_icon(item, icon_name, opacity=1.0, size=22)
+        img_dim = ui_icon(item, icon_name, opacity=0.65, size=22)
+        img_hov = ui_icon(item, icon_name, opacity=0.90, size=22)
+
+        lbl = tk.Label(item, image=img_dim, bg=theme.ACTIVITY_BG, cursor=CLICK_CURSOR)
+        lbl.image = img_dim
+        lbl.pack(fill="both", expand=True)
+
+        Tooltip(item, tip)
+        Tooltip(lbl, tip)
+        for w in (item, lbl):
+            w.bind("<Button-1>", lambda _e: command(item), add="+")
+            w.bind("<Enter>", lambda _e, k=key: self._on_hover(k, True, _e), add="+")
+            w.bind("<Leave>", lambda _e, k=key: self._on_hover(k, False, _e), add="+")
+
+        self._items[key] = (item, rail, lbl, img_active, img_dim, img_hov)
+
+    def _on_hover(self, key: str, is_hover: bool, event=None) -> None:
+        if key == self._active_key or key == self._active_page:
+            return
+        if not is_hover and event is not None:
+            try:
+                under = event.widget.winfo_containing(event.x_root, event.y_root)
+                curr = under
+                box = self._items[key][0]
+                while curr is not None:
+                    if curr == box:
+                        return  # 仍在此项内，不触发取消悬停
+                    curr = getattr(curr, "master", None)
+            except Exception:
+                pass
+        item, rail, lbl, img_active, img_dim, img_hov = self._items[key]
+        if is_hover:
+            lbl.configure(image=img_hov)
+        else:
+            lbl.configure(image=img_dim)
+
+    def set_active(self, key: str) -> None:
+        """视角组兼容桩（视角切换已移至侧栏顶栏）。"""
+        self._active_key = key
+
+    def set_page_active(self, idx: int) -> None:
+        """页组激活（原顶部页签栏）：idx 为主区页序号 0-5。"""
+        key = f"page:{idx}"
+        if key not in self._items:
+            return
+        self._active_page = key
+        for k in self._page_keys:
+            self._paint(k, k == key)
+
+    def _paint(self, key: str, active: bool) -> None:
+        item, rail, lbl, img_active, img_dim, img_hov = self._items[key]
+        rail.configure(bg=theme.FG_WHITE if active else theme.ACTIVITY_BG)
+        lbl.configure(bg=theme.ACTIVITY_BG, image=img_active if active else img_dim)
+    def _on_click_tools(self, widget) -> None:
+        if hasattr(self.controller, "filter"):
+            menu = FlatMenu(widget)
+            self.controller.filter._build_tool_menu(menu)
+            widget.update_idletasks()
+            menu.tk_popup(widget.winfo_rootx() + widget.winfo_width(),
+                          widget.winfo_rooty() + widget.winfo_height())
+
+    def _on_click_sparkle(self, _widget) -> None:
+        if hasattr(self.controller, "show_llm_config"):
+            self.controller.show_llm_config()
+
+    def _on_click_export(self, widget) -> None:
+        if hasattr(self.controller, "filter"):
+            menu = FlatMenu(widget)
+            self.controller.filter._build_export_menu(menu)
+            widget.update_idletasks()
+            menu.tk_popup(widget.winfo_rootx() + widget.winfo_width(),
+                          widget.winfo_rooty() + widget.winfo_height())
+
+    def _on_click_upload(self, _widget) -> None:
+        if hasattr(self.controller, "show_upload"):
+            self.controller.show_upload()
+class FilterBar:
+    """Integrated filter and actions controller (Zero-waste panel integration)."""
+
+    def __init__(self, parent, controller) -> None:
+        self.controller = controller
+        self.parent = parent
         self.view_mode = controller.view_mode
-        seg_bg = tk.Frame(bar, bg=theme.CONTROL_BG, padx=2, pady=2)
-        seg_bg.pack(side="left", padx=(0, 12))
-        self._view_btns: dict[str, tk.Label] = {}
-        self._view_pills: dict[str, tk.Frame] = {}
-        self._view_icon_lbls: dict[str, tk.Label] = {}
-        _seg_icons = {"project": ui_icon(seg_bg, "project"), "session": ui_icon(seg_bg, "session")}
-        for label, val in [("项目视角", "project"), ("会话视角", "session")]:
-            # 每个 pill 一个容器 Frame：图标/文字 Label 都装在里面，三者 bg
-            # 同步切换 → 图标与文字之间不留接缝（两个独立 Label 会有缝隙）。
-            pill = tk.Frame(seg_bg, bg=theme.CONTROL_BG)
-            pill.pack(side="left", padx=1)
-            self._view_pills[val] = pill
-            click = lambda e, v=val: self._set_view(v)
-            icon = _seg_icons.get(val)
-            if icon is not None:
-                il = tk.Label(pill, image=icon, bg=theme.CONTROL_BG, cursor=CLICK_CURSOR)
-                il.pack(side="left", padx=(4, 0))
-                il.bind("<Button-1>", click)
-                self._view_icon_lbls[val] = il
-            btn = tk.Label(pill, text=label, pady=1, cursor=CLICK_CURSOR,
-                           font=theme.FONT_UI_SMALL)
-            btn.pack(side="left", padx=(2, 6))
-            btn.bind("<Button-1>", click)
-            pill.bind("<Button-1>", click)  # 图标与文字之间的空隙也可点
-            self._view_btns[val] = btn
-        self._update_view_btns()
 
-        # -- Filters --
-        # 任务类型选择弱化：从上栏移入「工具」菜单的级联子菜单（task_var 仍由本栏
-        # 持有，供 get_params / restore_prefs 使用；菜单 radiobutton 直接绑 task_var）。
+        # 过滤状态
         self._task_display_names = {
             metrics.AUTO_TASK_TYPE: "自动",
             **{k: (v.get("name") or k) for k, v in metrics.TASK_CATEGORIES.items()},
@@ -260,7 +951,6 @@ class FilterBar:
         self.task_var = tk.StringVar(value=default_label)
         self._task_reverse_map = {v: k for k, v in self._task_display_names.items()}
 
-        tk.Label(bar, text="来源:", bg=theme.BG, fg=theme.FG).pack(side="left")
         self.source_var = tk.StringVar(value="全部")
         self._source_display_names = {
             "all": "全部",
@@ -272,83 +962,127 @@ class FilterBar:
             "pi": "Pi",
         }
         self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
-        source_cb = ttk.Combobox(bar, textvariable=self.source_var, width=8,
-                                 values=list(self._source_display_names.values()), state="readonly")
-        source_cb.pack(side="left", padx=(4, 12))
-        source_cb.bind("<<ComboboxSelected>>", self._on_source_change)
-        Tooltip(source_cb, "选择数据来源：全部 / Claude / Codex / OpenCode / Grok / Oh My Pi / Pi")
 
-        tk.Label(bar, text="时间:", bg=theme.BG, fg=theme.FG).pack(side="left")
         from datetime import datetime as _dt
-        # 默认起始日期=今天（启动即看当天会话）；until 留空，可由持久化恢复。
-        self.since_var = tk.StringVar(value=_dt.now().strftime("%Y-%m-%d"))
-        self._date_entry(bar, self.since_var, "开始日期").pack(side="left", padx=2)
-        tk.Label(bar, text="至", bg=theme.BG, fg=theme.FG).pack(side="left", padx=2)
+        today_str = _dt.now().strftime("%Y-%m-%d")
+        self.since_var = tk.StringVar(value=today_str)
         self.until_var = tk.StringVar(value="")
-        self._date_entry(bar, self.until_var, "结束日期").pack(side="left", padx=2)
+        self._current_preset = "today"
 
-        for label, preset in (("今天", "today"), ("本周", "week"), ("本月", "month"), ("全部", "all")):
-            flat_button(bar, label, lambda p=preset: self._set_preset(p),
-                        padx=theme.PAD_S).pack(side="left", padx=theme.PAD_XS)
+        # 下拉胶囊引用
+        self._src_capsule: tk.Frame | None = None
+        self._src_lbl: tk.Label | None = None
+        self._time_capsule: tk.Frame | None = None
+        self._time_lbl: tk.Label | None = None
 
-        # 刷新全部项目列表：重新扫描磁盘发现新会话/新项目，常驻入口（原右键菜单项）
-        refresh_btn = flat_button(bar, "刷新", self.controller.refresh_projects,
-                                  padx=theme.PAD_S, image=ui_icon(bar, "refresh"),
-                                  compound="left")
-        refresh_btn.pack(side="left", padx=(theme.PAD_M, theme.PAD_XS))
-        Tooltip(refresh_btn, "重新扫描磁盘，刷新全部项目列表")
+        # 兼容状态 Label（底层状态通信用）
+        self.status = tk.Label(parent, text="就绪", bg=theme.BG, fg=theme.SECTION_ACCENT)
 
-        # -- Actions (right side) --
-        # 上传按钮默认常驻（配置移入 tcer_ui.json 后不再以「是否配置 URL」显隐）。
-        from tcer.core import upload_config
-        factories = [
-            lambda: self._make_tool_menu(bar),
-            lambda: self._make_export_menu(bar),
-        ]
-        if upload_config.upload_enabled():
-            factories.append(lambda: self._make_upload_button(bar))
-        # LLM 按钮常驻（同上传；点击打开设置弹窗，未配置时本身零联网）。
-        factories.append(lambda: self._make_llm_button(bar))
-        for factory in factories:
-            factory().pack(side="right", padx=2)
+    def mount_view_switcher(self, parent_frame) -> None:
+        """在侧边栏顶栏挂载项目/会话视角切换圆角分段控件（取代原“资源管理器”文本）。"""
+        self._view_btns: dict[str, tk.Widget] = {}
+        self._view_pills: dict[str, tk.Widget] = {}
+        self._view_icon_lbls: dict[str, tk.Widget] = {}
 
-        self.status = tk.Label(bar, text="就绪", bg=theme.BG, fg="#9cdcfe", anchor="e")
-        self.status.pack(side="right", padx=(8, 4))
+        seg_bg = tk.Frame(parent_frame, bg=theme.PANEL)
+        seg_bg.pack(side="left", padx=(0, 4))
 
-    def _set_view(self, mode: str) -> None:
-        self.view_mode.set(mode)
-        self._update_view_btns()
-        self.controller._on_view_change()
+        _seg_icons = {
+            "project": ui_icon(seg_bg, "project"),
+            "session": ui_icon(seg_bg, "session"),
+        }
+        for label, val in [("项目", "project"), ("会话", "session")]:
+            def _click(_w=None, v=val):
+                self.controller.set_view_mode(v)
 
-    def _update_view_btns(self) -> None:
+            pill = RoundedPill(seg_bg, text=label, icon=_seg_icons.get(val),
+                               command=_click, width=58, height=22, radius=5,
+                               bg=theme.PANEL)
+            pill.pack(side="left", padx=1)
+            self._view_pills[val] = pill
+            self._view_btns[val] = pill
+
+            tip = f"切换至{label}视角"
+            Tooltip(pill, tip)
+
+        self.update_view_btns()
+
+    def update_view_btns(self) -> None:
+        """根据当前 view_mode 刷新视角切换按钮高亮状态。"""
+        if not hasattr(self, "_view_btns") or not self._view_btns:
+            return
         current = self.view_mode.get()
-        # 选中态用视角标识色：会话=蓝、项目=橙黄（与指标/模型页签视角图标同色系）。
-        _sel = {"session": theme.ACCENT, "project": theme.VIEW_PROJECT}
-        for val, btn in self._view_btns.items():
-            bg = _sel.get(val, theme.ACCENT) if val == current else theme.CONTROL_BG
-            fg = theme.FG_WHITE if val == current else theme.MUTED
-            btn.config(bg=bg, fg=fg)
-            self._view_pills[val].config(bg=bg)
-            il = self._view_icon_lbls.get(val)
-            if il is not None:
-                il.config(bg=bg)
+        _sel_bg = {"session": theme.ACCENT, "project": theme.VIEW_PROJECT}
+        for val, pill in self._view_btns.items():
+            active = (val == current)
+            fill = _sel_bg.get(val, theme.ACCENT) if active else theme.CONTROL_BG
+            fg = theme.FG_WHITE if active else theme.MUTED
+            pill.set_state(fill=fill, fg=fg)
 
-    def _pop_below(self, btn, build):
-        """点击 btn 时在其正下方弹出 FlatMenu（每次重建以反映最新状态）。"""
-        def cb():
-            menu = FlatMenu(btn)
-            build(menu)
-            btn.update_idletasks()
-            menu.tk_popup(btn.winfo_rootx(),
-                          btn.winfo_rooty() + btn.winfo_height())
-        return cb
+    def mount_sidebar(self, parent_frame) -> None:
+        """挂载数据来源与时间下拉胶囊至侧边栏顶栏（带抗锯齿圆角）。"""
+        # 1. 右侧：数据来源下拉胶囊
+        def _on_src_click(_widget):
+            m = FlatMenu(self._src_capsule)
+            for disp in self._source_display_names.values():
+                def _pick(val=disp):
+                    self.source_var.set(val)
+                    self._src_capsule.set_text(f"{val} ▾")
+                    self.controller.refresh_projects()
+                m.add_command(disp, _pick)
+            self._src_capsule.update_idletasks()
+            m.tk_popup(self._src_capsule.winfo_rootx(),
+                       self._src_capsule.winfo_rooty() + self._src_capsule.winfo_height())
 
-    def _make_tool_menu(self, parent):
-        btn = flat_button(parent, "工具 ▾", None, padx=6,
-                          image=ui_icon(parent, "tools"), compound="left")
-        btn.config(command=self._pop_below(btn, self._build_tool_menu))
-        Tooltip(btn, "项目总览 · 同模型跨源对照 · 会话时间线 · 会话对比 · 工具序列 · 个人基准 · 任务类型 · 高级选项 · 检查更新 / 版本信息")
-        return btn
+        self._src_capsule = RoundedPill(parent_frame, text=f"{self.source_var.get()} ▾",
+                                        command=_on_src_click, width=58, height=22, radius=5,
+                                        bg=theme.PANEL)
+        self._src_capsule.pack(side="right", padx=(2, 4))
+        self._src_lbl = self._src_capsule
+        Tooltip(self._src_capsule, "切换会话数据来源 (全部 / Claude / Codex / OpenCode / Grok / Oh My Pi / Pi)")
+
+        # 2. 紧随来源左侧：时间下拉胶囊
+        def _on_time_click(_widget):
+            m = FlatMenu(self._time_capsule)
+            for disp, preset in (("今天", "today"), ("本周", "week"), ("本月", "month"), ("全部", "all")):
+                def _pick(p=preset):
+                    self._set_preset(p)
+                m.add_command(disp, _pick)
+            self._time_capsule.update_idletasks()
+            m.tk_popup(self._time_capsule.winfo_rootx(),
+                       self._time_capsule.winfo_rooty() + self._time_capsule.winfo_height())
+
+        _disp_names = {"today": "今天", "week": "本周", "month": "本月", "all": "全部"}
+        cur_disp = _disp_names.get(self._current_preset, "今天")
+        self._time_capsule = RoundedPill(parent_frame, text=f"{cur_disp} ▾",
+                                         command=_on_time_click, width=58, height=22, radius=5,
+                                         bg=theme.PANEL)
+        self._time_capsule.pack(side="right", padx=(2, 4))
+        self._time_lbl = self._time_capsule
+        Tooltip(self._time_capsule, "筛选会话时间范围 (今天 / 本周 / 本月 / 全部)")
+
+    def _set_preset(self, preset: str) -> None:
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        _disp_names = {"today": "今天", "week": "本周", "month": "本月", "all": "全部"}
+        disp = _disp_names.get(preset, "今天")
+        if preset == "today":
+            self.since_var.set(today.strftime("%Y-%m-%d"))
+            self.until_var.set("")
+        elif preset == "week":
+            monday = today - timedelta(days=today.weekday())
+            self.since_var.set(monday.strftime("%Y-%m-%d"))
+            self.until_var.set("")
+        elif preset == "month":
+            self.since_var.set(today.replace(day=1).strftime("%Y-%m-%d"))
+            self.until_var.set("")
+        elif preset == "all":
+            self.since_var.set("")
+            self.until_var.set("")
+        self._current_preset = preset
+        if self._time_lbl is not None:
+            self._time_lbl.set_text(f"{disp} ▾")
+        self.controller.apply_time_filter()
 
     def _build_tool_menu(self, menu) -> None:
         c = self.controller
@@ -359,8 +1093,8 @@ class FilterBar:
         menu.add_command(label="会话时间线", command=c.show_session_timeline)
         menu.add_command(label="会话对比", command=c.show_session_compare)
         menu.add_separator()
-        menu.add_command(label="计算个人基准", command=c.compute_baselines)
-        menu.add_command(label="任务类型", state="disabled")  # 分组标题（不可点）
+        menu.add_command(label="LLM 动力学与复盘配置…", command=c.show_llm_config)
+        menu.add_command(label="计算个人基准…", command=c.compute_baselines)
         for dn in self._task_display_names.values():
             menu.add_radiobutton(label=dn, variable=self.task_var, value=dn,
                                  command=self._on_task_type_change)
@@ -375,13 +1109,6 @@ class FilterBar:
             command=c.toggle_auto_check,
         )
 
-    def _make_export_menu(self, parent):
-        btn = flat_button(parent, "导出 ▾", None, padx=6,
-                          image=ui_icon(parent, "export"), compound="left")
-        btn.config(command=self._pop_below(btn, self._build_export_menu))
-        Tooltip(btn, "项目级 / 会话级报告导出：HTML（自包含可分享）· Markdown · JSON · CSV")
-        return btn
-
     def _build_export_menu(self, menu) -> None:
         for label, fmt in (("项目报告 (HTML)", "html"), ("项目报告 (Markdown)", "md"),
                            ("项目数据 (JSON)", "json"), ("项目数据 (CSV)", "csv")):
@@ -392,99 +1119,10 @@ class FilterBar:
             menu.add_command(label=label,
                              command=lambda f=fmt: self.controller.export(f, scope="session"))
 
-    def _make_upload_button(self, parent) -> tk.Button:
-        btn = flat_button(parent, "上传…", self.controller.show_upload,
-                          padx=theme.PAD_M, image=ui_icon(parent, "upload"), compound="left")
-        Tooltip(btn, "上传当前项目的效率报告到 TCER Server")
-        return btn
-
-    def _make_llm_button(self, parent) -> tk.Button:
-        # ui-sparkle.png 素材暂缺时 ui_icon 返回 None → 纯文字降级，素材后补。
-        btn = flat_button(parent, "LLM设置", self.controller.show_llm_config,
-                          padx=theme.PAD_M, image=ui_icon(parent, "sparkle"),
-                          compound="left")
-        Tooltip(btn, "LLM 语义解读配置（OpenAI-compatible 端点，可选本地 Ollama；"
-                     "解读入口在会话时间线弹窗）")
-        return btn
-
-    def _date_entry(self, bar, var, tip):
-        wrap = tk.Frame(bar, bg=theme.BG)
-        e = tk.Entry(wrap, textvariable=var, width=10, bg=theme.PANEL, fg=theme.FG,
-                     insertbackground=theme.FG, relief="flat", highlightthickness=1,
-                     highlightbackground=theme.BORDER, highlightcolor=theme.ACCENT)
-        e.bind("<Return>", lambda ev: self._validate_and_reanalyze(var))
-        e.bind("<FocusOut>", lambda ev: self._validate_and_reanalyze(var))
-        Tooltip(e, tip + "（YYYY-MM-DD）。回车/失焦生效，或点 ▦ 选择日期。")
-        e.pack(side="left")
-        cal_icon = ui_icon(wrap, "calendar")
-        cal = tk.Label(wrap, text="" if cal_icon else "▦", image=cal_icon, compound="left",
-                       bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI, cursor=CLICK_CURSOR, padx=5,
-                       highlightthickness=1, highlightbackground=theme.BORDER)
-        Tooltip(cal, "点击选择日期")
-        cal.bind("<Enter>", lambda _ev: cal.config(fg=theme.ACCENT), add="+")
-        cal.bind("<Leave>", lambda _ev: cal.config(fg=theme.MUTED), add="+")
-        cal.bind("<Button-1>", lambda ev: self._popup_calendar(cal, var))
-        cal.pack(side="left")
-        return wrap
-
-    def _popup_calendar(self, anchor, var) -> None:
-        """点日历图标弹出选日期；选定后写入输入框并重新分析。"""
-        def on_select(s: str) -> None:
-            var.set(s)
-            # 起始日期联动左栏隐藏；结束日期只重新分析会话。
-            if var is self.since_var:
-                self.controller.apply_time_filter()
-            else:
-                self.controller.reanalyze()
-        CalendarPopup(anchor, on_select, anchor=anchor, initial=var.get())
-
-    @staticmethod
-    def _validate_date(s: str) -> bool:
-        if not s:
-            return True
-        from datetime import datetime
-        try:
-            datetime.strptime(s, "%Y-%m-%d")
-            return True
-        except ValueError:
-            return False
-
-    def _validate_and_reanalyze(self, var) -> None:
-        v = var.get().strip()
-        # 起始日期变化要联动左栏隐藏（apply_time_filter）；结束日期只影响会话级 reanalyze。
-        target = (self.controller.apply_time_filter
-                  if var is self.since_var else self.controller.reanalyze)
-        if self._validate_date(v):
-            target()
-        else:
-            var.set("")
-            target()
-
-    def _set_preset(self, preset: str) -> None:
-        from datetime import datetime, timedelta
-        today = datetime.now()
-        if preset == "today":
-            self.since_var.set(today.strftime("%Y-%m-%d"))
-            self.until_var.set("")
-        elif preset == "week":
-            monday = today - timedelta(days=today.weekday())
-            self.since_var.set(monday.strftime("%Y-%m-%d"))
-            self.until_var.set("")
-        elif preset == "month":
-            self.since_var.set(today.replace(day=1).strftime("%Y-%m-%d"))
-            self.until_var.set("")
-        else:  # all
-            self.since_var.set("")
-            self.until_var.set("")
-        self.controller.apply_time_filter()
-
     def _on_task_type_change(self, event=None) -> None:
         """任务类型变化时的回调（菜单 command 无 event，故可选）"""
         # task_var 存储的是中文名称，直接触发重新分析
         self.controller.reanalyze()
-
-    def _on_source_change(self, event) -> None:
-        self.controller.refresh_projects()
 
     def get_params(self) -> dict:
         """Analysis params owned by the bar (task type / time)."""
@@ -501,21 +1139,20 @@ class FilterBar:
         return self._source_reverse_map.get(self.source_var.get(), "all")
 
     def restore_prefs(self, prefs: dict) -> None:
-        """恢复上次的来源/任务类型/时间区间筛选（在首次 refresh_projects 之前调用）。"""
+        """恢复上次的来源/任务类型筛选（在首次 refresh_projects 之前调用）。"""
         src = prefs.get("source")
         if src in self._source_display_names:
             self.source_var.set(self._source_display_names[src])
         tt = prefs.get("task_type")
         if tt in self._task_display_names:
             self.task_var.set(self._task_display_names[tt])
-        # since 不恢复——启动固定为今天；until 可恢复上次的结束日期。
-        until = prefs.get("until")
-        if isinstance(until, str) and self._validate_date(until):
-            self.until_var.set(until)
+        # 时间不恢复——启动固定为「今天」预设（until 恒空，无 UI 入口）。
 
-    def set_status(self, text: str) -> None:
-        self.status.config(text=text)
-
+    def set_status(self, text: str, *, fg: str | None = None) -> None:
+        self.status.config(text=text, fg=fg or theme.SECTION_ACCENT)
+        # 可见反馈走底部状态栏（self.status 兼容保留，测试直读）
+        if hasattr(self.controller, "status_bar") and self.controller.status_bar is not None:
+            self.controller.status_bar.set_status(text, fg=fg)
 
 class ProjectColumn:
     """Left column: a scrollable list of selectable project cards."""
@@ -530,17 +1167,35 @@ class ProjectColumn:
         col = tk.Frame(parent, bg=theme.PANEL)
         col.pack(side="left", fill="both", expand=True)
 
-        header = tk.Frame(col, bg=theme.PANEL)
-        header.pack(fill="x", padx=6, pady=4)
-        _pi = ui_icon(header, "project")
+        tk.Frame(col, bg=theme.BORDER, height=1).pack(fill="x")
+        header = tk.Frame(col, bg=theme.SECTION_HEADER_BG, height=28)
+        header.pack(fill="x", pady=(2, 0))
+        header.pack_propagate(False)
+        _pi = ui_icon(header, "folder")
         if _pi is not None:
-            tk.Label(header, image=_pi, bg=theme.PANEL).pack(side="left")
-        self.count_label = tk.Label(header, text="项目", bg=theme.PANEL, fg=theme.FG,
-                                    font=theme.FONT_HEADING, anchor="w")
-        self.count_label.pack(side="left", padx=(theme.PAD_S, 0))
+            tk.Label(header, image=_pi, bg=theme.SECTION_HEADER_BG).pack(side="left", padx=(6, 2))
+        self.title_label = tk.Label(header, text="项目", bg=theme.SECTION_HEADER_BG, fg=theme.FG,
+                                    font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+        self.title_label.pack(side="left", padx=(theme.PAD_XS, 0))
+        self._count_badge = RoundedPill(
+            header, text="0", width=28, height=18, radius=4,
+            fill=theme.CONTROL_BG, bg=theme.SECTION_HEADER_BG, fg=theme.MUTED,
+            command=None)
+        self._count_badge.pack(side="left", padx=(4, 0))
+        self._count_tip = Tooltip(self._count_badge, "")
+        self.count_label = tk.Label(header, text="项目")
 
+        self._filter_var = tk.StringVar(value="")
+        self._search_box = RoundedSearchBox(
+            header, textvariable=self._filter_var, icon=ui_icon(header, "search"),
+            width=110, height=22, radius=5, bg=theme.SECTION_HEADER_BG)
+        self._search_box.pack(side="right", padx=(2, 4))
+        self.search_entry = self._search_box.entry
+        Tooltip(self._search_box.entry, "按项目名称 / 路径 / 来源过滤 · Esc 清空")
+        Tooltip(self._search_box, "按项目名称 / 路径 / 来源过滤 · Esc 清空")
+        self._filter_var.trace_add("write", lambda *_a: self._render_filter())
         sf = ScrollFrame(col, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=6, pady=4)
+        sf.canvas.pack(fill="both", expand=True, padx=6, pady=(1, 4))
         self.scroll = sf
         self.container = sf.inner
 
@@ -561,9 +1216,7 @@ class ProjectColumn:
         for idx, d in enumerate(projects):
             card = self._make_card(d, idx, is_empty=(idx in self._empty))
             self._cards.append(card)
-            if idx in self._hidden:            # 时间范围外：建好即隐藏
-                card.frame.pack_forget()
-        self._refresh_count_label()
+        self._render_filter()
         if not projects:
             # 空状态引导：告诉用户去哪里产生数据，而不是留一片空白。
             self._empty_hint = SelectableLabel(
@@ -603,42 +1256,38 @@ class ProjectColumn:
         card = Card(self.container,
                     on_click=lambda c, i=idx, e=is_empty: self._on_card_click(c, i, e),
                     on_right_click=lambda e, _i=idx, _d=project_dir: self._on_right_click(e, _i, _d),
-                    padx=1, pady=1)
+                    bg=theme.PANEL, padx=1, pady=1)
         name = project_label(project_dir)
         label = project_source_label(project_dir)
         if is_empty:
             name += " （无会话）"
         fg = theme.MUTED if is_empty else theme.FG
         icon = source_icon(card.frame, project_icon_key(project_dir))
-        if icon is None:
-            # 无图标资源：回退到 [源名] 文字前缀
-            drive = project_drive(project_dir)
-            prefix = f"[{label}] {drive}: " if drive else f"[{label}] "
-            lbl = tk.Label(card.frame, text=prefix + name, bg=theme.PANEL_2, fg=fg,
-                           font=theme.FONT_UI_BOLD, anchor="w")
-            lbl.pack(fill="x", padx=3, pady=3)
-            card.bind_to(lbl)
-            return card
-        # 图标 + 盘符 + 名称横排，取代 [Claude] 之类的文字标注。盘符小字灰显
-        # （同事在不同盘建同名文件夹时，列表里靠它区分——名字本身被剥掉盘符）。
-        row = tk.Frame(card.frame, bg=theme.PANEL_2)
-        row.pack(fill="x", padx=3, pady=3)
-        img_lbl = tk.Label(row, image=icon, bg=theme.PANEL_2)
-        img_lbl.pack(side="left", padx=(0, 4))
-        Tooltip(img_lbl, label)  # 悬停图标显示来源名（图标取代了文字标注）
-        drive = project_drive(project_dir)
-        bindees = [row, img_lbl]
-        if drive:
-            drive_lbl = tk.Label(row, text=f"{drive}:", bg=theme.PANEL_2,
-                                 fg=theme.MUTED, font=theme.FONT_UI_SMALL_BOLD,
-                                 anchor="w", padx=1)
-            drive_lbl.pack(side="left", padx=(0, 3))
-            Tooltip(drive_lbl, f"项目所在盘符 {drive}:（同名项目可能在不同盘）")
-            bindees.append(drive_lbl)
-        name_lbl = tk.Label(row, text=name, bg=theme.PANEL_2, fg=fg,
-                            font=theme.FONT_UI_BOLD, anchor="w")
+
+        # VS Code 紧凑文件树行 (height 24px)
+        row = tk.Frame(card.frame, bg=theme.PANEL, height=24)
+        row.pack(fill="x", padx=(4, 6))
+        row.pack_propagate(False)
+
+        bindees = [row]
+        if icon is not None:
+            img_lbl = tk.Label(row, image=icon, bg=theme.PANEL)
+            img_lbl.pack(side="left", padx=(2, 6))
+            Tooltip(img_lbl, label)
+            bindees.append(img_lbl)
+
+        name_lbl = tk.Label(row, text=name, bg=theme.PANEL, fg=fg,
+                            font=theme.FONT_UI, anchor="w")
         name_lbl.pack(side="left", fill="x", expand=True)
         bindees.append(name_lbl)
+
+        drive = project_drive(project_dir)
+        if drive:
+            drive_lbl = tk.Label(row, text=f"{drive.upper()}:", bg=theme.PANEL,
+                                 fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
+            drive_lbl.pack(side="right", padx=(4, 0))
+            bindees.append(drive_lbl)
+
         for w in bindees:
             card.bind_to(w)
         return card
@@ -647,16 +1296,16 @@ class ProjectColumn:
         if is_empty:
             return  # 空项目不响应点击
         self._select(card, idx)
-
-    def _select(self, card, idx=None, *, notify: bool = True):
+    def _select(self, card, idx, *, notify=True):
         if self._selected is not None:
+            self._selected.set_state_rail(None)   # 清选中蓝条，防残留
             self._selected.set_selected(False)
         self._selected = card
         self._selected_idx = idx
+        card.set_state_rail(theme.ACCENT)
         card.set_selected(True)
         if idx is not None and notify:
             self.controller.on_select_project(idx)
-
     def select_idx(self, idx: int, *, notify: bool = True) -> None:
         """按索引视觉选中（bounds 安全）。notify=False 不回调 controller。"""
         if 0 <= idx < len(self._cards):
@@ -668,18 +1317,12 @@ class ProjectColumn:
         若当前选中卡被隐藏，清其高亮（改选由 controller 决定）。
         """
         self._hidden = set(hidden)
-        for idx, card in enumerate(self._cards):
-            if idx in self._hidden:
-                card.frame.pack_forget()
-            else:
-                card.frame.pack(fill="x", padx=1, pady=1)   # 按索引序，顺序保持
+        self._render_filter()
         if self._selected_idx is not None and self._selected_idx in self._hidden:
             if self._selected is not None:
                 self._selected.set_selected(False)
             self._selected = None
             self._selected_idx = None
-        self._refresh_count_label()
-        self.scroll.update_scroll()
 
     def _refresh_count_label(self) -> None:
         n = len(self._projects)
@@ -689,6 +1332,35 @@ class ProjectColumn:
         else:
             self.count_label.config(text=f"项目（{n}）")
 
+    def _render_filter(self) -> None:
+        needle = self._filter_var.get().strip().casefold()
+        tokens = needle.split()
+        n_matched = 0
+        n_vis = 0
+        for idx, (p, card) in enumerate(zip(self._projects, self._cards)):
+            if idx in self._hidden:
+                card.frame.pack_forget()
+                continue
+            n_vis += 1
+            if tokens:
+                p_text = f"{project_label(p)} {getattr(p, 'path', '')} {getattr(p, 'cwd', '')} {getattr(p, 'source', '')}".casefold()
+                if not all(tok in p_text for tok in tokens):
+                    card.frame.pack_forget()
+                    continue
+            card.frame.pack(fill="x", padx=1, pady=1)
+            n_matched += 1
+
+        n_total = len(self._projects)
+        h = len(self._hidden)
+        if tokens:
+            self._count_badge.set_text(f"{n_matched}/{n_vis}")
+            self._count_tip.text = f"搜索匹配 {n_matched} 项 / 当前活跃 {n_vis} / 总计 {n_total} 个项目"
+        else:
+            self._count_badge.set_text(str(n_vis))
+            self._count_tip.text = f"当前活跃 {n_vis} 项 / 隐藏 {h} 项 / 总计 {n_total} 个项目"
+
+        self._refresh_count_label()
+        self.scroll.update_scroll()
     def _on_right_click(self, event, idx, project_dir):
         """Right-click context menu on a project card."""
         name = project_label(project_dir)
@@ -775,44 +1447,51 @@ class SessionColumn:
         col = tk.Frame(parent, bg=theme.PANEL)
         col.pack(side="left", fill="both", expand=True)
 
-        header = tk.Frame(col, bg=theme.PANEL)
-        header.pack(fill="x", padx=6, pady=4)
+        tk.Frame(col, bg=theme.BORDER, height=1).pack(fill="x")
+        header = tk.Frame(col, bg=theme.SECTION_HEADER_BG, height=28)
+        header.pack(fill="x", pady=(2, 0))
+        header.pack_propagate(False)
         _hi = ui_icon(header, "session")
         if _hi is not None:
-            tk.Label(header, image=_hi, bg=theme.PANEL).pack(side="left")
-        self.count_label = tk.Label(header, text="会话", bg=theme.PANEL, fg=theme.FG,
-                                    font=theme.FONT_HEADING, anchor="w")
-        self.count_label.pack(side="left", padx=(theme.PAD_S, 0))
-        # 搜索框：放大镜置于框内左侧（Frame 包裹，视觉一体），点放大镜聚焦输入。
+            tk.Label(header, image=_hi, bg=theme.SECTION_HEADER_BG).pack(side="left", padx=(6, 2))
+        self.title_label = tk.Label(header, text="会话", bg=theme.SECTION_HEADER_BG, fg=theme.FG,
+                                    font=theme.FONT_UI_SMALL_BOLD, anchor="w")
+        self.title_label.pack(side="left", padx=(theme.PAD_XS, 0))
+        self._count_badge = RoundedPill(
+            header, text="0", width=28, height=18, radius=4,
+            fill=theme.CONTROL_BG, bg=theme.SECTION_HEADER_BG, fg=theme.MUTED,
+            command=None)
+        self._count_badge.pack(side="left", padx=(4, 0))
+        self._count_tip = Tooltip(self._count_badge, "")
+        self.count_label = tk.Label(header, text="会话")
+
+        # 搜索框与红旗过滤（带抗锯齿圆角底）
         self._filter_var = tk.StringVar(value="")
-        search_wrap = tk.Frame(header, bg=theme.PANEL_2, highlightthickness=1,
-                               highlightbackground=theme.BORDER)
-        search_wrap.pack(side="right")  # 先 pack → 占最右
-        _si = ui_icon(search_wrap, "search")
-        if _si is not None:
-            _s_lbl = tk.Label(search_wrap, image=_si, bg=theme.PANEL_2, cursor=CLICK_CURSOR)
-            _s_lbl.pack(side="left", padx=(3, 0), pady=1)
-            _s_lbl.bind("<Button-1>", lambda _e: search.focus_set())
-        search = tk.Entry(search_wrap, textvariable=self._filter_var, width=10,
-                          bg=theme.PANEL_2, fg=theme.FG, insertbackground=theme.FG,
-                          relief="flat", borderwidth=0, highlightthickness=0,
-                          font=theme.FONT_UI_SMALL)
-        search.pack(side="left", padx=(2, 5), pady=1)
-        Tooltip(search, "按标题 / 会话 ID / 模型 过滤（实时）")
-        # 红旗快速过滤：点击只看打了红旗的会话（与搜索词叠加）。
+        _search_box = RoundedSearchBox(header, textvariable=self._filter_var,
+                                       icon=ui_icon(header, "search"),
+                                       width=110, height=22, radius=5,
+                                       bg=theme.SECTION_HEADER_BG)
+        _search_box.pack(side="right", padx=(2, 4))
+        self.search_entry = _search_box.entry  # Ctrl+F 全局聚焦入口
+        Tooltip(_search_box.entry, "按标题 / 会话 ID / 模型 过滤（实时）· Ctrl+F 聚焦")
+        Tooltip(_search_box, "按标题 / 会话 ID / 模型 过滤（实时）· Ctrl+F 聚焦")
         self._flag_only = tk.BooleanVar(value=False)
         self._ff_img = {"off": ui_icon(header, "flag"), "on": ui_icon(header, "flag-on")}
         _ff0 = self._ff_img["off"]
         if _ff0 is not None:
-            self._flag_filter = tk.Label(header, image=_ff0, bg=theme.PANEL, cursor=CLICK_CURSOR)
+            self._flag_filter = tk.Label(header, image=_ff0, bg=theme.SECTION_HEADER_BG, cursor=CLICK_CURSOR)
             self._flag_filter.image = _ff0
         else:
-            self._flag_filter = tk.Label(header, text="旗", bg=theme.PANEL,
+            self._flag_filter = tk.Label(header, text="旗", bg=theme.SECTION_HEADER_BG,
                                          fg=theme.MUTED, font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
-        self._flag_filter.pack(side="right", padx=(6, 2))  # 后 pack → 搜索框左边
+        self._flag_filter.pack(side="right", padx=(4, 2))
         self._flag_filter.bind("<Button-1>", lambda _e: self._toggle_flag_only())
-        self._flag_filter.bind("<Enter>", lambda _e: self._flag_filter.configure(bg=theme.HOVER_BG))
-        self._flag_filter.bind("<Leave>", lambda _e: self._flag_filter.configure(bg=theme.PANEL))
+        if _ff0 is not None:
+            _ff_hov = ui_icon(header, "flag", opacity=1.0)
+            self._flag_filter.bind("<Enter>", lambda _e: self._flag_filter.configure(
+                image=self._ff_img["on"] if self._flag_only.get() else _ff_hov))
+            self._flag_filter.bind("<Leave>", lambda _e: self._flag_filter.configure(
+                image=self._ff_img["on"] if self._flag_only.get() else _ff0))
         Tooltip(self._flag_filter, "只看红旗会话")
         self._filter_var.trace_add("write", lambda *_a: self._render())
         self._all_reports: list = []
@@ -821,7 +1500,7 @@ class SessionColumn:
         self._flagged: set[str] = set()
 
         sf = ScrollFrame(col, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=6, pady=4)
+        sf.canvas.pack(fill="both", expand=True, padx=6, pady=(1, 4))
         self.scroll = sf
         self.container = sf.inner
 
@@ -883,14 +1562,24 @@ class SessionColumn:
             self.select_by_sid(sid, notify=False)
 
     def _filtered_out(self, r, needle: str, flag_only: bool) -> bool:
-        if needle and not (
-            needle in (r.meta.title or "").casefold()
-            or needle in (r.meta.session_id or r.meta.path.stem).casefold()
-            or any(needle in _m.casefold() for _m in r.usage.models)
-        ):
-            return True
         if flag_only and (r.meta.session_id or r.meta.path.stem) not in self._flagged:
             return True
+        if not needle:
+            return False
+        tokens = needle.split()
+        searchable_parts = [
+            r.meta.title or "",
+            r.meta.session_id or "",
+            r.meta.path.stem or "",
+            r.task_type or "",
+            r.meta.git_branch or "",
+            *(r.usage.models or ()),
+            *(r.usage.per_model.keys() if hasattr(r.usage, "per_model") and r.usage.per_model else ()),
+        ]
+        text_corpus = " ".join(searchable_parts).casefold()
+        for tok in tokens:
+            if tok not in text_corpus:
+                return True
         return False
 
     def _sorted(self, reports):
@@ -953,7 +1642,7 @@ class SessionColumn:
             self._empty_hint.destroy()
             self._empty_hint = None
         if not self._reports:
-            hint = ("无匹配会话，试试清空搜索框 / 关闭红旗过滤"
+            hint = ("无匹配会话，按 Esc 清空搜索框"
                     if (needle or flag_only)
                     else "该项目暂无会话\n（或尚未完成分析）")
             self._empty_hint = tk.Label(self.container, text=hint,
@@ -962,9 +1651,15 @@ class SessionColumn:
                                         pady=theme.PAD_L * 2)
             self._empty_hint.pack(padx=theme.PAD_M)
         n_all = len(self._all_reports)
-        label = (f"会话（{len(self._reports)}/{n_all}）" if (needle or flag_only)
-                 else f"会话（{n_all}）")
-        self.count_label.config(text=label)
+        n_cur = len(self._reports)
+        if needle or flag_only:
+            self._count_badge.set_text(f"{n_cur}/{n_all}")
+            self.count_label.config(text=f"会话（{n_cur}/{n_all}）")
+            self._count_tip.text = f"过滤匹配 {n_cur} 项 / 共 {n_all} 个会话"
+        else:
+            self._count_badge.set_text(str(n_all))
+            self.count_label.config(text=f"会话（{n_all}）")
+            self._count_tip.text = f"共 {n_all} 个会话"
         self.scroll.update_scroll(reset=reset)
 
     def _make_card(self, r):
@@ -972,78 +1667,147 @@ class SessionColumn:
         title = r.meta.title or "(无标题)"
         card = Card(self.container,
                     on_click=lambda c, s=sid: self._select(c, s),
-                    on_right_click=lambda e, _r=r, _s=sid: self._on_right_click(e, _r, _s))
+                    on_right_click=lambda e, _r=r, _s=sid: self._on_right_click(e, _r, _s),
+                    bg=theme.PANEL, padx=1, pady=1)
+
+        # 左侧状态高光条 (State Rail)
+        rail_color = None
+        tier = getattr(r, "tier", None)
+        if tier in ("优秀", "良好"):
+            rail_color = theme.SUCCESS
+        elif tier in ("待改进", "低效"):
+            rail_color = theme.WARNING
+        card.set_state_rail(rail_color)
+
         time_ms = r.usage.ended_at or r.usage.started_at
-        # 时间行：左时间，右置顶/红旗可点击图标（左键 toggle，不触发卡片选中）。
-        top_row = tk.Frame(card.frame, bg=theme.PANEL_2)
-        top_row.pack(fill="x", padx=6, pady=(4, 1))
-        t_lbl = tk.Label(top_row, text=fmt_dt(time_ms, FMT_SHORT_MINUTE) if time_ms else "-",
-                         bg=theme.PANEL_2, fg="#888888", font=theme.FONT_MONO, anchor="w")
-        t_lbl.pack(side="left")
-        marks_row = tk.Frame(top_row, bg=theme.PANEL_2)
-        marks_row.pack(side="right")
+        time_str = fmt_dt(time_ms, FMT_SHORT_MINUTE) if time_ms else "-"
+
+        # Row 1: 状态指示点 + 时间（左） + 标记按钮（右，常驻静止防晃动）
+        row1 = tk.Frame(card.frame, bg=card._bg)
+        row1.pack(fill="x", padx=6, pady=(3, 1))
+        dot_color = theme.SUCCESS if tier in ("优秀", "良好") else (
+                    theme.WARNING if tier in ("待改进", "低效") else theme.MUTED)
+        dot_lbl = tk.Label(row1, text="●", bg=card._bg, fg=dot_color,
+                           font=theme.FONT_UI_SMALL)
+        dot_lbl.pack(side="left", padx=(0, 4))
+        card.track_bg(dot_lbl)
+        dot_lbl.bind("<Button-1>", lambda _e: self._select(card, sid))
+
+        t_lbl = tk.Label(row1, text=time_str, bg=card._bg, fg=theme.MUTED,
+                         font=theme.FONT_MONO, anchor="w")
+        t_lbl.pack(side="left", padx=(0, 4))
+
+        marks_row = tk.Frame(row1, bg=card._bg)
+        card.track_bg(marks_row)
         self._mark_icon(marks_row, card, sid, "pin",
                         is_on=sid in self._pinned, tip="置顶 / 取消置顶")
         self._mark_icon(marks_row, card, sid, "flag",
                         is_on=sid in self._flagged, tip="红旗 / 取消红旗")
-        title_disp = title[:35] + "..." if len(title) > 35 else title
-        ti_lbl = tk.Label(card.frame, text=title_disp, bg=theme.PANEL_2, fg=theme.FG,
+        is_marked = (sid in self._pinned) or (sid in self._flagged)
+        if is_marked:
+            marks_row.pack(side="right", padx=(2, 0))
+        else:
+            def _on_enter_marks(_e):
+                marks_row.pack(side="right", padx=(2, 0))
+            def _on_leave_marks(_e):
+                if (sid in self._pinned) or (sid in self._flagged):
+                    return
+                try:
+                    px, py = card.frame.winfo_pointerx(), card.frame.winfo_pointery()
+                    fx, fy = card.frame.winfo_rootx(), card.frame.winfo_rooty()
+                    if fx <= px < fx + card.frame.winfo_width() \
+                            and fy <= py < fy + card.frame.winfo_height():
+                        return
+                except Exception:
+                    pass
+                marks_row.pack_forget()
+            card.frame.bind("<Enter>", _on_enter_marks, add="+")
+            card.frame.bind("<Leave>", _on_leave_marks, add="+")
+
+        # Row 2: 会话标题（独立全宽行，排版舒展，字号适中，绝不拥挤截断）
+        row2 = tk.Frame(card.frame, bg=card._bg)
+        row2.pack(fill="x", padx=6, pady=(1, 2))
+        card.track_bg(row2)
+        title_disp = format_card_title(title, 38)
+        ti_lbl = tk.Label(row2, text=title_disp, bg=card._bg, fg=theme.FG,
                           font=theme.FONT_UI_SMALL, anchor="w")
-        ti_lbl.pack(fill="x", padx=6, pady=(1, 1))
-        # 摘要行：左侧主模型短名，右侧消耗成本金额（纯文本，无卡片底）——
-        # 不点开指标页就能扫一眼谁花的多少（数据全在 report 上，零额外扫描）。
-        sum_row = tk.Frame(card.frame, bg=theme.PANEL_2)
-        sum_row.pack(fill="x", padx=6, pady=(0, 1))
-        sum_lbl = tk.Label(sum_row, bg=theme.PANEL_2, fg=theme.MUTED,
-                           font=theme.FONT_UI_SMALL, anchor="w",
-                           text=self._summary_line(r))
-        sum_lbl.pack(side="left")
-        # 成本对齐指标分类「总成本」的数值样式：FONT_VALUE 等宽粗体 + 按好坏
-        # 方向着色——与 MetricCell.set_value 同一规则（down 指标：>0 红、
-        # ==0 绿「零成本即最优」），精度按卡片场景收窄到两位小数。
-        cost_fg = (theme.VALUE_BAD if r.cost > 0 else theme.VALUE_GOOD)
-        cost_lbl = tk.Label(sum_row, bg=theme.PANEL_2, fg=cost_fg,
-                            font=theme.FONT_VALUE, anchor="e",
-                            text=f"${r.cost:.2f}")
-        cost_lbl.pack(side="right")
-        sid_disp = sid[:36] + "..." if len(sid) > 36 else sid
-        sid_lbl = tk.Label(card.frame, text=sid_disp, bg=theme.PANEL_2, fg="#6B7077",
-                           font=theme.FONT_MONO, cursor=CLICK_CURSOR, anchor="w")
-        sid_lbl.pack(fill="x", padx=6, pady=(1, 4))
-        # top_row/marks_row/时间标签随卡片选中；标记图标自行绑事件（见 _mark_icon）。
-        for w in (top_row, t_lbl, marks_row, ti_lbl, sum_row, sum_lbl,
-                  cost_lbl, sid_lbl):
-            card.bind_to(w)
+        ti_lbl.pack(side="left", fill="x", expand=True)
+
+        # Row 3: 摘要行——左「模型短名 · 时长」，右成本金额
+        from tcer.core.format import fmt_duration_ms
+        model_name = dominant_model_label(r.usage)
+        dur = fmt_duration_ms(getattr(r.usage, "session_duration_ms", 0))
+        sum_parts = [p for p in (model_name, dur) if p and p != "-"]
+        sum_row = tk.Frame(card.frame, bg=card._bg)
+        sum_row.pack(fill="x", padx=6, pady=(1, 3))
+        card.track_bg(sum_row)
+        sum_lbl = tk.Label(sum_row, text=" · ".join(sum_parts) or "-",
+                           bg=card._bg, fg=theme.MUTED,
+                           font=theme.FONT_UI_SMALL, anchor="w")
+        sum_lbl.pack(side="left", fill="x", expand=True)
+
+        cost_fg = theme.WARNING if r.cost >= 50.0 else theme.FG
+        cost_lbl = tk.Label(sum_row, text=f"${r.cost:.2f}", bg=card._bg, fg=cost_fg,
+                            font=theme.FONT_VALUE, anchor="e")
+        cost_lbl.pack(side="right", padx=(4, 0))
+
+        # Tooltip：完整标题 + ID + 详细摘要（回合/LOC/返工在此悬浮可见）
+        turns = r.usage.assistant_msgs
+        net_loc = r.net_loc or 0
+        loc_str = f"{net_loc:+,} 行"
+        churn = r.churn_ratio or 0.0
+        rework_str = ("极少返工" if churn < 0.05
+                      else f"{'高' if churn >= 0.20 else ''}返工 {churn*100:.0f}%")
+        detail = " · ".join(filter(None, [
+            dur if dur != "-" else "", f"{turns:,} 回合" if turns else "",
+            loc_str, rework_str]))
+        tip_text = (f"{title}\nID: {sid}\n{detail}\n"
+                    "双击查看会话详情，右键更多操作")
+        Tooltip(card.frame, tip_text)
+        Tooltip(ti_lbl, tip_text)
+        Tooltip(sum_lbl, tip_text)
+
+        card.bind_to(row1)
+        card.bind_to(t_lbl)
+        card.bind_to(row2)
+        card.bind_to(ti_lbl)
+        card.bind_to(sum_row)
+        card.bind_to(sum_lbl)
+        card.bind_to(cost_lbl)
+
+        for w in (row1, t_lbl, row2, ti_lbl, sum_row, sum_lbl, cost_lbl):
             w.bind("<Double-Button-1>", lambda e, s=sid: self.controller.show_session_detail(s))
         return card
-
-    def _summary_line(self, r) -> str:
-        """卡片摘要行文本：模型短名 · 持续时间（成本在右侧、评级已移除）。"""
-        from tcer.core import pricing as _pricing
-        from tcer.core.format import fmt_duration_ms
-        main = max(r.usage.per_model.items(),
-                   key=lambda kv: getattr(kv[1], "total", 0),
-                   default=None) if r.usage.per_model else None
-        model_txt = _pricing.label(main[0]) if main else "-"
-        dur = fmt_duration_ms(r.usage.session_duration_ms)
-        return f"{model_txt} · {dur}" if dur != "-" else model_txt
 
     def _mark_icon(self, parent, card, sid, kind, *, is_on, tip):
         """卡片右上角可点击标记图标：左键 toggle（不选中卡片），右键复用卡片菜单。
 
         kind 为 "pin"（置顶）/ "flag"（红旗）。激活态用彩色 ``<kind>-on`` 图标，
         未激活用灰色 ``<kind>`` 图标；缺资源回退到着色字符（置顶 ▾ / 红旗 ◆）。
+        底色随卡片 hover/选中联动（track_bg），图标自身 hover 高亮、离开还原。
         """
-        img = ui_icon(self.container, f"{kind}-on" if is_on else kind)
-        if img is not None:
-            lbl = tk.Label(parent, image=img, bg=theme.PANEL_2, cursor=CLICK_CURSOR)
-            lbl.image = img  # 防 GC（ui_icon 已模块级缓存，双保险）
+
+        def _card_bg():
+            """卡片当前有效底色（选中 > 悬浮 > 常态）。"""
+            if card._selected:
+                return theme.SEL_ROW_ACTIVE
+            if card._hovered:
+                return theme.HOVER_BG
+            return card._bg
+
+        effective_bg = _card_bg()
+        img_normal = ui_icon(self.container, f"{kind}-on" if is_on else kind, opacity=1.0 if is_on else 0.6)
+        img_hover = ui_icon(self.container, f"{kind}-on" if is_on else kind, opacity=1.0)
+        if img_normal is not None:
+            lbl = tk.Label(parent, image=img_normal, bg=effective_bg, cursor=CLICK_CURSOR)
+            lbl.image = img_normal  # 防 GC
         else:
             ch = "▾" if kind == "pin" else "◆"
             fg = (theme.ACCENT if kind == "pin" else theme.ERROR) if is_on else theme.MUTED
-            lbl = tk.Label(parent, text=ch, bg=theme.PANEL_2, fg=fg,
+            lbl = tk.Label(parent, text=ch, bg=effective_bg, fg=fg,
                            font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
         lbl.pack(side="left", padx=(2, 0))
+        card.track_bg(lbl)   # 随卡片 hover/选中联动变色（不绑事件，保 toggle 语义）
 
         def toggle(_e):
             if kind == "pin":
@@ -1053,8 +1817,10 @@ class SessionColumn:
 
         lbl.bind("<Button-1>", toggle)
         lbl.bind("<Button-3>", card._on_right_click)   # 右键仍走卡片菜单
-        lbl.bind("<Enter>", lambda _e: lbl.configure(bg=theme.HOVER_BG))
-        lbl.bind("<Leave>", lambda _e: lbl.configure(bg=theme.PANEL_2))
+        # 悬停仅提亮图标透明度，底色始终随卡片底保持无缝一致，绝无灰块色斑
+        if img_hover is not None:
+            lbl.bind("<Enter>", lambda _e: lbl.configure(image=img_hover))
+            lbl.bind("<Leave>", lambda _e: lbl.configure(image=img_normal))
         Tooltip(lbl, tip)
         return lbl
 
@@ -1279,7 +2045,6 @@ class SessionColumn:
             self._pending_select_sid = sid
         return False
 
-
 @dataclass
 class _MetricGrid:
     """Per-grid collapse state for MetricPanel: the cells, the expander label,
@@ -1301,45 +2066,159 @@ class _GroupState:
     collapsed: bool = False
 
 
+# 简要版精简保留的核心高信息量指标白名单（其余在简要版中隐藏，完整版展示全量）
+BRIEF_METRIC_KEYS: frozenset[str] = frozenset({
+    # G1 会话概况（保留：请求数、开始时间、结束时间、持续时长、模型、工具调用、用户消息）
+    "turns", "started", "last_time", "duration", "models", "tools", "user_msgs",
+    # G2 Token 用量（保留：总 Token、输入、输出、缓存创建、缓存命中）
+    "total_tokens", "input", "output", "cache_write", "cache_read",
+    # G3 缓存效率（全量保留）
+    "chr", "io_ratio", "caf", "cache_efficiency", "cache_write_ratio", "non_cached_input_ratio",
+    # G4 代码产出与质量
+    # 基础（保留：净增行、写入行、删除行、涉及文件）
+    "net_loc", "added", "deleted", "files_touched",
+    # 行为（保留：读写比、编辑占比、探索占比、Bash 占比）
+    "read_write_ratio", "edit_ratio", "exploration_ratio", "bash_ratio",
+    # 质量（保留：返工率、先读后写率、工具错误率）
+    "churn", "read_before_write", "tool_error_rate",
+    # G5 成本分析（保留：总成本、每百万Token成本、千行代码成本）
+    "cost", "cost_per_mt", "cpe",
+    # G6 综合评分（保留：TCER、综合效率分、评级、任务类型）
+    "tcer", "score", "tier", "task_type",
+})
+
 class MetricPanel:
-    """Right-column tab 1: the G1–G6 metric grid, built from metric_defs."""
+    """Right-column tab 1: the G1–G6 metric grid, built from metric_defs.GROUPS."""
 
     def __init__(self, parent, controller) -> None:
         self.controller = controller
+        self._chips: dict[str, tuple[tk.Label, tk.Label]] = {}
+        self._groups: list[_GroupState] = []
         self._cells: dict[str, MetricCell] = {}
         self._grids: list[_MetricGrid] = []
-        self._groups: list[_GroupState] = []
+        self._full_mode: bool = False
 
         sf = ScrollFrame(parent, bg=theme.BG)
         sf.canvas.pack(fill="both", expand=True)
         self.container = sf.inner
 
+        # 顶部概况指示条
+        self._build_header_strip()
+
+        # 6 大指标分类 (G1–G6，以 metric_defs.GROUPS 为唯一真理源)
         for group in GROUPS:
             self._build_group(group)
 
+    def _build_header_strip(self) -> None:
+        """34px 汇总条：会话标题、耗时/回合、支出、净增、综合效率分。"""
+        h = tk.Frame(self.container, bg=theme.BG, height=34)
+        h.pack(fill="x", padx=8, pady=(4, 2))
+        h.pack_propagate(False)
+        tk.Frame(h, bg=theme.BORDER, height=1).pack(side="bottom", fill="x")
+
+        self._h_title = tk.Label(h, text="待选会话", bg=theme.BG, fg=theme.FG,
+                                 font=theme.FONT_UI_BOLD)
+        self._h_title.pack(side="left", padx=(12, 8))
+
+        self._h_dur = tk.Label(h, text="耗时 -", bg=theme.BG, fg=theme.MUTED,
+                               font=theme.FONT_UI)
+        self._h_dur.pack(side="left", padx=theme.PAD_M)
+
+        # 右侧：会话/项目上下文与环境信息记录徽标（非点击按钮，专注记录关键信息）
+        # 模式切换胶囊：简要版（默认，隐藏空/不适用项）⟷ 完整版（展示全量槽位）
+        self._mode_btn = RoundedPill(
+            h, text="简要版", width=68, height=22, radius=4,
+            fill=theme.CONTROL_BG, hover_fill=theme.HOVER_BG,
+            bg=theme.BG, fg=theme.ACCENT, font=theme.FONT_UI_SMALL_BOLD,
+            command=self._toggle_view_density)
+        self._mode_btn.pack(side="right", padx=(3, 6))
+        Tooltip(self._mode_btn, "点击切换：【简要版】仅展示有数据的指标；【完整版】展开全量指标槽位。")
+
+        self._tag_time = RoundedPill(
+            h, text="-", width=120, height=22, radius=4,
+            fill=theme.CONTROL_BG, hover_fill=None, bg=theme.BG, fg=theme.MUTED,
+            font=theme.FONT_MONO, command=None)
+        self._tag_time.pack(side="right", padx=(3, 4))
+        Tooltip(self._tag_time, "会话启动/完成时间")
+
+        self._tag_task = RoundedPill(
+            h, text="任务: -", width=95, height=22, radius=4,
+            fill=theme.CONTROL_BG, hover_fill=None, bg=theme.BG, fg=theme.FG,
+            command=None)
+        self._tag_task.pack(side="right", padx=3)
+        Tooltip(self._tag_task, "任务类型（TTAF 归一化基准类别）")
+
+        self._tag_meta = RoundedPill(
+            h, text="", width=105, height=22, radius=4,
+            fill=theme.CONTROL_BG, hover_fill=None, bg=theme.BG, fg=theme.MUTED,
+            command=None)
+        self._tag_meta.pack(side="right", padx=3)
+        Tooltip(self._tag_meta, "环境信息（Git 分支 / 子代理折叠 / 推理档位）")
+
+        # 保持旧属性与测试兼容别名
+        self._h_cost = tk.Label(h, text="$0.00")
+        self._h_loc = tk.Label(h, text="+0 行")
+        self._h_score_val = tk.Label(h, text="-")
+        self._h_score_tier = tk.Label(h, text="")
+        self._chips["_sum_token"] = (self._h_cost, self._h_cost)
+        self._chips["_sum_code"] = (self._h_loc, self._h_loc)
+        self._chips["_sum_prompt"] = (self._h_dur, self._h_dur)
+        self._chips["_sum_agent"] = (self._h_title, self._h_title)
     def _build_group(self, group) -> None:
         gframe = tk.Frame(self.container, bg=theme.BG)
-        gframe.pack(fill="x", pady=(1, 0))
-        header = tk.Frame(gframe, bg=theme.GROUP_COLORS[group.id], padx=6, pady=1)
+        gframe.pack(fill="x", padx=8, pady=(4, 2))
+
+        header_bg = theme.GROUP_COLORS.get(group.id, theme.PANEL_2)
+        collapsed = False  # 全部分类（含 G4 代码产出与质量）默认展开
+
+        # 采用自绘抗锯齿圆角底 Canvas 替代生硬直角横梁
+        header = tk.Canvas(gframe, height=28, bg=theme.BG, highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
         header.pack(fill="x")
-        # 「代码产出与质量」(G4) 项多、常只需概览 → 默认折叠；其余默认展开。
-        collapsed = group.id == "G4"
-        arrow_lbl = tk.Label(header, text=f"{'▶' if collapsed else '▼'} {group.name}",
-                             bg=theme.GROUP_COLORS[group.id], fg=theme.FG,
-                             font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor=CLICK_CURSOR)
-        arrow_lbl.pack(side="left")
-        # body 容纳该组全部子组/网格；折叠时 pack_forget 它（整组收起）。
+
+        def _redraw_hdr(_e=None, h=header, bg_col=header_bg):
+            w = h.winfo_width()
+            ht = h.winfo_height()
+            if w < 10 or ht < 10:
+                return
+            h.delete("hdr_bg")
+            img = get_rounded_rect_img(h, w, ht, 6, bg_col, theme.BG)
+            if img is not None:
+                h.create_image(0, 0, anchor="nw", image=img, tags="hdr_bg")
+            else:
+                h.create_rectangle(0, 0, w, ht, fill=bg_col, outline="", tags="hdr_bg")
+            h.tag_lower("hdr_bg")
+
+        header.bind("<Configure>", _redraw_hdr)
+
+        arrow_lbl = tk.Label(header, text=f"{'▸' if collapsed else '▾'} {group.name}",
+                             bg=header_bg, fg=theme.FG,
+                             font=theme.FONT_UI_BOLD, anchor="w", cursor=CLICK_CURSOR)
+        header.create_window(8, 14, anchor="w", window=arrow_lbl, tags="arrow_win")
+
+        # 组头右侧摘要
+        s_lbl = tk.Label(header, text="", bg=header_bg, fg=theme.MUTED,
+                         font=theme.FONT_UI_SMALL, anchor="e", cursor=CLICK_CURSOR)
+        header.create_window(header.winfo_reqwidth() - 8, 14, anchor="e", window=s_lbl, tags="sum_win")
+
+        def _reposition_sum(e, h=header):
+            h.coords("sum_win", e.width - 8, 14)
+        header.bind("<Configure>", _reposition_sum, add="+")
+
         body = tk.Frame(gframe, bg=theme.BG)
-        body.pack(fill="x")
+        body.pack(fill="x", pady=(2, 0))
+
         if group.subgroups:
             for sg in group.subgroups:
                 self._build_metric_grid(sg.metrics, sub_label=sg.name, parent=body)
         else:
             self._build_metric_grid(group.metrics, parent=body)
+
         gs = _GroupState(name=group.name, arrow=arrow_lbl, body=body, collapsed=collapsed)
         self._groups.append(gs)
-        for w in (header, arrow_lbl):
+
+        for w in (header, arrow_lbl, s_lbl):
             w.bind("<Button-1>", lambda e, s=gs: self._toggle_group(s))
+
         if collapsed:
             body.pack_forget()
 
@@ -1347,12 +2226,12 @@ class MetricPanel:
                            parent=None) -> None:
         parent = parent or self.container
         if sub_label:
-            sub = tk.Frame(parent, bg=theme.PANEL, padx=8, pady=0)
+            sub = tk.Frame(parent, bg=theme.PANEL, padx=8, pady=1)
             sub.pack(fill="x", pady=(1, 0))
             tk.Label(sub, text=f"· {sub_label}", bg=theme.PANEL, fg=theme.MUTED,
                      font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
 
-        grid = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=1)
+        grid = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=2)
         grid.pack(fill="x", pady=(0, 0))
         cells: list[MetricCell] = []
         for i, metric in enumerate(metrics):
@@ -1373,21 +2252,20 @@ class MetricPanel:
             from .metric_defs import APPROX_KEYS
             cell = MetricCell(grid, metric, on_click=on_click,
                               approx=metric.key in APPROX_KEYS)
-            cell.frame.grid(row=i // _PER_ROW, column=i % _PER_ROW, sticky="nsew", padx=2)
+            cell.frame.grid(row=i // _PER_ROW, column=i % _PER_ROW, sticky="nsew", padx=2, pady=2)
             self._cells[metric.key] = cell
+            self._chips[metric.key] = (cell.value, cell.approx_lbl or cell.value)
             cells.append(cell)
+
         for c in range(_PER_ROW):
             grid.grid_columnconfigure(c, weight=1)
-        # Collapse expander: lives INSIDE the grid so grid_remove/grid() preserves
-        # its row — pack_forget + pack would reshuffle it past the next group
-        # header. Row = len(metrics) is guaranteed below every cell row; empty
-        # rows between collapse and expand are auto-collapsed by Tk's grid.
+
         exp_row = len(metrics)
         expander = tk.Label(grid, text="", bg=theme.PANEL, fg=theme.MUTED,
                             font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor=CLICK_CURSOR)
         expander.grid(row=exp_row, column=0, columnspan=_PER_ROW,
                       sticky="w", pady=(1, 0))
-        expander.grid_remove()  # hidden until _apply_grid finds empty cells
+        expander.grid_remove()
         state = _MetricGrid(frame=grid, cells=cells, expander=expander,
                             expander_row=exp_row, expanded=False)
         expander.bind("<Button-1>", lambda e, s=state: self._toggle(s))
@@ -1400,7 +2278,62 @@ class MetricPanel:
         for state in self._grids:
             self._apply_grid(state)
 
+        # 刷新顶部汇总条
+        title = getattr(report.meta, "title", None) or getattr(report.meta, "session_id", "(无标题)")
+        is_agg = getattr(report.meta, "session_id", "") == "(aggregate)"
+        if is_agg:
+            title = "项目全量汇总"
+        u = report.usage
+        turns = getattr(u, "assistant_msgs", getattr(u, "turns", 0))
+        self._h_title.config(text=f"{title[:32]} · {turns} 回合")
+
+        from tcer.core.format import fmt_duration_ms
+        dur_ms = getattr(u, "session_duration_ms", 0)
+        self._h_dur.config(text=f"耗时 {fmt_duration_ms(dur_ms)}" if dur_ms else "耗时 -")
+
+        cost_val = getattr(report, "cost", 0.0) or 0.0
+        self._h_cost.config(text=f"${cost_val:.2f}")
+
+        net_loc = getattr(report, "net_loc", 0) or 0
+        self._h_loc.config(text=f"{net_loc:+,} 行")
+
+        score = getattr(report, "score", None)
+        self._h_score_val.config(text=f"{score:.1f}" if score is not None else "-")
+
+        # 刷新右侧上下文元数据记录胶囊
+        if is_agg:
+            n_sess = len(getattr(self.controller, "_current", None).reports) if getattr(self.controller, "_current", None) else 0
+            self._tag_time.set_text(f"共 {n_sess} 个会话")
+            self._tag_task.set_text("全量聚合")
+            self._tag_meta.set_text(f"来源: {report.meta.source}")
+        else:
+            time_ms = u.started_at or u.ended_at
+            time_str = fmt_dt(time_ms, "%Y-%m-%d %H:%M") if time_ms else "-"
+            self._tag_time.set_text(time_str)
+
+            task_name = metrics.TASK_CATEGORIES.get(report.task_type, {}).get("name", report.task_type or "自动")
+            self._tag_task.set_text(f"任务: {task_name}")
+
+            meta_parts = []
+            if getattr(report.meta, "git_branch", None):
+                meta_parts.append(f"分支: {report.meta.git_branch}")
+            elif getattr(report, "subagent_count", 0) > 0:
+                meta_parts.append(f"{report.subagent_count} 子代理")
+            elif getattr(report.meta, "reasoning_effort", None):
+                meta_parts.append(f"推理: {report.meta.reasoning_effort}")
+            else:
+                meta_parts.append(f"来源: {report.meta.source}")
+            self._tag_meta.set_text(" · ".join(meta_parts))
+
     def clear(self) -> None:
+        self._h_title.config(text="待选会话")
+        self._h_dur.config(text="耗时 -")
+        self._h_cost.config(text="$0.00")
+        self._h_loc.config(text="+0 行")
+        self._h_score_val.config(text="-")
+        self._tag_time.set_text("-")
+        self._tag_task.set_text("任务: -")
+        self._tag_meta.set_text("")
         for cell in self._cells.values():
             cell.set_value("-")
         for state in self._grids:
@@ -1413,41 +2346,44 @@ class MetricPanel:
     def _toggle_group(self, gs: _GroupState) -> None:
         """点击分组标题：折叠/展开整组（隐藏该组 body 下所有子组与网格）。"""
         gs.collapsed = not gs.collapsed
-        gs.arrow.config(text=f"{'▶' if gs.collapsed else '▼'} {gs.name}")
+        gs.arrow.config(text=f"{'▸' if gs.collapsed else '▾'} {gs.name}")
         if gs.collapsed:
             gs.body.pack_forget()
         else:
             gs.body.pack(fill="x")
 
-    def _apply_grid(self, state: _MetricGrid) -> None:
-        """Reflow one grid: hide empty (「-」) cells when collapsed, repack the
-        rest tightly, and show/hide the expander row. The empty set is recomputed
-        every call so a session change that fills a previously-empty metric
-        brings its cell back automatically; the user's expand/collapse choice
-        persists on ``state.expanded`` across updates."""
-        empty = [c for c in state.cells
-                 if c.var.get() in ("-", UNSUPPORTED_LABEL)]
-        n_empty = len(empty)
-        if state.expanded or n_empty == 0:
-            shown = state.cells
+    def _toggle_view_density(self) -> None:
+        self._full_mode = not getattr(self, "_full_mode", False)
+        if self._full_mode:
+            self._mode_btn.set_text("完整版")
+            self._mode_btn.set_fg(theme.WARNING)
         else:
-            empty_ids = {id(c) for c in empty}
-            shown = [c for c in state.cells if id(c) not in empty_ids]
+            self._mode_btn.set_text("简要版")
+            self._mode_btn.set_fg(theme.ACCENT)
+        for state in self._grids:
+            state.expanded = self._full_mode
+            self._apply_grid(state)
+
+    def _apply_grid(self, state: _MetricGrid) -> None:
+        """Reflow one grid: hide non-brief or empty (「-」) cells in 简要版,
+        or show all in 完整版."""
+        full = getattr(self, "_full_mode", False) or state.expanded
+        if full:
+            shown = state.cells
+            hidden = []
+        else:
+            shown = [c for c in state.cells
+                     if c.key in BRIEF_METRIC_KEYS and c.var.get() not in ("-", UNSUPPORTED_LABEL)]
+            hidden = [c for c in state.cells if c not in shown]
+
         for i, c in enumerate(shown):
             c.frame.grid(row=i // _PER_ROW, column=i % _PER_ROW,
-                         sticky="nsew", padx=2)
-        if not state.expanded and n_empty > 0:
-            for c in empty:
-                c.frame.grid_remove()
-        if n_empty == 0:
-            state.expander.grid_remove()
-        else:
-            arrow = "▼" if state.expanded else "▶"
-            action = "收起" if state.expanded else "展开"
-            state.expander.config(text=f"{arrow} {n_empty} 项无数据或不适用（点击{action}）")
-            state.expander.grid()
+                         sticky="nsew", padx=2, pady=2)
+        for c in hidden:
+            c.frame.grid_remove()
 
-
+        # 彻底移除各网格底部的机械展开行，由顶部的【简要版/完整版】全局切换
+        state.expander.grid_remove()
 # --------------------------------------------------------------------------- #
 # Charts (Canvas)
 # --------------------------------------------------------------------------- #
@@ -1486,7 +2422,7 @@ class ScoreRankingView:
         # 只在会话视角显示（项目视角隐藏，见 _apply_layout）。
         self._grade_sec = grade_sec = CollapsibleSection(parent, "评级分布",
                                        theme.GROUP_COLORS["G_NEUTRAL"], expand=False)
-        self._grade_canvas = tk.Canvas(grade_sec.content, bg=theme.PANEL, height=38,
+        self._grade_canvas = tk.Canvas(grade_sec.content, bg=theme.PANEL, height=36,
                                        highlightthickness=0)
         self._grade_canvas.pack(fill="x", padx=2, pady=(0, 1))
         self._grade_canvas.bind("<Configure>", lambda e: self._draw_grade_bar())
@@ -1511,7 +2447,7 @@ class ScoreRankingView:
         decomp_frame = tk.Frame(paned, bg=theme.BG)
         paned.add(decomp_frame, minsize=340)
         # 左栏目标宽度（像素）：会话视角更窄（表只作定位），项目视角略宽。
-        self._sash_session = 210
+        self._sash_session = 380
         self._sash_project = 300
 
         # -- Treeview with 可折叠标题 --
@@ -1532,16 +2468,17 @@ class ScoreRankingView:
                            command=lambda: self._sort_by("delta"))
         self._tree.heading("tier",   text="等级", anchor="center",
                            command=lambda: self._sort_by("tier"))
-        self._tree.column("rank",     width=40,  minwidth=30,  stretch=False, anchor="center")
-        self._tree.column("session",  width=140, minwidth=80,  stretch=True,  anchor="w")
-        self._tree.column("score_val", width=70,  minwidth=50,  stretch=False, anchor="e")
+        self._tree.column("rank",     width=36,  minwidth=28,  stretch=False, anchor="center")
+        self._tree.column("session",  width=200, minwidth=140, stretch=True,  anchor="w")
+        self._tree.column("score_val", width=64, minwidth=50, stretch=False, anchor="e")
         self._tree.column("delta",    width=64,  minwidth=48,  stretch=False, anchor="e")
-        self._tree.column("tier",    width=70,  minwidth=50,  stretch=False, anchor="center")
+        self._tree.column("tier",    width=56,  minwidth=46,  stretch=False, anchor="center")
 
         sb = ttk.Scrollbar(tree_sec.content, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")  # 常驻细条：先占右侧
         self._tree.pack(fill="both", expand=True)
+        self._update_headings()  # 默认排序列（效率分降序）初始即显方向指示
 
         # Mousewheel on enter/leave (same pattern as project/session columns)
         self._unbind_wheel = None
@@ -1591,7 +2528,7 @@ class ScoreRankingView:
             self._fallback_note = SelectableLabel(
                 self._note_parent,
                 text="ℹ 会话缺少综合效率分（无净增行或成本数据）——当前按 TCER 排名。",
-                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI_SMALL,
+                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
                 padx=theme.PAD_M, pady=theme.PAD_XS)
         if self._fallback_tcer:
             self._fallback_note.pack(fill="x", before=self._paned_ref)
@@ -1697,28 +2634,51 @@ class ScoreRankingView:
                 counts[g] += 1
         total = sum(counts.values()) or 1
 
-        x = 2
-        bar_h = 22
-        y0 = 8
+        bar_w = min(w - 24, 640)
+        bar_h = 8
+        x0 = 12
+        y0 = 6
+
+        # 背景凹槽 (深灰底)
+        c.create_rectangle(x0, y0, x0 + bar_w, y0 + bar_h, fill=theme.CONTROL_BG, outline="", width=0)
+
+        cur_x = x0
         for g in grades_in_order:
             n = counts[g]
-            if n == 0 and self._grade_filter != g:
+            if n == 0:
                 continue
-            seg_w = max(28, int((n / total) * (w - 10)))
-            if x + seg_w > w - 2:
-                seg_w = w - 2 - x
+            seg_w = max(8, int((n / total) * bar_w))
+            if cur_x + seg_w > x0 + bar_w:
+                seg_w = x0 + bar_w - cur_x
             fill = theme.GRADE_HEX.get(g, theme.MUTED)
             if self._grade_filter and self._grade_filter != g:
                 fill = theme.GRADE_DIM
-            c.create_rectangle(x, y0, x + seg_w, y0 + bar_h,
-                               fill=fill, outline=theme.BG, width=1)
-            if seg_w > 36:
-                c.create_text(x + seg_w / 2, y0 + bar_h / 2,
-                              text=f"{g} {n}", fill=theme.FG_WHITE,
-                              font=theme.FONT_UI_SMALL, anchor="center")
-            self._grade_rects.append((x, y0, x + seg_w, y0 + bar_h, g))
-            x += seg_w + 2
+            c.create_rectangle(cur_x, y0, cur_x + seg_w, y0 + bar_h, fill=fill, outline="")
+            cur_x += seg_w
 
+        # 底部精致交互式 Tier 药丸项
+        pill_y = 22
+        px = x0
+        for g in grades_in_order:
+            n = counts[g]
+            dot_col = theme.GRADE_HEX.get(g, theme.MUTED)
+            is_active = (self._grade_filter == g)
+            txt_col = theme.FG_WHITE if is_active else (theme.FG if n > 0 else theme.MUTED)
+
+            start_x = px - 4
+            t_dot = c.create_text(px, pill_y, text="●", fill=dot_col, font=("Segoe UI", 8), anchor="w")
+            t_txt = c.create_text(px + 12, pill_y, text=f"{g} {n}", fill=txt_col,
+                                  font=theme.FONT_UI_SMALL_BOLD if is_active else theme.FONT_UI_SMALL,
+                                  anchor="w")
+            bbox = c.bbox(t_txt)
+            end_x = bbox[2] + 4 if bbox else px + 50
+            if is_active:
+                bg_rect = c.create_rectangle(start_x, pill_y - 8, end_x, pill_y + 8,
+                                             fill=theme.CONTROL_BG, outline=dot_col, width=1)
+                c.tag_lower(bg_rect, t_dot)
+
+            self._grade_rects.append((start_x, pill_y - 10, end_x, pill_y + 10, g))
+            px = end_x + 16
     def _on_grade_click(self, event) -> None:
         for x0, y0, x1, y1, g in self._grade_rects:
             if x0 <= event.x <= x1 and y0 <= event.y <= y1:
@@ -1817,7 +2777,20 @@ class ScoreRankingView:
             self._sort_col = col
             # 综合效率分默认降序；贡献Δ 默认升序（最拖累/最负排最前）。
             self._sort_reverse = (col == "score")
+        self._update_headings()
         self._rebuild_tree()
+
+    def _update_headings(self) -> None:
+        """表头排序方向指示（VS Code 式）：当前排序列标题尾缀 ▾ 降序 / ▴ 升序。
+
+        注意排序键与 heading 列名的映射（"score" 键 ↔ "score_val" 列）。"""
+        base = {"rank": "#", "session": "标题", "score": _SCORE_SHORT,
+                "delta": "贡献Δ", "tier": "等级"}
+        col_map = {"score": "score_val"}
+        for sort_key, text in base.items():
+            if sort_key == self._sort_col:
+                text += " ▾" if self._sort_reverse else " ▴"
+            self._tree.heading(col_map.get(sort_key, sort_key), text=text)
 
     # -- Decompose panel (ScrollFrame with group headers) ----------------------
 
@@ -1930,7 +2903,7 @@ class ScoreRankingView:
         for rc in recos:
             card = tk.Frame(sec.content, bg=theme.PANEL, padx=8, pady=6)
             card.pack(fill="x", pady=(0, 1))
-            SelectableLabel(card, text=f"\u25b8 {rc.title}", bg=theme.PANEL, fg=theme.FG,
+            SelectableLabel(card, text=f"▸ {rc.title}", bg=theme.PANEL, fg=theme.FG,
                             font=theme.FONT_UI_BOLD, justify="left").pack(fill="x")
             SelectableLabel(card, text=rc.why, bg=theme.PANEL, fg=theme.MUTED,
                             font=theme.FONT_UI_SMALL, justify="left").pack(fill="x")
@@ -2024,8 +2997,9 @@ class ScoreRankingView:
                                 font=theme.FONT_UI_SMALL, width=8, anchor="w",
                                 cursor=CLICK_CURSOR)
             name_lbl.pack(side="left")
+            # 数值中性（异常才着色）；好坏方向由 bar 上的彩色标记表达，图形比小字可读
             color = theme.VALUE_GOOD if val >= SCORE_AXIS_NEUTRAL else theme.VALUE_BAD
-            val_lbl = tk.Label(row, text=format_axis(val), bg=theme.PANEL, fg=color,
+            val_lbl = tk.Label(row, text=format_axis(val), bg=theme.PANEL, fg=theme.VALUE_NEUTRAL,
                                font=theme.FONT_VALUE, width=5, anchor="e")
             val_lbl.pack(side="left", padx=4)
             if axis_tip:
@@ -2147,8 +3121,9 @@ class ScoreRankingView:
                                 font=theme.FONT_UI_SMALL, width=8, anchor="w",
                                 cursor=CLICK_CURSOR)
             name_lbl.pack(side="left")
+            # 数值中性（异常才着色）；好坏方向由 bar 上的彩色标记表达，图形比小字可读
             color = theme.VALUE_GOOD if val >= SCORE_AXIS_NEUTRAL else theme.VALUE_BAD
-            val_lbl = tk.Label(row, text=format_axis(val), bg=theme.PANEL, fg=color,
+            val_lbl = tk.Label(row, text=format_axis(val), bg=theme.PANEL, fg=theme.VALUE_NEUTRAL,
                                font=theme.FONT_VALUE, width=5, anchor="e")
             val_lbl.pack(side="left", padx=4)
             if axis_tip:
@@ -2236,23 +3211,23 @@ class ScoreRankingView:
     # -- 洞察与意见（可执行诊断，仿 Claude Code /insights + /doctor）------------
     _INSIGHT_STYLE = {
         # kind -> (章节标题, 前景色, 行首标记)
-        "good": ("亮点", theme.VALUE_GOOD, "\u2713"),
+        "good": ("亮点", theme.VALUE_GOOD, "✓"),
         "drag": ("拖累项", theme.VALUE_BAD, "!"),
-        "cost": ("金额", theme.VIEW_PROJECT, "\uffe5"),  # 橙黄 ¥ 标记：花钱相关
-        "tip": ("快速改进", theme.ACCENT, "\u2192"),
+        "cost": ("金额", theme.VIEW_PROJECT, "￥"),  # 橙黄 ¥ 标记：花钱相关
+        "tip": ("快速改进", theme.ACCENT, "→"),
     }
     _INSIGHT_ORDER = ("good", "drag", "cost", "tip")
 
     def _render_insight_items(self, parent, items) -> None:
-        """\u628a\u4e00\u7ec4 Insight \u6309 \u4eae\u70b9/\u62d6\u7d2f\u9879/\u5feb\u901f\u6539\u8fdb \u5206\u7ec4\u6e32\u67d3\u5230 parent\u3002
+        """把一组 Insight 按 亮点/拖累项/快速改进 分组渲染到 parent。
 
-        \u6bcf\u7ec4\u4e00\u4e2a\u53ef\u70b9\u51fb\u6298\u53e0\u7684\u5c0f\u6807\u9898\uff08\u25bc/\u25b6 + \u540d\u79f0 + \u8ba1\u6570\uff09\uff1b\u4eae\u70b9\uff08good\uff09
-        \u9ed8\u8ba4\u6298\u53e0\uff08\u5148\u770b\u95ee\u9898\u3001\u518d\u770b\u8868\u626c\uff09\u3002\u6298\u53e0\u6001\u5b58 self._insight_collapsed\uff0c\u8de8\u9009\u4e2d\u4fdd\u6301\u3002
-        good/drag/tip \u5171\u7528\u540c\u4e00\u6e32\u67d3\uff08\u5355\u4f1a\u8bdd\u4e0e\u9879\u76ee\u7ea7\u90fd\u8d70\u8fd9\u91cc\uff09\u3002
+        每组一个可点击折叠的小标题（▼/▶ + 名称 + 计数）；亮点（good）
+        默认折叠（先看问题、再看表扬）。折叠态存 self._insight_collapsed，跨选中保持。
+        good/drag/tip 共用同一渲染（单会话与项目级都走这里）。
         """
         collapsed = getattr(self, "_insight_collapsed", None)
         if collapsed is None:
-            collapsed = self._insight_collapsed = {"good": True}  # \u4eae\u70b9\u9ed8\u8ba4\u6298\u53e0
+            collapsed = self._insight_collapsed = {"good": True}  # 亮点默认折叠
         by_kind = {"good": [], "drag": [], "cost": [], "tip": []}
         for it in items:
             by_kind.get(it.kind, by_kind["tip"]).append(it)
@@ -2265,34 +3240,34 @@ class ScoreRankingView:
             head_txt, color, mark = self._INSIGHT_STYLE[kind]
             is_collapsed = collapsed.get(kind, False)
 
-            # \u5206\u7ec4\u6807\u9898\uff08\u53ef\u70b9\u51fb\u6298\u53e0\uff09\uff1a\u25bc/\u25b6 + \u540d\u79f0\uff08N\uff09
+            # 分组标题（可点击折叠）：▼/▶ + 名称（N）
             header = tk.Frame(parent, bg=theme.PANEL, cursor=CLICK_CURSOR)
             header.pack(fill="x", pady=(8, 2))
-            arrow = "\u25b6" if is_collapsed else "\u25bc"
-            head_lbl = tk.Label(header, text=f"{arrow} {head_txt}\uff08{len(group)}\uff09",
+            arrow = "▶" if is_collapsed else "▼"
+            head_lbl = tk.Label(header, text=f"{arrow} {head_txt}（{len(group)}）",
                                 bg=theme.PANEL, fg=color, font=theme.FONT_UI_BOLD,
                                 anchor="w")
             head_lbl.pack(side="left", fill="x", expand=True)
 
-            # \u6b63\u6587\u5bb9\u5668\uff08\u6298\u53e0\u65f6 pack_forget\uff09\uff1b\u5de6\u4fa7\u8272\u6761 + \u7f29\u8fdb
+            # 正文容器（折叠时 pack_forget）；左侧色条 + 缩进
             body = tk.Frame(parent, bg=theme.PANEL)
             for it in group:
                 row = tk.Frame(body, bg=theme.PANEL)
                 row.pack(fill="x", pady=(2, 3))
-                # \u5de6\u4fa7\u5f69\u8272\u7ad6\u6761\uff08\u6309 kind \u4e0a\u8272\uff09
-                tk.Frame(row, bg=color, width=3).pack(side="left", fill="y")
+                # 左侧彩色竖条（色轨制：级别靠色轨，正文全中性）
+                tk.Frame(row, bg=color, width=theme.RAIL_W).pack(side="left", fill="y")
                 body_col = tk.Frame(row, bg=theme.PANEL)
                 body_col.pack(side="left", fill="x", expand=True, padx=(8, 0))
-                # \u6807\u9898\u884c\uff1a\u6807\u8bb0 + \u7ed3\u8bba
+                # 标题行：标记 + 结论（中性色——级别由色轨与分组标题承担）
                 SelectableLabel(body_col, text=f"{mark} {it.title}", bg=theme.PANEL,
-                                fg=color, font=theme.FONT_UI,
+                                fg=theme.FG, font=theme.FONT_UI,
                                 justify="left").pack(fill="x")
                 if it.evidence:
                     SelectableLabel(body_col, text=it.evidence, bg=theme.PANEL,
                                     fg=theme.MUTED, font=theme.FONT_UI,
                                     justify="left").pack(fill="x", padx=(14, 0))
                 if it.action:
-                    SelectableLabel(body_col, text=f"\u2192 {it.action}", bg=theme.PANEL,
+                    SelectableLabel(body_col, text=f"→ {it.action}", bg=theme.PANEL,
                                     fg=theme.FG, font=theme.FONT_UI,
                                     justify="left").pack(fill="x", padx=(14, 0))
             # body 必须锚定在自己 header 的正下方（after=header）。否则 pack 会把它
@@ -2305,8 +3280,8 @@ class ScoreRankingView:
                         n=len(group), col=color):
                 now = not self._insight_collapsed.get(k, False)
                 self._insight_collapsed[k] = now
-                arr = "\u25b6" if now else "\u25bc"
-                hl.config(text=f"{arr} {ht}\uff08{n}\uff09")
+                arr = "▶" if now else "▼"
+                hl.config(text=f"{arr} {ht}（{n}）")
                 if now:
                     b.pack_forget()
                 else:
@@ -2314,13 +3289,13 @@ class ScoreRankingView:
             header.bind("<Button-1>", _toggle)
             head_lbl.bind("<Button-1>", _toggle)
         if not rendered:
-            tk.Label(parent, text="\u6682\u65e0\u53ef\u6267\u884c\u6d1e\u5bdf\u3002",
+            tk.Label(parent, text="暂无可执行洞察。",
                      bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
                      anchor="w").pack(fill="x")
 
     def _build_insights_section(self, report) -> None:
         """会话视角「洞察与意见」：把 core.insights 的诊断分组渲染，让用户知道具体改什么。"""
-        sec = CollapsibleSection(self._decomp_inner, "\u6d1e\u5bdf\u4e0e\u610f\u89c1 (\u4f1a\u8bdd)",
+        sec = CollapsibleSection(self._decomp_inner, "洞察与意见 (会话)",
                                  theme.GROUP_COLORS["G6"], expand=True)
         wrap = tk.Frame(sec.content, bg=theme.PANEL, padx=6, pady=4)
         wrap.pack(fill="x", pady=(0, 1))
@@ -2339,14 +3314,12 @@ from .charts import (  # noqa: F401
 class ModelCompareView:
     """模型对比 — per-model stats in group/grid layout matching MetricPanel style."""
 
-    _COL_COLORS = ["#569cd6", "#4ec9b0", "#dcdcaa", "#ce9178", "#9cdcfe", "#c586c0"]
-
     def __init__(self, parent, controller=None):
         self.parent = parent
         self._models: list = []
         self._groups: list[_GroupState] = []
-        # 分组折叠状态（跨 update 保持）；「代码质量与行为」(M_QUAL) 默认折叠。
-        self._group_collapsed: dict[str, bool] = {"M_QUAL": True}
+        # 分组折叠状态（跨 update 保持）；所有分组默认展开
+        self._group_collapsed: dict[str, bool] = {}
 
         sf = ScrollFrame(parent, bg=theme.BG)
         sf.canvas.pack(fill="both", expand=True)
@@ -2370,19 +3343,22 @@ class ModelCompareView:
             self._build_group(group)
 
     def _build_header(self) -> None:
-        """Cost distribution bar + model summary, matching group header style."""
-        # Group header with title
-        header = tk.Frame(self._container, bg=theme.GROUP_COLORS["G_NEUTRAL"], padx=6, pady=3)
+        """Model summary（多模型时附成本占比条与模型卡片组）。"""
+        header = tk.Frame(self._container, bg=theme.PANEL_2, padx=10, pady=6)
         header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text="▼ 模型对比", bg=theme.GROUP_COLORS["G_NEUTRAL"], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        tk.Label(header, text="模型对比", bg=theme.PANEL_2, fg=theme.FG,
+                 font=theme.FONT_HEADING, anchor="w").pack(side="left")
+        n_mod = len(self._models)
+        subtitle = f"共 {n_mod} 个模型对比" if n_mod > 1 else "单模型深度表现"
+        tk.Label(header, text=f" · {subtitle}", bg=theme.PANEL_2, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL, anchor="w").pack(side="left")
 
-        # Cost distribution bar
+        # Cost distribution bar：仅多模型时绘制（段色锚定各列，单模型是纯噪声）。
         total_cost = sum(mc.cost for mc in self._models)
-        if total_cost > 0:
-            bar = tk.Frame(self._container, bg=theme.PANEL, padx=4, pady=4)
+        if total_cost > 0 and len(self._models) >= 2:
+            bar = tk.Frame(self._container, bg=theme.PANEL, padx=6, pady=4)
             bar.pack(fill="x")
-            canvas = tk.Canvas(bar, bg=theme.PANEL, height=20, highlightthickness=0)
+            canvas = tk.Canvas(bar, bg=theme.PANEL, height=18, highlightthickness=0)
             canvas.pack(fill="x")
 
             def draw_bar(_e=None):
@@ -2390,91 +3366,126 @@ class ModelCompareView:
                 w = canvas.winfo_width()
                 if w < 10:
                     return
-                # Draw colored segments
                 rx = 0.0
                 for i, mc in enumerate(self._models):
                     rw = mc.cost / total_cost
-                    color = self._COL_COLORS[i % len(self._COL_COLORS)]
+                    color = theme.CHART_PALETTE[i % len(theme.CHART_PALETTE)]
                     x1 = int(rx * w)
                     x2 = int((rx + rw) * w)
-                    canvas.create_rectangle(x1, 0, x2, 20, fill=color, outline="")
+                    canvas.create_rectangle(x1, 0, x2, 18, fill=color, outline="")
                     rx += rw
-                # Draw model names on top (always visible)
                 rx = 0.0
                 for i, mc in enumerate(self._models):
                     rw = mc.cost / total_cost
                     x1 = int(rx * w)
                     x2 = int((rx + rw) * w)
                     cx = (x1 + x2) / 2
-                    if x2 - x1 > 20:
-                        canvas.create_text(cx, 10, text=mc.display_name,
-                                           fill=theme.BG,
-                                           font=(theme.FONT_MONO_NAME, 7))
+                    if x2 - x1 > 28:
+                        canvas.create_text(cx, 9, text=mc.display_name,
+                                           fill=theme.FG_WHITE,
+                                           font=(theme.FONT_MONO_NAME, 8, "bold"))
                     rx += rw
 
             canvas.bind("<Configure>", draw_bar)
             canvas.after(10, draw_bar)
 
-        # Summary grid: model names + cost + sessions
-        grid = tk.Frame(self._container, bg=theme.PANEL, padx=4, pady=4)
-        grid.pack(fill="x", pady=(0, 1))
+        # Summary deck: elevated model cards
+        deck = tk.Frame(self._container, bg=theme.BG)
+        deck.pack(fill="x", pady=(4, 4))
         for j, mc in enumerate(self._models):
-            color = self._COL_COLORS[j % len(self._COL_COLORS)]
-            cell = tk.Frame(grid, bg=theme.PANEL, padx=6, pady=2)
-            cell.grid(row=0, column=j, sticky="nsew", padx=2)
-            name_lbl = tk.Label(cell, text=mc.display_name, bg=theme.PANEL, fg=color,
+            cell = tk.Frame(deck, bg=theme.PANEL_2, padx=12, pady=6)
+            cell.pack(side="left", fill="both", expand=True, padx=4)
+
+            row0 = tk.Frame(cell, bg=theme.PANEL_2)
+            row0.pack(fill="x")
+            if len(self._models) >= 2:
+                dot_color = theme.CHART_PALETTE[j % len(theme.CHART_PALETTE)]
+                tk.Label(row0, text="●", bg=theme.PANEL_2, fg=dot_color,
+                         font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
+            name_lbl = tk.Label(row0, text=mc.display_name, bg=theme.PANEL_2, fg=theme.FG_WHITE,
                                 font=theme.FONT_VALUE, anchor="w")
-            name_lbl.pack(anchor="w")
+            name_lbl.pack(side="left")
+
             cost_str = model_display(mc, "m_cost")
-            sub_lbl = tk.Label(cell, text=f"{cost_str} · {mc.session_count} 会话",
-                               bg=theme.PANEL, fg=theme.MUTED,
+            share_str = f" · 占比 {mc.cost_share * 100:.1f}%" if len(self._models) >= 2 else ""
+            sub_lbl = tk.Label(cell, text=f"{cost_str} · {mc.session_count} 会话{share_str}",
+                               bg=theme.PANEL_2, fg=theme.MUTED,
                                font=theme.FONT_UI_SMALL, anchor="w")
-            sub_lbl.pack(anchor="w")
+            sub_lbl.pack(anchor="w", pady=(2, 0))
+
             price_tip = _model_price_tip(mc)
-            for w in (cell, name_lbl, sub_lbl):
+            for w in (cell, row0, name_lbl, sub_lbl):
                 Tooltip(w, price_tip)
-        for j in range(len(self._models)):
-            grid.grid_columnconfigure(j, weight=1)
 
     def _build_group(self, group) -> None:
         """Build one per-model metric group from a metric_defs.Group (SSOT)."""
         collapsed = self._group_collapsed.get(group.id, False)
         gframe = tk.Frame(self._container, bg=theme.BG)
-        gframe.pack(fill="x", pady=(1, 0))
-        header = tk.Frame(gframe, bg=theme.GROUP_COLORS["G2"], padx=6, pady=3)
+        gframe.pack(fill="x", pady=(4, 0))
+
+        # 宝石色映射
+        GROUP_ACCENTS = {
+            "M_TOK": theme.GROUP_COLORS["G2"],   # 宝石蓝
+            "M_COST": theme.GROUP_COLORS["G5"],  # 琥珀金
+            "M_EFF": theme.GROUP_COLORS["G3"],   # 青碧绿
+            "M_QUAL": theme.GROUP_COLORS["G4"],  # 翡翠绿
+        }
+        accent_col = GROUP_ACCENTS.get(group.id, theme.ACCENT)
+
+        header_bg = theme.PANEL_2
+        header = tk.Frame(gframe, bg=header_bg, height=28, cursor=CLICK_CURSOR)
         header.pack(fill="x")
-        arrow_lbl = tk.Label(header, text=f"{'▶' if collapsed else '▼'} {group.name}",
-                             bg=theme.GROUP_COLORS["G2"], fg=theme.FG,
-                             font=theme.FONT_UI_SMALL_BOLD, anchor="w", cursor=CLICK_CURSOR)
-        arrow_lbl.pack(side="left")
-        body = tk.Frame(gframe, bg=theme.BG)
+        header.pack_propagate(False)
+
+        # 3px 宝石色左侧指示条
+        bar = tk.Frame(header, bg=accent_col, width=3)
+        bar.pack(side="left", fill="y")
+
+        arrow_lbl = tk.Label(header, text=f"{'▸' if collapsed else '▾'} {group.name}",
+                             bg=header_bg, fg=theme.FG,
+                             font=theme.FONT_UI_BOLD, anchor="w", cursor=CLICK_CURSOR)
+        arrow_lbl.pack(side="left", fill="y", padx=(8, 6))
+
+        tk.Label(header, text=f"{len(group.metrics)} 项", bg=header_bg, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL).pack(side="right", padx=10)
+
+        body = tk.Frame(gframe, bg=theme.PANEL)
         body.pack(fill="x")
 
-        grid = tk.Frame(body, bg=theme.PANEL, padx=4, pady=4)
-        grid.pack(fill="x", pady=(0, 1))
+        # 多模型时渲染专属表头（仅出现一次，不再每个分组重复罗列冗余模型名）
+        if len(self._models) >= 2:
+            th_row = tk.Frame(body, bg=theme.PANEL_2, height=24)
+            th_row.pack(fill="x")
+            th_row.pack_propagate(False)
+            tk.Label(th_row, text="指标名称", bg=theme.PANEL_2, fg=theme.MUTED,
+                     font=theme.FONT_UI_SMALL_BOLD, width=18, anchor="w").pack(side="left", padx=(12, 8))
+            th_right = tk.Frame(th_row, bg=theme.PANEL_2)
+            th_right.pack(side="right", fill="both", expand=True, padx=(8, 16))
+            for j, mc in enumerate(self._models):
+                lbl = tk.Label(th_right, text=mc.display_name, bg=theme.PANEL_2, fg=theme.FG,
+                               font=theme.FONT_UI_SMALL_BOLD, anchor="e")
+                lbl.grid(row=0, column=j, sticky="nsew", padx=4)
+                th_right.grid_columnconfigure(j, weight=1)
 
-        # Column headers (model names)
-        tk.Label(grid, text="", bg=theme.PANEL, width=14).grid(row=0, column=0)
-        for j, mc in enumerate(self._models):
-            color = self._COL_COLORS[j % len(self._COL_COLORS)]
-            tk.Label(grid, text=mc.display_name, bg=theme.PANEL, fg=color,
-                     font=theme.FONT_UI_SMALL_BOLD, anchor="e").grid(
-                         row=0, column=j + 1, sticky="e", padx=2)
-
-        # Metric rows — name / value / tooltip / 好坏方向 all come from the SSOT.
+        # 逐行渲染指标（带斑马纹 + 悬停全行高亮 + 单模型紧凑自适应对齐）
         for i, metric in enumerate(group.metrics):
             key = metric.key
             tip_text = model_tip(key)
+            row_bg = theme.PANEL_2 if i % 2 == 1 else theme.PANEL
 
-            name_lbl = tk.Label(grid, text=metric.name, bg=theme.PANEL, fg=theme.FG,
-                                font=theme.FONT_UI_SMALL, anchor="w")
-            name_lbl.grid(row=i + 1, column=0, sticky="w")
+            row = tk.Frame(body, bg=row_bg, height=27)
+            row.pack(fill="x")
+            row.pack_propagate(False)
+
+            name_lbl = tk.Label(row, text=metric.name, bg=row_bg, fg=theme.FG,
+                                font=theme.FONT_UI_SMALL, width=18, anchor="w")
+            name_lbl.pack(side="left", padx=(12, 8))
             if tip_text:
                 Tooltip(name_lbl, tip_text)
 
-            # Gold-highlight the best value in this row. metric.sentiment follows
-            # the metric's 词性: "up"=越大越好, "down"=越小越好. Skipped for metrics
-            # with no good/bad direction, or when all models tie.
+            widgets_in_row = [row, name_lbl]
+
+            # 计算最优值高亮（金色 VALUE_BEST）
             row_colors: dict[int, str] = {}
             if metric.sentiment in ("up", "down"):
                 valid = [(j, model_raw(mc, key)) for j, mc in enumerate(self._models)]
@@ -2486,18 +3497,50 @@ class ModelCompareView:
                         if v == target:
                             row_colors[j] = theme.VALUE_BEST
 
-            for j, mc in enumerate(self._models):
+            # 单模型 vs 多模型排版
+            if len(self._models) == 1:
+                mc = self._models[0]
                 val = model_display(mc, key)
-                lbl = tk.Label(grid, text=val, bg=theme.PANEL,
-                               fg=row_colors.get(j, theme.VALUE_NEUTRAL),
-                               font=theme.FONT_VALUE, anchor="e")
-                lbl.grid(row=i + 1, column=j + 1, sticky="e", padx=2)
+                val_lbl = tk.Label(row, text=val, bg=row_bg,
+                                   fg=row_colors.get(0, theme.FG_WHITE),
+                                   font=theme.FONT_VALUE, anchor="e")
+                val_lbl.pack(side="right", padx=(8, 16))
                 if tip_text:
-                    Tooltip(lbl, tip_text)
+                    Tooltip(val_lbl, tip_text)
+                widgets_in_row.append(val_lbl)
+            else:
+                val_container = tk.Frame(row, bg=row_bg)
+                val_container.pack(side="right", fill="both", expand=True, padx=(8, 16))
+                widgets_in_row.append(val_container)
+                for j, mc in enumerate(self._models):
+                    val = model_display(mc, key)
+                    val_lbl = tk.Label(val_container, text=val, bg=row_bg,
+                                       fg=row_colors.get(j, theme.VALUE_NEUTRAL),
+                                       font=theme.FONT_VALUE, anchor="e")
+                    val_lbl.grid(row=0, column=j, sticky="nsew", padx=4)
+                    val_container.grid_columnconfigure(j, weight=1)
+                    if tip_text:
+                        Tooltip(val_lbl, tip_text)
+                    widgets_in_row.append(val_lbl)
 
-        # Make columns expandable
-        for j in range(len(self._models) + 1):
-            grid.grid_columnconfigure(j, weight=1)
+            # 悬停全行高亮反馈
+            def _bind_hover(r=row, wlist=widgets_in_row, default_bg=row_bg):
+                def _enter(_e):
+                    for w in wlist:
+                        try:
+                            w.configure(bg=theme.CONTROL_BG)
+                        except tk.TclError:
+                            pass
+                def _leave(_e):
+                    for w in wlist:
+                        try:
+                            w.configure(bg=default_bg)
+                        except tk.TclError:
+                            pass
+                for w in wlist:
+                    w.bind("<Enter>", _enter, add="+")
+                    w.bind("<Leave>", _leave, add="+")
+            _bind_hover()
 
         gs = _GroupState(name=group.name, arrow=arrow_lbl, body=body, collapsed=collapsed)
         self._groups.append(gs)
@@ -2510,12 +3553,11 @@ class ModelCompareView:
         """点击分组标题：折叠/展开整组（状态记入 self._group_collapsed，跨 update 保持）。"""
         gs.collapsed = not gs.collapsed
         self._group_collapsed[gid] = gs.collapsed
-        gs.arrow.config(text=f"{'▶' if gs.collapsed else '▼'} {gs.name}")
+        gs.arrow.config(text=f"{'▸' if gs.collapsed else '▾'} {gs.name}")
         if gs.collapsed:
             gs.body.pack_forget()
         else:
             gs.body.pack(fill="x")
-
 
 def _model_price_tip(mc) -> str:
     """Tooltip text: a model's full list price (the four $/MTok billing rates).
@@ -2692,7 +3734,7 @@ class RealProjectsView:
         card = Card(self._container, on_click=_toggle, padx=1, pady=1)
 
         # 第 1 行：项目路径（盘符统一大写，来自 _display_cwd）+ 右侧成本金额
-        # （与会话卡片同款：$两位小数、方向着色——成本>0 红、$0 绿、FONT_VALUE）。
+        # （与会话卡片同款：$ 两位小数、FONT_VALUE、异常才着色——≥$50 警示橙，平时中性）
         row1 = tk.Frame(card.frame, bg=theme.PANEL_2)
         row1.pack(fill="x", padx=theme.PAD_S, pady=(theme.PAD_S, 0))
         arrow = tk.Label(row1, text="▾" if expanded else "▸", bg=theme.PANEL_2,
@@ -2700,7 +3742,7 @@ class RealProjectsView:
         arrow.pack(side="left", padx=(2, 4))
         card.bind_to(arrow)
         cost = t.get("cost") or 0.0
-        cost_fg = theme.VALUE_BAD if cost > 0 else theme.VALUE_GOOD
+        cost_fg = theme.WARNING if cost >= 50.0 else theme.FG
         cost_lbl = tk.Label(row1, bg=theme.PANEL_2, fg=cost_fg,
                             font=theme.FONT_VALUE, anchor="e",
                             text=f"${cost:.2f}")
@@ -2910,10 +3952,11 @@ class PhasePortraitWidget:
         self._view_mode = "manifold"
         self._mode_btns = {}
         for m_key, m_name in (("manifold", "时序流形"), ("phase_plane", "相速度极限环")):
-            btn = tk.Label(self.mode_frame, text=m_name, bg=theme.PANEL_2,
-                           fg=theme.FG, font=theme.FONT_UI_SMALL, padx=8, pady=2, cursor=CLICK_CURSOR)
+            btn = RoundedPill(self.mode_frame, text=m_name, radius=4, height=22,
+                              fill=theme.PANEL_2, hover_fill=theme.HOVER_BG,
+                              bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_SMALL,
+                              command=lambda _p=None, m=m_key: self._set_mode(m))
             btn.pack(side="left", padx=2)
-            btn.bind("<Button-1>", lambda _e, m=m_key: self._set_mode(m))
             self._mode_btns[m_key] = btn
         self._update_mode_btns()
         # 缩放平移交互控制（Zoom & Pan）
@@ -2936,24 +3979,27 @@ class PhasePortraitWidget:
         self.zoom_frame = tk.Frame(left_top, bg=theme.CARD_HEADER_BG)
         self.zoom_frame.pack(side="left", padx=(12, 0))
 
-        btn_out = tk.Label(self.zoom_frame, text="－", bg=theme.PANEL_2,
-                           fg=theme.FG, font=theme.FONT_UI_SMALL, padx=6, pady=2, cursor=CLICK_CURSOR)
+        btn_out = RoundedPill(self.zoom_frame, text="－", width=22, height=20, radius=4,
+                              fill=theme.PANEL_2, hover_fill=theme.HOVER_BG,
+                              bg=theme.CARD_HEADER_BG, fg=theme.FG,
+                              command=lambda: self._zoom(0.85))
         btn_out.pack(side="left", padx=1)
-        btn_out.bind("<Button-1>", lambda _e: self._zoom(0.85))
 
         self.zoom_lbl = tk.Label(self.zoom_frame, text="100%", bg=theme.CARD_HEADER_BG,
                                  fg=theme.MUTED, font=theme.FONT_UI_SMALL, padx=4)
         self.zoom_lbl.pack(side="left", padx=1)
 
-        btn_in = tk.Label(self.zoom_frame, text="＋", bg=theme.PANEL_2,
-                          fg=theme.FG, font=theme.FONT_UI_SMALL, padx=6, pady=2, cursor=CLICK_CURSOR)
+        btn_in = RoundedPill(self.zoom_frame, text="＋", width=22, height=20, radius=4,
+                             fill=theme.PANEL_2, hover_fill=theme.HOVER_BG,
+                             bg=theme.CARD_HEADER_BG, fg=theme.FG,
+                             command=lambda: self._zoom(1.18))
         btn_in.pack(side="left", padx=1)
-        btn_in.bind("<Button-1>", lambda _e: self._zoom(1.18))
 
-        btn_rst = tk.Label(self.zoom_frame, text="复位", bg=theme.PANEL_2,
-                           fg=theme.FG, font=theme.FONT_UI_SMALL, padx=6, pady=2, cursor=CLICK_CURSOR)
+        btn_rst = RoundedPill(self.zoom_frame, text="复位", width=36, height=20, radius=4,
+                              fill=theme.PANEL_2, hover_fill=theme.HOVER_BG,
+                              bg=theme.CARD_HEADER_BG, fg=theme.FG,
+                              command=lambda: self._reset_zoom())
         btn_rst.pack(side="left", padx=(3, 1))
-        btn_rst.bind("<Button-1>", lambda _e: self._reset_zoom())
 
         Tooltip(self.zoom_frame,
                 "视口缩放与平移漫游：\n"
@@ -4879,11 +5925,11 @@ class LlmReportsView:
         paned = tk.PanedWindow(parent, orient="horizontal", bg=theme.BG, sashwidth=3)
         paned.pack(fill="both", expand=True, padx=theme.PAD_S, pady=theme.PAD_S)
         self._paned_ref = paned
-        self._sash_target = 330
+        self._sash_target = 240
 
-        # 左：报告列表（类型 / 解读对象 / 模型 / 时间）— 仅用于点选定位，保持紧凑
+        # 左：报告列表（类型 / 解读对象 / 模型 / 时间）— 保持紧凑，把黄金空间留给阅读区
         left = tk.Frame(paned, bg=theme.BG)
-        paned.add(left, minsize=200)
+        paned.add(left, minsize=160)
         # 左顶部：标题栏 + 数量 + 清空按钮
         bar = tk.Frame(left, bg=theme.BG)
         bar.pack(fill="x", pady=(0, theme.PAD_XS))
@@ -4895,33 +5941,32 @@ class LlmReportsView:
         self._count_lbl = tk.Label(bar, text="", bg=theme.BG, fg=theme.MUTED,
                                    font=theme.FONT_UI_SMALL)
         self._count_lbl.pack(side="left", padx=8)
-        flat_button(bar, "清空", self._clear_all, padx=theme.PAD_S).pack(side="right", padx=2)
+        clear_btn = flat_button(bar, "清空", self._clear_all, padx=theme.PAD_XS)
+        clear_btn.pack(side="right", padx=2)
+        Tooltip(clear_btn, "清空所有本地 LLM 报告记录")
         if on_cancel_tasks is not None:
-            # 取消生成中任务入口（controller 注入回调；后 pack 在「清空」左侧）
-            self._cancel_tasks_btn = flat_button(
-                bar, "取消生成中任务", on_cancel_tasks, padx=theme.PAD_S)
+            self._cancel_tasks_btn = flat_button(bar, "取消生成中任务", on_cancel_tasks, padx=theme.PAD_XS)
             self._cancel_tasks_btn.pack(side="right", padx=2)
-
+            Tooltip(self._cancel_tasks_btn, "终止所有进行中与排队中的后台分析任务")
         # 搜索与类型过滤工具条
-        filter_box = tk.Frame(left, bg=theme.BG)
+        self._filter_box = filter_box = tk.Frame(left, bg=theme.BG)
         filter_box.pack(fill="x", pady=(0, 6))
 
         # 第一行：类型切换胶囊
         self._pill_frame = tk.Frame(filter_box, bg=theme.BG)
         self._pill_frame.pack(fill="x", pady=(0, 4))
-        self._pill_btns: dict[str, tk.Widget] = {}
+        self._pill_btns: dict[str, RoundedPill] = {}
         for k, lbl in (("all", "全部"), ("session", "会话"), ("dynamics", "相空间"),
                        ("project", "项目"), ("compare", "对比"), ("other", "其他")):
-            btn = tk.Label(self._pill_frame, text=lbl, bg=theme.PANEL_2,
-                           fg=theme.FG, font=theme.FONT_UI_SMALL,
-                           padx=6, pady=2, cursor=CLICK_CURSOR)
+            btn = RoundedPill(self._pill_frame, text=lbl, width=52, height=22, radius=4,
+                              fill=theme.CONTROL_BG, hover_fill=theme.HOVER_BG,
+                              bg=theme.BG, fg=theme.FG, font=theme.FONT_UI_SMALL,
+                              command=lambda _p=None, kind=k: self._set_kind_filter(kind))
             btn.pack(side="left", padx=(0, 4))
-            btn.bind("<Button-1>", lambda _e, kind=k: self._set_kind_filter(kind))
             self._pill_btns[k] = btn
 
-        # 第二行：实时搜索框
-        search_wrap = tk.Frame(filter_box, bg=theme.PANEL_2, highlightthickness=1,
-                               highlightbackground=theme.BORDER)
+        # 第二行：实时搜索框（底色槽无描边）
+        search_wrap = tk.Frame(filter_box, bg=theme.PANEL_2)
         search_wrap.pack(fill="x", pady=(2, 0))
         _si = ui_icon(search_wrap, "search")
         if _si is not None:
@@ -4931,13 +5976,13 @@ class LlmReportsView:
         self._search_entry = tk.Entry(
             search_wrap, textvariable=self._search_var, bg=theme.PANEL_2,
             fg=theme.FG, insertbackground=theme.FG, relief="flat",
-            borderwidth=0, highlightthickness=0, font=theme.FONT_UI_SMALL)
+            borderwidth=0, highlightthickness=0, font=theme.FONT_UI)
         self._search_entry.pack(side="left", fill="x", expand=True, padx=4, pady=2)
         self._search_entry.bind("<KeyRelease>", lambda _e: self._on_search_changed())
         Tooltip(self._search_entry, "按标题 / 解读对象 / 模型 / 内容 实时过滤")
 
         # 列表 Treeview
-        tree_container = tk.Frame(left, bg=theme.PANEL)
+        self._tree_container = tree_container = tk.Frame(left, bg=theme.PANEL)
         tree_container.pack(fill="both", expand=True)
         cols = ("kind", "title", "time")
         self._tree = ttk.Treeview(tree_container, columns=cols, show="headings",
@@ -4950,6 +5995,7 @@ class LlmReportsView:
                                command=lambda c=col: self._sort_by(c))
             self._tree.column(col, width=w, minwidth=mw, stretch=stretch,
                               anchor=anchor)
+        self._update_headings()  # 默认按时间降序，初始即显方向
 
         sb = ttk.Scrollbar(tree_container, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
@@ -4977,10 +6023,9 @@ class LlmReportsView:
         right = tk.Frame(paned, bg=theme.PANEL)
         paned.add(right, minsize=380)
 
-        # 右顶部：结构化元数据 Hero 卡片
+        # 右顶部：结构化元数据 Hero 卡片（明度阶分区，无边框）
         self._header_card = tk.Frame(
-            right, bg=theme.PANEL_2, relief="flat", highlightthickness=1,
-            highlightbackground=theme.BORDER)
+            right, bg=theme.PANEL_2, relief="flat")
         self._header_card.pack(fill="x", padx=10, pady=(4, 6))
 
         # 卡片第一行：标题 + 操作按钮
@@ -5001,24 +6046,28 @@ class LlmReportsView:
         self._badge_row = tk.Frame(self._header_card, bg=theme.PANEL_2)
         self._badge_row.pack(fill="x", padx=10, pady=(0, 8))
 
-        self._kind_badge = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL, fg=theme.ACCENT,
-            font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self._kind_badge = RoundedPill(
+            self._badge_row, text="", width=95, height=22, radius=4,
+            fill=theme.PANEL, hover_fill=None, bg=theme.PANEL_2, fg=theme.ACCENT,
+            command=None)
         self._kind_badge.pack(side="left", padx=(0, 6))
 
-        self._source_badge = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL, fg=theme.FG,
-            font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self._source_badge = RoundedPill(
+            self._badge_row, text="", width=75, height=22, radius=4,
+            fill=theme.PANEL, hover_fill=None, bg=theme.PANEL_2, fg=theme.FG,
+            command=None)
         self._source_badge.pack(side="left", padx=(0, 6))
 
-        self._model_badge = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL, fg=theme.FG,
-            font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self._model_badge = RoundedPill(
+            self._badge_row, text="", width=120, height=22, radius=4,
+            fill=theme.PANEL, hover_fill=None, bg=theme.PANEL_2, fg=theme.FG,
+            command=None)
         self._model_badge.pack(side="left", padx=(0, 6))
 
-        self._scope_badge = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL, fg=theme.MUTED,
-            font=theme.FONT_UI_SMALL, padx=6, pady=1)
+        self._scope_badge = RoundedPill(
+            self._badge_row, text="", width=80, height=22, radius=4,
+            fill=theme.PANEL, hover_fill=None, bg=theme.PANEL_2, fg=theme.MUTED,
+            command=None)
         self._scope_badge.pack(side="left", padx=(0, 6))
 
         self._metrics_lbl = tk.Label(
@@ -5200,12 +6249,19 @@ class LlmReportsView:
             else:
                 counts["other"] += 1
         for k, btn in self._pill_btns.items():
+            cnt = counts.get(k, 0)
             active = (self._kind_filter == k)
-            bg = theme.HOVER_ACCENT if active else theme.PANEL_2
-            fg = theme.FG_WHITE if active else theme.FG
+            # 0 计数分类（除全部外且非激活）隐藏，避免占位噪音
+            if cnt == 0 and not active and k != "all":
+                btn.pack_forget()
+                continue
+            else:
+                btn.pack(side="left", padx=(0, 4))
+            bg = theme.SEL_ROW_ACTIVE if active else theme.CONTROL_BG
+            fg = theme.FG_WHITE if active else theme.MUTED
             label = {"all": "全部", "session": "会话", "dynamics": "相空间",
                      "project": "项目", "compare": "对比", "other": "其他"}.get(k, k)
-            btn.config(text=f"{label} {counts.get(k, 0)}", bg=bg, fg=fg)
+            btn.config(text=f"{label} {cnt}", bg=bg, fg=fg)
 
         # 过滤报告集合
         filtered = [r for r in self._reports if self._matches_filter(r)]
@@ -5269,6 +6325,7 @@ class LlmReportsView:
         self._kind_badge.config(text="")
         self._source_badge.config(text="")
         self._model_badge.config(text="")
+        self._model_badge.pack_forget()
         self._scope_badge.config(text="")
         self._metrics_lbl.config(text="")
         self._time_lbl.config(text="")
@@ -5280,7 +6337,16 @@ class LlmReportsView:
         else:
             self._sort_col = col
             self._sort_desc = (col in ("time",))
+        self._update_headings()
         self._refresh_list()
+
+    def _update_headings(self) -> None:
+        """表头排序方向指示：当前排序列尾缀 ▾ 降序 / ▴ 升序（同效率榜）。"""
+        base = {"kind": "类型/态势", "title": "解读对象 / 标题", "time": "时间"}
+        for col, text in base.items():
+            if col == self._sort_col:
+                text += " ▾" if self._sort_desc else " ▴"
+            self._tree.heading(col, text=text)
 
     def _on_tree_enter(self, _event=None) -> None:
         from .platform import bind_mousewheel
@@ -5319,13 +6385,22 @@ class LlmReportsView:
         self._title_lbl.config(text=title)
         if kind == "dynamics":
             _status_key, s_lbl, s_col = self._resolve_dynamics_status(r)
-            self._kind_badge.config(text=f"[相空间 · {s_lbl}]", fg=s_col)
+            self._kind_badge.config(text=f"相空间 · {s_lbl}", fg=s_col)
         else:
             self._kind_badge.config(
-                text=f"[{kind_meta['label']}解读]", fg=kind_meta["color"])
-        self._source_badge.config(text=f"源: {r.get('source') or 'claude'}")
-        self._model_badge.config(text=f"模型: {r.get('model') or '-'}")
-        self._scope_badge.config(text=f"档位: {r.get('scope') or '-'}")
+                text=f"{kind_meta['label']}解读", fg=kind_meta["color"])
+        self._source_badge.config(text=f"源：{r.get('source') or 'claude'}")
+        # 模型徽标：旧报告无 model 字段时整体隐藏（不显示「模型：-」占位）
+        model_name = r.get("model")
+        if model_name:
+            self._model_badge.config(text=f"模型：{model_name}")
+            self._model_badge.pack(side="left", padx=(0, 6),
+                                   before=self._scope_badge)
+        else:
+            self._model_badge.config(text="")
+            self._model_badge.pack_forget()
+        # 「范围」= 授权数据范围摘要（勿叫「档位」——供给档 standard/rich/full 是另一维度）
+        self._scope_badge.config(text=f"范围：{r.get('scope') or '—'}")
         warns = r.get("audit_warnings")
         if isinstance(warns, list) and warns:
             self._audit_badge.config(
@@ -5381,6 +6456,16 @@ class LlmReportsView:
         except Exception:
             pass
 
+    def select_session_report(self, sid: str) -> bool:
+        """从主列表选中会话时自动联动展示专属报告。"""
+        if not sid:
+            return False
+        for r in self._reports:
+            r_sid = str(r.get("session_id") or r.get("id") or "")
+            if r_sid == sid or sid in r_sid:
+                self.select_report(r.get("id"))
+                return True
+        return False
     def _on_tree_context_menu(self, event) -> None:
         item = self._tree.identify_row(event.y)
         if item:
