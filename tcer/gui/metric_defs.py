@@ -820,7 +820,7 @@ UNSUPPORTED_LABEL = "不适用"
 
 SOURCE_LABELS = {
     "claude": "Claude", "codex": "Codex", "opencode": "OpenCode",
-    "grok": "Grok", "omp": "Oh My Pi", "pi": "Pi",
+    "grok": "Grok", "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
 }
 
 # key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
@@ -829,8 +829,8 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "subagent": frozenset({"claude", "grok"}),
     "memory_files": frozenset({"claude"}),
     # Claude 的推理输出并入「输出」，不单独上报
-    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "grok", "pi"}),
-    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "grok", "pi"}),
+    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "grok", "pi", "antigravity"}),
+    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "grok", "pi", "antigravity"}),
     # Codex/Grok 运行时信号（Grok 来自 signals.json）
     "context_window": frozenset({"codex", "grok"}),
     "context_window_used": frozenset({"codex", "grok"}),
@@ -859,7 +859,7 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "user_modified": frozenset({"claude"}),
     "revert_events": frozenset({"opencode", "grok"}),
     "hook_overhead": frozenset({"claude"}),
-    "slash_commands": frozenset({"claude", "omp", "pi"}),
+    "slash_commands": frozenset({"claude", "omp", "pi", "antigravity"}),
     "plan_modes": frozenset({"claude", "omp"}),
     # 压缩代价（compactMetadata）与 LOC 可信度（structuredPatch）仅 Claude 暴露。
     "compaction_cost": frozenset({"claude"}),
@@ -875,7 +875,7 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "rate_limit_hits": frozenset({"claude", "codex", "omp"}),
     "task_completion": frozenset({"codex", "grok"}),
     "compactions": frozenset({"claude", "codex", "opencode", "grok"}),
-    "web_searches": frozenset({"claude", "codex", "grok", "omp", "pi"}),
+    "web_searches": frozenset({"claude", "codex", "grok", "omp", "pi", "antigravity"}),
     "image_inputs": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
     # Codex 不上报缓存写入 (reader 恒 0)，显示 0 会误导
     "cache_write": frozenset({"claude", "opencode", "omp", "pi"}),

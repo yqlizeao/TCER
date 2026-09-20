@@ -15,7 +15,7 @@ from functools import reduce
 from pathlib import Path
 from typing import Callable
 
-from tcer.core import codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, pi_reader, pricing, reader
+from tcer.core import antigravity_reader, codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, pi_reader, pricing, reader
 from tcer.core.models import ProjectRef, SessionMeta, SessionReport, TokenUsage
 from tcer.core.paths import ref_root, resolve_project
 
@@ -1069,7 +1069,67 @@ _PI = _SourceAdapter(
     subagents_of=lambda ref, f: len(pi_reader._subagent_files(f)),
 )
 
-_ADAPTERS = (_CODEX, _OPENCODE, _GROK, _OMP, _PI)
+
+# ---- antigravity hooks ----------------------------------------------------- #
+def _antigravity_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        f, "antigravity_usage", lambda: antigravity_reader.aggregate_usage(f)
+    )
+
+
+def _antigravity_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        f, "antigravity_loc", lambda: antigravity_reader.session_loc_full(f)
+    )
+
+
+_ANTIGRAVITY = _SourceAdapter(
+    source="antigravity",
+    entrypoint="agy",
+    resolve=antigravity_reader.resolve_project,
+    sessions=antigravity_reader.discover_sessions,
+    read_meta=lambda ref, f: antigravity_reader.read_session_meta(f),
+    usage_of=_antigravity_usage_of,
+    loc_of=_antigravity_loc_of,
+    session_key=lambda ref, f: (antigravity_reader.read_session_meta(f).session_id or f.stem),
+    not_found="antigravity project '{project}' not found under ~/.gemini/antigravity-cli",
+    no_sessions="no antigravity session files for '{name}'",
+    no_match="no antigravity session matches '{session}'",
+)
+
+
+def analyze_antigravity_project(
+    project: str | ProjectRef,
+    *,
+    session: str | None = None,
+    no_loc: bool = False,
+    task_type: str = metrics.DEFAULT_TASK_TYPE,
+    baseline_tcer: float | None = None,
+    baseline_cpe: float | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    cancel_event: threading.Event | None = None,
+    auto_infer: bool = False,
+) -> ProjectAnalysis:
+    """Analyze one Antigravity (agy) project."""
+    return _analyze_source_project(
+        _ANTIGRAVITY,
+        project,
+        session=session,
+        no_loc=no_loc,
+        task_type=task_type,
+        baseline_tcer=baseline_tcer,
+        baseline_cpe=baseline_cpe,
+        since=since,
+        until=until,
+        cancel_check=_make_cancel_check(cancel_event),
+        auto_infer=auto_infer,
+    )
+
+
+_ADAPTERS = (_CODEX, _OPENCODE, _GROK, _OMP, _PI, _ANTIGRAVITY)
 
 
 def _synth_meta(session_id: str, sample: Path) -> SessionMeta:

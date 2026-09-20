@@ -977,11 +977,14 @@ class TcerGui:
             if source == "pi":
                 from tcer.core import pi_reader
                 return pi_reader.read_user_messages(r.meta.path)
+            if source == "antigravity":
+                from tcer.core import antigravity_reader
+                return antigravity_reader.read_user_messages(r.meta.path)
             # Claude
             return TcerGui._claude_user_messages(r)
 
         label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
-                 "omp": "Oh My Pi", "pi": "Pi"}.get(source, "Claude")
+                 "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity"}.get(source, "Claude")
 
         if is_agg:
             groups: list[tuple[str, list[str]]] = []

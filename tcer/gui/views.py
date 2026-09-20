@@ -96,8 +96,11 @@ def _short_name(project_hash: str) -> str:
 def project_label(project) -> str:
     """Display label for a source-aware project ref or legacy Path."""
     source = getattr(project, "source", "claude")
-    if source in ("codex", "opencode", "grok", "omp", "pi"):
-        default = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi", "pi": "Pi"}.get(source, source)
+    if source in ("codex", "opencode", "grok", "omp", "pi", "antigravity"):
+        default = {
+            "codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
+            "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
+        }.get(source, source)
         return getattr(project, "display_name", None) or getattr(project, "key", default)
     name = getattr(project, "name", None) or getattr(project, "key", str(project))
     return _short_name(name)
@@ -121,7 +124,7 @@ def project_drive(project) -> str | None:
 
 _SOURCE_DISPLAY = {
     "codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
-    "omp": "Oh My Pi", "pi": "Pi",
+    "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
 }
 
 
@@ -257,6 +260,9 @@ def project_open_path(project) -> str:
     if source == "pi":
         from tcer.core.paths import pi_sessions_dir
         return str(pi_sessions_dir())
+    if source == "antigravity":
+        from tcer.core.paths import antigravity_conversations_dir
+        return str(antigravity_conversations_dir())
     path = getattr(project, "path", None)
     cwd = getattr(project, "cwd", None)
     return str(path or cwd or project)
@@ -960,6 +966,7 @@ class FilterBar:
             "grok": "Grok",
             "omp": "Oh My Pi",
             "pi": "Pi",
+            "antigravity": "Antigravity",
         }
         self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
 
@@ -1959,7 +1966,7 @@ class SessionColumn:
         menu.add_separator()
 
         # Destructive action — last item, gated behind a二次确认对话框.
-        readonly = report.meta.source in ("codex", "opencode", "grok", "omp", "pi")
+        readonly = report.meta.source in ("codex", "opencode", "grok", "omp", "pi", "antigravity")
         delete_state = "disabled" if readonly else "normal"
         delete_label = "删除会话…" if not readonly else f"删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(

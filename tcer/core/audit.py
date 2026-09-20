@@ -39,7 +39,7 @@ from functools import reduce
 from pathlib import Path
 from typing import Any, Iterable
 
-from tcer.core import analyze, codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, pi_reader, reader
+from tcer.core import analyze, antigravity_reader, codex_reader, grok_reader, loc, metrics, omp_reader, opencode_reader, pi_reader, reader
 from tcer.core.models import ProjectRef, TokenUsage
 from tcer.core.paths import list_project_refs, ref_root, resolve_project
 
@@ -475,6 +475,13 @@ def _audit_file_session(
             not bad,
             detail=f"raw pi tool names leaked: {bad} -- map via _PI_TOOL_MAP",
         ))
+    if source == "antigravity":
+        bad = [k for k in report.usage.tool_calls if k in antigravity_reader._ANTIGRAVITY_TOOL_MAP]
+        sa.checks.append(_truth(
+            "antigravity_tools_canonical",
+            not bad,
+            detail=f"raw antigravity tool names leaked: {bad} -- map via _ANTIGRAVITY_TOOL_MAP",
+        ))
     # LOC + self-rework rescan (guards rework_deleted / net_loc regressions).
     if report.net_loc is not None:
         try:
@@ -483,6 +490,7 @@ def _audit_file_session(
                 "grok": grok_reader.session_loc_full,
                 "omp": omp_reader.session_loc_full,
                 "pi": pi_reader.session_loc_full,
+                "antigravity": lambda p: antigravity_reader.session_loc_full(p)[0],
             }[source]
             sloc = _loc_fn(report.meta.path)
             sa.checks.append(_eq(
@@ -744,6 +752,8 @@ def audit_ref(
             sa = _audit_file_session(rep, source="omp", aggregate_fn=omp_reader.aggregate_usage)
         elif ref.source == "pi":
             sa = _audit_file_session(rep, source="pi", aggregate_fn=pi_reader.aggregate_usage)
+        elif ref.source == "antigravity":
+            sa = _audit_file_session(rep, source="antigravity", aggregate_fn=antigravity_reader.aggregate_usage)
         else:
             sa = SessionAudit(
                 session_id="?",
@@ -962,7 +972,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Closed-loop audit: analyze real local sessions and re-verify against raw files.",
     )
     p.add_argument("--source", default="all",
-                   choices=["all", "claude", "codex", "grok", "opencode", "omp", "pi"],
+                   choices=["all", "claude", "codex", "grok", "opencode", "omp", "pi", "antigravity"],
                    help="Data source (default: all when --project set, else all)")
     p.add_argument("--project", default=None,
                    help="Project key or substring (e.g. TCER, c--GitHub-TCER)")

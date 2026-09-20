@@ -271,6 +271,23 @@ def pi_sessions_dir() -> Path:
     return pi_agent_dir() / "sessions"
 
 
+def antigravity_dir() -> Path:
+    """Return the Antigravity CLI config/data root (``~/.gemini/antigravity-cli`` by default).
+
+    Honors the ``ANTIGRAVITY_DIR``, ``ANTIGRAVITY_CLI_DIR``, or ``GEMINI_CLI_DIR`` env overrides.
+    """
+    for env in ("ANTIGRAVITY_DIR", "ANTIGRAVITY_CLI_DIR", "GEMINI_CLI_DIR"):
+        val = os.environ.get(env)
+        if val:
+            return Path(val)
+    return Path.home() / ".gemini" / "antigravity-cli"
+
+
+def antigravity_conversations_dir() -> Path:
+    """Return the directory containing Antigravity session SQLite databases."""
+    return antigravity_dir() / "conversations"
+
+
 def encode_hash(cwd: str | Path) -> str:
     """Encode a working-directory path into its project-hash folder name.
 
@@ -347,6 +364,12 @@ def project_has_sessions(ref: ProjectRef) -> bool:
             return bool(opencode_reader.sessions_for_project(ref))
         except Exception:  # noqa: BLE001 — treat unreadable as empty
             return False
+    if ref.source == "antigravity":
+        from tcer.core import antigravity_reader
+        try:
+            return bool(antigravity_reader.discover_sessions(ref))
+        except Exception:  # noqa: BLE001 — treat unreadable as empty
+            return False
     return False
 
 
@@ -384,7 +407,7 @@ def _max_mtime_ms(paths) -> int | None:
 def project_latest_activity_ms(ref: ProjectRef) -> int | None:
     """Epoch ms of *ref*'s most-recent session activity (approx ≈ last write).
 
-    Claude/codex/grok/omp: max session-file mtime. OpenCode: max(session.time_created)
+    Claude/codex/grok/omp/antigravity: max session-file mtime. OpenCode: max(session.time_created)
     from SQLite (== authoritative started_at). Returns None when there are no
     scannable files / the project is empty / all stats failed. Lazy-imports
     readers like ``project_has_sessions`` to avoid import cycles with ``paths``.
@@ -396,6 +419,13 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
         return _max_mtime_ms(files)
     if ref.source in ("codex", "grok", "omp", "pi"):
         return _max_mtime_ms(ref.session_paths)
+    if ref.source == "antigravity":
+        from tcer.core import antigravity_reader
+        try:
+            sessions = antigravity_reader.discover_sessions(ref)
+            return _max_mtime_ms(sessions)
+        except Exception:
+            return None
     if ref.source == "opencode":
         from tcer.core import opencode_reader
         try:
@@ -408,8 +438,8 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
 def list_project_refs(source: str = "all") -> list[ProjectRef]:
     """Return source-aware project refs for the GUI.
     ``source`` is one of ``"all"``, ``"claude"``, ``"codex"``, ``"opencode"``,
-    ``"grok"``, ``"omp"``, or ``"pi"``. Claude refs wrap real project
-    directories; Codex/OpenCode/Grok/omp/pi refs are grouped by session
+    ``"grok"``, ``"omp"``, ``"pi"``, or ``"antigravity"``. Claude refs wrap real project
+    directories; Codex/OpenCode/Grok/omp/pi/antigravity refs are grouped by session
     cwd/project directory.
     """
     refs: list[ProjectRef] = []
@@ -445,6 +475,10 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
         from tcer.core import pi_reader
 
         refs.extend(pi_reader.list_project_refs())
+    if source in ("all", "antigravity"):
+        from tcer.core import antigravity_reader
+
+        refs.extend(antigravity_reader.list_project_refs())
     return sorted(refs, key=lambda r: (r.source, r.display_name.lower()))
 
 

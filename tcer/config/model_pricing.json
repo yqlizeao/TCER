@@ -26,6 +26,44 @@
     "cache_write": 3.75
   },
   "models": {
+    "gemini-3.8-flash": {
+      "display_name": "Gemini 3.8 Flash",
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.0375,
+      "cache_write": 0.0,
+      "_note": "Google Gemini 3.8 Flash 标准计价：Input $0.15/MTok, Output $0.60/MTok, Cache Read $0.0375/MTok"
+    },
+    "gemini-3.8-flash-high": {
+      "display_name": "Gemini 3.8 Flash (High)",
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.0375,
+      "cache_write": 0.0,
+      "_note": "Google Gemini 3.8 Flash 高思考档位"
+    },
+    "gemini-2.5-pro": {
+      "display_name": "Gemini 2.5 Pro",
+      "input": 1.25,
+      "output": 5.0,
+      "cache_read": 0.3125,
+      "cache_write": 0.0,
+      "_note": "Google Gemini 2.5 Pro 旗舰推理模型"
+    },
+    "gemini-2.5-flash": {
+      "display_name": "Gemini 2.5 Flash",
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.0375,
+      "cache_write": 0.0
+    },
+    "gemini-2.0-flash": {
+      "display_name": "Gemini 2.0 Flash",
+      "input": 0.1,
+      "output": 0.4,
+      "cache_read": 0.025,
+      "cache_write": 0.0
+    },
     "claude-fable-5-1": {
       "display_name": "Claude Fable 5.1",
       "input": 10,
