@@ -936,7 +936,11 @@ class SessionTimelinePopup:
         except Exception as e:
             ok, payload = False, f"TypeSafe Jev 判定失败：{e}"
 
-        self._ui_queue.put(lambda: self._llm_done(ok, payload, ["metrics"], is_dynamics=True, provider="typesafe"))
+        # typesafe 动力学报告为本地模板合成，不跑语义审计（同 app 路径口径：
+        # 只审自由生成的 LLM 叙事，模板文案会被「术语超纲/无据表扬」误伤）
+        self._ui_queue.put(lambda: self._llm_done(
+            ok, payload, ["metrics"], is_dynamics=True, provider="typesafe",
+            semantic=None))
         try:
             self._after_host.after(0, self._drain_ui_queue)
         except Exception:
@@ -976,8 +980,34 @@ class SessionTimelinePopup:
             ok, payload = False, str(e)
         except Exception as e:  # 网络栈意外异常同样落到错误展示
             ok, payload = False, f"解读失败：{e}"
+        # 语义审计（方案 A）在 worker 线程执行（网络调用不进主线程）；
+        # 仅配置 typesafe key 时参与，失败静默降级 None
+        semantic = self._semantic_audit(payload) if ok else None
         # 放入线程安全队列，由主线程 _poll_ui_queue 立即调度（彻底根除 Windows 跨线程 after 丢失）
-        self._ui_queue.put(lambda: self._llm_done(ok, payload, scope, is_dynamics))
+        self._ui_queue.put(lambda: self._llm_done(
+            ok, payload, scope, is_dynamics, semantic=semantic))
+
+    def _semantic_audit(self, text: str):
+        """语义审计（方案 A：反谄媚审计官，worker 线程内调用）。
+
+        Jev 对报告文本做 Noul 扇出，抓本地正则抓不住的违约形态（无据表扬/
+        和稀泥归因/术语超纲/结论无据/建议空泛）。未配置 typesafe key 返回
+        None（零联网）；任何失败同样返回 None，不影响主报告。
+        """
+        from tcer.core import llm_prefs, llm_prompts, typesafe_client
+        try:
+            if not llm_prefs.typesafe_enabled():
+                return None
+            state, questions = llm_prompts.build_semantic_audit_payload(text)
+            resp = typesafe_client.evaluate(
+                state, questions,
+                api_key=llm_prefs.typesafe_api_key() or "",
+                base_url=llm_prefs.typesafe_base_url(),
+                model=llm_prefs.typesafe_model(),
+            )
+            return llm_prompts.format_semantic_audit((resp or {}).get("answers", {}))
+        except Exception:
+            return None
         try:
             self._after_host.after(0, self._drain_ui_queue)  # 立即调度单次排空队列
         except Exception:
@@ -1007,7 +1037,8 @@ class SessionTimelinePopup:
         except (tk.TclError, RuntimeError):
             pass
 
-    def _llm_done(self, ok: bool, payload: str, scope, is_dynamics: bool = False, provider: str = "general") -> None:
+    def _llm_done(self, ok: bool, payload: str, scope, is_dynamics: bool = False,
+                  provider: str = "general", semantic=None) -> None:
         """主线程回填（setter 层兜底：弹窗刚销毁的窗口期不炸）。"""
         import time as _time
         from tcer.core import llm_prefs, llm_reports, llm_prompts
@@ -1058,6 +1089,7 @@ class SessionTimelinePopup:
                 "kind": kind,
                 "title": title,
                 "audit_warnings": audit_flags,
+                "audit_semantic": semantic,
                 "session_id": meta.session_id,
                 "session_title": meta.title,
                 "source": meta.source or "claude",

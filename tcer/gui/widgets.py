@@ -380,6 +380,31 @@ class ScrollFrame:
         self.canvas.yview_moveto(0)
         self._reset_pending = False
 
+    def see(self, widget) -> None:
+        """Scroll canvas to ensure ``widget`` is visible."""
+        try:
+            self.canvas.update_idletasks()
+            c_h = self.canvas.winfo_height()
+            if c_h <= 1:
+                return
+            sr = self.canvas.cget("scrollregion").split()
+            if len(sr) < 4:
+                return
+            total_h = float(sr[3])
+            if total_h <= c_h:
+                return
+            wy = widget.winfo_y()
+            wh = widget.winfo_height()
+            top_frac = wy / total_h
+            bot_frac = (wy + wh) / total_h
+            curr_top, curr_bot = self.canvas.yview()
+            if top_frac < curr_top:
+                self.canvas.yview_moveto(top_frac)
+            elif bot_frac > curr_bot:
+                self.canvas.yview_moveto(max(0.0, (wy + wh - c_h) / total_h))
+        except Exception:
+            pass
+
 
 class Card:
     """A selectable list card with solid elevation, state rail, and hover feedback.
@@ -526,6 +551,14 @@ class Card:
                     w.configure(fg=orig_fg)
                 except tk.TclError:
                     pass
+
+    def select(self) -> None:
+        """Visual select shorthand."""
+        self.set_selected(True)
+
+    def deselect(self) -> None:
+        """Visual deselect shorthand."""
+        self.set_selected(False)
 
 class MetricCell:
     """One metric tile: colored title + value (StringVar) + unit + tooltip.
@@ -811,7 +844,8 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, pady=No
     padx/pady 默认 PAD_M/PAD_XS；传值可放大主操作按钮（如「立即更新」）。
     macOS 下用 ``_MacButton``（tk.Label）绕开 Aqua 主题 tk.Button 的白背景 bug。
     """
-    base_bg = theme.ACCENT if primary else theme.PANEL
+    custom_bg = kw.pop("bg", None)
+    base_bg = custom_bg if custom_bg is not None else (theme.ACCENT if primary else theme.PANEL)
     hover_bg = theme.HOVER_ACCENT if primary else theme.HOVER_BG
     fg = theme.FG_WHITE if primary else theme.FG
     pad_x = theme.PAD_M if padx is None else padx
@@ -1312,6 +1346,16 @@ class RoundedPill(tk.Canvas):
             self._fg = kw.pop("fg", kw.pop("foreground", None))
         if "text" in kw:
             self._text = kw.pop("text")
+            import tkinter.font as tkfont
+            try:
+                txt_w = tkfont.Font(font=self._font).measure(self._text)
+                ico_extra = (getattr(self._icon, "width", lambda: 16)() + 4) if self._icon else 0
+                needed_w = txt_w + ico_extra + 18
+                if needed_w > self._width_px:
+                    self._width_px = needed_w
+                    super().configure(width=needed_w)
+            except Exception:
+                pass
         if "font" in kw:
             self._font = kw.pop("font")
         self._redraw()
@@ -1376,7 +1420,13 @@ class RoundedSearchBox(tk.Canvas):
             return "break"
         self.entry.bind("<Escape>", _clear)
         self.bind("<Button-1>", lambda _e: self.entry.focus_set())
+        self.bind("<Configure>", self._on_configure)
         self._redraw()
+
+    def _on_configure(self, event) -> None:
+        if event.width > 20 and event.width != self._width_px:
+            self._width_px = event.width
+            self._redraw()
 
     def _redraw(self) -> None:
         self.delete("bg")

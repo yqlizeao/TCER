@@ -58,6 +58,7 @@ SUCCESS = "#22c55e"         # 活力翡翠绿
 WARNING = "#f59e0b"         # 明亮温暖金橙
 ERROR = "#ef4444"           # 清晰活力珊瑚红
 CYAN = "#06b6d4"            # 高亮电光青蓝
+CODE_MINT = "#4ec9b0"       # VS Code 官方标准代码语法青色
 PURPLE = "#a855f7"          # 典雅紫罗兰
 VIEW_PROJECT = "#f59e0b"    # 温暖金橙项目视角标识色
 

@@ -267,9 +267,9 @@ class TcerGui:
         paned = tk.PanedWindow(container, orient="horizontal", bg=theme.BG, sashwidth=4)
         paned.pack(side="left", fill="both", expand=True)
 
-        # 左侧全高侧边栏 (Primary Sidebar，通顶)
+        # 左侧全高侧边栏 (Primary Sidebar，通顶) — 紧凑索引，突出右侧主体展示
         sidebar = tk.Frame(paned, bg=theme.PANEL)
-        paned.add(sidebar, minsize=260, width=320)
+        paned.add(sidebar, minsize=180, width=240)
 
         # 侧栏顶部标题条
         sb_head = tk.Frame(sidebar, bg=theme.PANEL, height=28)
@@ -344,7 +344,7 @@ class TcerGui:
         self._paned = paned
         container.update_idletasks()
         try:
-            paned.sash_place(0, 280, 0)
+            paned.sash_place(0, 240, 0)
             self.sidebar_paned.sash_place(0, 0, 220)
         except (TypeError, ValueError, tk.TclError):
             pass
@@ -353,7 +353,11 @@ class TcerGui:
         if isinstance(saved, list):
             try:
                 if len(saved) >= 1:
-                    paned.sash_place(0, int(saved[0]), 0)
+                    s0 = int(saved[0])
+                    # 紧凑侧栏：仅作用户索引，若历史保存偏大（如过往设定的 350+），重置为紧凑的 240
+                    if s0 > 300:
+                        s0 = 240
+                    paned.sash_place(0, s0, 0)
                 if len(saved) >= 2 and hasattr(self, "sidebar_paned"):
                     s1 = min(250, max(140, int(saved[1])))
                     self.sidebar_paned.sash_place(0, 0, s1)
@@ -1387,6 +1391,116 @@ class TcerGui:
         """从右键菜单直接发起：相空间收敛动力学分析（异步并发，收信箱模型）。"""
         self._run_session_llm(report, is_dynamics=True)
 
+    def run_correction_crosscheck(self, report) -> None:
+        """从右键菜单直接发起：纠正信号交叉验证（方案 C：正则 vs Jev 双引擎对账）。
+
+        Jev 逐条判定用户消息是否为「纠正先前方向」，与指标层 CORRECTION_RE
+        确定性判定对账——分歧点（疑似误报/漏报）是深挖入口。结果只进解读层
+        报告（kind="crosscheck"），绝不回写指标。
+        """
+        from tkinter import messagebox
+        from concurrent.futures import ThreadPoolExecutor
+        from uuid import uuid4
+        from tcer.core import llm_prefs
+
+        if not llm_prefs.typesafe_enabled():
+            messagebox.showinfo(
+                "纠正信号交叉验证",
+                "该功能使用 TypeSafe Jev 引擎做语义判定。\n\n"
+                "请先点击工具栏「LLM设置」配置 TypeSafe API Key。",
+                parent=self.root)
+            self.show_llm_config()
+            return
+
+        # 消息量级预估（出境内容 = 用户消息文本，截断 400 字符/条）
+        try:
+            n_msgs = len(report.usage.user_msgs or 0) or 0
+        except Exception:
+            n_msgs = 0
+        if not messagebox.askyesno(
+                "纠正信号交叉验证（数据出境确认）",
+                "将向 TypeSafe System One 发送本会话的**用户消息文本**做语义判定：\n"
+                f"模型：{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}\n"
+                f"出境范围：用户消息（约 {n_msgs} 条，每条截断 400 字符）\n"
+                "预计成本：不足 1 美分（单请求 Noul 扇出）。\n\n"
+                "判定结果只进「LLM 报告」收信箱，不参与任何指标计算；出境后不可撤销。\n\n"
+                "是否立即开始？",
+                parent=self.root):
+            return
+
+        sid = report.meta.session_id or report.meta.path.stem
+        dedup_key = (sid, "crosscheck")
+        if any(t["key"] == dedup_key for t in self._llm_tasks.values()):
+            self.filter.set_status("该会话的交叉验证任务已在生成中，请在收信箱稍候")
+            return
+
+        session_title = report.meta.title or sid[:12]
+        task_id = uuid4().hex
+        task_desc = f"{session_title} · 纠正信号交叉验证"
+        if self._llm_executor is None:
+            self._llm_executor = ThreadPoolExecutor(
+                max_workers=3, thread_name_prefix="tcer-llm")
+        future = self._llm_executor.submit(
+            self._crosscheck_worker, report, task_id, task_desc)
+        self._llm_tasks[task_id] = {"key": dedup_key, "desc": task_desc, "future": future}
+        self.filter.set_status(
+            f"正在请求 {llm_prefs.typesafe_model()} 交叉验证: {session_title}…",
+            fg=theme.ACCENT)
+
+    def _crosscheck_worker(self, report, task_id: str, task_desc: str) -> None:
+        """交叉验证 worker（线程池内执行）：读用户消息 → Jev 扇出 → 对账入库。"""
+        from uuid import uuid4
+        from tcer.core import llm_prefs, llm_prompts, llm_reports, typesafe_client
+        import time as _time
+        import sys as _sys
+        try:
+            messages = TcerGui._load_user_messages(report, [])[0]
+            if not messages:
+                raise typesafe_client.TypesafeError("本会话未读到用户消息（或该源不支持）")
+
+            state, questions = llm_prompts.build_correction_crosscheck_payload(messages)
+            if not questions:
+                raise typesafe_client.TypesafeError("无可对账的用户消息")
+            resp = typesafe_client.evaluate(
+                state, questions,
+                api_key=llm_prefs.typesafe_api_key() or "",
+                base_url=llm_prefs.typesafe_base_url(),
+                model=llm_prefs.typesafe_model(),
+            )
+            text, xdata = llm_prompts.format_correction_crosscheck(
+                messages, (resp or {}).get("answers", {}))
+
+            meta = report.meta
+            session_title = meta.title or meta.session_id or "会话"
+            entry_id = f"{int(_time.time() * 1000)}_{uuid4().hex[:8]}"
+            audit_flags = llm_prompts.audit_warnings(text, False, "crosscheck")
+            entry = {
+                "id": entry_id,
+                "created_at": int(_time.time() * 1000),
+                "kind": "crosscheck",
+                "title": f"{session_title} · 纠正信号交叉验证",
+                "audit_warnings": audit_flags,
+                "audit_semantic": None,   # 本地合成报告，谄媚风险为零，跳过语义审计
+                "session_id": meta.session_id,
+                "session_title": meta.title,
+                "source": meta.source or "claude",
+                "model": llm_prefs.typesafe_model(),
+                "scope": "user_messages",
+                "turns": 0,
+                "net_loc": report.net_loc,
+                "cost_display": "",
+                "text": text,
+                "crosscheck_data": xdata,
+            }
+            llm_reports.append(entry)
+            print(f"[LLM Task] Success: saved crosscheck {entry_id}")
+            self._llm_ui_queue.put(
+                lambda: self._on_llm_task_done(task_id, task_desc.split(" · ")[0], entry_id))
+        except Exception as e:
+            print(f"[LLM Task Error] {task_desc}: {e}", file=_sys.stderr)
+            self._llm_ui_queue.put(
+                lambda: self._on_llm_task_error(task_id, task_desc, str(e)))
+
     def _run_session_llm(self, report, is_dynamics: bool) -> None:
         """从会话列表直接派发 LLM 任务（收信箱模型：首次确认 + 去重 + 有界线程池 + UI 队列回填）。"""
         from tkinter import messagebox
@@ -1598,12 +1712,34 @@ class TcerGui:
             # Jev 级联报告为本地确定性合成章节，按其实际标题校验必备节）
             audit_flags = llm_prompts.audit_warnings(
                 text, is_dynamics, "typesafe" if use_typesafe else "general")
+            # 语义审计（方案 A：反谄媚审计官）——Jev 对报告文本做 Noul 扇出，
+            # 抓正则抓不住的违约形态。仅配置了 typesafe key 时参与（opt-in）；
+            # 任何失败静默降级为 None，绝不影响主报告入库。
+            # 仅审「自由生成的 LLM 叙事」——use_typesafe 的动力学报告与
+            # crosscheck 均为本地模板合成（谄媚风险为零，且模板里的 ζ/η/
+            # 「反馈质量良好」会被误伤成「术语超纲/无据表扬」，实测打脸）。
+            audit_semantic = None
+            if llm_prefs.typesafe_enabled() and not use_typesafe:
+                try:
+                    from tcer.core import typesafe_client as _ts_client
+                    sa_state, sa_q = llm_prompts.build_semantic_audit_payload(text)
+                    sa_resp = _ts_client.evaluate(
+                        sa_state, sa_q,
+                        api_key=llm_prefs.typesafe_api_key() or "",
+                        base_url=llm_prefs.typesafe_base_url(),
+                        model=llm_prefs.typesafe_model(),
+                    )
+                    audit_semantic = llm_prompts.format_semantic_audit(
+                        (sa_resp or {}).get("answers", {}))
+                except Exception:
+                    audit_semantic = None
             entry = {
                 "id": entry_id,
                 "created_at": int(_time.time() * 1000),
                 "kind": kind,
                 "title": title,
                 "audit_warnings": audit_flags,
+                "audit_semantic": audit_semantic,
                 "session_id": meta.session_id,
                 "session_title": meta.title,
                 "source": meta.source or "claude",

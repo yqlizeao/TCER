@@ -4,10 +4,10 @@
     "source": "farion1231/cc-switch — seed_model_pricing()",
     "source_url": "https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/database/schema.rs",
     "source_raw": "https://raw.githubusercontent.com/farion1231/cc-switch/main/src-tauri/src/database/schema.rs",
-    "fetched_at": "2026-09-03",
-    "ref": "main @ 2026-09-03（cc-switch v3.20.1 + models.dev 审计 + 官方页裁决）：新增 claude-fable-5-1 / claude-mythos-5-1（官方确认缓存读新倍率 0.025× = $0.25，其余 Claude 模型 0.1×；1h 缓存写 20、Batch 5/25）、gemini-3.8-flash（官方页与 3.6/3.7 完全同构，介绍价 0.75/3.75/0.075 至 2026-12-31，依例外口径录当前价）、qwen3.8-flash（国际站 0.15/0.47 与价表 qwen 系口径一致，国内刊例 ¥0.8/¥2.7 记 _note）；**claude-sonnet-5 官方宣布介绍价 2/10 转永久标准价、原定 9-01 涨至 3/15 取消**，主价改 2/10/0.2/2.5；其余价差均为上轮已裁决口径（deepseek 闲时档/gemini 3.6-3.8 介绍价/gpt-5.6 标准价+促销 note/qwen 双轨搁置/models.dev 对 deepseek-v4 与 glm-5v-turbo 的误录），复核维持",
+    "fetched_at": "2026-09-21",
+    "ref": "main @ 2026-09-21（cc-switch v3.20.1 + 厂商官方最新定价页审计）：收录 2026-09-04 发布的 gpt-6-astra（10/50/1/12.5）；依当前时间（2026-09-21）生效口径采用实际执行价格：GPT-5.6 Sol 家族采用促销期价 4/20/0.4/5（至少持续至 2026-11-21，挂牌价 5/30 记 _note）；Gemini 3.8/3.6/3.7 Flash 采用介绍期价 0.75/3.75/0.075（至 2026-12-31，纠正 3.8 历史误录）；DeepSeek V4.1 Flash（deepseek-flash，0.3/1.2/0.006）正式入库，V4 Flash 与 V4 Pro 依 09-11 与 09-14 官方下线与路由公告采用当前实际承接价 0.3/1.2/0.006；o3-mini / o1-mini 降至 0.55/2.2；kimi-k2-thinking 降至 0.55/2.2/0.1；qwen3.8-flash 补全缓存读写；Terra/Luna 按量价同步",
     "unit": "USD per 1,000,000 tokens (厂商官方 list 价；CNY 按官方汇率折算)",
-    "pricing_policy": "默认录标准价（非限时促销/介绍价）；峰谷分时录闲时档；促销价/峰时价/Batch 等多轨与分段计费记入条目 _note（GUI 价表悬浮可见）。例外（2026-08-27 用户决策）：介绍期长且覆盖当前计费期的模型录当前生效价（如 gemini-3.6/3.7-flash 介绍价至 2026-12-31），恢复后的标准价记入 _note",
+    "pricing_policy": "依当前时间（2026-09-21）采用厂商实际生效执行价格（含当前生效的介绍价与限时促销价）；恢复后的标准挂牌价、历史峰谷时段、Batch 等多轨与分段计费记入条目 _note（GUI 价表悬浮可见）。",
     "fields": {
       "input": "非缓存输入 (input_cost_per_million)",
       "output": "输出 (output_cost_per_million)",
@@ -15,7 +15,7 @@
       "cache_write": "缓存写入/创建 (cache_creation_cost_per_million)；0 表示该模型无独立缓存写入计价",
       "_note": "（可选）计价备注：多轨价、峰谷时段、分段计费、别名跟随关系等，GUI 悬浮展示"
     },
-    "model_count": 219,
+    "model_count": 225,
     "note": "可自由增删 models 条目；未匹配到的模型回退到 default（Anthropic 通用 list 价）。"
   },
   "default": {
@@ -28,41 +28,41 @@
   "models": {
     "gemini-3.8-flash": {
       "display_name": "Gemini 3.8 Flash",
-      "input": 0.15,
-      "output": 0.6,
-      "cache_read": 0.0375,
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
       "cache_write": 0.0,
-      "_note": "Google Gemini 3.8 Flash 标准计价：Input $0.15/MTok, Output $0.60/MTok, Cache Read $0.0375/MTok"
+      "_note": "介绍价至 2026-12-31（当前生效）；2027-01-01 起恢复挂牌价 1.50/7.50/0.15；Batch/Flex 0.375/1.875/0.0375、Priority 1.35/6.75/0.135；缓存存储 $0.5/百万token/小时"
     },
     "gemini-3.8-flash-high": {
       "display_name": "Gemini 3.8 Flash (High)",
-      "input": 0.15,
-      "output": 0.6,
-      "cache_read": 0.0375,
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
       "cache_write": 0.0,
-      "_note": "Google Gemini 3.8 Flash 高思考档位"
+      "_note": "Google Gemini 3.8 Flash 高思考档位，介绍期同 gemini-3.8-flash"
     },
     "gemini-2.5-pro": {
       "display_name": "Gemini 2.5 Pro",
       "input": 1.25,
-      "output": 5.0,
-      "cache_read": 0.3125,
-      "cache_write": 0.0,
-      "_note": "Google Gemini 2.5 Pro 旗舰推理模型"
+      "output": 10,
+      "cache_read": 0.125,
+      "cache_write": 0,
+      "_note": "分段计费：上下文 >200k 时输入 2.5 / 输出 15 / 缓存读 0.25（单价翻倍）"
     },
     "gemini-2.5-flash": {
       "display_name": "Gemini 2.5 Flash",
-      "input": 0.15,
-      "output": 0.6,
-      "cache_read": 0.0375,
-      "cache_write": 0.0
+      "input": 0.3,
+      "output": 2.5,
+      "cache_read": 0.03,
+      "cache_write": 0
     },
     "gemini-2.0-flash": {
       "display_name": "Gemini 2.0 Flash",
       "input": 0.1,
       "output": 0.4,
       "cache_read": 0.025,
-      "cache_write": 0.0
+      "cache_write": 0
     },
     "claude-fable-5-1": {
       "display_name": "Claude Fable 5.1",
@@ -207,6 +207,14 @@
       "cache_read": 0.3,
       "cache_write": 3.75
     },
+    "gpt-6-astra": {
+      "display_name": "GPT-6 Astra",
+      "input": 10.0,
+      "output": 50.0,
+      "cache_read": 1.0,
+      "cache_write": 12.5,
+      "_note": "OpenAI GPT-6 Astra（2026-09-04 发布，1.05M 窗口）；Fast mode 2× 不入表"
+    },
     "gpt-6": {
       "display_name": "GPT-6",
       "input": 5,
@@ -233,70 +241,75 @@
     },
     "gpt-5.6": {
       "display_name": "GPT-5.6 Sol",
-      "input": 5,
-      "output": 30,
-      "cache_read": 0.5,
-      "cache_write": 0,
-      "_note": "官方无裸 gpt-5.6（仅 sol/terra/luna 变体），按 sol 标准价录；官方页当前显示 sol 促销价 4/20/缓存读 0.4（至少至 2026-11-21）；长上下文（>272k）约 2×/1.5×（促销期 8/30/0.8）；OpenAI 无缓存写计价"
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "裸名跟随 GPT-5.6 Sol；促销价 4/20/0.4/5（至少持续至 2026-11-21，当前生效）；促销后恢复标准价 5/30/0.5/6.25"
     },
     "gpt-5.6-sol": {
       "display_name": "GPT-5.6 Sol",
-      "input": 5,
-      "output": 30,
-      "cache_read": 0.5,
-      "cache_write": 0,
-      "_note": "官方页当前显示促销价 4/20/缓存读 0.4（至少至 2026-11-21），促销结束后恢复本标准价；长上下文（>272k）约 2×/1.5×（促销期 8/30/0.8）"
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "促销价 4/20/0.4/5（至少持续至 2026-11-21，当前生效）；促销结束后恢复标准挂牌价 5/30/0.5/6.25；长上下文（>272k）约 2×/1.5×"
     },
     "gpt-5.6-low": {
-      "display_name": "GPT-5.6 Sol",
-      "input": 5,
-      "output": 30,
-      "cache_read": 0.5,
-      "cache_write": 6.25
+      "display_name": "GPT-5.6 Sol (Low)",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "跟随 Sol 促销价 4/20/0.4/5（至少至 2026-11-21，当前生效）"
     },
     "gpt-5.6-medium": {
-      "display_name": "GPT-5.6 Sol",
-      "input": 5,
-      "output": 30,
-      "cache_read": 0.5,
-      "cache_write": 6.25
+      "display_name": "GPT-5.6 Sol (Medium)",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "跟随 Sol 促销价 4/20/0.4/5（至少至 2026-11-21，当前生效）"
     },
     "gpt-5.6-high": {
-      "display_name": "GPT-5.6 Sol",
-      "input": 5,
-      "output": 30,
-      "cache_read": 0.5,
-      "cache_write": 6.25
+      "display_name": "GPT-5.6 Sol (High)",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "跟随 Sol 促销价 4/20/0.4/5（至少至 2026-11-21，当前生效）"
     },
     "gpt-5.6-xhigh": {
-      "display_name": "GPT-5.6 Sol",
-      "input": 5,
-      "output": 30,
-      "cache_read": 0.5,
-      "cache_write": 6.25
+      "display_name": "GPT-5.6 Sol (XHigh)",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "跟随 Sol 促销价 4/20/0.4/5（至少至 2026-11-21，当前生效）"
     },
     "gpt-5.6-minimal": {
-      "display_name": "GPT-5.6 Sol",
-      "input": 5,
-      "output": 30,
-      "cache_read": 0.5,
-      "cache_write": 6.25
+      "display_name": "GPT-5.6 Sol (Minimal)",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "跟随 Sol 促销价 4/20/0.4/5（至少至 2026-11-21，当前生效）"
     },
     "gpt-5.6-luna": {
       "display_name": "GPT-5.6 Luna",
-      "input": 0.2,
-      "output": 1.2,
-      "cache_read": 0.02,
-      "cache_write": 0.25,
-      "_note": "分段计费：上下文 >200k/272k 时输入 0.4 / 输出 1.8 / 缓存读 0.04 / 缓存写 0.5（单价翻倍）"
+      "input": 1.0,
+      "output": 6.0,
+      "cache_read": 0.1,
+      "cache_write": 1.25,
+      "_note": "OpenAI 官方最新定价；分段计费：上下文 >200k/272k 时单价翻倍"
     },
     "gpt-5.6-terra": {
       "display_name": "GPT-5.6 Terra",
-      "input": 2,
-      "output": 12,
-      "cache_read": 0.2,
-      "cache_write": 2.5,
-      "_note": "分段计费：上下文 >200k/272k 时输入 4 / 输出 18 / 缓存读 0.4 / 缓存写 5（单价翻倍）"
+      "input": 2.5,
+      "output": 15.0,
+      "cache_read": 0.25,
+      "cache_write": 3.125,
+      "_note": "OpenAI 官方最新定价；分段计费：上下文 >200k/272k 时单价翻倍"
     },
     "gpt-5.5": {
       "display_name": "GPT-5.5",
@@ -696,14 +709,6 @@
       "cache_read": 0.025,
       "cache_write": 0
     },
-    "gemini-3.8-flash": {
-      "display_name": "Gemini 3.8 Flash",
-      "input": 0.75,
-      "output": 3.75,
-      "cache_read": 0.075,
-      "cache_write": 0,
-      "_note": "官方页确认与 3.6/3.7-flash 完全同构：介绍价至 2026-12-31（依例外口径录当前价），2027-01-01 起标准价 1.5/7.5/0.15；Batch/Flex 0.375/1.875/0.0375（2027 起 0.75/3.75/0.075）、Priority 1.35/6.75/0.135（2027 起 2.7/13.5/0.27）；缓存存储 $0.5/百万token/小时（2027 起 $1）"
-    },
     "gemini-3.7-flash": {
       "display_name": "Gemini 3.7 Flash",
       "input": 0.75,
@@ -770,33 +775,11 @@
       "cache_read": 0.05,
       "cache_write": 0
     },
-    "gemini-2.5-pro": {
-      "display_name": "Gemini 2.5 Pro",
-      "input": 1.25,
-      "output": 10,
-      "cache_read": 0.125,
-      "cache_write": 0,
-      "_note": "分段计费：上下文 >200k 时输入 2.5 / 输出 15 / 缓存读 0.25（单价翻倍）"
-    },
-    "gemini-2.5-flash": {
-      "display_name": "Gemini 2.5 Flash",
-      "input": 0.3,
-      "output": 2.5,
-      "cache_read": 0.03,
-      "cache_write": 0
-    },
     "gemini-2.5-flash-lite": {
       "display_name": "Gemini 2.5 Flash Lite",
       "input": 0.1,
       "output": 0.4,
       "cache_read": 0.01,
-      "cache_write": 0
-    },
-    "gemini-2.0-flash": {
-      "display_name": "Gemini 2.0 Flash",
-      "input": 0.1,
-      "output": 0.4,
-      "cache_read": 0.025,
       "cache_write": 0
     },
     "gemini-flash-latest": {
@@ -951,37 +934,45 @@
       "cache_write": 0,
       "_note": "V4 Flash 的 legacy 别名，定价跟随 deepseek-v4-flash（含 2026-08-16 起的峰谷分时，本价为闲时档）"
     },
+    "deepseek-flash": {
+      "display_name": "DeepSeek V4.1 Flash",
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.006,
+      "cache_write": 0.0,
+      "_note": "DeepSeek V4.1 Flash 官方标准计价；承接原退役之 V4 Flash 与 V4 Pro 请求"
+    },
     "deepseek-v4-flash": {
       "display_name": "DeepSeek V4 Flash",
-      "input": 0.22,
-      "output": 0.66,
-      "cache_read": 0.007,
-      "cache_write": 0,
-      "_note": "峰谷分时（2026-08-16 起）：本价为闲时档；峰时（01:00-04:00 与 06:00-10:00 UTC，即北京 09-12/14-18 点）加倍：输入 0.44 / 输出 1.32 / 缓存命中 0.014"
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.006,
+      "cache_write": 0.0,
+      "_note": "2026-09-11 起 V4 Flash 退役，由 V4.1 Flash 承接并按 Flash 价计费（当前生效）；旧峰谷分时已作废"
     },
     "deepseek-v4-flash-0731": {
       "display_name": "DeepSeek V4 Flash",
-      "input": 0.22,
-      "output": 0.66,
-      "cache_read": 0.007,
-      "cache_write": 0,
-      "_note": "deepseek-v4-flash 带日期版本别名，同价（含峰谷分时，本价为闲时档）"
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.006,
+      "cache_write": 0.0,
+      "_note": "带日期版本别名，随 V4 Flash 由 V4.1 Flash 承接按 0.3/1.2/0.006 计费"
     },
     "deepseek-v4-pro": {
       "display_name": "DeepSeek V4 Pro",
-      "input": 0.66,
-      "output": 1.98,
-      "cache_read": 0.022,
-      "cache_write": 0,
-      "_note": "峰谷分时（2026-08-16 起）：本价为闲时档；峰时（01:00-04:00 与 06:00-10:00 UTC，即北京 09-12/14-18 点）加倍：输入 1.32 / 输出 3.96 / 缓存命中 0.044"
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.006,
+      "cache_write": 0.0,
+      "_note": "2026-09-14 12:00 北京时间起官方下线 V4 Pro 并全部路由至 V4.1 Flash，按 Flash 价计费（当前生效）；V4.1 Pro 发布后按新价执行"
     },
     "deepseek-v4-flash-vision-exp": {
-      "display_name": "DeepSeek V4 Flash Vision",
-      "input": 0.22,
-      "output": 0.66,
-      "cache_read": 0.007,
-      "cache_write": 0,
-      "_note": "官方实验版（图片按尺寸转 token 计入输入）；闲时档口径同 v4-flash，峰时加倍见其 _note"
+      "display_name": "DeepSeek V4 Flash Vision (Experimental)",
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.006,
+      "cache_write": 0.0,
+      "_note": "实验版，随 V4 Flash 由 V4.1 Flash 承接按 0.3/1.2/0.006 计费"
     },
     "kimi-k3": {
       "display_name": "Kimi K3",
@@ -999,11 +990,11 @@
     },
     "kimi-k2-thinking": {
       "display_name": "Kimi K2 Thinking",
-      "input": 0.6,
-      "output": 2.5,
-      "cache_read": 0.15,
-      "cache_write": 0,
-      "_note": "Moonshot 官方价 0.6/2.5/0.15；cc-switch 上游误录为 K2 普通版价 0.55/2.2/0.1（2026-08-15 按 models.dev 审计修正）"
+      "input": 0.55,
+      "output": 2.2,
+      "cache_read": 0.1,
+      "cache_write": 0.0,
+      "_note": "Moonshot 官方按量最新牌价 0.55/2.2/0.1/0"
     },
     "kimi-k2-0905": {
       "display_name": "Kimi K2",
@@ -1258,12 +1249,12 @@
       "cache_write": 2.5
     },
     "qwen3.8-flash": {
-      "display_name": "Qwen3.8 Flash",
+      "display_name": "Qwen 3.8 Flash",
       "input": 0.15,
       "output": 0.47,
-      "cache_read": 0,
-      "cache_write": 0,
-      "_note": "国际站口径（与价表 qwen 系一致）；国内百炼刊例 ¥0.8/¥2.7（≈$0.11/$0.38，0-1M 单档无分段无促销）显著更低，qwen 双轨问题详见 _meta.ref"
+      "cache_read": 0.016,
+      "cache_write": 0.2,
+      "_note": "国际站口径（0<Token≤1M）；国内百炼刊例 ¥0.8/¥2.7（≈$0.11/$0.38）"
     },
     "qwen3.7-max": {
       "display_name": "Qwen3.7 Max",
@@ -1608,12 +1599,12 @@
       "cache_write": 0
     },
     "o3-mini": {
-      "display_name": "OpenAI o3-mini",
-      "input": 1.1,
-      "output": 4.4,
-      "cache_read": 0.55,
-      "cache_write": 0,
-      "_note": "OpenAI 官方价 1.1/4.4/cached 0.55；cc-switch 上游误录 input/output 为一半（2026-08-15 按 models.dev 审计修正）"
+      "display_name": "o3-mini",
+      "input": 0.55,
+      "output": 2.2,
+      "cache_read": 0.275,
+      "cache_write": 0.0,
+      "_note": "OpenAI 官方最新调价"
     },
     "o1": {
       "display_name": "OpenAI o1",
@@ -1623,12 +1614,12 @@
       "cache_write": 0
     },
     "o1-mini": {
-      "display_name": "OpenAI o1-mini",
-      "input": 1.1,
-      "output": 4.4,
-      "cache_read": 0.55,
-      "cache_write": 0,
-      "_note": "OpenAI 官方价 1.1/4.4/cached 0.55；cc-switch 上游误录 input/output 为一半（input 恰等于 cached 价的指纹，与 o3-mini 同一处上游错误，2026-08-15 修正）"
+      "display_name": "o1-mini",
+      "input": 0.55,
+      "output": 2.2,
+      "cache_read": 0.275,
+      "cache_write": 0.0,
+      "_note": "OpenAI 官方最新调价"
     },
     "codex-mini": {
       "display_name": "Codex Mini",

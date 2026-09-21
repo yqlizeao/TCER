@@ -1370,6 +1370,16 @@ def test_llm_reports_view(root, monkeypatch, tmp_path):
     v.select_report("r_dyn")
     assert "意图降熵力 92" in v._phase_portrait.cap_lbl.cget("text")
     assert v._phase_portrait.container.winfo_manager() == "pack"
+    # 测试一键折叠相图（类似指标看板，折叠后隐藏画布但保留精炼摘要条）
+    v._toggle_phase_portrait()
+    assert v._phase_collapsed is True
+    assert "▸" in v._phase_arrow.cget("text")
+    assert not v._phase_portrait.container.winfo_manager()
+    # 再次点击一键展开
+    v._toggle_phase_portrait()
+    assert v._phase_collapsed is False
+    assert "▾" in v._phase_arrow.cget("text")
+    assert v._phase_portrait.container.winfo_manager() == "pack"
     # 丰富化相图图元与真实回合映射验证
     dyn_rich = {
         "convergence_type": "dirac",

@@ -104,11 +104,10 @@ def test_table_key_distinguishes_default():
 def test_note_for_multitrack_annotations():
     """``_note`` carries the non-primary price tracks (promo/peak/batch/tiered)
     a single rate set can't express; surfaced by the GUI price tooltip."""
-    # 峰谷条目：闲时档为主价，备注含峰时价与时段
-    assert pricing.note_for("deepseek-v4-flash") == (
-        "峰谷分时（2026-08-16 起）：本价为闲时档；"
-        "峰时（01:00-04:00 与 06:00-10:00 UTC，即北京 09-12/14-18 点）加倍："
-        "输入 0.44 / 输出 1.32 / 缓存命中 0.014")
+    # 促销/下线路由条目：当前生效价为主价，备注含促销期或下线路由说明
+    assert "2026-09-11 起 V4 Flash 退役" in pricing.note_for("deepseek-v4-flash")
+    assert "促销价" in pricing.note_for("gpt-5.6-sol")
+    assert "介绍价至 2026-12-31" in pricing.note_for("gemini-3.8-flash")
     # 别名条目跟随主条目（resolve 路径不同，note 同样命中）
     assert "legacy 别名" in pricing.note_for("deepseek-chat")
     # 无备注条目 / 未知模型 / 空值 → None
@@ -288,3 +287,27 @@ def test_cache_write_1h_flows_through_scan_and_merge(tmp_path):
     assert m.per_model[next(iter(m.per_model))].cache_write_1h_tokens == 1600
     # 逐模型成本加总 == 总成本（审计一致性）
     assert abs(sum(cost_by_model(m).values()) - cost_usd(m)) < 1e-9
+
+
+def test_newly_added_models_and_current_time_pricing():
+    """Verify models added/updated in 2026-09 pricing audit."""
+    # GPT-6 Astra
+    assert pricing.is_table_priced("gpt-6-astra")
+    astra = pricing.resolve("gpt-6-astra")
+    assert astra == {"input": 10.0, "output": 50.0, "cache_read": 1.0, "cache_write": 12.5}
+    assert pricing.label("gpt-6-astra") == "GPT-6 Astra"
+
+    # DeepSeek V4.1 Flash
+    assert pricing.is_table_priced("deepseek-flash")
+    assert pricing.resolve("deepseek-flash") == {"input": 0.3, "output": 1.2, "cache_read": 0.006, "cache_write": 0.0}
+
+    # 当前时间（2026-09-21）实际生效价格
+    # GPT-5.6 Sol 促销期价格生效中
+    assert pricing.resolve("gpt-5.6-sol") == {"input": 4.0, "output": 20.0, "cache_read": 0.4, "cache_write": 5.0}
+    # Gemini 3.8 Flash 介绍期价格生效中
+    assert pricing.resolve("gemini-3.8-flash") == {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0}
+    # DeepSeek V4 Pro 路由生效价
+    assert pricing.resolve("deepseek-v4-pro") == {"input": 0.3, "output": 1.2, "cache_read": 0.006, "cache_write": 0.0}
+    # o3-mini 降价
+    assert pricing.resolve("o3-mini") == {"input": 0.55, "output": 2.2, "cache_read": 0.275, "cache_write": 0.0}
+

@@ -1931,6 +1931,12 @@ class SessionColumn:
             command=lambda: self.controller.run_session_dynamics_analysis(report),
             image=_layers, compound="left",
         )
+        _crosscheck = ui_icon(self.container, "crosscheck")
+        menu.add_command(
+            label="纠正信号交叉验证",
+            command=lambda: self.controller.run_correction_crosscheck(report),
+            image=_crosscheck, compound="left",
+        )
 
         menu.add_separator()
         # File location
@@ -5917,6 +5923,86 @@ class PhasePortraitWidget:
         # 卫星标签标注（密集簇只画微质点与引力细线）
         self._draw_satellite_labels(c, 18, 32)
 
+class _LlmTreeShim:
+    """向后兼容代理：将原有对 Treeview 接口的调用无缝映射至 Card 列表与报告数据。"""
+
+    def __init__(self, view) -> None:
+        self._view = view
+
+    def get_children(self) -> tuple[str, ...]:
+        return tuple(r["id"] for r in self._view._visible_reports if "id" in r)
+
+    def exists(self, item_id: str) -> bool:
+        return item_id in self._view._report_to_card
+
+    def item(self, item_id: str, option: str | None = None, **kwargs):
+        r = next((x for x in self._view._reports if x.get("id") == item_id), None)
+        if not r:
+            return () if option == "values" else {}
+        kind = self._view._resolve_kind(r)
+        if kind == "dynamics":
+            _k, kind_lbl, _c = self._view._resolve_dynamics_status(r)
+        else:
+            kind_lbl = self._view.REPORT_KINDS.get(kind, {}).get("label", "报告")
+        vals = (kind_lbl, self._view._resolve_title(r), self._view._fmt_time(r.get("created_at")))
+        if option == "values":
+            return vals
+        return {"values": vals, "tags": ()}
+
+    def selection(self) -> tuple[str, ...]:
+        return (self._view._selected_id,) if self._view._selected_id else ()
+
+    def selection_set(self, item_id: str) -> None:
+        self._view.select_report(item_id)
+
+    def see(self, item_id: str) -> None:
+        pass
+
+    def delete(self, *items: str) -> None:
+        pass
+
+    def cget(self, option: str):
+        if option == "columns":
+            return ("kind", "title", "time")
+        return None
+
+    def column(self, col: str, option: str | None = None, **kw):
+        if option == "width":
+            return 90 if col == "time" else (56 if col == "kind" else 170)
+        if option == "anchor":
+            return "center" if col in ("time", "kind") else "w"
+        return {"width": 90, "anchor": "center"}
+
+    def heading(self, col: str, **kw):
+        pass
+
+    def tag_configure(self, tag: str, **kw):
+        pass
+
+    def bind(self, sequence=None, func=None, add=None):
+        pass
+
+    @property
+    def _w(self):
+        try:
+            return self._view._scroll.canvas._w
+        except Exception:
+            return ""
+
+    @property
+    def tk(self):
+        try:
+            return self._view._scroll.canvas.tk
+        except Exception:
+            return None
+
+    def winfo_toplevel(self):
+        try:
+            return self._view._scroll.canvas.winfo_toplevel()
+        except Exception:
+            return None
+
+
 class LlmReportsView:
     """「LLM 报告」页签 — 会话/项目/多源解读的持久化回看（左列表 + 右全高阅读区）。
 
@@ -5928,16 +6014,17 @@ class LlmReportsView:
     _BODY_FONT = (theme.FONT_CJK, 10)
 
     REPORT_KINDS = {
-        "session":  {"label": "会话", "color": theme.CHART_PALETTE[2], "desc": "会话过程收敛解读"},
-        "dynamics": {"label": "相空间", "color": theme.CHART_PALETTE[4], "desc": "相空间收敛动力学分析"},
-        "project":  {"label": "项目", "color": theme.CHART_PALETTE[0], "desc": "项目全局架构解读"},
-        "compare":  {"label": "对比", "color": theme.CHART_PALETTE[3], "desc": "多模型/跨源对比解读"},
-        "anomaly":  {"label": "诊断", "color": theme.WARNING, "desc": "异常卡死/返工诊断"},
-        "general":  {"label": "通用", "color": theme.MUTED, "desc": "综合解读报告"},
+        "session":  {"label": "会话", "color": theme.CHART_PALETTE[2], "desc": "会话过程收敛解读", "icon": "session"},
+        "dynamics": {"label": "相空间", "color": theme.CHART_PALETTE[4], "desc": "相空间收敛动力学分析", "icon": "layers"},
+        "crosscheck": {"label": "对账", "color": theme.CHART_PALETTE[1], "desc": "纠正信号双引擎交叉验证（正则 vs Jev）", "icon": "crosscheck"},
+        "project":  {"label": "项目", "color": theme.CHART_PALETTE[0], "desc": "项目全局架构解读", "icon": "project"},
+        "compare":  {"label": "对比", "color": theme.CHART_PALETTE[3], "desc": "多模型/跨源对比解读", "icon": "compare"},
+        "anomaly":  {"label": "诊断", "color": theme.WARNING, "desc": "异常卡死/返工诊断", "icon": "tools"},
+        "general":  {"label": "通用", "color": theme.MUTED, "desc": "综合解读报告", "icon": "sparkle"},
     }
 
     def __init__(self, parent, controller=None, on_cancel_tasks=None) -> None:
-        from .widgets import flat_button, FlatMenu
+        from .widgets import flat_button, FlatMenu, Card, ScrollFrame
         self.controller = controller
         self._cancel_tasks_btn = None  # 未注入 on_cancel_tasks 回调时完全不显示取消按钮
         self._reports: list[dict] = []
@@ -5951,11 +6038,11 @@ class LlmReportsView:
         paned = tk.PanedWindow(parent, orient="horizontal", bg=theme.BG, sashwidth=3)
         paned.pack(fill="both", expand=True, padx=theme.PAD_S, pady=theme.PAD_S)
         self._paned_ref = paned
-        self._sash_target = 240
+        self._sash_target = 250  # 适度舒展的报告索引列，兼顾卡片标题完整度与右侧阅读沉浸感
 
         # 左：报告列表（类型 / 解读对象 / 模型 / 时间）— 保持紧凑，把黄金空间留给阅读区
         left = tk.Frame(paned, bg=theme.BG)
-        paned.add(left, minsize=160)
+        paned.add(left, minsize=180, width=250)
         # 左顶部：标题栏 + 数量 + 清空按钮
         bar = tk.Frame(left, bg=theme.BG)
         bar.pack(fill="x", pady=(0, theme.PAD_XS))
@@ -5966,85 +6053,87 @@ class LlmReportsView:
                  font=theme.FONT_HEADING).pack(side="left")
         self._count_lbl = tk.Label(bar, text="", bg=theme.BG, fg=theme.MUTED,
                                    font=theme.FONT_UI_SMALL)
-        self._count_lbl.pack(side="left", padx=8)
-        clear_btn = flat_button(bar, "清空", self._clear_all, padx=theme.PAD_XS)
-        clear_btn.pack(side="right", padx=2)
-        Tooltip(clear_btn, "清空所有本地 LLM 报告记录")
-        if on_cancel_tasks is not None:
-            self._cancel_tasks_btn = flat_button(bar, "取消生成中任务", on_cancel_tasks, padx=theme.PAD_XS)
-            self._cancel_tasks_btn.pack(side="right", padx=2)
-            Tooltip(self._cancel_tasks_btn, "终止所有进行中与排队中的后台分析任务")
-        # 搜索与类型过滤工具条
-        self._filter_box = filter_box = tk.Frame(left, bg=theme.BG)
-        filter_box.pack(fill="x", pady=(0, 6))
+        self._count_lbl.pack(side="left", padx=(4, 2))
+        # Jev 引擎累计账单（方案 F）：opt-in 付费必须可见——只记真实网络调用，
+        # 缓存命中不计；按官方输入单价折算（输出免费）
+        self._usage_lbl = tk.Label(bar, text="", bg=theme.BG, fg=theme.MUTED,
+                                   font=theme.FONT_UI_SMALL)
+        Tooltip(self._usage_lbl,
+                "TypeSafe Jev 引擎累计计费口径：仅真实网络调用（判定缓存命中不计），"
+                "按官方输入单价 $0.042/百万 token 折算，输出 token 免费")
 
-        # 第一行：类型切换胶囊
-        self._pill_frame = tk.Frame(filter_box, bg=theme.BG)
-        self._pill_frame.pack(fill="x", pady=(0, 4))
+        # 右侧操作图标组：清空与取消任务（纯 Codicon 图标化，沉浸底色，悬停高亮，永不截断）
+        _trash_icon = ui_icon(bar, "trash")
+        clear_btn = flat_button(bar, "清空", self._clear_all,
+                                image=_trash_icon, bg=theme.BG,
+                                padx=2, pady=1)
+        clear_btn.pack(side="right", padx=(2, 0))
+        Tooltip(clear_btn, "清空所有本地 LLM 报告记录")
+
+        if on_cancel_tasks is not None:
+            _stop_icon = ui_icon(bar, "stop")
+            self._cancel_tasks_btn = flat_button(bar, "取消生成中任务", on_cancel_tasks,
+                                                 image=_stop_icon, bg=theme.BG,
+                                                 padx=2, pady=1)
+            self._cancel_tasks_btn.pack(side="right", padx=(2, 0))
+            Tooltip(self._cancel_tasks_btn, "取消生成中任务（终止所有进行中与排队中的后台分析任务）")
+        # 搜索与类型过滤工具条（零多余空白死区，与侧栏自然紧凑贴合）
+        self._filter_box = filter_box = tk.Frame(left, bg=theme.BG)
+        filter_box.pack(fill="x", pady=(0, 2))
+
+        # 类型切换胶囊（流式自适应紧凑排布，零多余空白死区）
+        self._pill_frame = pill_box = tk.Frame(filter_box, bg=theme.BG)
+        pill_box.pack(fill="x", pady=(0, 2))
         self._pill_btns: dict[str, RoundedPill] = {}
-        for k, lbl in (("all", "全部"), ("session", "会话"), ("dynamics", "相空间"),
-                       ("project", "项目"), ("compare", "对比"), ("other", "其他")):
-            btn = RoundedPill(self._pill_frame, text=lbl, width=52, height=22, radius=4,
+
+        pills = [
+            ("all", "全部", 50),
+            ("session", "会话", 50),
+            ("dynamics", "相空间", 58),
+            ("crosscheck", "对账", 50),
+            ("project", "项目", 50),
+            ("compare", "对比", 50),
+            ("other", "其他", 46),
+        ]
+        for k, lbl, w in pills:
+            btn = RoundedPill(pill_box, text=lbl, width=w, height=22, radius=5,
                               fill=theme.CONTROL_BG, hover_fill=theme.HOVER_BG,
                               bg=theme.BG, fg=theme.FG, font=theme.FONT_UI_SMALL,
                               command=lambda _p=None, kind=k: self._set_kind_filter(kind))
-            btn.pack(side="left", padx=(0, 4))
+            btn.pack(side="left", padx=(0, 2))
             self._pill_btns[k] = btn
 
-        # 第二行：实时搜索框（底色槽无描边）
-        search_wrap = tk.Frame(filter_box, bg=theme.PANEL_2)
-        search_wrap.pack(fill="x", pady=(2, 0))
-        _si = ui_icon(search_wrap, "search")
-        if _si is not None:
-            tk.Label(search_wrap, image=_si, bg=theme.PANEL_2).pack(
-                side="left", padx=(4, 2), pady=2)
+        # 实时搜索框：与会话列表 (SessionColumn) 100% 一致的 RoundedSearchBox（抗锯齿圆角槽 + 内嵌放大镜）
         self._search_var = tk.StringVar(value="")
-        self._search_entry = tk.Entry(
-            search_wrap, textvariable=self._search_var, bg=theme.PANEL_2,
-            fg=theme.FG, insertbackground=theme.FG, relief="flat",
-            borderwidth=0, highlightthickness=0, font=theme.FONT_UI)
-        self._search_entry.pack(side="left", fill="x", expand=True, padx=4, pady=2)
-        self._search_entry.bind("<KeyRelease>", lambda _e: self._on_search_changed())
-        Tooltip(self._search_entry, "按标题 / 解读对象 / 模型 / 内容 实时过滤")
+        from .widgets import RoundedSearchBox
+        self._search_box = RoundedSearchBox(
+            filter_box, textvariable=self._search_var,
+            icon=ui_icon(filter_box, "search"),
+            width=240, height=22, radius=5,
+            fill=theme.CONTROL_BG, bg=theme.BG, fg=theme.FG)
+        self._search_box.pack(fill="x", pady=(2, 4))
+        self.search_entry = self._search_entry = self._search_box.entry
+        self._search_var.trace_add("write", lambda *_a: self._on_search_changed())
+        Tooltip(self._search_box, "按标题 / 解读对象 / 模型 / 内容 实时过滤 · Esc 清除")
+        Tooltip(self._search_entry, "按标题 / 解读对象 / 模型 / 内容 实时过滤 · Esc 清除")
 
-        # 列表 Treeview
+        # 卡片式报告列表容器（使用 ScrollFrame + Card，对齐 SessionColumn）
         self._tree_container = tree_container = tk.Frame(left, bg=theme.PANEL)
         tree_container.pack(fill="both", expand=True)
-        cols = ("kind", "title", "time")
-        self._tree = ttk.Treeview(tree_container, columns=cols, show="headings",
-                                  selectmode="browse")
-        for col, text, w, mw, anchor, stretch in (
-                ("kind", "类型/态势", 56, 46, "center", False),
-                ("title", "解读对象 / 标题", 170, 100, "w", True),
-                ("time", "时间", 90, 82, "center", False)):
-            self._tree.heading(col, text=text, anchor=anchor,
-                               command=lambda c=col: self._sort_by(c))
-            self._tree.column(col, width=w, minwidth=mw, stretch=stretch,
-                              anchor=anchor)
-        self._update_headings()  # 默认按时间降序，初始即显方向
+        self._scroll = ScrollFrame(tree_container, bg=theme.PANEL)
+        self._scroll.canvas.pack(fill="both", expand=True, padx=2, pady=(1, 2))
+        self.container = self._scroll.inner
+        self._cards: list[Card] = []
+        self._card_to_report: dict[Card, dict] = {}
+        self._report_to_card: dict[str, Card] = {}
+        self._visible_reports: list[dict] = []
+        self._selected_card: Card | None = None
+        self._tree = _LlmTreeShim(self)
 
-        sb = ttk.Scrollbar(tree_container, orient="vertical", command=self._tree.yview)
-        self._tree.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self._tree.pack(side="left", fill="both", expand=True)
-        self._tree.bind("<<TreeviewSelect>>", self._on_select)
-        self._unbind_wheel = None
-        self._tree.bind("<Enter>", self._on_tree_enter)
-        self._tree.bind("<Leave>", self._on_tree_leave)
+        # 键盘上下键切换卡片
+        self._scroll.canvas.bind("<Up>", lambda _e: self._on_nav_key(-1))
+        self._scroll.canvas.bind("<Down>", lambda _e: self._on_nav_key(1))
 
-        # 右键上下文菜单
-        self._ctx_menu = FlatMenu(self._tree)
-        self._ctx_menu.add_command(label="复制全文 Markdown", command=self._copy_markdown)
-        self._ctx_menu.add_command(label="删除本条报告", command=self._delete_selected)
-        self._tree.bind("<Button-3>", self._on_tree_context_menu)
-
-        # 列表标签着色（含相空间态势结论细分色）
-        for k, meta in self.REPORT_KINDS.items():
-            self._tree.tag_configure(f"kind_{k}", foreground=meta["color"])
-        self._tree.tag_configure("dyn_escaped", foreground=theme.SUCCESS)
-        self._tree.tag_configure("dyn_dirac", foreground=theme.SUCCESS)
-        self._tree.tag_configure("dyn_trapped", foreground=theme.ERROR)
-        self._tree.tag_configure("dyn_wandering", foreground=theme.WARNING)
         # 右：全高阅读区 — 作为报告展示主核心
         right = tk.Frame(paned, bg=theme.PANEL)
         paned.add(right, minsize=380)
@@ -6062,11 +6151,22 @@ class LlmReportsView:
             font=(theme.FONT_CJK, 12, "bold"), anchor="w", justify="left")
         self._title_lbl.pack(side="left", fill="x", expand=True)
 
+        # 右侧操作区：复制与删除按钮（Codicon 图标化，沉浸于 PANEL_2，悬浮高亮）
+        _copy_icon = ui_icon(top_row, "copy")
         self._copy_btn = flat_button(
-            top_row, "复制全文", self._copy_markdown, padx=theme.PAD_S)
-        self._copy_btn.pack(side="right", padx=(4, 0))
-        flat_button(top_row, "删除", self._delete_selected,
-                    padx=theme.PAD_S).pack(side="right")
+            top_row, "复制全文", self._copy_markdown,
+            image=_copy_icon, bg=theme.PANEL_2,
+            padx=4, pady=2)
+        self._copy_btn.pack(side="right", padx=(3, 0))
+        self._copy_tip = Tooltip(self._copy_btn, "复制全文 Markdown（含遥测 JSON）")
+
+        _del_icon = ui_icon(top_row, "trash")
+        self._del_btn = flat_button(
+            top_row, "删除", self._delete_selected,
+            image=_del_icon, bg=theme.PANEL_2,
+            padx=4, pady=2)
+        self._del_btn.pack(side="right", padx=(3, 0))
+        Tooltip(self._del_btn, "删除本条报告")
 
         # 卡片第二行：徽标与关键指标
         self._badge_row = tk.Frame(self._header_card, bg=theme.PANEL_2)
@@ -6078,23 +6178,22 @@ class LlmReportsView:
             command=None)
         self._kind_badge.pack(side="left", padx=(0, 6))
 
-        self._source_badge = RoundedPill(
-            self._badge_row, text="", width=75, height=22, radius=4,
-            fill=theme.PANEL, hover_fill=None, bg=theme.PANEL_2, fg=theme.FG,
-            command=None)
-        self._source_badge.pack(side="left", padx=(0, 6))
+        # 元数据项：回归纯净排版流（去框化设计，杜绝截断与 Badge 视觉过载）
+        self._source_badge = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL)
+        self._source_badge.pack(side="left", padx=(0, 4))
 
-        self._model_badge = RoundedPill(
-            self._badge_row, text="", width=120, height=22, radius=4,
-            fill=theme.PANEL, hover_fill=None, bg=theme.PANEL_2, fg=theme.FG,
-            command=None)
-        self._model_badge.pack(side="left", padx=(0, 6))
+        self._model_badge = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.FG,
+            font=theme.FONT_UI_SMALL)
+        self._model_badge.pack(side="left", padx=(0, 4))
+        self._model_tip = Tooltip(self._model_badge, "当前报告所用 LLM 模型")
 
-        self._scope_badge = RoundedPill(
-            self._badge_row, text="", width=80, height=22, radius=4,
-            fill=theme.PANEL, hover_fill=None, bg=theme.PANEL_2, fg=theme.MUTED,
-            command=None)
-        self._scope_badge.pack(side="left", padx=(0, 6))
+        self._scope_badge = tk.Label(
+            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL)
+        self._scope_badge.pack(side="left", padx=(0, 4))
 
         self._metrics_lbl = tk.Label(
             self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
@@ -6119,9 +6218,41 @@ class LlmReportsView:
         # 兼容旧代码引用的 _meta_lbl 属性（指向标题文本或空桩）
         self._meta_lbl = self._title_lbl
 
-        # 正文阅读器（原生平滑滚动 Text + 自定义排版标签）
-        # 专属相空间动力学相图组件（仅在选中 dynamics 报告时挂载显示）
-        self._phase_portrait = PhasePortraitWidget(right)
+        # 专属相空间动力学相图折叠面板（对齐指标看板折叠风格，仅在选中 dynamics 报告时挂载显示）
+        self._phase_container = tk.Frame(right, bg=theme.PANEL)
+        self._phase_collapsed: bool = False
+
+        # 分组折叠标题栏（样式与交互完全对齐 MetricPanelView 指标看板分组）
+        self._phase_header = tk.Frame(self._phase_container, bg=theme.SECTION_HEADER_BG,
+                                      padx=10, pady=4, cursor=CLICK_CURSOR)
+        self._phase_header.pack(fill="x", pady=(0, 2))
+
+        self._phase_arrow = tk.Label(
+            self._phase_header, text="▾ 相空间收敛动力学相图",
+            font=theme.FONT_UI_BOLD, fg=theme.FG,
+            bg=theme.SECTION_HEADER_BG, cursor=CLICK_CURSOR)
+        self._phase_arrow.pack(side="left")
+
+        self._phase_tip_lbl = tk.Label(
+            self._phase_header, text="（点击可折叠图表，专注通读下方正文报告）",
+            font=theme.FONT_UI_SMALL, fg=theme.MUTED,
+            bg=theme.SECTION_HEADER_BG, cursor=CLICK_CURSOR)
+        self._phase_tip_lbl.pack(side="left", padx=(8, 0))
+
+        self._phase_summary_lbl = tk.Label(
+            self._phase_header, text="",
+            font=theme.FONT_UI_SMALL_BOLD, fg=theme.MUTED,
+            bg=theme.SECTION_HEADER_BG, cursor=CLICK_CURSOR)
+        self._phase_summary_lbl.pack(side="right", padx=(0, 6))
+
+        for _w in (self._phase_header, self._phase_arrow, self._phase_tip_lbl, self._phase_summary_lbl):
+            _w.bind("<Button-1>", lambda _e: self._toggle_phase_portrait())
+
+        # 相图主体容器（用于折叠/展开）
+        self._phase_body = tk.Frame(self._phase_container, bg=theme.PANEL)
+        self._phase_body.pack(fill="x")
+
+        self._phase_portrait = PhasePortraitWidget(self._phase_body)
 
         # 正文阅读器（原生平滑滚动 Text + 自定义排版标签）
         self._text_frame = text_frame = tk.Frame(right, bg=theme.PANEL)
@@ -6129,7 +6260,7 @@ class LlmReportsView:
 
         text_sb = ttk.Scrollbar(text_frame, orient="vertical")
         self._body_lbl = tk.Text(
-            text_frame, wrap="char", bg=theme.PANEL, fg=theme.FG_WHITE,
+            text_frame, wrap="word", bg=theme.PANEL, fg=theme.FG_WHITE,
             font=self._BODY_FONT, relief="flat", bd=0, highlightthickness=0,
             padx=20, pady=16, yscrollcommand=text_sb.set,
             selectbackground=theme.HOVER_ACCENT, selectforeground=theme.FG_WHITE,
@@ -6175,12 +6306,24 @@ class LlmReportsView:
         self._body_lbl.tag_configure(
             "md_italic", font=(theme.FONT_CJK, 10, "italic"))
         self._body_lbl.tag_configure(
-            "md_mono", font=theme.FONT_MONO, background=theme.CONTROL_BG,
-            foreground=theme.CHART_PALETTE[1])
+            "md_mono", font=theme.FONT_MONO,
+            foreground=theme.CODE_MINT)
         self._body_lbl.tag_configure(
             "code_block", font=theme.FONT_MONO, background=theme.BG,
-            foreground=theme.FG_WHITE, lmargin1=20, lmargin2=20,
-            spacing1=1, spacing2=2, spacing3=1)
+            foreground=theme.FG_WHITE, lmargin1=16, lmargin2=16,
+            spacing1=4, spacing2=2, spacing3=4)
+        self._body_lbl.tag_configure(
+            "tbl_border", font=theme.FONT_MONO, foreground=theme.BORDER)
+        self._body_lbl.tag_configure(
+            "tbl_header", font=theme.FONT_MONO, foreground=theme.FG_WHITE)
+        self._body_lbl.tag_configure(
+            "tbl_cell", font=theme.FONT_MONO, foreground=theme.FG)
+        self._body_lbl.tag_configure(
+            "tbl_highlight", font=theme.FONT_MONO, foreground=theme.WARNING)
+        self._body_lbl.tag_configure(
+            "tbl_alert", font=theme.FONT_MONO, foreground=theme.ERROR)
+        self._body_lbl.tag_configure(
+            "tbl_good", font=theme.FONT_MONO, foreground=theme.SUCCESS)
         self._apply_sash()
 
     def _apply_sash(self) -> None:
@@ -6234,7 +6377,33 @@ class LlmReportsView:
         from tcer.core import llm_reports, llm_prefs
         self._apply_sash()
         self._reports = llm_reports.load()
+        self._update_usage_lbl()
         self._refresh_list()
+
+    def _update_usage_lbl(self) -> None:
+        """刷新 Jev 引擎累计账单行（零请求时隐藏）。"""
+        try:
+            from tcer.core import typesafe_client
+            stats = typesafe_client.usage_stats()
+            cost = typesafe_client.usage_cost_usd(stats)
+        except Exception:
+            if hasattr(self, "_usage_lbl"):
+                self._usage_lbl.pack_forget()
+            return
+        if hasattr(self, "_usage_lbl"):
+            self._usage_lbl.pack_forget()
+        if not stats or not stats.get("requests"):
+            return
+        toks = stats.get("input_tokens") or 0
+        tok_txt = f"{toks / 1_000_000:.2f}M" if toks >= 1_000_000 else f"{toks / 1000:.1f}k"
+        tip_text = (
+            f"LLM 报告收信箱\n"
+            f"TypeSafe Jev 引擎累计调用: {stats['requests']} 次\n"
+            f"输入 Token: {tok_txt} · 预估计费: ≈${cost:.3f}\n"
+            "（按官方输入单价 $0.042/百万 token 折算，输出 token 免费）"
+        )
+        if hasattr(self, "_count_lbl"):
+            Tooltip(self._count_lbl, tip_text)
 
     def _set_kind_filter(self, kind: str) -> None:
         if self._kind_filter == kind:
@@ -6250,7 +6419,7 @@ class LlmReportsView:
         kind = self._resolve_kind(r)
         if self._kind_filter != "all":
             if self._kind_filter == "other":
-                if kind in ("session", "dynamics", "project", "compare"):
+                if kind in ("session", "dynamics", "crosscheck", "project", "compare"):
                     return False
             elif kind != self._kind_filter:
                 return False
@@ -6264,10 +6433,180 @@ class LlmReportsView:
                 return False
         return True
 
+    def _make_card(self, r: dict):
+        from .widgets import Card
+        rid = r.get("id")
+        kind = self._resolve_kind(r)
+        title = self._resolve_title(r)
+        time_str = self._fmt_time(r.get("created_at"))
+
+        card = Card(
+            self.container,
+            on_click=lambda c, _id=rid: self.select_report(_id),
+            on_right_click=lambda e, _id=rid: self._on_card_context_menu(e, _id),
+            bg=theme.PANEL, padx=1, pady=1
+        )
+
+        # State Rail 着色
+        rail_col = None
+        if kind == "dynamics":
+            status_key, _, col = self._resolve_dynamics_status(r)
+            rail_col = col
+        elif kind == "crosscheck":
+            xdata = r.get("crosscheck_data") or {}
+            cnts = xdata.get("counts") or {}
+            if cnts.get("agree_correction"):
+                rail_col = theme.ERROR
+            elif cnts.get("jev_only") or cnts.get("jev_uncertain"):
+                rail_col = theme.WARNING
+            else:
+                rail_col = theme.SUCCESS
+        elif kind == "session":
+            rail_col = theme.CHART_PALETTE[2]
+        elif kind == "project":
+            rail_col = theme.CHART_PALETTE[0]
+        elif kind == "compare":
+            rail_col = theme.CHART_PALETTE[3]
+        card.set_state_rail(rail_col)
+
+        # Row 1: 图标 + 类型徽章 + 时间（左），右侧为态势/状态胶囊
+        row1 = tk.Frame(card.frame, bg=card._bg)
+        row1.pack(fill="x", padx=6, pady=(3, 1))
+        card.track_bg(row1)
+
+        kind_meta = self.REPORT_KINDS.get(kind, self.REPORT_KINDS["general"])
+        icon_name = kind_meta.get("icon", "session")
+        _ico = ui_icon(row1, icon_name)
+        if _ico is not None:
+            ico_lbl = tk.Label(row1, image=_ico, bg=card._bg)
+            ico_lbl.pack(side="left", padx=(0, 4))
+            card.track_bg(ico_lbl)
+            card.bind_to(ico_lbl)
+
+        k_lbl = tk.Label(row1, text=kind_meta["label"], bg=card._bg, fg=kind_meta["color"],
+                         font=theme.FONT_UI_SMALL_BOLD)
+        k_lbl.pack(side="left", padx=(0, 4))
+        card.track_bg(k_lbl)
+        card.bind_to(k_lbl)
+
+        t_lbl = tk.Label(row1, text=time_str, bg=card._bg, fg=theme.MUTED,
+                         font=theme.FONT_MONO)
+        t_lbl.pack(side="left", padx=(0, 4))
+        card.track_bg(t_lbl)
+        card.bind_to(t_lbl)
+
+        # 右侧态势/结论胶囊
+        status_text = ""
+        status_fg = theme.MUTED
+        if kind == "dynamics":
+            _, s_lbl, s_col = self._resolve_dynamics_status(r)
+            status_text = f"● {s_lbl}"
+            status_fg = s_col
+        elif kind == "crosscheck":
+            xdata = r.get("crosscheck_data") or {}
+            cnts = xdata.get("counts") or {}
+            uncertain = cnts.get("jev_uncertain", 0)
+            jev_only = cnts.get("jev_only", 0)
+            if jev_only > 0:
+                status_text = f"漏报 {jev_only}"
+                status_fg = theme.WARNING
+            elif uncertain > 0:
+                status_text = f"灰色 {uncertain}"
+                status_fg = theme.WARNING
+            elif cnts.get("agree_correction", 0) > 0:
+                status_text = f"纠正 {cnts['agree_correction']}"
+                status_fg = theme.ERROR
+            else:
+                status_text = "双引擎一致"
+                status_fg = theme.SUCCESS
+        elif r.get("audit_warnings") == []:
+            status_text = "✓ 守约"
+            status_fg = theme.SUCCESS
+
+        if status_text:
+            st_lbl = tk.Label(row1, text=status_text, bg=card._bg, fg=status_fg,
+                              font=theme.FONT_UI_SMALL, anchor="e")
+            st_lbl.pack(side="right")
+            card.track_bg(st_lbl)
+            card.bind_to(st_lbl)
+
+        # Row 2: 解读对象与标题（紧凑卡片展示，剥除长路径前缀）
+        row2 = tk.Frame(card.frame, bg=card._bg)
+        row2.pack(fill="x", padx=6, pady=(1, 2))
+        card.track_bg(row2)
+        ti_disp = format_card_title(title, 26)
+        ti_lbl = tk.Label(row2, text=ti_disp, bg=card._bg, fg=theme.FG,
+                          font=theme.FONT_UI_SMALL, anchor="w", justify="left")
+        ti_lbl.pack(side="left", fill="x", expand=True)
+        card.track_bg(ti_lbl)
+        card.bind_to(ti_lbl)
+
+        # Row 3: 底部摘要行（模型 · 回合数）
+        row3 = tk.Frame(card.frame, bg=card._bg)
+        row3.pack(fill="x", padx=6, pady=(1, 3))
+        card.track_bg(row3)
+
+        sum_parts = []
+        if r.get("model"):
+            m_short = str(r["model"]).split("/")[-1]
+            if len(m_short) > 16:
+                m_short = m_short[:15] + "…"
+            sum_parts.append(m_short)
+        if r.get("turns"):
+            sum_parts.append(f"{r['turns']}轮")
+
+        sum_txt = " · ".join(sum_parts) or "—"
+        sum_lbl = tk.Label(row3, text=sum_txt, bg=card._bg, fg=theme.MUTED,
+                           font=theme.FONT_UI_SMALL, anchor="w")
+        sum_lbl.pack(side="left", fill="x", expand=True)
+        card.track_bg(sum_lbl)
+        card.bind_to(sum_lbl)
+
+        return card
+
+    def _on_card_context_menu(self, event, report_id: str) -> None:
+        self.select_report(report_id)
+        from .widgets import FlatMenu
+        menu = FlatMenu(self.container)
+        menu.add_command(label="复制全文 Markdown", command=self._copy_markdown)
+        menu.add_command(label="删除本条报告", command=self._delete_selected)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _on_nav_key(self, delta: int) -> None:
+        if not self._cards:
+            return
+        curr_idx = -1
+        if self._selected_card in self._cards:
+            curr_idx = self._cards.index(self._selected_card)
+        new_idx = max(0, min(len(self._cards) - 1, curr_idx + delta))
+        if new_idx != curr_idx:
+            r = self._card_to_report.get(self._cards[new_idx])
+            if r and r.get("id"):
+                self.select_report(r["id"])
+
+    def _select_card(self, card) -> None:
+        if not card or card not in self._card_to_report:
+            return
+        r = self._card_to_report[card]
+        if self._selected_card and self._selected_card != card:
+            try:
+                self._selected_card.set_selected(False)
+            except Exception:
+                pass
+        self._selected_card = card
+        try:
+            card.set_selected(True)
+            self._scroll.see(card.frame)
+        except Exception:
+            pass
+        self._selected_id = r.get("id")
+        self._on_select()
+
     def _refresh_list(self) -> None:
         # 更新过滤胶囊样式与计数
         counts: dict[str, int] = {"all": len(self._reports), "session": 0,
-                                  "dynamics": 0, "project": 0, "compare": 0, "other": 0}
+                                  "dynamics": 0, "crosscheck": 0, "project": 0,
+                                  "compare": 0, "other": 0}
         for r in self._reports:
             k = self._resolve_kind(r)
             if k in counts:
@@ -6277,16 +6616,16 @@ class LlmReportsView:
         for k, btn in self._pill_btns.items():
             cnt = counts.get(k, 0)
             active = (self._kind_filter == k)
-            # 0 计数分类（除全部外且非激活）隐藏，避免占位噪音
             if cnt == 0 and not active and k != "all":
                 btn.pack_forget()
                 continue
             else:
-                btn.pack(side="left", padx=(0, 4))
+                btn.pack(side="left", padx=(0, 2))
             bg = theme.SEL_ROW_ACTIVE if active else theme.CONTROL_BG
             fg = theme.FG_WHITE if active else theme.MUTED
             label = {"all": "全部", "session": "会话", "dynamics": "相空间",
-                     "project": "项目", "compare": "对比", "other": "其他"}.get(k, k)
+                     "crosscheck": "对账", "project": "项目", "compare": "对比",
+                     "other": "其他"}.get(k, k)
             btn.config(text=f"{label} {cnt}", bg=bg, fg=fg)
 
         # 过滤报告集合
@@ -6302,7 +6641,18 @@ class LlmReportsView:
         filtered.sort(key=key_fn, reverse=self._sort_desc)
 
         sel = self._selected_id
-        self._tree.delete(*self._tree.get_children())
+        self._visible_reports = filtered
+
+        # 清理旧卡片
+        for c in self._cards:
+            try:
+                c.frame.destroy()
+            except Exception:
+                pass
+        self._cards.clear()
+        self._card_to_report.clear()
+        self._report_to_card.clear()
+        self._selected_card = None
 
         if not filtered:
             from tcer.core import llm_prefs
@@ -6318,33 +6668,25 @@ class LlmReportsView:
             self._body_lbl.insert("end", note, ("quote",))
             self._body_lbl.configure(state="disabled")
             self._count_lbl.config(text=f"0 / {len(self._reports)} 条")
+            self._scroll.update_scroll(reset=True)
             return
 
         for r in filtered:
-            kind = self._resolve_kind(r)
-            if kind == "dynamics":
-                status_key, kind_lbl, _col = self._resolve_dynamics_status(r)
-                tag = f"dyn_{status_key}" if status_key in ("escaped", "dirac", "trapped", "wandering") else f"kind_{kind}"
-            else:
-                kind_lbl = self.REPORT_KINDS.get(kind, {}).get("label", "报告")
-                tag = f"kind_{kind}"
-            self._tree.insert(
-                "", "end", iid=r.get("id"),
-                tags=(tag,),
-                values=(kind_lbl,
-                        self._fmt_title(self._resolve_title(r)),
-                        self._fmt_time(r.get("created_at"))))
-        self._count_lbl.config(text=f"{len(filtered)} / {len(self._reports)} 条")
-        if sel and self._tree.exists(sel):
-            self._tree.selection_set(sel)
-            self._tree.see(sel)
-        elif filtered:
-            first = self._tree.get_children()[0]
-            self._tree.selection_set(first)
-            self._tree.see(first)
+            card = self._make_card(r)
+            self._cards.append(card)
+            self._card_to_report[card] = r
+            rid = r.get("id")
+            if rid:
+                self._report_to_card[rid] = card
 
-        if self._tree.selection():
-            self._on_select()
+        self._scroll.update_scroll(reset=False)
+        self._count_lbl.config(text=f"{len(filtered)} / {len(self._reports)} 条")
+
+        # 保持或设定选中项
+        if sel and sel in self._report_to_card:
+            self.select_report(sel)
+        elif filtered and filtered[0].get("id") in self._report_to_card:
+            self.select_report(filtered[0]["id"])
 
     def _clear_header(self) -> None:
         self._title_lbl.config(text="无选中的报告")
@@ -6367,30 +6709,28 @@ class LlmReportsView:
         self._refresh_list()
 
     def _update_headings(self) -> None:
-        """表头排序方向指示：当前排序列尾缀 ▾ 降序 / ▴ 升序（同效率榜）。"""
-        base = {"kind": "类型/态势", "title": "解读对象 / 标题", "time": "时间"}
-        for col, text in base.items():
-            if col == self._sort_col:
-                text += " ▾" if self._sort_desc else " ▴"
-            self._tree.heading(col, text=text)
+        pass
 
     def _on_tree_enter(self, _event=None) -> None:
-        from .platform import bind_mousewheel
-        self._unbind_wheel = bind_mousewheel(
-            self._tree, lambda units: self._tree.yview_scroll(units, "units"))
+        pass
 
     def _on_tree_leave(self, _event=None) -> None:
-        if self._unbind_wheel:
-            self._unbind_wheel()
-            self._unbind_wheel = None
+        pass
 
     def select_report(self, report_id: str) -> None:
         """报告生成保存后由 controller 调用：选中并展示。"""
-        self.on_show()
-        if report_id and self._tree.exists(report_id):
-            self._tree.selection_set(report_id)
-            self._tree.see(report_id)
-            self._on_select()
+        if not self._reports:
+            self.on_show()
+        if not report_id:
+            return
+        card = self._report_to_card.get(report_id)
+        if card:
+            self._select_card(card)
+        else:
+            r = next((x for x in self._reports if x.get("id") == report_id), None)
+            if r:
+                self._selected_id = report_id
+                self._on_select()
 
     # -- 选中与展示 --
     def _on_select(self, _event=None) -> None:
@@ -6415,26 +6755,54 @@ class LlmReportsView:
         else:
             self._kind_badge.config(
                 text=f"{kind_meta['label']}解读", fg=kind_meta["color"])
-        self._source_badge.config(text=f"源：{r.get('source') or 'claude'}")
-        # 模型徽标：旧报告无 model 字段时整体隐藏（不显示「模型：-」占位）
+        src_val = r.get('source') or 'claude'
+        self._source_badge.config(text=f"源: {src_val} ·")
+        # 模型信息：旧报告无 model 字段时整体隐藏（不显示占位），长名称自然延展永不截断
         model_name = r.get("model")
         if model_name:
-            self._model_badge.config(text=f"模型：{model_name}")
-            self._model_badge.pack(side="left", padx=(0, 6),
+            self._model_badge.config(text=f"模型: {model_name} ·")
+            self._model_tip.text = f"LLM 模型: {model_name}"
+            self._model_badge.pack(side="left", padx=(0, 4),
                                    before=self._scope_badge)
         else:
             self._model_badge.config(text="")
             self._model_badge.pack_forget()
         # 「范围」= 授权数据范围摘要（勿叫「档位」——供给档 standard/rich/full 是另一维度）
-        self._scope_badge.config(text=f"范围：{r.get('scope') or '—'}")
+        scope_val = r.get('scope') or '—'
+        self._scope_badge.config(text=f"范围: {scope_val} ·")
         warns = r.get("audit_warnings")
+        semantic = r.get("audit_semantic")
+        sem_warns = (semantic or {}).get("warnings") if isinstance(semantic, dict) else None
         if isinstance(warns, list) and warns:
-            self._audit_badge.config(
-                text=f"审计校验: {len(warns)} 项警示", fg=theme.WARNING)
-            self._audit_tip.text = "\n".join(f"· {w}" for w in warns)
+            local_total = len(warns)
         elif isinstance(warns, list):
+            local_total = 0
+        else:
+            local_total = None
+        sem_total = len(sem_warns) if isinstance(sem_warns, list) else None
+        # 合并徽标：本地正则 + Jev 语义审计（方案 A）两路计数；任一来源缺失
+        # （旧报告 / 未配置 typesafe key）按已有来源显示，不虚报
+        if local_total or sem_total:
+            parts = [n for n in (local_total, sem_total) if n]
+            self._audit_badge.config(
+                text=f"审计校验: {sum(parts)} 项警示", fg=theme.WARNING)
+            tip_lines = []
+            if local_total:
+                tip_lines.append("【本地规则】")
+                tip_lines.extend(f"· {w}" for w in warns)
+            if sem_total:
+                tip_lines.append("【语义判定 · Jev】")
+                tip_lines.extend(f"· {w}" for w in sem_warns)
+            self._audit_tip.text = "\n".join(tip_lines)
+        elif local_total == 0:
+            sem_note = ""
+            if isinstance(semantic, dict) and semantic.get("probs_display"):
+                # 语义审计通过：附概率明细供深度采信
+                detail = " · ".join(semantic["probs_display"])
+                sem_note = f"\n【语义判定 · Jev】全部通过。{detail}"
             self._audit_badge.config(text="审计校验: 通过", fg=theme.SUCCESS)
-            self._audit_tip.text = "本地机械规则全部通过：小节齐全、无笼统表扬、转折锚点达标。"
+            self._audit_tip.text = (
+                "本地机械规则全部通过：小节齐全、无笼统表扬、转折锚点达标。" + sem_note)
         else:
             self._audit_badge.config(text="", fg=theme.MUTED)
             self._audit_tip.text = ""
@@ -6451,20 +6819,52 @@ class LlmReportsView:
         self._metrics_lbl.config(text=" · ".join(metrics_parts))
         self._time_lbl.config(text=self._fmt_time(r.get("created_at")))
 
-        # 动力学相图视口联动（仅 dynamics 类型显示，其余报告完全隐藏）
+        # 动力学相图视口联动（仅 dynamics 类型显示，支持类似指标看板的一键折叠）
         if kind == "dynamics":
             try:
                 self._phase_portrait.render(r.get("dynamics_data") or {}, r)
+                st_key, st_txt, st_col = self._resolve_dynamics_status(r)
+                ddata = r.get("dynamics_data") or {}
+                par = ddata.get("parameters") or {}
+                zeta = par.get("damping_ratio")
+                zeta_s = f" · ζ={zeta:.2f}" if zeta is not None else ""
+                self._phase_summary_lbl.config(text=f"● {st_txt}{zeta_s}", fg=st_col)
             except Exception:
                 # 兜底：相图渲染异常时降级隐藏，保证右侧正文阅读区不受牵连
+                self._phase_container.pack_forget()
                 self._phase_portrait.pack_forget()
             else:
-                self._phase_portrait.pack(fill="x", padx=10, pady=(0, 6), before=self._text_frame)
+                self._phase_container.pack(fill="x", padx=10, pady=(0, 6), before=self._text_frame)
+                if self._phase_collapsed:
+                    self._phase_portrait.pack_forget()
+                    self._phase_body.pack_forget()
+                    self._phase_arrow.config(text="▸ 相空间收敛动力学相图")
+                    self._phase_tip_lbl.config(text="（图表已折叠 · 点击展开相图）")
+                else:
+                    self._phase_body.pack(fill="x")
+                    self._phase_portrait.pack(fill="x")
+                    self._phase_arrow.config(text="▾ 相空间收敛动力学相图")
+                    self._phase_tip_lbl.config(text="（点击可折叠图表，专注通读下方正文报告）")
         else:
+            self._phase_container.pack_forget()
             self._phase_portrait.pack_forget()
 
         # 渲染正文
         self._fill_body(str(r.get("text") or ""))
+
+    def _toggle_phase_portrait(self) -> None:
+        """折叠/展开相空间动力学相图（对齐指标看板交互规范）。"""
+        self._phase_collapsed = not self._phase_collapsed
+        arrow_str = "▸" if self._phase_collapsed else "▾"
+        self._phase_arrow.config(text=f"{arrow_str} 相空间收敛动力学相图")
+        if self._phase_collapsed:
+            self._phase_portrait.pack_forget()
+            self._phase_body.pack_forget()
+            self._phase_tip_lbl.config(text="（图表已折叠 · 点击展开相图）")
+        else:
+            self._phase_body.pack(fill="x")
+            self._phase_portrait.pack(fill="x")
+            self._phase_tip_lbl.config(text="（点击可折叠图表，专注通读下方正文报告）")
     def _copy_markdown(self) -> None:
         """一键复制当前报告全文到系统剪贴板。"""
         sel = self._tree.selection()
@@ -6478,7 +6878,16 @@ class LlmReportsView:
             top.clipboard_clear()
             top.clipboard_append(str(r["text"]))
             self._copy_btn.config(text="已复制 ✓")
-            self._copy_btn.after(1500, lambda: self._copy_btn.config(text="复制全文"))
+            if hasattr(self, "_copy_tip") and self._copy_tip is not None:
+                self._copy_tip.text = "已复制 ✓"
+            def _reset_copy():
+                try:
+                    self._copy_btn.config(text="复制全文")
+                    if hasattr(self, "_copy_tip") and self._copy_tip is not None:
+                        self._copy_tip.text = "复制全文 Markdown（含遥测 JSON）"
+                except Exception:
+                    pass
+            self._copy_btn.after(1500, _reset_copy)
         except Exception:
             pass
 
@@ -6731,6 +7140,143 @@ class LlmReportsView:
         text = re.sub(r"(?<=[一-鿿（【“]) ?(?=[A-Za-z0-9])", " ", text)
         return re.sub(r"(?<=[A-Za-z0-9]) ?(?=[一-鿿])", " ", text)
 
+    @staticmethod
+    def _cjk_width(s: str) -> int:
+        import unicodedata
+        w = 0
+        for ch in s:
+            status = unicodedata.east_asian_width(ch)
+            w += 2 if status in ('F', 'W') else 1
+        return w
+
+    @classmethod
+    def _strip_md(cls, s: str) -> str:
+        s = cls._MD_LINK.sub(r"\1", s)
+        s = cls._MD_BOLD.sub(r"\1", s)
+        s = cls._MD_ITALIC.sub(r"\1", s)
+        s = cls._MD_CODE.sub(r"\1", s)
+        return s.strip()
+
+    def _render_table_block(self, tb, table_lines: list[str]) -> None:
+        """结构化高精度等宽表格渲染引擎：全角/半角精密对齐、表头加粗、单元格语义高亮。"""
+        import unicodedata
+        rows: list[list[str]] = []
+        for ln in table_lines:
+            s = ln.strip()
+            if not s.startswith("|") or not s.endswith("|"):
+                continue
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            rows.append(cells)
+
+        if len(rows) < 2:
+            for ln in table_lines:
+                tb.insert("end", ln + "\n", ("code_block",))
+            return
+
+        header = rows[0]
+        sep = rows[1]
+        data_rows = rows[2:]
+
+        num_cols = len(header)
+        col_widths = [self._cjk_width(self._strip_md(c)) for c in header]
+
+        # 解析对齐方式
+        alignments = []
+        for c in sep:
+            c_strip = c.strip()
+            if c_strip.startswith(":") and c_strip.endswith(":"):
+                alignments.append("center")
+            elif c_strip.endswith(":"):
+                alignments.append("right")
+            else:
+                alignments.append("left")
+        while len(alignments) < num_cols:
+            alignments.append("left")
+
+        # 计算最大列宽（给单单元格设置合理的上限，例如 38 宽）
+        max_limit = 38
+        for r in data_rows:
+            for i, c in enumerate(r):
+                if i < num_cols:
+                    cw = self._cjk_width(self._strip_md(c))
+                    if cw > max_limit:
+                        cw = max_limit
+                    if cw > col_widths[i]:
+                        col_widths[i] = cw
+
+        padded_widths = [w + 2 for w in col_widths]
+
+        def _pad(text: str, target_w: int, align: str = "left") -> str:
+            curr_w = self._cjk_width(text)
+            diff = max(0, target_w - curr_w)
+            if align == "right":
+                return " " * diff + text
+            elif align == "center":
+                left = diff // 2
+                right = diff - left
+                return " " * left + text + " " * right
+            return text + " " * diff
+
+        # 顶边框 ┌───┬───┐
+        top_border = "  ┌" + "┬".join("─" * w for w in padded_widths) + "┐\n"
+        tb.insert("end", top_border, ("tbl_border",))
+
+        # 表头
+        tb.insert("end", "  │", ("tbl_border",))
+        for i, c in enumerate(header):
+            w = padded_widths[i]
+            disp = _pad(c, w - 2, "center")
+            tb.insert("end", f" {disp} ", ("tbl_header",))
+            tb.insert("end", "│", ("tbl_border",))
+        tb.insert("end", "\n")
+
+        # 分隔线 ├───┼───┤
+        mid_border = "  ├" + "┼".join("─" * w for w in padded_widths) + "┤\n"
+        tb.insert("end", mid_border, ("tbl_border",))
+
+        # 数据行
+        for r in data_rows:
+            tb.insert("end", "  │", ("tbl_border",))
+            for i in range(num_cols):
+                raw_val = r[i] if i < len(r) else ""
+                clean_val = self._strip_md(raw_val)
+                # 超长内容截断
+                if self._cjk_width(clean_val) > max_limit:
+                    truncated = ""
+                    tw = 0
+                    for ch in clean_val:
+                        ch_w = 2 if unicodedata.east_asian_width(ch) in ('F', 'W') else 1
+                        if tw + ch_w > max_limit - 2:
+                            break
+                        truncated += ch
+                        tw += ch_w
+                    clean_val = truncated + "…"
+
+                w = padded_widths[i]
+                disp = _pad(clean_val, w - 2, alignments[i])
+
+                # 智能语义着色
+                cell_tag = "tbl_cell"
+                if "**" in raw_val:
+                    if any(k in raw_val for k in ("灰色地带", "仅正则", "不确定")):
+                        cell_tag = "tbl_highlight"
+                    elif any(k in raw_val for k in ("疑似漏报", "疑似误报", "错误", "死锁")):
+                        cell_tag = "tbl_alert"
+                    elif any(k in raw_val for k in ("双方·纠正", "确认纠正", "收敛", "通过", "命中")):
+                        cell_tag = "tbl_good"
+                    else:
+                        cell_tag = "tbl_header"
+                elif clean_val == "命中":
+                    cell_tag = "tbl_good"
+
+                tb.insert("end", f" {disp} ", (cell_tag,))
+                tb.insert("end", "│", ("tbl_border",))
+            tb.insert("end", "\n")
+
+        # 底边框 └───┴───┘
+        bot_border = "  └" + "┴".join("─" * w for w in padded_widths) + "┘\n\n"
+        tb.insert("end", bot_border, ("tbl_border",))
+
     def _fill_body(self, text: str) -> None:
         tb = self._body_lbl
         tb.configure(state="normal")
@@ -6744,14 +7290,31 @@ class LlmReportsView:
             text,
             flags=re.IGNORECASE
         )
-        for ln in self._reflow_lines(text):
-            if ln.strip().startswith("```"):
+        lines = self._reflow_lines(text)
+        idx = 0
+        n = len(lines)
+        while idx < n:
+            ln = lines[idx]
+            s_strip = ln.strip()
+            if s_strip.startswith("```"):
                 in_code_block = not in_code_block
+                idx += 1
                 continue
-            if not ln.strip() and not in_code_block:
+            if not in_code_block and s_strip.startswith("|") and s_strip.endswith("|"):
+                # 收集连续的表格行
+                tbl = [ln]
+                idx += 1
+                while idx < n and lines[idx].strip().startswith("|") and lines[idx].strip().endswith("|"):
+                    tbl.append(lines[idx])
+                    idx += 1
+                self._render_table_block(tb, tbl)
+                continue
+            if not s_strip and not in_code_block:
                 tb.insert("end", "\n")
+                idx += 1
                 continue
             self._insert_line(tb, ln, in_code_block=in_code_block)
+            idx += 1
         tb.configure(state="disabled")
     def _delete_selected(self) -> None:
         import tkinter.messagebox as mb
@@ -6761,9 +7324,10 @@ class LlmReportsView:
             return
         r = next((x for x in self._reports if x.get("id") == sel[0]), None)
         title = self._resolve_title(r or {})[:24]
+        parent = getattr(self.controller, "root", None) or self.container.winfo_toplevel()
         if not mb.askyesno("删除报告",
                            f"确定删除「{title}…」这条 LLM 报告？（不可恢复）",
-                           parent=self._tree):
+                           parent=parent):
             return
         self._selected_id = None
         llm_reports.delete(sel[0])
@@ -6774,8 +7338,9 @@ class LlmReportsView:
         from tcer.core import llm_reports
         if not self._reports:
             return
+        parent = getattr(self.controller, "root", None) or self.container.winfo_toplevel()
         if mb.askyesno("清空 LLM 报告", f"确定删除全部 {len(self._reports)} 条报告？"
-                       "（不可恢复）", parent=self._tree):
+                       "（不可恢复）", parent=parent):
             self._selected_id = None
             llm_reports.clear()
             self.on_show()

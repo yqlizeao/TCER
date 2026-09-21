@@ -796,6 +796,8 @@ _DYN_REQUIRED = ("速读摘要", "开局", "关键转折", "反馈")
 # Jev 级联报告的章节由本地确定性合成（非自由生成），机检子集按其实际标题取：
 # 执行摘要与核心裁决 / 一、开局 / 转折定位与因果 / 反馈序列评价
 _DYN_JEV_REQUIRED = ("执行摘要", "开局", "转折", "反馈")
+# 交叉验证报告同为本地合成，章节按其实际标题取（沿用 general 子集会误报）
+_CROSSCHECK_REQUIRED = ("执行摘要",)
 
 
 def audit_warnings(text: str, is_dynamics: bool = False, provider: str = "general") -> list[str]:
@@ -809,12 +811,15 @@ def audit_warnings(text: str, is_dynamics: bool = False, provider: str = "genera
 
     provider="typesafe"：Jev 级联报告走本地确定性合成的固定章节结构，
     必备小节集合按其实际标题校验（沿用 general 的子集会稳定误报）。
+    provider="crosscheck"：交叉验证报告同为本地合成，按其实际标题校验。
     """
     import re
     warns: list[str] = []
     if not text or not text.strip():
         return ["模型返回了空正文"]
-    if is_dynamics and provider == "typesafe":
+    if provider == "crosscheck":
+        required = _CROSSCHECK_REQUIRED
+    elif is_dynamics and provider == "typesafe":
         required = _DYN_JEV_REQUIRED
     else:
         required = _DYN_REQUIRED if is_dynamics else _CONV_REQUIRED
@@ -824,12 +829,349 @@ def audit_warnings(text: str, is_dynamics: bool = False, provider: str = "genera
     praised = [p for p in _FLAT_PRAISE_PATTERNS if p in text]
     if praised:
         warns.append("含笼统表扬措辞（审计立场禁止）：" + "、".join(praised[:3]))
-    anchors = re.findall(r"【T\d+", text)
-    if len(anchors) < 3:
-        warns.append(f"转折锚点仅 {len(anchors)} 处（要求至少 3 个 **【T数字】** 深挖）")
-    if ("责任" not in text) and ("归因" not in text):
-        warns.append("未出现任何责任判定/归因表述")
+    # 转折锚点 / 责任归因是「叙事解读类」报告的契约；crosscheck 是数据对账
+    # 报告（本地合成分歧清单），天然无此二要素，不适用这两条规则
+    if provider != "crosscheck":
+        anchors = re.findall(r"【T\d+", text)
+        if len(anchors) < 3:
+            warns.append(f"转折锚点仅 {len(anchors)} 处（要求至少 3 个 **【T数字】** 深挖）")
+        if ("责任" not in text) and ("归因" not in text):
+            warns.append("未出现任何责任判定/归因表述")
     return warns
+
+
+# ---------------------------------------------------------------------------
+# 语义审计（jev-research 方案 A：反谄媚审计官）
+#
+# 本地 audit_warnings 是正则级黑名单（免费、确定性）；本节补语义级判定：
+# 由 Jev 对报告文本发一簇 Noul（一次请求、几厘钱），抓正则抓不住的违约形态
+# ——未绑定证据的正面评价、和稀泥归因、术语超纲、结论无据、建议不可执行。
+# 双保险结构：未配置 typesafe key 时本节完全不参与（零联网零入口）；
+# 判定失败不影响主报告入库（审计是旁路，TypesafeError 在调用方捕获）。
+# ---------------------------------------------------------------------------
+
+# 语义审计题面（英文判定 + 中文章签；报告正文作为素材保持原文进 state）。
+# 风险题 p ≥ _SEM_RISK_T 判警示；健康题 p < _SEM_HEALTH_T 判警示（反向）。
+# 阈值 0.6/0.4 与 low_confidence 口径同源（本机 A/B 调校，非 cookbook 示例值）。
+_SEM_RISK_T = 0.60
+_SEM_HEALTH_T = 0.40
+
+_SEMANTIC_AUDIT_QUESTIONS: dict[str, dict] = {
+    "ungrounded_praise": {
+        "label": "无据正面评价",
+        "question": (
+            "Does the report contain positive assessments of the AI or the "
+            "collaboration that are NOT tied to any specific turn number, "
+            "quoted user message, tool action, or concrete evidence?"),
+    },
+    "mud_blame": {
+        "label": "归因和稀泥",
+        "question": (
+            "Does the report attribute shared responsibility vaguely (e.g. "
+            "'both sides are at fault', 'communication issues') WITHOUT "
+            "assigning explicit shares or naming who specifically did what?"),
+    },
+    "jargon": {
+        "label": "术语超纲",
+        "question": (
+            "Does the report use physics metaphors or technical jargon that a "
+            "non-CS undergraduate reader would not understand (e.g. phase "
+            "space, potential barrier, thermodynamic terms used figuratively)?"),
+    },
+    "missing_evidence": {
+        "label": "结论无据",
+        "question": (
+            "Do key conclusions in the report lack references to concrete "
+            "session evidence such as turn numbers, tool calls, file changes, "
+            "or quoted messages?"),
+    },
+    "vague_turnaround": {
+        "label": "转折含糊",
+        "question": (
+            "Does the report describe turning points or key decisions without "
+            "pinning them to a specific turn or user message?"),
+    },
+    # 健康信号（反向题）：高 = 好，过低计警示
+    "actionable_advice": {
+        "label": "建议可执行",
+        "question": (
+            "Does the report's advice / next-step section give concrete, "
+            "executable instructions the reader could act on directly "
+            "(specific practices, not platitudes)?"),
+        "healthy": True,
+    },
+}
+
+
+def build_semantic_audit_payload(text: str) -> tuple[dict, dict]:
+    """构建语义审计的 (state, questions)：报告正文原文进 state，Noul 扇出。"""
+    questions: dict = {}
+    for key, spec in _SEMANTIC_AUDIT_QUESTIONS.items():
+        q: dict = {"type": "noul", "instructions": spec["question"]}
+        if spec.get("healthy"):
+            q["criteria"] = {
+                "true": "the advice is concrete and executable",
+                "false": "platitudes only, nothing the reader could act on",
+            }
+        else:
+            q["criteria"] = {
+                "true": "the described violation is present in the report",
+                "false": "absent; the report grounds / attributes / phrases properly",
+            }
+        questions[key] = q
+    return {"report_text": text}, questions
+
+
+def format_semantic_audit(answers: dict) -> dict:
+    """把 Jev 的 Noul 答案裁决为语义审计结果。
+
+    Returns:
+        {"warnings": [中文警示文案], "probs": {key: p}, "praise_risk": float}
+        praise_risk = 无据正面评价概率（谄媚风险的单一摘要值）。
+    """
+    probs: dict[str, float] = {}
+    for key, spec in _SEMANTIC_AUDIT_QUESTIONS.items():
+        ans = answers.get(key)
+        p = None
+        if isinstance(ans, dict):
+            try:
+                p = float(ans.get("noul"))
+            except (TypeError, ValueError):
+                p = None
+        if p is not None:
+            probs[key] = round(p, 3)
+
+    warnings: list[str] = []
+    for key, spec in _SEMANTIC_AUDIT_QUESTIONS.items():
+        p = probs.get(key)
+        if p is None:
+            continue
+        if spec.get("healthy"):
+            if p < _SEM_HEALTH_T:
+                warnings.append(f"建议缺乏可执行性（判定 {p:.0%}）")
+        elif p >= _SEM_RISK_T:
+            warnings.append(f"{spec['label']}（判定 {p:.0%}）")
+    return {
+        "warnings": warnings,
+        "probs": probs,
+        # 中文展示串（GUI tooltip / 回看用；key 为机器协议保持英文稳定）
+        "probs_display": [
+            f"{spec['label']} {probs[key]:.0%}"
+            for key, spec in _SEMANTIC_AUDIT_QUESTIONS.items() if key in probs
+        ],
+        "praise_risk": probs.get("ungrounded_praise", 0.0),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 纠正信号交叉验证（jev-research 方案 C：双引擎对账，分歧即洞察）
+#
+# 指标层的 correction_msg_count 由 parse_util.CORRECTION_RE 确定性判定
+# （前 200 字符保守正则）——审计账本不可替换。本节做的是**语义第二意见**：
+# Jev 对同批用户消息逐条判定「是否纠正先前方向」，与正则结果对账。
+# 分歧点（正则误报 / 疑似漏报）是深挖入口，进解读层报告，绝不回写指标。
+# 两问独立（corrects / newreq），不假设互补——jaggedness #8：Jev 不保证
+# 跨问题概率恒等式（实测一问与其否定的 Noul 和为 1.19）。
+# ---------------------------------------------------------------------------
+
+_CROSSCHECK_MAX_MSGS = 40
+_CROSSCHECK_MSG_CHARS = 400
+_CROSSCHECK_AGREE_T = 0.60   # Jev 认同阈值（与语义审计/low_confidence 同口径）
+_CROSSCHECK_BORDER_T = 0.40  # 低于此视为「Jev 判非」；两阈之间为不确定带
+
+
+def build_correction_crosscheck_payload(messages: list[str]) -> tuple[dict, dict]:
+    """构建纠正信号交叉验证的 (state, questions)：每条用户消息三个独立 Noul。
+
+    三维独立判定（互不假设互补——jaggedness #8）：
+    - corrects：纠正/反转**方向**；
+    - dissatisfied：对产出**质量**不满、要求返工或改进——真实会话中最常见的
+      纠正形态（如「整理得不够好，你再看看」），不含方向反转词，保守正则
+      与「方向纠正」单题都抓不住（实测 0.46 卡在阈值下被吞）；
+    - newreq：新增需求/范围扩张。
+    """
+    from tcer.core.parse_util import is_slash_command
+
+    usable = [
+        (i, (m or "").strip())
+        for i, m in enumerate(messages, 1)
+        if (m or "").strip() and not is_slash_command(m)
+    ][:_CROSSCHECK_MAX_MSGS]
+
+    state = {
+        "user_messages": [
+            {"index": i, "text": t[:_CROSSCHECK_MSG_CHARS]} for i, t in usable
+        ],
+    }
+    questions: dict = {}
+    for i, _t in usable:
+        questions[f"corrects_{i}"] = {
+            "type": "noul",
+            "instructions": (
+                f"Does `user_messages` entry with index {i} correct, reverse, or "
+                "reject the direction of work the AI had been taking (as opposed "
+                "to adding information within the same direction)?"),
+            "criteria": {
+                "true": "it pushes back on or reverses previous work",
+                "false": "it continues, adds detail, or starts an unrelated new task",
+            },
+        }
+        questions[f"dissatisfied_{i}"] = {
+            "type": "noul",
+            "instructions": (
+                f"Does `user_messages` entry with index {i} express dissatisfaction "
+                "with the quality or completeness of the AI's output and ask for "
+                "rework or improvement (even without changing the overall direction)?"),
+            "criteria": {
+                "true": "complains about quality and/or explicitly asks to redo or improve",
+                "false": "accepts the output, or merely gives neutral instructions",
+            },
+        }
+        questions[f"newreq_{i}"] = {
+            "type": "noul",
+            "instructions": (
+                f"Does `user_messages` entry with index {i} introduce a new "
+                "requirement or expand the task scope beyond what was asked before?"),
+            "criteria": {
+                "true": "new scope/requirement not present in earlier requests",
+                "false": "within the existing scope",
+            },
+        }
+    return state, questions
+
+
+def format_correction_crosscheck(messages: list[str], answers: dict) -> tuple[str, dict]:
+    """正则 vs Jev 对账，本地合成报告（判定数值由 Jev 返回、成文由本地合成）。
+
+    v2 分类要点（按真实会话实测教训修订）：
+    - 纠正信号 = max(corrects, dissatisfied)——方向纠正与质量不满任一成立即算；
+    - **灰色地带（0.40–0.60）无论正则命中与否一律单列 `jev_uncertain`**——
+      实测正则全 miss 的会话里 0.46 的不满消息被吞进 agree_none 造成
+      「无分歧」假阴性，而灰色消息恰是最该人工过目的；
+    - newreq ≥ 0.6 独立计入「需求扩张信号」（不参与四象限）；
+    - 逐条明细全量展示（不只分歧）——正则 0 命中时 Jev 概率是唯一语义视图；
+    - 零命中零强信号时明确写「两引擎都没报警 ≠ 确认无纠正」（fail loud）。
+    """
+    from tcer.core.parse_util import is_correction
+
+    def _p(key: str) -> float | None:
+        ans = answers.get(key)
+        if not isinstance(ans, dict):
+            return None
+        try:
+            return float(ans.get("noul"))
+        except (TypeError, ValueError):
+            return None
+
+    items: list[dict] = []
+    counts = {"agree_correction": 0, "regex_only": 0, "jev_only": 0,
+              "jev_uncertain": 0, "agree_none": 0, "scope_growth": 0}
+    for i, raw in enumerate(messages, 1):
+        text = (raw or "").strip()
+        if not text:
+            continue
+        regex_hit = is_correction(text)
+        jc = _p(f"corrects_{i}")
+        jd = _p(f"dissatisfied_{i}")
+        jn = _p(f"newreq_{i}")
+        if jc is None and jd is None and jn is None and not regex_hit:
+            continue  # 未发送且正则未命中：无对账价值
+        if jn is not None and jn >= _CROSSCHECK_AGREE_T:
+            counts["scope_growth"] += 1
+        signal = None
+        if jc is not None or jd is not None:
+            signal = max(v for v in (jc, jd) if v is not None)
+        if signal is None:
+            category = "regex_no_judge"
+        elif _CROSSCHECK_BORDER_T <= signal < _CROSSCHECK_AGREE_T:
+            category = "jev_uncertain"   # 灰色地带：正则两侧一律单列
+        elif regex_hit and signal >= _CROSSCHECK_AGREE_T:
+            category = "agree_correction"
+        elif regex_hit:
+            category = "regex_only"      # 疑似正则误报
+        elif signal >= _CROSSCHECK_AGREE_T:
+            category = "jev_only"        # 疑似正则漏报
+        else:
+            category = "agree_none"
+        if category in counts:
+            counts[category] += 1
+        items.append({
+            "index": i,
+            "excerpt": text[:120],
+            "regex": regex_hit,
+            "jev_corrects": jc,
+            "jev_dissatisfied": jd,
+            "jev_newreq": jn,
+            "category": category,
+        })
+
+    total = counts["agree_correction"] + counts["regex_only"] + \
+        counts["jev_only"] + counts["jev_uncertain"] + counts["agree_none"]
+    # 真·正则命中数（v2 灰色地带两侧都有，不能再按类目拼凑——miss 侧的
+    # 灰色消息不是正则命中，拼凑口径曾让 fail-loud 分支永远进不去）
+    regex_hits = sum(1 for it in items if it["regex"])
+    lines = [
+        "# 纠正信号交叉验证报告",
+        "",
+        "> 判定数值由 Jev（TypeSafe System One）返回、成文由 TCER 本地合成。",
+        "> 本报告是解读层旁路：不参与任何指标计算，不回写 correction_msg_count。",
+        "",
+        "## 执行摘要",
+        "",
+        f"- 参与对账用户消息 **{total}** 条（保守正则命中 {regex_hits} 条）",
+        f"- 双方确认纠正：**{counts['agree_correction']}** 条",
+        f"- 疑似正则误报（正则命中、Jev 判非）：**{counts['regex_only']}** 条",
+        f"- 疑似正则漏报（正则未命中、Jev 判纠正/不满）：**{counts['jev_only']}** 条",
+        f"- **灰色地带**（Jev 0.40–0.60，建议人工过目）：**{counts['jev_uncertain']}** 条",
+        f"- 需求扩张信号（Jev newreq ≥ 60%）：**{counts['scope_growth']}** 条",
+    ]
+    if counts["jev_only"] == 0 and counts["regex_only"] == 0:
+        if regex_hits == 0 and counts["jev_only"] == 0:
+            # 零命中且无 ≥60% 强确认信号（可含灰色地带）——绝不写成「无分歧」
+            gray_note = ""
+            if counts["jev_uncertain"]:
+                gray_note = (f"（其中 {counts['jev_uncertain']} 条落在灰色地带 "
+                             "0.40–0.60，建议优先过目）")
+            lines += [
+                "",
+                "**注意：正则零命中且 Jev 无 ≥60% 强信号**——这只说明两个引擎都",
+                f"没报警，**不等于确认无纠正**{gray_note}。",
+                "（本判定引擎对中文委婉表达偏保守；若与会话观感不符，",
+                "请直接阅读下方逐条明细。）",
+            ]
+        elif counts["jev_uncertain"] == 0:
+            lines += ["", "两引擎结论一致（正则命中的条目 Jev 均认同），无分歧信号。"]
+
+    _CAT_TAG = {
+        "agree_correction": "双方·纠正", "regex_only": "疑似误报",
+        "jev_only": "疑似漏报", "jev_uncertain": "灰色地带",
+        "agree_none": "非纠正", "regex_no_judge": "仅正则",
+    }
+
+    def _fmt(v):
+        return "—" if v is None else f"{v:.0%}"
+
+    lines += ["", "## 逐条明细", "",
+              "| # | 判定 | 正则 | 方向纠正 | 质量不满 | 新增需求 | 消息摘录 |",
+              "|---|---|---|---|---|---|---|"]
+    for it in items:
+        tag = _CAT_TAG.get(it["category"], it["category"])
+        if it["category"] in ("regex_only", "jev_only", "jev_uncertain"):
+            tag = f"**{tag}**"
+        lines.append(
+            f"| {it['index']} | {tag} | {'命中' if it['regex'] else '—'} "
+            f"| {_fmt(it['jev_corrects'])} | {_fmt(it['jev_dissatisfied'])} "
+            f"| {_fmt(it['jev_newreq'])} | {it['excerpt']} |")
+    flagged = [it for it in items if it["category"] != "agree_none"]
+    if flagged:
+        lines += ["", "### 值得关注（非「非纠正」类目）", ""]
+        for it in flagged:
+            tag = _CAT_TAG.get(it["category"], it["category"])
+            lines.append(f"- **第 {it['index']} 条 · {tag}**：{it['excerpt']}")
+    data = {"counts": counts, "items": items,
+            "thresholds": {"agree": _CROSSCHECK_AGREE_T,
+                           "border": _CROSSCHECK_BORDER_T}}
+    return "\n".join(lines), data
 
 
 def build_llm_derived(report) -> dict:
@@ -887,7 +1229,10 @@ def build_llm_derived(report) -> dict:
         "net_loc": getattr(report, "net_loc", 0) or 0,
         "rework_loc": getattr(report, "code_reworked", 0) or 0,
         "compaction_tokens": getattr(report.usage, "compaction_discarded_tokens", 0) or 0,
-        "total_tokens": getattr(report.usage, "total_tokens", 0) or 0,
+        # TokenUsage 无 total_tokens 属性（曾有此 bug：getattr 默认 0 导致报告
+        # 「消耗 0 Token」，真实会话暴露）。总消耗 = input + output
+        "total_tokens": (getattr(report.usage, "input_tokens", 0) or 0)
+                        + (getattr(report.usage, "output_tokens", 0) or 0),
         "reasoning_tokens": getattr(u, "reasoning_output_tokens", 0) or 0,
         "subagent_density": getattr(report, "subagent_density", 0.0) or 0.0,
     }
@@ -1167,14 +1512,17 @@ def build_jev_pass1_topology_payload(report, derived: dict, dialogue=None, singu
 
     hot_files = list(report.files_touched_details.keys())[:8] if report.files_touched_details else []
 
-    # 用户消息摘录：dialogue 中第 k 条 [用户] 行 ≈ 第 U_k 轮的输入原文
+    # 用户消息摘录：dialogue 中第 k 条 [用户] 行 ≈ 第 U_k 轮的输入原文。
+    # 400 字符（曾 160）：真实 432 回合会话实测，用户裁决类消息（「丢到插件
+    # Content 下」）被 160 截断后 Jev 把该里程碑 trigger 判成「常规惯性」，
+    # 与读全文的通用 LLM 版归因（用户破局）相反——转折判定吃证据长度
     user_msg_by_idx: dict[int, str] = {}
     if dialogue:
         k = 0
         for ln in dialogue:
             if ln.startswith("[用户]"):
                 k += 1
-                user_msg_by_idx.setdefault(k, ln[4:].strip()[:160])
+                user_msg_by_idx.setdefault(k, ln[4:].strip()[:400])
 
     # 终局交付证据：最后 5 个工具动作 + 是否执行过验证 + 收尾是否干净
     ops_by_turn = derived.get("ops_by_turn") or {}
@@ -1369,6 +1717,11 @@ def build_jev_pass1_topology_payload(report, derived: dict, dialogue=None, singu
                 "retry_loop": "hit an error or fell into a retry loop",
                 "course_correction": "responded to a correction (user's or its own) and adjusted course",
                 "stabilization": "tests passed; locking in results and wrapping up",
+                # 逃生口（jev-research 方案 E）：Choice 分布和恒为 1，输入即使不匹配
+                # 五类也必选其一（官方 jaggedness：乱码仍选、不确定性只在概率里），
+                # 故覆盖不全的分类题必须给出显式出口，否则「不在此类」的回合会被
+                # 硬贴上五类之一（如上下文压缩/权限拒绝被误标 normal）。
+                "other": "notable event of another kind (context compaction, permission denial, etc.)",
             },
         }
         questions[f"distance_t{t_num}"] = {
@@ -1532,6 +1885,10 @@ def build_jev_pass2_autopsy_payload(
                 "hallucinated_contract": "the AI assumed an API, method signature, or dependency that does not exist",
                 "cascading_regression": "the change broke existing working behavior elsewhere (fix one thing, break another)",
                 "clean_breakthrough": "precisely located the root cause and applied a minimal surgical fix",
+                # 逃生口（jev-research 方案 E）：五类均为「人因」，纯环境/依赖故障
+                # （构建器损坏、网络、工具链问题）无对应项，不设出口会被硬归到
+                # 最近的人因类，污染责任占比（blame_env 由此低估）。
+                "other": "none of the above fits (e.g. pure environment or dependency failure)",
             },
         },
         "crit_counterfactual_preventable": {
@@ -1833,6 +2190,9 @@ def synthesize_authoritative_dynamics_report(
             "hallucinated_contract": "虚构接口协议：AI臆想了不存在的函数签名或第三方接口",
             "cascading_regression": "水床连锁回退：改动局部引发了其他正常功能的次生破坏",
             "clean_breakthrough": "精准一击必中：实施最小手术式精准重构，顺利攻克卡点",
+            # 逃生口兜底须语义中立：落到 clean_breakthrough 会把环境故障
+            # 误报成「精准攻克」，污染下游责任叙事
+            "other": "其他根因：五类既定归因之外（如环境/依赖/工具链故障）",
         }
         causal_desc = causal_map.get(causal_raw, causal_map["clean_breakthrough"])
 
@@ -1900,7 +2260,12 @@ def synthesize_authoritative_dynamics_report(
         tensions.append(
             "Jev 判定「已达成」，但本地遥测显示无净增代码产出"
             "——判定可能与客观证据存在张力，建议人工复核")
-    # 低置信度 → 建议升级通用大模型深挖（System 1 → System 2，opt-in 不自动发请求）
+    # 低置信度 → 建议升级通用大模型深挖（System 1 → System 2，opt-in 不自动发请求）。
+    # 阈值依据（jev-research §4.3/§6.7）：与官方 consistency cookbook 的不确定带
+    # （Noul <0.30 判否 / 0.30–0.70 人工 / >0.70 判是）同量级，取 0.6/0.7 而非
+    # 0.3/0.7 是本机 A/B 实测调校——阈值是领域超参数，实测优先于 cookbook 示例值。
+    # 注意 jaggedness #8：两个阈值各管一个口径（主概率 / confidence），不可互相
+    # 推算（Jev 不保证跨问题概率恒等式，实测一问与其否定的 Noul 和为 1.19）。
     low_confidence = (p_main < 0.60) or (conv_conf < 0.70)
 
     dynamics_data: dict = {
@@ -1955,6 +2320,8 @@ def synthesize_authoritative_dynamics_report(
         "test_fail": "遇到测试失败或工具报错",
         # ground_dynamics_user_turns 空洞插值节点的专有事件（用户介入微调）
         "user_impulse": "用户介入微调",
+        # 题面逃生口的中文映射（get 无默认值，缺映射会渲染成 None）
+        "other": "其他事件（压缩/权限等五类之外）",
     }
 
     # 构造清晰易读的时序流卡片（势能 V 留在明细表与遥测，正文行只保留读者

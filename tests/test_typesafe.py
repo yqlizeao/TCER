@@ -11,6 +11,29 @@ import pytest
 from tcer.core import llm_prefs, llm_prompts, models, typesafe_client
 
 
+@pytest.fixture(autouse=True)
+def _isolate_typesafe_cache(tmp_path, monkeypatch):
+    """缓存/记账隔离：所有测试的判定缓存与计费口径指向 tmp 目录，前后清空。
+
+    无此隔离时 evaluate 会把 mock 响应写进真实 prefs 目录
+    （tcer_typesafe_cache.json / tcer_typesafe_usage.json），并让
+    call_count 断言受磁盘旧缓存干扰。
+    """
+    monkeypatch.setattr(typesafe_client, "_cache_path",
+                        lambda: tmp_path / "ts_cache.json")
+    monkeypatch.setattr(typesafe_client, "_usage_path",
+                        lambda: tmp_path / "ts_usage.json")
+    typesafe_client.cache_clear()
+    typesafe_client._usage_state = {"requests": 0, "input_tokens": 0,
+                                    "output_tokens": 0}
+    typesafe_client._usage_loaded = False
+    yield
+    typesafe_client.cache_clear()
+    typesafe_client._usage_state = {"requests": 0, "input_tokens": 0,
+                                    "output_tokens": 0}
+    typesafe_client._usage_loaded = False
+
+
 class _FakeResp:
     def __init__(self, body: bytes, status: int = 200):
         self._body = body
@@ -234,6 +257,21 @@ def test_build_jev_dynamics_payload():
             if "criteria" in q:
                 assert isinstance(q["criteria"], dict), f"{q_id} noul criteria must be dict"
                 assert "true" in q["criteria"] and "false" in q["criteria"]
+
+    # 逃生口体检（jev-research 方案 E）：Choice 分布和恒为 1，覆盖不全的分类题
+    # 必须有显式 none/other 出口，否则不匹配输入会被硬贴最近类（官方 jaggedness：
+    # 乱码输入仍必选一项）。白名单 = 有序尺度/方向类，语义上必有其一，无需弃权。
+    _ESCAPABLE_OK = {"intent_entropy"}  # low/mid/high 模糊度总有程度
+    for q_id, q in questions.items():
+        if q["type"] != "choice":
+            continue
+        base = q_id.rsplit("_t", 1)[0] if "_t" in q_id else q_id
+        if q_id in _ESCAPABLE_OK or base in _ESCAPABLE_OK or base == "vector":
+            continue
+        has_escape = any(k in ("other", "none", "none_of_the_above")
+                         for k in q["criteria"])
+        assert has_escape, (
+            f"choice 题 {q_id} 缺逃生口（other/none）：覆盖不全时会被硬贴最近类")
 
 
 def test_synthesize_jev_dynamics_data():
@@ -470,6 +508,10 @@ def test_build_jev_pass2_autopsy_payload():
     assert "crit_waterbed_breakage" in questions
     assert "crit_cognitive_overload" in questions
     assert "prescriptive_action" in questions
+    # 逃生口（方案 E）：五类人因之外须有出口，否则纯环境故障被硬归人因类
+    assert "other" in questions["crit_causal_attribution"]["criteria"]
+    # prescriptive_action 的 maintain_course 即「无需调整」的显式出口，语义自洽
+    assert "maintain_course" in questions["prescriptive_action"]["criteria"]
 
 
 def test_evaluate_dynamics_cascade_end_to_end():
@@ -542,4 +584,358 @@ def test_evaluate_dynamics_cascade_end_to_end():
     assert "反事实验证" in text
     assert "85.0%" in text
     assert "连带破坏" in text
+
+
+# =========================================================================
+# 6. 判定缓存（jev-research 方案 D）：省钱 + 采样漂移归零 + 跨重启复用
+# =========================================================================
+
+_Q = {"q": {"type": "choice", "criteria": {"a": "opt a", "b": "opt b"}}}
+
+
+def _ok_resp() -> bytes:
+    return json.dumps({
+        "model": "jev-latest",
+        "answers": {"q": {"type": "choice", "choice": "a", "confidence": 0.9}},
+    }).encode("utf-8")
+
+
+def test_evaluate_cache_hit_and_miss():
+    calls = []
+
+    def _mock(req, timeout=10.0):
+        calls.append(req)
+        return _FakeResp(_ok_resp())
+
+    with mock.patch("urllib.request.urlopen", side_effect=_mock):
+        r1 = typesafe_client.evaluate(state={"s": 1}, questions=_Q, api_key="k")
+        r2 = typesafe_client.evaluate(state={"s": 1}, questions=_Q, api_key="k")
+        # 同 state 不同问题 → 缓存键不同，必须发起新请求
+        typesafe_client.evaluate(
+            state={"s": 1}, questions={"q2": {"type": "noul", "instructions": "x"}},
+            api_key="k")
+        # use_cache=False → 绕过缓存强制联网
+        typesafe_client.evaluate(state={"s": 1}, questions=_Q, api_key="k",
+                                 use_cache=False)
+
+    assert len(calls) == 3, "命中应零网络、异键与强制刷新各一次"
+    assert r1 == r2
+
+
+def test_evaluate_cache_survives_restart():
+    """缓存落盘：清空进程内状态模拟重启后仍不重复请求。"""
+    calls = []
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=lambda req, timeout=10.0:
+                    (calls.append(req), _FakeResp(_ok_resp()))[1]):
+        typesafe_client.evaluate(state={"s": 2}, questions=_Q, api_key="k")
+        # 模拟新进程：丢弃内存态，仅磁盘缓存仍在
+        typesafe_client._cache_store.clear()
+        typesafe_client._cache_loaded = False
+        typesafe_client.evaluate(state={"s": 2}, questions=_Q, api_key="k")
+    assert len(calls) == 1
+
+
+def test_evaluate_cache_hit_returns_deep_copy():
+    """命中返回深拷贝：调用方突变不得污染缓存。"""
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=lambda req, timeout=10.0: _FakeResp(_ok_resp())):
+        r1 = typesafe_client.evaluate(state={"s": 3}, questions=_Q, api_key="k")
+    r1["answers"]["q"]["choice"] = "mutated"
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=lambda req, timeout=10.0: _FakeResp(_ok_resp())):
+        r2 = typesafe_client.evaluate(state={"s": 3}, questions=_Q, api_key="k")
+    assert r2["answers"]["q"]["choice"] == "a"
+
+
+def test_cache_clear_forces_refresh():
+    calls = []
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=lambda req, timeout=10.0:
+                    (calls.append(req), _FakeResp(_ok_resp()))[1]):
+        typesafe_client.evaluate(state={"s": 4}, questions=_Q, api_key="k")
+        typesafe_client.cache_clear()
+        typesafe_client.evaluate(state={"s": 4}, questions=_Q, api_key="k")
+    assert len(calls) == 2
+
+
+def test_cascade_pass2_uses_cache_not_failure_path():
+    """级联的 Pass 2 降级分支只捕网络异常——缓存命中的正常路径不受影响；
+    且同参数重跑级联时两阶段全部命中缓存（0 次网络调用）。"""
+    report = _make_dummy_report()
+    derived = llm_prompts.build_llm_derived(report)
+
+    pass1_data = {
+        "model": "jev-latest",
+        "answers": {
+            "convergence_type": {"type": "choice", "choice": "escaped",
+                                 "confidence": 0.92},
+            "primary_bottleneck": {"type": "choice", "choice": "retry_loop",
+                                   "confidence": 0.88},
+            "barrier_crossed": {"type": "noul", "noul": 0.9},
+            "attractor_trapped": {"type": "noul", "noul": 0.1},
+            "intent_formalization": {"type": "score", "score": 3.5, "confidence": 0.9},
+            "drift_sensitivity": {"type": "score", "score": 3.0, "confidence": 0.85},
+            "feedback_mutual_info": {"type": "score", "score": 4.2, "confidence": 0.95},
+            "epistemic_balance": {"type": "score", "score": 3.8, "confidence": 0.9},
+        },
+    }
+    pass2_data = {
+        "model": "jev-latest",
+        "answers": {
+            "crit_causal_attribution": {"type": "choice", "choice": "other",
+                                        "confidence": 0.9},
+            "crit_counterfactual_preventable": {"type": "noul", "noul": 0.85},
+            "crit_waterbed_breakage": {"type": "noul", "noul": 0.12},
+            "crit_cognitive_overload": {"type": "score", "score": 1.0, "confidence": 0.9},
+            "blame_ai": {"type": "score", "score": 1.0, "confidence": 0.9},
+            "blame_user": {"type": "score", "score": 1.0, "confidence": 0.9},
+            "blame_env": {"type": "score", "score": 3.0, "confidence": 0.9},
+            "prescriptive_action": {"type": "choice", "choice": "rollback_reset",
+                                    "confidence": 0.9},
+        },
+    }
+
+    calls = []
+
+    def _mock(req, timeout=10.0):
+        calls.append(req)
+        body = json.loads(req.data.decode("utf-8"))
+        if "crit_causal_attribution" in body.get("questions", {}):
+            return _FakeResp(json.dumps(pass2_data).encode("utf-8"))
+        return _FakeResp(json.dumps(pass1_data).encode("utf-8"))
+
+    with mock.patch("urllib.request.urlopen", side_effect=_mock):
+        typesafe_client.evaluate_dynamics_cascade(
+            report, derived, api_key="k", on_progress=lambda m: None)
+        # 同参数重跑：两阶段全命中缓存，零网络调用
+        text2, _ = typesafe_client.evaluate_dynamics_cascade(
+            report, derived, api_key="k", on_progress=lambda m: None)
+
+    assert len(calls) == 2
+    # 逃生口选项经合成层渲染为中立中文（不会渲染成 None 或误落 clean_breakthrough）
+    assert "其他根因" in text2
+
+
+# =========================================================================
+# 7. 语义审计（方案 A：反谄媚审计官）
+# =========================================================================
+
+def test_build_semantic_audit_payload():
+    state, questions = llm_prompts.build_semantic_audit_payload("报告正文……")
+    assert state == {"report_text": "报告正文……"}
+    # 全部为 Noul 且带显式 true/false 边界（官方最佳实践：微妙边界要 criteria）
+    assert len(questions) >= 6
+    for q in questions.values():
+        assert q["type"] == "noul"
+        assert set(q["criteria"]) == {"true", "false"}
+
+
+def test_format_semantic_audit_verdicts():
+    answers = {
+        "ungrounded_praise": {"type": "noul", "noul": 0.82},
+        "mud_blame": {"type": "noul", "noul": 0.31},   # 阈下 → 不警示
+        "jargon": {"type": "noul", "noul": 0.65},
+        "actionable_advice": {"type": "noul", "noul": 0.20},  # 健康题过低 → 警示
+        # missing_evidence / vague_turnaround 未答 → 跳过不计
+    }
+    res = llm_prompts.format_semantic_audit(answers)
+    texts = " ".join(res["warnings"])
+    assert "无据正面评价" in texts and "82%" in texts
+    assert "术语超纲" in texts
+    assert "建议缺乏可执行性" in texts
+    assert "归因和稀泥" not in texts, "阈下风险不应计入警示"
+    assert res["praise_risk"] == 0.82
+    # 展示串含中文标签
+    assert any("无据正面评价 82%" in d for d in res["probs_display"])
+
+
+def test_format_semantic_audit_all_clear():
+    answers = {k: {"type": "noul", "noul": 0.05}
+               for k in llm_prompts._SEMANTIC_AUDIT_QUESTIONS
+               if not llm_prompts._SEMANTIC_AUDIT_QUESTIONS[k].get("healthy")}
+    answers["actionable_advice"] = {"type": "noul", "noul": 0.93}
+    res = llm_prompts.format_semantic_audit(answers)
+    assert res["warnings"] == []
+    assert res["praise_risk"] == 0.05
+
+
+def test_semantic_audit_end_to_end_via_cache():
+    """worker 语义审计链路：payload 构建 → evaluate（mock）→ 裁决落 entry 形状。"""
+    resp = json.dumps({
+        "model": "jev-latest",
+        "answers": {
+            k: {"type": "noul", "noul": 0.10}
+            for k in llm_prompts._SEMANTIC_AUDIT_QUESTIONS
+        },
+    }).encode("utf-8")
+    # actionable_advice 是健康题，0.10 会触发「建议缺乏可执行性」警示
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=lambda req, timeout=10.0: _FakeResp(resp)):
+        state, questions = llm_prompts.build_semantic_audit_payload("正文")
+        r = typesafe_client.evaluate(state, questions, api_key="k")
+    res = llm_prompts.format_semantic_audit(r["answers"])
+    assert res["warnings"] == ["建议缺乏可执行性（判定 10%）"]
+
+
+# =========================================================================
+# 8. 纠正信号交叉验证（方案 C：正则 vs Jev 双引擎对账）
+# =========================================================================
+
+def test_build_correction_crosscheck_payload():
+    msgs = ["帮我实现 CLI", "/compact", "", "不对，重来，要换方案", "补充一个细节"]
+    state, questions = llm_prompts.build_correction_crosscheck_payload(msgs)
+    # 斜杠命令与空消息不参与；索引保持原消息序号（1-based，跳 2/3）
+    idxs = [m["index"] for m in state["user_messages"]]
+    assert idxs == [1, 4, 5]
+    assert set(questions) == {"corrects_1", "dissatisfied_1", "newreq_1",
+                              "corrects_4", "dissatisfied_4", "newreq_4",
+                              "corrects_5", "dissatisfied_5", "newreq_5"}
+    for q in questions.values():
+        assert q["type"] == "noul"
+        assert set(q["criteria"]) == {"true", "false"}
+
+
+def test_format_correction_crosscheck_four_quadrants():
+    msgs = [
+        "帮我实现一个 CLI 工具",            # 1 正则未命中 + Jev 低 → 双方确认非纠正
+        "不对，方向错了，重来",              # 2 正则命中 + Jev 认同 → agree
+        "别这么写，换成解析器方案",           # 3 正则命中 + Jev 判非 → 疑似误报
+        "另外把日志也加上吧",                # 4 正则未命中 + Jev 判纠正 → 疑似漏报
+        "不对，再检查一下边界情况",           # 5 正则命中 + Jev 0.5 → 灰色地带（命中侧）
+        "可是计划你执行了吗？",              # 6 正则未命中 + Jev 0.46 → 灰色地带（miss 侧，v2 关键）
+        "整理得不够好，你再看看",            # 7 正则未命中 + dissatisfied 0.8 → 疑似漏报（质量不满）
+    ]
+    answers = {
+        "corrects_1": {"type": "noul", "noul": 0.05},
+        "dissatisfied_1": {"type": "noul", "noul": 0.05},
+        "newreq_1": {"type": "noul", "noul": 0.02},
+        "corrects_2": {"type": "noul", "noul": 0.91},
+        "dissatisfied_2": {"type": "noul", "noul": 0.10},
+        "newreq_2": {"type": "noul", "noul": 0.05},
+        "corrects_3": {"type": "noul", "noul": 0.15},
+        "dissatisfied_3": {"type": "noul", "noul": 0.20},
+        "newreq_3": {"type": "noul", "noul": 0.30},
+        "corrects_4": {"type": "noul", "noul": 0.72},
+        "dissatisfied_4": {"type": "noul", "noul": 0.10},
+        "newreq_4": {"type": "noul", "noul": 0.88},
+        "corrects_5": {"type": "noul", "noul": 0.50},
+        "dissatisfied_5": {"type": "noul", "noul": 0.30},
+        "newreq_5": {"type": "noul", "noul": 0.10},
+        "corrects_6": {"type": "noul", "noul": 0.46},
+        "dissatisfied_6": {"type": "noul", "noul": 0.35},
+        "newreq_6": {"type": "noul", "noul": 0.10},
+        "corrects_7": {"type": "noul", "noul": 0.20},
+        "dissatisfied_7": {"type": "noul", "noul": 0.80},
+        "newreq_7": {"type": "noul", "noul": 0.10},
+    }
+    text, data = llm_prompts.format_correction_crosscheck(msgs, answers)
+    c = data["counts"]
+    assert c["agree_correction"] == 1
+    assert c["regex_only"] == 1
+    assert c["jev_only"] == 2          # 4（方向纠正）+ 7（质量不满）
+    assert c["jev_uncertain"] == 2     # 5（命中侧）+ 6（miss 侧，v2 关键修复）
+    assert c["agree_none"] == 1
+    assert c["scope_growth"] == 1      # 4 的 newreq 0.88
+    # 分歧/灰色明细与 v2 语义文案
+    assert "疑似误报" in text and "疑似漏报" in text
+    assert "灰色地带" in text and "需求扩张信号" in text
+    assert "换成解析器方案" in text and "你再看看" in text
+    # 逐条明细全量展示（7 条全部入表）
+    assert "| 6 |" in text and "| 7 |" in text
+    assert "不参与任何指标计算" in text  # 解读层旁路声明
+
+
+def test_format_crosscheck_zero_hit_fail_loud():
+    """正则零命中 + 无强信号：必须 fail loud，禁止「无分歧」误导结论。"""
+    msgs = ["继续", "好的"]
+    answers = {
+        "corrects_1": {"type": "noul", "noul": 0.10},
+        "dissatisfied_1": {"type": "noul", "noul": 0.05},
+        "newreq_1": {"type": "noul", "noul": 0.10},
+        "corrects_2": {"type": "noul", "noul": 0.45},
+        "dissatisfied_2": {"type": "noul", "noul": 0.30},
+        "newreq_2": {"type": "noul", "noul": 0.10},
+    }
+    text, data = llm_prompts.format_correction_crosscheck(msgs, answers)
+    assert "不等于确认无纠正" in text
+    assert data["counts"]["jev_uncertain"] == 1
+
+
+def test_correction_crosscheck_report_audit_clean():
+    """crosscheck 报告走 provider="crosscheck" 口径：不被叙事契约误报。"""
+    msgs = ["帮我实现 CLI", "不对，重来"]
+    answers = {"corrects_1": {"type": "noul", "noul": 0.05},
+               "corrects_2": {"type": "noul", "noul": 0.9}}
+    text, _ = llm_prompts.format_correction_crosscheck(msgs, answers)
+    assert llm_prompts.audit_warnings(text, False, "crosscheck") == []
+
+
+def test_correction_crosscheck_end_to_end():
+    """全链路：payload → evaluate（mock，走缓存）→ 对账。"""
+    msgs = ["实现功能 A", "不对，这样不对，改回原方案"]
+    state, questions = llm_prompts.build_correction_crosscheck_payload(msgs)
+    resp = json.dumps({
+        "model": "jev-latest",
+        "answers": {
+            "corrects_1": {"type": "noul", "noul": 0.03},
+            "newreq_1": {"type": "noul", "noul": 0.05},
+            "corrects_2": {"type": "noul", "noul": 0.88},
+            "newreq_2": {"type": "noul", "noul": 0.06},
+        },
+    }).encode("utf-8")
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=lambda req, timeout=10.0: _FakeResp(resp)):
+        r = typesafe_client.evaluate(state, questions, api_key="k")
+    text, data = llm_prompts.format_correction_crosscheck(msgs, r["answers"])
+    assert data["counts"]["agree_correction"] == 1
+    assert data["counts"]["agree_none"] == 1
+    assert "双引擎" in text or "执行摘要" in text
+
+
+# =========================================================================
+# 9. 计费记账（方案 F）：只记真实网络调用，缓存命中不计
+# =========================================================================
+
+def test_usage_records_real_calls_only():
+    resp = json.dumps({
+        "model": "jev-latest",
+        "usage": {"input_tokens": 5000, "output_tokens": 120},
+        "answers": {"q": {"type": "choice", "choice": "a"}},
+    }).encode("utf-8")
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=lambda req, timeout=10.0: _FakeResp(resp)):
+        typesafe_client.evaluate(state={"s": 1}, questions=_Q, api_key="k")
+        typesafe_client.evaluate(state={"s": 1}, questions=_Q, api_key="k")  # 缓存命中
+        typesafe_client.evaluate(state={"s": 2}, questions=_Q, api_key="k")  # 真实调用
+    stats = typesafe_client.usage_stats()
+    assert stats["requests"] == 2, "缓存命中不计费"
+    assert stats["input_tokens"] == 10000
+    assert stats["output_tokens"] == 240
+    # 官方输入单价折算：10k tokens × $0.042/M = $0.00042
+    assert abs(typesafe_client.usage_cost_usd(stats) - 0.00042) < 1e-9
+
+
+def test_usage_survives_restart():
+    resp = json.dumps({
+        "model": "jev-latest",
+        "usage": {"input_tokens": 1000, "output_tokens": 10},
+        "answers": {"q": {"type": "choice", "choice": "a"}},
+    }).encode("utf-8")
+    with mock.patch("urllib.request.urlopen",
+                    side_effect=lambda req, timeout=10.0: _FakeResp(resp)):
+        typesafe_client.evaluate(state={"s": 9}, questions=_Q, api_key="k")
+    # 模拟新进程：仅磁盘记账仍在
+    typesafe_client._usage_state = {"requests": 0, "input_tokens": 0,
+                                    "output_tokens": 0}
+    typesafe_client._usage_loaded = False
+    stats = typesafe_client.usage_stats()
+    assert stats["requests"] == 1
+    assert stats["input_tokens"] == 1000
+
+
+def test_usage_zero_when_no_calls():
+    assert typesafe_client.usage_stats() == {
+        "requests": 0, "input_tokens": 0, "output_tokens": 0}
+    assert typesafe_client.usage_cost_usd() == 0.0
 
