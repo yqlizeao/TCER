@@ -10,6 +10,7 @@ from __future__ import annotations
 import queue
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -124,6 +125,13 @@ class TcerGui:
         if self._ui_prefs.get("check_update_on_start"):
             # opt-in 启动自动检查更新:延后 2s 避开启动繁忙,仅「有新版」才弹窗
             root.after(2000, lambda: self.check_for_update(silent=True))
+        self._last_auto_check_ts: float = 0.0
+        self._auto_upload_running: bool = False
+        self._auto_upload_job = None
+        # 仅当开启了自动上传时，才启动轮询！未开启时零定时器开销
+        from tcer.core import upload_config
+        if upload_config.auto_upload():
+            self._start_auto_upload_polling(30_000)
     def _hotkey_search(self, _event=None) -> None:
         """Ctrl+F：聚焦搜索框并全选（焦点在项目区则搜项目，否则搜会话）。"""
         try:
@@ -537,6 +545,11 @@ class TcerGui:
                             dialog.set_status(message, error=not ok)
                         except tk.TclError:
                             pass  # dialog closed before result arrived
+                elif kind == "auto_upload":
+                    _, ok, n_proj, n_recs, message = item
+                    self.filter.set_status(message)
+                    if ok and n_recs > 0:
+                        self._show_upload_success_bubble(n_proj, n_recs)
                 # unknown kind: ignore — never unpack an unexpected tuple shape,
                 # which would raise and stop _poll from rescheduling (freezes GUI).
         except queue.Empty:
@@ -1801,8 +1814,6 @@ class TcerGui:
     # --------------------------------------------------------------- upload
     def show_upload(self) -> None:
         from tcer.core import upload_config
-        projects = [(views.ref_uid(p), f"[{views.project_source_label(p)}] {views.project_label(p)}")
-                    for p in self._projects]
         default_proj = None
         proj = self._selected_project()
         if proj is not None:
@@ -1810,7 +1821,7 @@ class TcerGui:
         popups.UploadDialog(
             self.root,
             prefs=self._upload_prefs,
-            projects=projects,
+            projects=self._projects,
             default_project=default_proj,
             on_upload=self._start_upload,
             on_save_prefs=self._save_upload_prefs,
@@ -1820,16 +1831,20 @@ class TcerGui:
             config=upload_config.stored_config(),
         )
 
-    def _save_upload_config(self, *, url: str, auth_token: str, detail: bool) -> None:
+    def _save_upload_config(self, *, url: str, auth_token: str, detail: bool,
+                            auto_upload: bool = False) -> None:
         """把 dialog 编辑的上传配置写回 ``tcer_ui.json`` 的 upload 段。
 
         写回后同步 ``self._ui_prefs``（退出时整体落盘的内存副本），避免 ``_on_close``
         用旧副本覆盖掉刚保存的 upload 段。
         """
         from tcer.core import upload_config
-        upload_config.save(url=url, auth_token=auth_token, detail=detail)
+        upload_config.save(url=url, auth_token=auth_token, detail=detail, auto_upload=auto_upload)
         self._ui_prefs = ui_prefs.load()
-
+        if auto_upload:
+            self._start_auto_upload_polling(1000)
+        else:
+            self._stop_auto_upload_polling()
     def _save_upload_prefs(self, prefs: dict) -> None:
         """Persist only the remembered project selection (rest lives in
         ``tcer_ui.json`` 的 upload 段, see ``upload_config``)."""
@@ -1874,8 +1889,8 @@ class TcerGui:
         params = self.filter.get_params()
         analysis_args = dict(
             task_type=params["task_type"],
-            since=params["since"],
-            until=params["until"],
+            since=None,
+            until=None,
             no_loc=self._no_loc,
         )
         cfg = dict(server_url=server_url, auth_token=upload_config.auth_token(),
@@ -1903,15 +1918,22 @@ class TcerGui:
         total_inserted = 0
         ok_projects = 0
         errors: list[str] = []
+        skipped_empty: list[str] = []
+
+        from tcer.core.paths import project_has_sessions
+
         for key, ref in refs:
             label = views.project_label(ref)
+            if not project_has_sessions(ref):
+                skipped_empty.append(label)
+                continue
             try:
                 a = analyze.analyze_project(
                     project=ref.key, source=ref.source, project_ref=ref,
                     **analysis_args,
                 )
                 if not a.reports and a.n_sessions == 0:
-                    errors.append(f"{label}: 选定范围内无会话，跳过")
+                    skipped_empty.append(label)
                     continue
                 total_inserted += upload_client.token_upload(
                     server_url=server_url, auth_token=auth_token,
@@ -1919,18 +1941,190 @@ class TcerGui:
                     n_sessions=a.n_sessions, project=key, detail=detail,
                 )
                 ok_projects += 1
-            except Exception as e:  # noqa: BLE001 — collect per-project failures
+            except Exception as e:  # noqa: BLE001 — collect per-project failures without aborting
                 errors.append(f"{label}: {e}")
 
-        ok = ok_projects > 0 and not errors
+        ok = ok_projects > 0 or (not errors and not refs)
+        if ok_projects > 0:
+            from tcer.core import upload_config
+            upload_config.set_last_upload_ts(int(time.time() * 1000))
         parts = [f"上传完成 · {ok_projects}/{len(refs)} 个项目 · 写入 {total_inserted} 条记录"]
+        if skipped_empty:
+            parts.append(f"（{len(skipped_empty)} 项无会话，已跳过）")
         if missing:
             parts.append(f"（{len(missing)} 个已不存在，已跳过）")
         if errors:
             shown = "；".join(errors[:3])
-            parts.append(f"失败：{shown}" + (f" 等 {len(errors)} 项" if len(errors) > 3 else ""))
+            parts.append(f"失败 {len(errors)} 项：{shown}" + (f" 等" if len(errors) > 3 else ""))
         self._q.put(("upload", dialog, ok, " ".join(parts)))
 
+    # --------------------------------------------------------- auto-upload
+    def _start_auto_upload_polling(self, delay_ms: int = 60_000) -> None:
+        """启动自动上传轮询（仅在开启 auto_upload 时运行）。"""
+        self._stop_auto_upload_polling()
+        from tcer.core import upload_config
+        if not upload_config.auto_upload():
+            return
+        try:
+            self._auto_upload_job = self.root.after(delay_ms, self._auto_upload_tick)
+        except (tk.TclError, RuntimeError):
+            self._auto_upload_job = None
+
+    def _stop_auto_upload_polling(self) -> None:
+        """停止自动上传轮询，取消已调度的计时器。"""
+        job = getattr(self, "_auto_upload_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except (tk.TclError, RuntimeError):
+                pass
+            self._auto_upload_job = None
+
+    def _auto_upload_tick(self) -> None:
+        self._auto_upload_job = None
+        from tcer.core import upload_config
+        if not upload_config.auto_upload():
+            return  # 未开启自动上传，终止轮询
+        try:
+            self._check_auto_upload()
+        finally:
+            if upload_config.auto_upload():
+                self._start_auto_upload_polling(60_000)
+
+    def _check_auto_upload(self) -> None:
+        """每小时自动检查所选项目是否有新会话，有则上传。"""
+        from tcer.core import upload_config
+        if not upload_config.auto_upload():
+            return
+        if not upload_config.server_url():
+            return
+        if self._auto_upload_running:
+            return
+
+        last_ts = upload_config.last_upload_ts()
+        now = time.time()
+
+        # 距上次成功上传或上次自动检查是否已满 1 小时 (3600 秒)
+        ref_time = self._last_auto_check_ts
+        if last_ts is not None:
+            ref_time = max(ref_time, last_ts / 1000.0)
+
+        if ref_time > 0 and (now - ref_time) < 3600.0:
+            return
+
+        self._last_auto_check_ts = now
+        self._trigger_auto_upload(last_ts)
+
+    def _trigger_auto_upload(self, last_upload_ts: int | None) -> None:
+        """后台线程：保持上传面板选的列表与详情开关，检查并上传新会话。"""
+        from tcer.core import upload_config
+        server_url = upload_config.server_url()
+        if not server_url:
+            return
+        keys = list(self._upload_prefs.get("last_projects") or [])
+        if not keys:
+            return
+        refs = [(k, self._project_ref_by_uid(k)) for k in keys]
+        refs = [(k, r) for k, r in refs if r is not None]
+        if not refs:
+            return
+
+        self._auto_upload_running = True
+        params = self.filter.get_params()
+        analysis_args = dict(
+            task_type=params["task_type"],
+            since=None,
+            until=None,
+            no_loc=self._no_loc,
+        )
+        cfg = dict(
+            server_url=server_url,
+            auth_token=upload_config.auth_token(),
+            detail=upload_config.upload_detail(),
+        )
+        threading.Thread(
+            target=self._auto_upload_worker,
+            args=(cfg, refs, analysis_args, last_upload_ts),
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _report_activity_ms(report) -> int:
+        u = getattr(report, "usage", None)
+        if u is not None:
+            ts = getattr(u, "ended_at", None) or getattr(u, "started_at", None)
+            if ts is not None and ts > 0:
+                return int(ts)
+        meta = getattr(report, "meta", None)
+        if meta is not None:
+            ts = getattr(meta, "ended_at", None) or getattr(meta, "started_at", None)
+            if ts is not None and ts > 0:
+                return int(ts)
+            p = getattr(meta, "path", None)
+            if p is not None and getattr(p, "is_file", None) and p.is_file():
+                try:
+                    return int(p.stat().st_mtime * 1000)
+                except OSError:
+                    pass
+        return 0
+
+    def _auto_upload_worker(self, cfg, refs, analysis_args, last_upload_ts: int | None) -> None:
+        from tcer.core import upload_config
+        try:
+            server_url = cfg["server_url"]
+            auth_token = cfg.get("auth_token")
+            detail = bool(cfg.get("detail"))
+
+            total_inserted = 0
+            ok_projects = 0
+            errors: list[str] = []
+
+            for key, ref in refs:
+                label = views.project_label(ref)
+                try:
+                    a = analyze.analyze_project(
+                        project=ref.key, source=ref.source, project_ref=ref,
+                        **analysis_args,
+                    )
+                    if not a.reports:
+                        continue
+
+                    if last_upload_ts is not None:
+                        new_reports = [r for r in a.reports if self._report_activity_ms(r) > last_upload_ts]
+                    else:
+                        new_reports = a.reports
+
+                    if not new_reports:
+                        continue
+
+                    total_inserted += upload_client.token_upload(
+                        server_url=server_url, auth_token=auth_token,
+                        aggregate=a.aggregate, reports=new_reports,
+                        n_sessions=len(new_reports), project=key, detail=detail,
+                    )
+                    ok_projects += 1
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{label}: {e}")
+
+            if ok_projects > 0:
+                upload_config.set_last_upload_ts(int(time.time() * 1000))
+                msg = f"自动上传完成 · {ok_projects} 个项目 · 写入 {total_inserted} 条新记录"
+                self._q.put(("auto_upload", True, ok_projects, total_inserted, msg))
+            elif errors:
+                shown = "；".join(errors[:2])
+                self._q.put(("auto_upload", False, 0, 0, f"自动上传失败：{shown}"))
+        finally:
+            self._auto_upload_running = False
+
+    def _show_upload_success_bubble(self, n_projects: int, n_records: int) -> None:
+        """在活动栏上传按钮右侧弹出一个提示气泡，主动告知用户自动上传成功。"""
+        upload_btn = None
+        if hasattr(self, "activity_bar"):
+            upload_btn = self.activity_bar.get_upload_widget()
+        if upload_btn is not None:
+            title = "自动上传成功"
+            subtitle = f"总 {n_projects} 个项目，共 {n_records} 条"
+            popups.UploadSuccessBubble.show(upload_btn, title, subtitle)
     # --------------------------------------------------------------- entry
     @classmethod
     def run(cls) -> int:

@@ -163,22 +163,68 @@ class RealProject:
     refs: list[ProjectRef] = field(default_factory=list)
 
 
-def _claude_ref_cwd(ref: ProjectRef) -> str | None:
-    """Claude ref 的工作目录：首会话 meta 的 cwd（read_session_meta 走 file_cache）。
+def _claude_hash_of_cwd(cwd: str) -> str:
+    """把物理工作目录规范化编码为 Claude 格式的 hash 字符串（小写），供反查对齐。"""
+    s = os.path.normpath(cwd)
+    for ch in ("\\", "/", ".", ":"):
+        s = s.replace(ch, "-")
+    return s.lower()
 
-    ref 层不落 cwd（``list_project_refs`` 只列目录名）；key 反解不可靠——Claude
-    的编码把 ``.``/空格等一并折叠成 ``-``，有损。读不到（空项目/头损坏）→ None，
-    该 ref 独立成组。
+
+def _resolve_claude_key_to_cwd(key: str) -> str | None:
+    """从 Claude project-hash 文件夹名贪心反解出磁盘上真实存在的工作目录。
+
+    例如 ``d--a-b-c-d-e`` -> ``D:\\a\\b-c\\d-e``。
+    支持 Windows 盘符（如 ``d--``）与 Unix 根（如 ``-home-...``）。
+    """
+    if len(key) >= 4 and key[0].isalpha() and key[1:3] == "--":
+        drive = key[0].upper() + ":\\"
+        remainder = key[3:]
+    elif key.startswith("-"):
+        drive = "/"
+        remainder = key[1:]
+    else:
+        return None
+
+    tokens = [t for t in remainder.split("-") if t]
+    cur = Path(drive)
+    if not cur.exists():
+        return None
+
+    i = 0
+    n = len(tokens)
+    while i < n:
+        matched = False
+        for j in range(n, i, -1):
+            cand_name = "-".join(tokens[i:j])
+            cand_path = cur / cand_name
+            if cand_path.exists():
+                cur = cand_path
+                i = j
+                matched = True
+                break
+        if not matched:
+            return None
+    return str(cur)
+
+
+def _claude_ref_cwd(ref: ProjectRef) -> str | None:
+    """Claude ref 的工作目录：首会话 meta 的 cwd；读不到时按磁盘真实路径贪心还原。
+
+    ref 层不落 cwd；若无会话文件或会话头读不到 cwd，按磁盘真实存在的路径
+    反解还原，避免产生裸 hash 独立未合并分组。
     """
     try:
         files = reader.discover_jsonl(
             ref.key, roots=[ref_root(ref)] if ref_root(ref) is not None else None)
         main = next((f for f in files if not reader.is_subagent(f)), None)
-        if main is None:
-            return None
-        return reader.read_session_meta(main).cwd
-    except Exception:  # noqa: BLE001 — 头读失败不拦聚合，退独立成组
-        return None
+        if main is not None:
+            cwd = reader.read_session_meta(main).cwd
+            if cwd:
+                return cwd
+    except Exception:  # noqa: BLE001 — 头读失败不拦聚合，退反解
+        pass
+    return _resolve_claude_key_to_cwd(ref.key)
 
 
 def _display_cwd(cwd: str) -> str:
@@ -189,19 +235,27 @@ def _display_cwd(cwd: str) -> str:
 
 
 def real_projects(refs: list[ProjectRef]) -> list[RealProject]:
-    """把 (source, key) 粒度的 ref 按「真实工作目录」聚合。
+    r"""把 (source, key) 粒度的 ref 按「真实工作目录」聚合。
 
     规范化用 ``os.path.normcase + normpath``：Windows 下折叠盘符大小写与
     斜杠方向（``C:\GitHub\TCER`` == ``c:/github/tcer``）；展示名盘符统一
     大写（``_display_cwd``）。**父子路径不合并**（``c:\playground`` 与
     ``c:\playground\langfuse`` 是不同的工作目录语义）。
     """
+    # 先从已有确切 cwd 的 ref 中收集 hash 索引，协助无会话的 Claude ref 对齐合并
+    known_cwds: dict[str, str] = {}
+    for ref in refs:
+        if ref.cwd:
+            known_cwds[_claude_hash_of_cwd(ref.cwd)] = ref.cwd
+
     groups: dict[str, RealProject] = {}
     singles: list[RealProject] = []
     for ref in refs:
         cwd = ref.cwd
         if cwd is None and ref.source == "claude":
             cwd = _claude_ref_cwd(ref)
+            if not cwd and known_cwds and ref.key.lower() in known_cwds:
+                cwd = known_cwds[ref.key.lower()]
         if not cwd:
             singles.append(RealProject(
                 key=f"ref:{ref.source}:{ref.key}",

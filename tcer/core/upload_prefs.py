@@ -26,6 +26,7 @@ def _prefs_path():
 
 _DEFAULTS: dict = {
     "last_projects": [],   # list of selected project keys (multi-select)
+    "hidden_dirs": [],     # list of hidden directory keys
 }
 
 
@@ -43,13 +44,19 @@ def load() -> dict:
     if not projs and stored.get("last_project"):  # back-compat scalar
         projs = [stored["last_project"]]
     prefs["last_projects"] = projs if isinstance(projs, list) else []
+    h = stored.get("hidden_dirs")
+    prefs["hidden_dirs"] = h if isinstance(h, list) else []
     return prefs
 
 
 def save(prefs: dict) -> None:
     """Atomically persist the remembered project selection only."""
     projs = prefs.get("last_projects")
-    out = {"last_projects": projs if isinstance(projs, list) else []}
+    h = prefs.get("hidden_dirs")
+    out = {
+        "last_projects": projs if isinstance(projs, list) else [],
+        "hidden_dirs": h if isinstance(h, list) else [],
+    }
     p = _prefs_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")

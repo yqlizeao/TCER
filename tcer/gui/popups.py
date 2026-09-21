@@ -1441,16 +1441,14 @@ class ConfirmDeletePopup:
 class UploadDialog:
     """上传到 TCER Server — 「配置 + 选项目 + 上传」。
 
-    服务器地址 / Auth Token / 是否附带明细在此**可编辑**，保存后写回 ``tcer_ui.json``
-    的 ``upload`` 段（``on_save_config``）。点「立即上传」时先保存配置、再上传所选
-    项目。``projects`` 是 ``(key, display)`` 列表；``config`` 是 ``upload_config``
-    的存储原始值（``url``/``auth_token``/``detail``/``default_url``）。
-
-    设计：url 留空即用内置默认（占位提示里显示）；token 留空即匿名上传。本地单
-    用户工具，token 明文存同机 json、也在此明文回填，便于用户核对/更换。
+    服务器地址 / Auth Token / 是否附带明细 / 自动上传在此**可编辑**，保存后写回
+    ``tcer_ui.json`` 的 ``upload`` 段（``on_save_config``）。
+    项目列表按照工作目录分组展示，同目录的多个 agent 集中排布；各 agent 采用与主界面
+    一致的 16×16 图标（source_icon，复用资产）取代中括号文字标签。
+    上传按钮前设有自动上传勾选框，勾选后客户端按记录的上传时间戳每小时自动检查并上传新会话。
     """
 
-    def __init__(self, parent, *, prefs: dict, projects: list[tuple[str, str]],
+    def __init__(self, parent, *, prefs: dict, projects: list,
                  default_project: str | None, on_upload, on_save_prefs,
                  on_save_config, config: dict) -> None:
         self._on_upload = on_upload
@@ -1459,21 +1457,52 @@ class UploadDialog:
         self._projects = projects
         self._default_url = str(config.get("default_url") or "")
 
-        win = _new_window(parent, "上传到 TCER Server", "740x540")
+        win = _new_window(parent, "上传到 TCER Server", "760x580")
         self._win = win
         tk.Label(win, text="上传到 TCER Server", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
+                 font=theme.FONT_HEADING, pady=8).pack(side="top", fill="x")
 
+        # 底部操作区与状态行先 pack 在底部，确保任何高度下都固定可见
+        action = tk.Frame(win, bg=theme.BG)
+        action.pack(side="bottom", fill="x", padx=16, pady=(4, 8))
+
+        # -- 上传按钮前的自动上传勾选框 --
+        self._auto_upload_var = tk.BooleanVar(value=bool(config.get("auto_upload", False)))
+        auto_row = tk.Frame(action, bg=theme.BG, cursor=CLICK_CURSOR)
+        auto_row.pack(fill="x", pady=(0, 6))
+        self._auto_box, toggle_auto = self._create_checkbox_widget(
+            auto_row, self._auto_upload_var, on_toggle=self._on_toggle_auto_upload)
+        self._auto_box.pack(side="left", padx=(0, 6))
+        self._auto_chk = self._auto_box  # 兼容别名
+        auto_lbl = tk.Label(
+            auto_row, text="每小时自动检查并上传新会话（保持当前所选列表与详情设置）",
+            bg=theme.BG, fg=theme.FG, font=theme.FONT_UI, anchor="w",
+            cursor=CLICK_CURSOR)
+        auto_lbl.pack(side="left")
+        auto_row.bind("<Button-1>", toggle_auto)
+        auto_lbl.bind("<Button-1>", toggle_auto)
+        Tooltip(auto_row, "勾选后客户端将在后台按照记录的上传时间戳，每小时自动检查所选项目是否有新会话，并自动上传")
+
+        self._upload_btn = tk.Button(  # style-exempt: style.md §3 豁免：UploadDialog
+            action, text="立即上传", command=self._do_upload, bg=theme.ACCENT,
+            fg=theme.FG_WHITE, relief="flat", padx=16, pady=6, font=theme.FONT_UI_BOLD,
+            cursor=CLICK_CURSOR)
+        self._upload_btn.pack(fill="x")
+
+        # -- 状态行 --
+        self._status = tk.Label(win, text="", bg=theme.BG, fg=theme.MUTED,
+                                font=theme.FONT_UI, wraplength=520, justify="left")
+        self._status.pack(side="bottom", fill="x", padx=12, pady=(2, 2))
+
+        # -- 中间可滚动表单区 --
         sf = ScrollFrame(win, bg=theme.PANEL)
         self._sf = sf  # 供 _fit_window 读取表单实际高度
-        # ScrollFrame 内部已把 canvas 以 side="left" pack；此处必须先 forget 再以 side="top"
-        # 重排——否则 canvas 留在左侧，后续状态行/按钮会被挤到它右边（左右布局 bug）。
         sf.canvas.pack_forget()
         sf.canvas.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 4))
         inner = sf.inner
 
-        # -- 上传目标（可编辑）：服务器地址 / Auth Token / 是否含明细 --
-        cfg_card = self._card(inner, "上传目标（留空则用默认；改动点「立即上传」时保存）")
+        # -- 上传目标卡片（可编辑）：服务器地址 / Auth Token / 是否含明细 --
+        cfg_card = self._card(inner, "上传目标（留空则用默认；改动点「立即上传」或勾选自动上传时保存）")
         self._url_var = tk.StringVar(value=str(config.get("url") or ""))
         self._token_var = tk.StringVar(value=str(config.get("auth_token") or ""))
         self._detail_var = tk.BooleanVar(value=bool(config.get("detail")))
@@ -1481,71 +1510,472 @@ class UploadDialog:
                             placeholder=f"默认 {self._default_url}")
         self._labeled_entry(cfg_card, "Auth Token", self._token_var,
                             placeholder="留空 = 匿名上传")
-        chk = tk.Checkbutton(  # style-exempt: style.md §3 豁免：UploadDialog
-            cfg_card, text="附带每会话明细（完整对话）", variable=self._detail_var,
-            bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI, anchor="w",
-            selectcolor=theme.PANEL_2, activebackground=theme.PANEL,
-            activeforeground=theme.FG, highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
-        chk.pack(fill="x", pady=(4, 0))
 
-        # -- 项目选择卡（标题即提示，多选列表紧随其下） --
-        card3 = self._card(inner, "项目选择（可多选，Ctrl/Shift 点选）")
-        self._proj_keys = [k for k, _ in projects]
-        proj_displays = [d for _, d in projects]
-        lb_frame = tk.Frame(card3, bg=theme.PANEL)
-        lb_frame.pack(fill="x")
-        self._proj_lb = tk.Listbox(
-            lb_frame, selectmode="extended", height=9, exportselection=False,
-            bg=theme.BG, fg=theme.FG, relief="flat", highlightthickness=1,
-            highlightbackground=theme.BORDER, selectbackground=theme.ACCENT,
-            selectforeground=theme.FG_WHITE, font=theme.FONT_UI, activestyle="none")
-        lb_sb = ttk.Scrollbar(lb_frame, orient="vertical", command=self._proj_lb.yview)
-        self._proj_lb.configure(yscrollcommand=lb_sb.set)
-        self._proj_lb.pack(side="left", fill="both", expand=True)
-        lb_sb.pack(side="right", fill="y")
-        for d in proj_displays:
-            self._proj_lb.insert("end", d)
-        # 预选：记住的上次选择优先；否则回退到当前项目。
+        detail_row = tk.Frame(cfg_card, bg=theme.PANEL, cursor=CLICK_CURSOR)
+        detail_row.pack(fill="x", pady=(4, 0))
+        self._detail_box, toggle_detail = self._create_checkbox_widget(
+            detail_row, self._detail_var, on_toggle=self._on_detail_toggle)
+        self._detail_box.pack(side="left", padx=(0, 6))
+        detail_lbl = tk.Label(
+            detail_row, text="附带每会话明细（完整对话）",
+            bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI, anchor="w",
+            cursor=CLICK_CURSOR)
+        detail_lbl.pack(side="left")
+        detail_row.bind("<Button-1>", toggle_detail)
+        detail_lbl.bind("<Button-1>", toggle_detail)
+
+        # -- 项目选择卡（按目录分组显示，同目录多个 agent 集中排布，默认收起紧凑展示） --
+        card3 = self._card(inner, "项目选择（按工作目录分组，默认收起；可展开查看与选择各 Agent）")
+
+        # 构建分组数据与预选
+        self._groups = self._build_groups(projects)
+        self._proj_vars: dict[str, tk.BooleanVar] = {}
+        self._box_widgets: dict[str, tk.Widget] = {}
+        self._hidden_keys: set[str] = set(prefs.get("hidden_dirs") or [])
+        self._show_hidden: bool = False
+        all_uids = [it["uid"] for g in self._groups for it in g["items"]]
+
         preselect = set(prefs.get("last_projects") or [])
         if not preselect and default_project:
             preselect.add(default_project)
-        selected_idx = [i for i, k in enumerate(self._proj_keys) if k in preselect]
-        if not selected_idx and self._proj_keys:
-            selected_idx = [0]
-        for i in selected_idx:
-            self._proj_lb.selection_set(i)
-        if selected_idx:
-            self._proj_lb.see(selected_idx[0])
+        if not preselect and all_uids:
+            preselect.add(all_uids[0])
 
+        for uid in all_uids:
+            self._proj_vars[uid] = tk.BooleanVar(value=(uid in preselect))
+
+        # 顶部工具栏（全选、清空、全部展开、全部收起、显示隐藏、已选计数）
         sel_btn_row = tk.Frame(card3, bg=theme.PANEL)
-        sel_btn_row.pack(anchor="w", pady=(0, 4))
+        sel_btn_row.pack(fill="x", pady=(0, 6))
         tk.Button(sel_btn_row, text="全选",  # style-exempt: style.md §3 豁免：UploadDialog
-                  command=lambda: self._proj_lb.selection_set(0, "end"),
+                  command=self._select_all,
                   bg=theme.PANEL_2, fg=theme.FG, relief="flat", padx=8,
                   font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
         tk.Button(sel_btn_row, text="清空",  # style-exempt: style.md §3 豁免：UploadDialog
-                  command=lambda: self._proj_lb.selection_clear(0, "end"),
+                  command=self._clear_all,
                   bg=theme.PANEL_2, fg=theme.FG, relief="flat", padx=8,
-                  font=theme.FONT_UI_SMALL).pack(side="left")
+                  font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 8))
+        tk.Button(sel_btn_row, text="全部展开",  # style-exempt: style.md §3 豁免：UploadDialog
+                  command=self._expand_all,
+                  bg=theme.PANEL, fg=theme.MUTED, relief="flat", padx=6,
+                  font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
+        tk.Button(sel_btn_row, text="全部收起",  # style-exempt: style.md §3 豁免：UploadDialog
+                  command=self._collapse_all,
+                  bg=theme.PANEL, fg=theme.MUTED, relief="flat", padx=6,
+                  font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
+        self._show_hidden_btn = tk.Button(  # style-exempt: style.md §3 豁免：UploadDialog
+            sel_btn_row, text="显示隐藏",
+            command=self._toggle_show_hidden,
+            bg=theme.PANEL, fg=theme.MUTED, relief="flat", padx=6,
+            font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
+        self._show_hidden_btn.pack(side="left", padx=(0, 8))
 
-        # -- 状态行 --
-        self._status = tk.Label(win, text="", bg=theme.BG, fg=theme.MUTED,
-                                font=theme.FONT_UI, wraplength=440, justify="left")
-        self._status.pack(fill="x", padx=12, pady=(2, 0))
+        self._count_lbl = tk.Label(sel_btn_row, text="", bg=theme.PANEL, fg=theme.MUTED,
+                                   font=theme.FONT_UI_SMALL)
+        self._count_lbl.pack(side="left")
 
-        # -- 底部操作区 --
-        action = tk.Frame(win, bg=theme.BG)
-        action.pack(fill="x", padx=16, pady=(4, 8))
-        self._upload_btn = tk.Button(  # style-exempt: style.md §3 豁免：UploadDialog
-            action, text="立即上传", command=self._do_upload, bg=theme.ACCENT,
-            fg=theme.FG_WHITE, relief="flat", padx=16, pady=6, font=theme.FONT_UI_BOLD,
-            cursor=CLICK_CURSOR)
-        self._upload_btn.pack(fill="x")
-
-        # 已去掉显式关闭按钮；保留 Esc 退出，并用标题栏 × 关闭。
-        win.bind("<Escape>", lambda e: win.destroy())
+        # 渲染目录分组卡片
+        self._render_grouped_projects(card3)
+        self._refresh_visibility()
+        self._update_count()
+        # 窗口关闭（点 × 或按 Esc）时均保证保存当前偏好与选择
+        win.protocol("WM_DELETE_WINDOW", self._on_window_close)
+        win.bind("<Escape>", lambda e: self._on_window_close())
         # 按表单实际高度收紧窗口，消除底部留白。
         self._fit_window()
+
+    def _build_groups(self, projects) -> list[dict]:
+        """把项目列表按真实工作目录分组，提取 agent 图标与规范标签。"""
+        from . import views
+
+        if projects and hasattr(projects[0], "source"):
+            from tcer.core import analyze
+            raw_groups = analyze.real_projects(projects)
+            groups = []
+            for g in raw_groups:
+                src_count = {}
+                for r in g.refs:
+                    src_count[r.source] = src_count.get(r.source, 0) + 1
+                items = []
+                for r in g.refs:
+                    uid = views.ref_uid(r)
+                    icon_key = views.project_icon_key(r)
+                    src_lbl = views.project_source_label(r)
+                    p_lbl = views.project_label(r)
+                    sub = (r.config_root.name if r.source == "claude" and r.config_root is not None else r.key)
+                    if src_count.get(r.source, 0) > 1:
+                        src_lbl = f"{src_lbl}（{sub}）"
+                    disp = f"{src_lbl} · {p_lbl}" if p_lbl and p_lbl != g.display and p_lbl != r.source else src_lbl
+                    items.append({
+                        "uid": uid,
+                        "ref": r,
+                        "icon_key": icon_key,
+                        "source_label": src_lbl,
+                        "display": disp,
+                    })
+                groups.append({
+                    "key": g.key,
+                    "display": g.display,
+                    "items": items,
+                })
+            return groups
+
+        # 回退兼容 tuple[str, str] 列表（旧测试/调用）
+        groups = []
+        for item in projects:
+            if isinstance(item, (tuple, list)):
+                uid, disp = item[0], item[1]
+            else:
+                uid = disp = str(item)
+            icon_key = "claude"
+            src_lbl = "Agent"
+            clean_disp = disp
+            if disp.startswith("[") and "]" in disp:
+                tag = disp[1:disp.index("]")].strip()
+                clean_disp = disp[disp.index("]") + 1:].strip()
+                src_lbl = tag
+                icon_key = tag.lower()
+            groups.append({
+                "key": uid,
+                "display": clean_disp or uid,
+                "items": [{
+                    "uid": uid,
+                    "ref": None,
+                    "icon_key": icon_key,
+                    "source_label": src_lbl,
+                    "display": clean_disp or uid,
+                }],
+            })
+        return groups
+
+    @staticmethod
+    def _truncate_path(path: str, max_chars: int = 40) -> str:
+        """路径超长截断并加 ...（如 D:\\repos\\...\\game-smoke），防止挤压右侧按钮。"""
+        if len(path) <= max_chars:
+            return path
+        head_len = 14
+        tail_len = max_chars - head_len - 3
+        return f"{path[:head_len]}...{path[-tail_len:]}"
+
+    def _create_checkbox_widget(self, parent, var: tk.BooleanVar, on_toggle=None):
+        """深色微型复选框（13×13 像素小巧尺寸），选中时强调色底 + 纯白粗体 ✓。"""
+        is_on = var.get()
+        box = tk.Frame(
+            parent,
+            width=13,
+            height=13,
+            bg=theme.ACCENT if is_on else theme.PANEL_2,
+            highlightthickness=1,
+            highlightbackground=theme.ACCENT if is_on else theme.BORDER,
+            cursor=CLICK_CURSOR,
+        )
+        box.pack_propagate(False)
+        check_lbl = tk.Label(
+            box,
+            text="✓" if is_on else "",
+            bg=theme.ACCENT if is_on else theme.PANEL_2,
+            fg=theme.FG_WHITE,
+            font=("Segoe UI", 7, "bold"),
+            bd=0,
+            cursor=CLICK_CURSOR,
+        )
+        check_lbl.place(relx=0.5, rely=0.5, anchor="center")
+
+        def _refresh():
+            val = var.get()
+            c = theme.ACCENT if val else theme.PANEL_2
+            bc = theme.ACCENT if val else theme.BORDER
+            box.configure(bg=c, highlightbackground=bc)
+            check_lbl.configure(text="✓" if val else "", bg=c)
+
+        def _toggle(_e=None):
+            var.set(not var.get())
+            _refresh()
+            if on_toggle:
+                on_toggle()
+
+        box.bind("<Button-1>", _toggle)
+        check_lbl.bind("<Button-1>", _toggle)
+        box._refresh = _refresh
+        return box, _toggle
+
+    def _render_grouped_projects(self, parent) -> None:
+        """绘制按工作目录分组的卡片，默认收起以保持紧凑，提供选本组与展开/收起切换。"""
+        from . import views
+
+        for g in self._groups:
+            grp_box = tk.Frame(parent, bg=theme.PANEL, highlightthickness=1,
+                               highlightbackground=theme.BORDER)
+            grp_box.pack(fill="x", pady=(0, 6))
+
+            # 分组头部
+            grp_hdr = tk.Frame(grp_box, bg=theme.PANEL_2, padx=8, pady=5, cursor=CLICK_CURSOR)
+            grp_hdr.pack(fill="x")
+
+            # 右侧操作区先 pack(side="right")，确保最高占位优先级，无论路径多长都不被挤压
+            btn_frame = tk.Frame(grp_hdr, bg=theme.PANEL_2)
+            btn_frame.pack(side="right")
+
+            toggle_btn = tk.Button(  # style-exempt: style.md §3 豁免：UploadDialog
+                btn_frame, text="展开 ▾",
+                command=lambda grp=g: self._toggle_collapse(grp),
+                bg=theme.PANEL, fg=theme.FG, relief="flat", padx=6,
+                font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
+            toggle_btn.pack(side="right", padx=(4, 0))
+            g["toggle_btn"] = toggle_btn
+
+            g_uids = [it["uid"] for it in g["items"]]
+            select_btn = tk.Button(  # style-exempt: style.md §3 豁免：UploadDialog
+                btn_frame, text="选本组",
+                command=lambda u=g_uids: self._toggle_group(u),
+                bg=theme.PANEL, fg=theme.FG, relief="flat", padx=6,
+                font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
+            select_btn.pack(side="right")
+            g["select_btn"] = select_btn
+
+            # 左侧依次 pack
+            arrow_lbl = tk.Label(grp_hdr, text="▸", bg=theme.PANEL_2, fg=theme.MUTED,
+                                 font=theme.FONT_UI_BOLD, width=2)
+            arrow_lbl.pack(side="left")
+            g["arrow_lbl"] = arrow_lbl
+
+            dir_icon = views.ui_icon(grp_hdr, "project")
+            if dir_icon is not None:
+                tk.Label(grp_hdr, image=dir_icon, bg=theme.PANEL_2).pack(side="left", padx=(0, 6))
+
+            disp_text = self._truncate_path(g["display"])
+            hdr_title = tk.Label(grp_hdr, text=disp_text, bg=theme.PANEL_2, fg=theme.FG,
+                                 font=theme.FONT_UI_BOLD, anchor="w")
+            hdr_title.pack(side="left")
+            if disp_text != g["display"]:
+                Tooltip(hdr_title, g["display"])
+
+            count_lbl = tk.Label(grp_hdr, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+                                 font=theme.FONT_UI_SMALL)
+            count_lbl.pack(side="left", padx=(6, 0))
+            g["count_lbl"] = count_lbl
+
+            hidden_tag = tk.Label(grp_hdr, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+                                  font=theme.FONT_UI_SMALL)
+            hidden_tag.pack(side="left", padx=(4, 0))
+            g["hidden_tag"] = hidden_tag
+
+            # 右键菜单：隐藏此目录 / 取消隐藏
+            # 右键菜单：隐藏此目录 / 取消隐藏（挂在顶层窗口上，生命周期与子容器解耦）
+            def _pop_context_menu(event, grp=g):
+                from .widgets import FlatMenu
+                menu = FlatMenu(self._win)
+                is_h = grp["key"] in self._hidden_keys
+                if not is_h:
+                    menu.add_command(label="隐藏此目录", command=lambda k=grp["key"]: self._hide_group(k))
+                else:
+                    menu.add_command(label="取消隐藏", command=lambda k=grp["key"]: self._unhide_group(k))
+                menu.tk_popup(event.x_root, event.y_root)
+            for w in (grp_hdr, arrow_lbl, hdr_title, count_lbl, hidden_tag):
+                w.bind("<Button-3>", _pop_context_menu)
+                w.bind("<Button-2>", _pop_context_menu)
+
+            # 点击头部空白区域切换展开/收起
+            grp_hdr.bind("<Button-1>", lambda e, grp=g: self._toggle_collapse(grp))
+            arrow_lbl.bind("<Button-1>", lambda e, grp=g: self._toggle_collapse(grp))
+            hdr_title.bind("<Button-1>", lambda e, grp=g: self._toggle_collapse(grp))
+            count_lbl.bind("<Button-1>", lambda e, grp=g: self._toggle_collapse(grp))
+            g["grp_box"] = grp_box
+            # 分组子项容器（默认收起，不 pack）
+            items_box = tk.Frame(grp_box, bg=theme.PANEL, padx=12, pady=4)
+            g["items_box"] = items_box
+            g["is_expanded"] = False
+
+            for it in g["items"]:
+                row = tk.Frame(items_box, bg=theme.PANEL, pady=2, cursor=CLICK_CURSOR)
+                row.pack(fill="x")
+
+                var = self._proj_vars[it["uid"]]
+                box, toggle_fn = self._create_checkbox_widget(
+                    row, var, on_toggle=self._on_item_check)
+                box.pack(side="left", padx=(0, 6))
+                self._box_widgets[it["uid"]] = box
+
+                # 来源/品牌 16×16 图标（与主界面一致，复用资产）
+                icon = views.source_icon(row, it["icon_key"])
+                if icon is not None:
+                    il = tk.Label(row, image=icon, bg=theme.PANEL, cursor=CLICK_CURSOR)
+                    il.pack(side="left", padx=(0, 6))
+                    Tooltip(il, it["source_label"])
+                    il.bind("<Button-1>", toggle_fn)
+
+                nl = tk.Label(row, text=it["display"], bg=theme.PANEL, fg=theme.FG,
+                              font=theme.FONT_UI, anchor="w", cursor=CLICK_CURSOR)
+                nl.pack(side="left", fill="x", expand=True)
+                nl.bind("<Button-1>", toggle_fn)
+                row.bind("<Button-1>", toggle_fn)
+
+        self._refresh_group_counts()
+
+    def _toggle_collapse(self, grp: dict) -> None:
+        """切换单个目录分组的展开/收起状态。"""
+        exp = not grp.get("is_expanded", False)
+        grp["is_expanded"] = exp
+        if exp:
+            grp["items_box"].pack(fill="x", padx=12, pady=4)
+            grp["toggle_btn"].configure(text="收起 ▴")
+            grp["arrow_lbl"].configure(text="▾")
+        else:
+            grp["items_box"].pack_forget()
+            grp["toggle_btn"].configure(text="展开 ▾")
+            grp["arrow_lbl"].configure(text="▸")
+        self._fit_window()
+
+    def _expand_all(self) -> None:
+        """全部展开所有目录分组。"""
+        for g in self._groups:
+            g["is_expanded"] = True
+            g["items_box"].pack(fill="x", padx=12, pady=4)
+            g["toggle_btn"].configure(text="收起 ▴")
+            g["arrow_lbl"].configure(text="▾")
+        self._fit_window()
+
+    def _collapse_all(self) -> None:
+        """全部收起所有目录分组。"""
+        for g in self._groups:
+            g["is_expanded"] = False
+            g["items_box"].pack_forget()
+            g["toggle_btn"].configure(text="展开 ▾")
+            g["arrow_lbl"].configure(text="▸")
+        self._fit_window()
+
+    def _refresh_group_counts(self) -> None:
+        """刷新每个目录头部显示的已选数量以及选本组/已选高亮按钮状态。"""
+        for g in self._groups:
+            total = len(g["items"])
+            sel = sum(1 for it in g["items"] if self._proj_vars[it["uid"]].get())
+            lbl = g.get("count_lbl")
+            if lbl is not None and lbl.winfo_exists():
+                lbl.configure(text=f"（共 {total} 个 · 已选 {sel}）")
+
+            btn = g.get("select_btn")
+            if btn is not None and btn.winfo_exists():
+                all_selected = (total > 0 and sel == total)
+                if all_selected:
+                    btn.configure(text="已选", bg=theme.ACCENT, fg=theme.FG_WHITE)
+                else:
+                    btn.configure(text="选本组", bg=theme.PANEL, fg=theme.FG)
+
+    def _hide_group(self, key: str) -> None:
+        """把指定目录分组标记为隐藏并立即刷新界面且落盘持久化。"""
+        self._hidden_keys.add(key)
+        self._refresh_visibility()
+        self._save_all()
+
+    def _unhide_group(self, key: str) -> None:
+        """取消指定目录分组的隐藏并立即刷新界面且落盘持久化。"""
+        self._hidden_keys.discard(key)
+        self._refresh_visibility()
+        self._save_all()
+
+    def _toggle_show_hidden(self) -> None:
+        """切换是否显示被隐藏的目录分组。"""
+        self._show_hidden = not self._show_hidden
+        if self._show_hidden:
+            self._show_hidden_btn.configure(bg=theme.ACCENT, fg=theme.FG_WHITE)
+        else:
+            self._show_hidden_btn.configure(bg=theme.PANEL, fg=theme.MUTED)
+        self._refresh_visibility()
+
+    def _refresh_visibility(self) -> None:
+        """根据 _hidden_keys 与 _show_hidden 动态显示或隐藏卡片。"""
+        for g in self._groups:
+            grp_box = g.get("grp_box")
+            if grp_box is None or not grp_box.winfo_exists():
+                continue
+            is_h = g["key"] in self._hidden_keys
+            hidden_tag = g.get("hidden_tag")
+            if is_h:
+                if self._show_hidden:
+                    grp_box.pack(fill="x", pady=(0, 6))
+                    if hidden_tag and hidden_tag.winfo_exists():
+                        hidden_tag.configure(text="（已隐藏）")
+                else:
+                    grp_box.pack_forget()
+            else:
+                grp_box.pack(fill="x", pady=(0, 6))
+                if hidden_tag and hidden_tag.winfo_exists():
+                    hidden_tag.configure(text="")
+        try:
+            self._sf.inner.update_idletasks()
+        except Exception:
+            pass
+        self._fit_window()
+    def _refresh_all_checkboxes(self) -> None:
+        """批量刷新所有复选框方块的高亮与白勾状态。"""
+        for box in self._box_widgets.values():
+            if hasattr(box, "_refresh"):
+                box._refresh()
+        if hasattr(self, "_auto_box") and hasattr(self._auto_box, "_refresh"):
+            self._auto_box._refresh()
+        if hasattr(self, "_detail_box") and hasattr(self._detail_box, "_refresh"):
+            self._detail_box._refresh()
+
+    def _toggle_group(self, uids: list[str]) -> None:
+        all_checked = all(self._proj_vars[u].get() for u in uids if u in self._proj_vars)
+        new_state = not all_checked
+        for u in uids:
+            if u in self._proj_vars:
+                self._proj_vars[u].set(new_state)
+        self._refresh_all_checkboxes()
+        self._on_item_check()
+
+    def _select_all(self) -> None:
+        for var in self._proj_vars.values():
+            var.set(True)
+        self._refresh_all_checkboxes()
+        self._on_item_check()
+
+    def _clear_all(self) -> None:
+        for var in self._proj_vars.values():
+            var.set(False)
+        self._refresh_all_checkboxes()
+        self._on_item_check()
+
+    def _update_count(self) -> None:
+        selected = sum(1 for v in self._proj_vars.values() if v.get())
+        total = len(self._proj_vars)
+        self._count_lbl.config(text=f"已选 {selected} / 共 {total} 个 agent")
+        self._refresh_group_counts()
+    def _on_item_check(self) -> None:
+        self._update_count()
+        if self._auto_upload_var.get():
+            self._save_all()
+
+    def _on_detail_toggle(self) -> None:
+        if self._auto_upload_var.get():
+            self._save_all()
+
+    def _on_toggle_auto_upload(self) -> None:
+        enabled = self._auto_upload_var.get()
+        self._save_all()
+        if enabled:
+            self.set_status("已开启每小时自动检查并上传新会话")
+        else:
+            self.set_status("已关闭自动上传")
+
+    def _save_all(self) -> None:
+        prefs = self._collect()
+        self._save_config_safe(
+            url=self._url_var.get(),
+            auth_token=self._token_var.get(),
+            detail=self._detail_var.get(),
+            auto_upload=self._auto_upload_var.get(),
+        )
+        self._on_save_prefs(prefs)
+
+    def _save_config_safe(self, **kwargs) -> None:
+        try:
+            self._on_save_config(**kwargs)
+        except TypeError:
+            # 兼容仅接收 3 个参数的测试 mock
+            legacy = {k: v for k, v in kwargs.items() if k in ("url", "auth_token", "detail")}
+            self._on_save_config(**legacy)
 
     # -- small builders --
     def _card(self, inner, title: str) -> tk.Frame:
@@ -1578,20 +2008,23 @@ class UploadDialog:
         win.update_idletasks()
         canv = self._sf.canvas
         inner_h = self._sf.inner.winfo_reqheight()
-        top = canv.winfo_y()                       # 标题区 + canvas 上边距
+        top = canv.winfo_y()
         status_h = self._status.winfo_reqheight() + 2
         action_h = next((w.winfo_reqheight() for w in win.winfo_children()
                          if isinstance(w, tk.Frame) and w is not canv), 0)
-        win_h = max(360, min(top + inner_h + status_h + action_h + 14, 720))
+        win_h = max(420, min(top + inner_h + status_h + action_h + 20, 720))
         cur_h = win.winfo_height()
         adj = (cur_h - win_h) // 2 if cur_h > 200 else 0
-        cur_w = win.winfo_width() if win.winfo_width() > 300 else 740
+        cur_w = win.winfo_width() if win.winfo_width() > 300 else 760
         win.geometry(f"{cur_w}x{int(win_h)}+{int(win.winfo_x())}+{int(win.winfo_y() + adj)}")
 
     # -- prefs / status --
     def _collect(self) -> dict:
-        proj_keys = [self._proj_keys[i] for i in self._proj_lb.curselection()]
-        return {"last_projects": proj_keys}
+        selected = [uid for uid, var in self._proj_vars.items() if var.get()]
+        return {
+            "last_projects": selected,
+            "hidden_dirs": sorted(self._hidden_keys),
+        }
 
     def set_status(self, text: str, *, error: bool = False) -> None:
         if not self._status.winfo_exists():
@@ -1605,13 +2038,106 @@ class UploadDialog:
             return
         # 先保存上传配置（写回 tcer_ui.json 的 upload 段），再保存项目选择、上传。
         # _start_upload 从 upload_config 读回，故此处保存是上传取到最新配置的前提。
-        self._on_save_config(url=self._url_var.get(),
-                             auth_token=self._token_var.get(),
-                             detail=self._detail_var.get())
-        self._on_save_prefs(prefs)
+        self._save_all()
         self.set_status("上传中…")
         self._on_upload(prefs, self)
 
+    def _on_window_close(self) -> None:
+        """关闭窗口前保存当前偏好与隐藏目录设置。"""
+        try:
+            self._save_all()
+        except Exception:
+            pass
+        try:
+            self._win.destroy()
+        except Exception:
+            pass
+
+
+class UploadSuccessBubble:
+    """在活动栏上传按钮右侧弹出的主动提示气泡（通知自动上传成功）。
+
+    显示约 6 秒后自动关闭，点击立即关闭；深色主题卡片，ACCENT 描边，无抢焦。
+    """
+    _current = None
+
+    @classmethod
+    def show(cls, anchor_widget, title: str, subtitle: str, timeout_ms: int = 6000):
+        if cls._current is not None:
+            try:
+                cls._current.destroy()
+            except Exception:
+                pass
+            cls._current = None
+
+        if not anchor_widget:
+            return None
+        try:
+            if not anchor_widget.winfo_exists():
+                return None
+            anchor_widget.update_idletasks()
+            x_root = anchor_widget.winfo_rootx()
+            y_root = anchor_widget.winfo_rooty()
+            w_w = anchor_widget.winfo_width()
+            w_h = anchor_widget.winfo_height()
+        except Exception:
+            return None
+
+        bubble = tk.Toplevel(anchor_widget)
+        bubble.wm_overrideredirect(True)
+        try:
+            bubble.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+
+        bubble.configure(bg=theme.ACCENT)
+
+        inner = tk.Frame(bubble, bg=theme.PANEL_2, padx=10, pady=7)
+        inner.pack(padx=1, pady=1)
+
+        row1 = tk.Frame(inner, bg=theme.PANEL_2)
+        row1.pack(fill="x")
+
+        tk.Label(row1, text="✓", fg=theme.SUCCESS, bg=theme.PANEL_2,
+                 font=theme.FONT_UI_BOLD).pack(side="left", padx=(0, 6))
+
+        tk.Label(row1, text=title, fg=theme.FG_WHITE, bg=theme.PANEL_2,
+                 font=theme.FONT_UI_BOLD).pack(side="left")
+
+        close_btn = tk.Label(row1, text="×", fg=theme.MUTED, bg=theme.PANEL_2,
+                             font=theme.FONT_UI_BOLD, cursor=CLICK_CURSOR)
+        close_btn.pack(side="right", padx=(8, 0))
+
+        if subtitle:
+            row2 = tk.Frame(inner, bg=theme.PANEL_2)
+            row2.pack(fill="x", pady=(3, 0))
+            tk.Label(row2, text=subtitle, fg=theme.MUTED, bg=theme.PANEL_2,
+                     font=theme.FONT_UI_SMALL).pack(side="left")
+
+        def _dismiss(_event=None):
+            if cls._current is bubble:
+                cls._current = None
+            try:
+                bubble.destroy()
+            except Exception:
+                pass
+
+        bubble.bind("<Button-1>", _dismiss)
+        inner.bind("<Button-1>", _dismiss)
+        close_btn.bind("<Button-1>", _dismiss)
+
+        bubble.update_idletasks()
+        b_w = bubble.winfo_reqwidth()
+        b_h = bubble.winfo_reqheight()
+
+        pos_x = x_root + w_w + 6
+        pos_y = y_root + (w_h - b_h) // 2
+
+        bubble.wm_geometry(f"+{pos_x}+{pos_y}")
+        cls._current = bubble
+
+        bubble.after(timeout_ms, _dismiss)
+        return bubble
 class LlmConfigPopup:
     """LLM 语义解读设置 — OpenAI-compatible 端点 + 数据出境三档。
 

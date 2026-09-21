@@ -76,10 +76,13 @@ def test_stored_config_returns_raw_values(tmp_path, monkeypatch):
     c = upload_config.stored_config()
     assert c == {"url": "", "auth_token": "",
                  "detail": upload_config.DEFAULT_DETAIL,
+                 "auto_upload": upload_config.DEFAULT_AUTO_UPLOAD,
+                 "last_upload_ts": None,
                  "default_url": upload_config.DEFAULT_URL}
-    _write_prefs(tmp_path, {"upload": {"url": "https://x.io", "auth_token": "t1", "detail": False}})
+    _write_prefs(tmp_path, {"upload": {"url": "https://x.io", "auth_token": "t1", "detail": False, "auto_upload": True, "last_upload_ts": 1720000000000}})
     c2 = upload_config.stored_config()
     assert c2["url"] == "https://x.io" and c2["auth_token"] == "t1" and c2["detail"] is False
+    assert c2["auto_upload"] is True and c2["last_upload_ts"] == 1720000000000
 
 
 def test_save_roundtrip_and_getter_semantics(tmp_path, monkeypatch):
@@ -106,3 +109,25 @@ def test_save_merges_preserves_other_sections(tmp_path, monkeypatch):
     assert data["geometry"] == "1600x900+10+10"          # 其它段保留
     assert data["last_project"] == "claude::x"
     assert data["upload"]["url"] == "https://srv"
+
+
+def test_auto_upload_and_timestamp_persistence(tmp_path, monkeypatch):
+    """auto_upload 开关与 last_upload_ts 时间戳的读写与保持。"""
+    _point_prefs(tmp_path, monkeypatch)
+    assert upload_config.auto_upload() is False
+    assert upload_config.last_upload_ts() is None
+
+    upload_config.save(url="https://srv", auth_token="tok", detail=True, auto_upload=True)
+    assert upload_config.auto_upload() is True
+    assert upload_config.last_upload_ts() is None
+
+    # 记录最新上传时间戳
+    upload_config.set_last_upload_ts(1726000000123)
+    assert upload_config.last_upload_ts() == 1726000000123
+
+    # 再次保存上传配置（如更改 url），时间戳不应被抹掉
+    upload_config.save(url="https://srv2", auth_token="tok", detail=False, auto_upload=True)
+    assert upload_config.server_url() == "https://srv2"
+    assert upload_config.upload_detail() is False
+    assert upload_config.auto_upload() is True
+    assert upload_config.last_upload_ts() == 1726000000123

@@ -36,6 +36,8 @@ from tcer.core import ui_prefs
 DEFAULT_URL = ""
 # 默认附带每会话明细（对话）。
 DEFAULT_DETAIL = True
+# 默认不启用每小时自动上传
+DEFAULT_AUTO_UPLOAD = False
 
 _SECTION = "upload"
 
@@ -73,6 +75,29 @@ def upload_enabled() -> bool:
     不再以"是否配置了服务器地址"作为显隐开关）。"""
     return True
 
+def auto_upload() -> bool:
+    """是否开启每小时自动上传。未配置时用默认 :data:`DEFAULT_AUTO_UPLOAD`。"""
+    v = _section().get("auto_upload")
+    return bool(v) if isinstance(v, bool) else DEFAULT_AUTO_UPLOAD
+
+
+def last_upload_ts() -> int | None:
+    """上次成功上传的时间戳（epoch 毫秒）；未上传过返回 None。"""
+    v = _section().get("last_upload_ts")
+    if isinstance(v, (int, float)) and v > 0:
+        return int(v)
+    return None
+
+
+def set_last_upload_ts(ts: int) -> None:
+    """记录最新一次成功上传的时间戳（epoch 毫秒）。"""
+    prefs = ui_prefs.load()
+    sec = prefs.setdefault(_SECTION, {})
+    if not isinstance(sec, dict):
+        sec = prefs[_SECTION] = {}
+    sec["last_upload_ts"] = int(ts)
+    ui_prefs.save(prefs)
+
 
 def stored_config() -> dict:
     """当前存储的上传配置原始值（供 dialog 编辑回填）。
@@ -86,11 +111,14 @@ def stored_config() -> dict:
         "url": str(sec.get("url") or "").strip(),
         "auth_token": str(sec.get("auth_token") or "").strip(),
         "detail": sec.get("detail") if isinstance(sec.get("detail"), bool) else DEFAULT_DETAIL,
+        "auto_upload": sec.get("auto_upload") if isinstance(sec.get("auto_upload"), bool) else DEFAULT_AUTO_UPLOAD,
+        "last_upload_ts": last_upload_ts(),
         "default_url": DEFAULT_URL,
     }
 
 
-def save(*, url: str, auth_token: str, detail: bool) -> None:
+def save(*, url: str, auth_token: str, detail: bool, auto_upload: bool = False,
+         last_upload_ts: int | None = None) -> None:
     """把上传配置写回 ``tcer_ui.json`` 的 ``upload`` 段（load-merge，不抹其它段）。
 
     只持久化用户填的原始值（url/token 去首尾空白）：空串照存空串——``server_url``/
@@ -98,9 +126,15 @@ def save(*, url: str, auth_token: str, detail: bool) -> None:
     与 ``ui_prefs`` 一致：写失败静默（配置丢了重填即可，不值得打断）。
     """
     prefs = ui_prefs.load()
-    prefs[_SECTION] = {
+    old_sec = prefs.get(_SECTION) if isinstance(prefs.get(_SECTION), dict) else {}
+    out_ts = last_upload_ts if last_upload_ts is not None else old_sec.get("last_upload_ts")
+    sec_data = {
         "url": (url or "").strip(),
         "auth_token": (auth_token or "").strip(),
         "detail": bool(detail),
+        "auto_upload": bool(auto_upload),
     }
+    if out_ts is not None:
+        sec_data["last_upload_ts"] = int(out_ts)
+    prefs[_SECTION] = sec_data
     ui_prefs.save(prefs)

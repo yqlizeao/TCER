@@ -938,6 +938,11 @@ class ActivityBar:
     def _on_click_upload(self, _widget) -> None:
         if hasattr(self.controller, "show_upload"):
             self.controller.show_upload()
+
+    def get_upload_widget(self):
+        """活动栏上传按钮 Frame，供成功气泡定位。"""
+        it = self._items.get("upload")
+        return it[0] if it else None
 class FilterBar:
     """Integrated filter and actions controller (Zero-waste panel integration)."""
 

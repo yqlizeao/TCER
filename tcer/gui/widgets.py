@@ -844,6 +844,8 @@ class FlatMenu:
     调用方改动最小；1px 外框走 ``theme.BORDER``，悬停高亮走 ``theme.ACCENT``。
     """
 
+    _active_menu: FlatMenu | None = None
+
     def __init__(self, parent):
         self._closed = False
         self._top = tk.Toplevel(parent)
@@ -915,6 +917,13 @@ class FlatMenu:
         tk.Frame(self._body, bg=theme.BORDER, height=1).pack(fill="x", padx=4, pady=3)
 
     def tk_popup(self, x, y, *_args):
+        if FlatMenu._active_menu is not None and FlatMenu._active_menu != self:
+            try:
+                FlatMenu._active_menu._close()
+            except Exception:
+                pass
+        FlatMenu._active_menu = self
+
         self._top.deiconify()
         self._top.update_idletasks()
         w, h = self._top.winfo_reqwidth(), self._top.winfo_reqheight()
@@ -945,9 +954,11 @@ class FlatMenu:
             y = min_y
         self._top.geometry(f"+{x}+{y}")
         self._top.grab_set_global()
-        self._top.bind("<Button-1>", self._on_top_click, add="+")
+        for btn in ("<Button-1>", "<Button-2>", "<Button-3>"):
+            self._top.bind(btn, self._on_top_click, add="+")
         self._top.bind("<Escape>", lambda _e: self._close())
         self._top.focus_set()
+
     def _on_top_click(self, e):
         if self._closed:
             return
@@ -955,12 +966,32 @@ class FlatMenu:
         x0, y0 = self._top.winfo_rootx(), self._top.winfo_rooty()
         x1, y1 = x0 + self._top.winfo_width(), y0 + self._top.winfo_height()
         if not (x0 <= e.x_root <= x1 and y0 <= e.y_root <= y1):
+            is_right_click = getattr(e, "num", None) in (2, 3)
+            rx, ry = e.x_root, e.y_root
+            num = getattr(e, "num", 1)
+            master = getattr(self._top, "master", None)
             self._close()
+            if is_right_click and master is not None:
+                def _forward():
+                    try:
+                        under = master.winfo_containing(rx, ry)
+                        if under:
+                            ux = rx - under.winfo_rootx()
+                            uy = ry - under.winfo_rooty()
+                            under.event_generate(f"<Button-{num}>", x=ux, y=uy, rootx=rx, rooty=ry)
+                    except Exception:
+                        pass
+                try:
+                    master.after_idle(_forward)
+                except Exception:
+                    pass
 
     def _close(self):
         if self._closed:
             return
         self._closed = True
+        if FlatMenu._active_menu is self:
+            FlatMenu._active_menu = None
         try:
             self._top.grab_release()
             self._top.destroy()
