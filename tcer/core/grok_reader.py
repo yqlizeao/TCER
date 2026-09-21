@@ -305,6 +305,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
                     cache_read=after[2] - before[2],
                     output_tokens=after[3] - before[3],
                     duration_ms=api_ms or None,
+                    user_turn=u.user_msgs if u.user_msgs > 0 else 1,
                     model=current_model,
                 ))
             continue

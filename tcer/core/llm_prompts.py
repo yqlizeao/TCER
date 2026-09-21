@@ -12,8 +12,11 @@
 """
 from __future__ import annotations
 
+import json
+
 from tcer.core.llm_prefs import has_scope, scope_level
 from tcer.core.parse_util import is_correction
+from tcer.core import metrics as _metrics
 
 PROMPT_VERSION = "2026-09-v3"
 MAX_TIMELINE_ROWS = 40
@@ -790,9 +793,12 @@ _FLAT_PRAISE_PATTERNS = (
 _CONV_REQUIRED = ("用户到底想要什么", "关键转折", "反馈序列", "下一步行动")
 # dynamics 必备小节关键词（dyn-v4 章节的可机检子集）
 _DYN_REQUIRED = ("速读摘要", "开局", "关键转折", "反馈")
+# Jev 级联报告的章节由本地确定性合成（非自由生成），机检子集按其实际标题取：
+# 执行摘要与核心裁决 / 一、开局 / 转折定位与因果 / 反馈序列评价
+_DYN_JEV_REQUIRED = ("执行摘要", "开局", "转折", "反馈")
 
 
-def audit_warnings(text: str, is_dynamics: bool = False) -> list[str]:
+def audit_warnings(text: str, is_dynamics: bool = False, provider: str = "general") -> list[str]:
     """检查 LLM 报告正文是否满足审计契约，返回警示列表（空 = 通过）。
 
     规则（全部确定性、无启发式打分）：
@@ -800,12 +806,18 @@ def audit_warnings(text: str, is_dynamics: bool = False) -> list[str]:
     2. 命中笼统表扬黑名单 → 警示（谄媚违约的直接证据）；
     3. **【T数字】** 转折锚点 < 3 且会话非极短 → 警示（转折深挖是核心章节）；
     4. 正文无任何「责任/归因」字样 → 警示（审计立场第 4 条未落实）。
+
+    provider="typesafe"：Jev 级联报告走本地确定性合成的固定章节结构，
+    必备小节集合按其实际标题校验（沿用 general 的子集会稳定误报）。
     """
     import re
     warns: list[str] = []
     if not text or not text.strip():
         return ["模型返回了空正文"]
-    required = _DYN_REQUIRED if is_dynamics else _CONV_REQUIRED
+    if is_dynamics and provider == "typesafe":
+        required = _DYN_JEV_REQUIRED
+    else:
+        required = _DYN_REQUIRED if is_dynamics else _CONV_REQUIRED
     missing = [k for k in required if k not in text]
     if missing:
         warns.append("缺少必备小节：" + "、".join(missing))
@@ -879,3 +891,1235 @@ def build_llm_derived(report) -> dict:
         "reasoning_tokens": getattr(u, "reasoning_output_tokens", 0) or 0,
         "subagent_density": getattr(report, "subagent_density", 0.0) or 0.0,
     }
+
+
+# ============================================================
+# TypeSafe Jev (System One) 相空间动力学判定引擎
+# ============================================================
+
+# 里程碑 kind -> 英文注记（发给 Jev 的 state 用英文——官方文档声明 Jev 主要
+# 训练语言为英语、CJK 准确率较低；中文 rationale 仅供本地报告展示）
+_KIND_EN = {
+    "init": "session start: requirement intake and initial planning",
+    "crystal": "final turn: verification and delivery",
+    "barrier": "breakthrough: peak single-turn code output",
+    "attractor": "stuck: error storm or rework peak",
+    "bifurcation": "first course change after an error",
+    "user_feedback": "user intervention (start of a new user turn)",
+    "progress": "steady construction progress",
+    "liquid": "regular build turn (short session)",
+}
+
+
+def _local_debt_kind(ops_by_turn: dict, turn_1based: int) -> str:
+    """本地确定性推导「先查后改」风格（prudent/reckless/neutral）。
+
+    模式识别留给代码（TypeSafe 官方原则：deterministic checks stay in code）：
+    该回合有 Edit/Write 且本回合或前一回合有 Read/Grep/Glob → prudent；
+    有 Edit/Write 但前后均无读操作 → reckless；无编辑动作 → neutral。
+    """
+    edit_keys = ("edit", "write", "multiedit", "search_replace", "notebook")
+    read_keys = ("read", "grep", "glob", "search")
+
+    def _has(t_key: int, names: tuple) -> bool:
+        for op in ops_by_turn.get(t_key) or []:
+            n = (getattr(op, "tool", "") or "").lower()
+            if any(k in n for k in names):
+                return True
+        return False
+
+    t0 = turn_1based - 1  # ops_by_turn 键为 0-based turn
+    if not _has(t0, edit_keys):
+        return "neutral"
+    looked = _has(t0, read_keys) or _has(t0 - 1, read_keys)
+    return "prudent" if looked else "reckless"
+
+
+def detect_phase_singularities(report, derived: dict, max_singularities: int = 16) -> list[dict]:
+    """通过时间线与动力学特征，自动锁定会话中的关键节点与控制论里程碑。
+
+    涵盖全流程阶段演化：
+      - init: 开局（需求说明与初步规划）
+      - user_feedback: 用户关键反馈与纠偏（各 Uk 首轮）
+      - barrier: 关键突破拐点（单回合代码产出峰值 / 转正）
+      - attractor: 卡壳受困点（报错风暴/大额返工自删）
+      - bifurcation: 首次方向转变（探索转向分支）
+      - progress: 中间平稳推进锚点（填补大跨度空洞，杜绝空白直跳）
+      - crystal: 终局收尾与交付点（最后一回合）
+    """
+    stats = derived.get("stats") or []
+    total_turns = len(stats) or getattr(report.usage, "assistant_msgs", 0) or 1
+    loc_map = derived.get("loc_by_turn") or {}
+    ops_by_turn = derived.get("ops_by_turn") or {}
+    stat_by_num = {getattr(s, "turn", 0) + 1: s for s in stats}
+    user_msgs = getattr(report.usage, "user_msgs", 1) or 1
+
+    if total_turns <= 4:
+        singularities = []
+        for t in range(1, total_turns + 1):
+            st = stat_by_num.get(t)
+            add_l, del_l = loc_map.get(t - 1, (0, 0))
+            kind = "init" if t == 1 else ("crystal" if t == total_turns else "liquid")
+            u_num = getattr(st, "user_turn", None)
+            if u_num is None:
+                u_num = 1 if t == 1 else user_msgs
+            singularities.append({
+                "turn": t,
+                "user_turn": u_num,
+                "kind": kind,
+                "rationale": "短会话全量采样点",
+                "debt_local": _local_debt_kind(ops_by_turn, t),
+                "errors": getattr(st, "errors", 0) if st else 0,
+                "tool_calls": getattr(st, "tool_calls", 0) if st else 0,
+                "loc_added": add_l,
+                "loc_deleted": del_l,
+                "duration_ms": getattr(st, "duration_ms", 0) if st else 0,
+                "input_tokens": getattr(st, "input_tokens", 0) if st else 0,
+            })
+        return singularities
+
+    chosen: dict[int, dict] = {}
+
+    def _make_cand(t: int, kind: str, rationale: str) -> dict:
+        st = stat_by_num.get(t)
+        add_l, del_l = loc_map.get(t - 1, (0, 0))
+        u_num = getattr(st, "user_turn", None)
+        if u_num is None:
+            # 兜底：按比例估算用户交互轮次
+            u_num = max(1, min(user_msgs, int(round((t / total_turns) * user_msgs))))
+        return {
+            "turn": t,
+            "user_turn": u_num,
+            "kind": kind,
+            "rationale": rationale,
+            "debt_local": _local_debt_kind(ops_by_turn, t),
+            "errors": getattr(st, "errors", 0) if st else 0,
+            "tool_calls": getattr(st, "tool_calls", 0) if st else 0,
+            "loc_added": add_l,
+            "loc_deleted": del_l,
+            "duration_ms": getattr(st, "duration_ms", 0) if st else 0,
+            "input_tokens": getattr(st, "input_tokens", 0) if st else 0,
+        }
+
+    # 1. 必选边界点：T1 与 T_total
+    chosen[1] = _make_cand(1, "init", "开局：需求说明与初步规划")
+    chosen[total_turns] = _make_cand(total_turns, "crystal", "收尾：验证与交付")
+
+    # 2. 鞍点势垒突破点 (最大 net loc / output tokens 峰值)
+    best_barrier_turn = None
+    max_add = 0
+    for t in range(2, total_turns):
+        add_l, _ = loc_map.get(t - 1, (0, 0))
+        if add_l > max_add:
+            max_add = add_l
+            best_barrier_turn = t
+    if best_barrier_turn is None:
+        max_out = -1
+        for s in stats:
+            t = getattr(s, "turn", 0) + 1
+            out_tok = getattr(s, "output_tokens", 0)
+            if out_tok > max_out and 1 < t < total_turns:
+                max_out = out_tok
+                best_barrier_turn = t
+    if best_barrier_turn:
+        add_l, _ = loc_map.get(best_barrier_turn - 1, (0, 0))
+        chosen[best_barrier_turn] = _make_cand(
+            best_barrier_turn, "barrier", f"关键突破：单回合代码产出峰值（净增+{add_l}行）"
+        )
+
+    # 3. 局部死锁/受困点 (errors 峰值或 loc_deleted 峰值)
+    best_trap_turn = None
+    max_err = 0
+    for s in stats:
+        t = getattr(s, "turn", 0) + 1
+        err = getattr(s, "errors", 0)
+        if err > max_err and 1 < t < total_turns:
+            max_err = err
+            best_trap_turn = t
+    if best_trap_turn is None:
+        max_del = 0
+        for t in range(2, total_turns):
+            _, del_l = loc_map.get(t - 1, (0, 0))
+            if del_l > max_del and del_l > 10:
+                max_del = del_l
+                best_trap_turn = t
+    if best_trap_turn and best_trap_turn not in chosen:
+        err = getattr(stat_by_num.get(best_trap_turn), "errors", 0)
+        _, del_l = loc_map.get(best_trap_turn - 1, (0, 0))
+        chosen[best_trap_turn] = _make_cand(
+            best_trap_turn, "attractor", f"卡壳受困：报错或返工峰值（报错{err}次，删改{del_l}行）"
+        )
+
+    # 4. 初次分岔点 (首次非零退出/报错或首次产生代码增量)
+    for s in stats:
+        t = getattr(s, "turn", 0) + 1
+        if getattr(s, "errors", 0) > 0 and 1 < t < total_turns and t not in chosen:
+            chosen[t] = _make_cand(t, "bifurcation", f"首次方向转变：探索转向新分支（T{t}）")
+            break
+
+    # 5. 用户交互脉冲轮（User Turns Uk）——一等公民纳入候选。
+    #    多用户轮长会话中 U 脉冲可多达数十个：若全量占满 max_singularities 名额，
+    #    空洞填补会被上限卡死（实测仍出现 200+ 回合空白直跳），故超预算时先
+    #    均匀降采样（首个与最后一个 U 必保，中间等距），为 gap 填补让出名额。
+    user_pulse_turns = []
+    last_u = None
+    for s in stats:
+        t = getattr(s, "turn", 0) + 1
+        u_val = getattr(s, "user_turn", None)
+        if u_val is not None and u_val != last_u:
+            if 1 < t < total_turns:
+                user_pulse_turns.append((t, u_val))
+            last_u = u_val
+
+    structural_n = len(chosen)  # 边界 + barrier + attractor + bifurcation
+    gap_budget = 3 if total_turns > 40 else 0  # 空洞填补保留名额（长会话才需要）
+    u_budget = max_singularities - structural_n - gap_budget
+    keep_pulses = user_pulse_turns
+    if len(keep_pulses) > u_budget > 0:
+        n_u = len(keep_pulses)
+        idxs = {round(i * (n_u - 1) / (u_budget - 1)) for i in range(u_budget)} \
+            if u_budget > 1 else {0}
+        keep_pulses = [user_pulse_turns[i] for i in sorted(idxs)]
+
+    # 纳入用户交互反馈点
+    for t_u, u_idx in keep_pulses:
+        if t_u not in chosen:
+            chosen[t_u] = _make_cand(t_u, "user_feedback", f"用户介入：第 U{u_idx} 轮输入反馈")
+
+    # 6. 大跨度时空空洞自适应填补（Gap Progressive Sampler）
+    # 彻底杜绝像 T46 到 T314 这种跨越 260 回合的大跳跃
+    max_allowed_gap = max(15, total_turns // 8)
+    while len(chosen) < max_singularities:
+        sorted_turns = sorted(chosen.keys())
+        largest_gap = 0
+        gap_pair = None
+        for i in range(len(sorted_turns) - 1):
+            g = sorted_turns[i + 1] - sorted_turns[i]
+            if g > largest_gap:
+                largest_gap = g
+                gap_pair = (sorted_turns[i], sorted_turns[i + 1])
+        if largest_gap <= max_allowed_gap or not gap_pair:
+            break
+        t_left, t_right = gap_pair
+        mid_t = (t_left + t_right) // 2
+        best_mid = mid_t
+        for t_cand in range(max(t_left + 1, mid_t - 5), min(t_right, mid_t + 6)):
+            add_l, _ = loc_map.get(t_cand - 1, (0, 0))
+            if add_l > 0:
+                best_mid = t_cand
+                break
+        chosen[best_mid] = _make_cand(best_mid, "progress", f"平稳推进（T{best_mid}）")
+
+    # 7. 极端候选溢出兜底（海量报错轮 + U 脉冲叠加）：
+    #    保首尾 + barrier + attractor + 已保留 U 脉冲，其余等距抽样
+    if len(chosen) > max_singularities:
+        priority_turns = {1, total_turns}
+        if best_barrier_turn:
+            priority_turns.add(best_barrier_turn)
+        if best_trap_turn:
+            priority_turns.add(best_trap_turn)
+        for t_u, _ in keep_pulses:
+            priority_turns.add(t_u)
+        remaining = [t for t in sorted(chosen.keys()) if t not in priority_turns]
+        needed = max_singularities - len(priority_turns)
+        if needed > 0 and remaining:
+            step = max(1, len(remaining) // needed)
+            sampled = remaining[::step][:needed]
+            final_turns = sorted(priority_turns | set(sampled))
+        else:
+            final_turns = sorted(priority_turns)[:max_singularities]
+    else:
+        final_turns = sorted(chosen.keys())
+
+    return [chosen[t] for t in final_turns]
+
+
+def build_jev_pass1_topology_payload(report, derived: dict, dialogue=None, singularities: list[dict] | None = None) -> tuple[dict, dict]:
+    """构建第一阶段：全局形态与关键节点判定的 (state, questions)。
+
+    在 1 个 HTTP POST 请求中并行测定：全局收敛形态、瓶颈归因、意图模糊度、
+    四维工程能力、关键转折指认、各里程碑的相态/动能/方向/事件/距离。
+
+    语言策略（官方文档：Jev 主要训练语言为英语，CJK 准确率较低）：
+    判定的 instructions/criteria 与结构性字段值一律英文；用户消息等语义
+    素材保持原文（无法离线翻译），由 Jev 自行理解。
+    证据供给（#2）：control_sequence 各里程碑附该 U 轮用户消息摘录，
+    terminal_deliverable 附最终工具动作/验证事实/收尾状态——判「是否达成」
+    必须让判定者看到交付物形态与验证证据。
+    问题瘦身（#8）：「先查后改」是本地模式识别（debt_local 已在 detect 阶段
+    确定性推导），不再向 Jev 发 debt_t{n} 题。
+    """
+    stats = derived.get("stats") or []
+    total_turns = len(stats) or report.usage.assistant_msgs or 1
+    if singularities is None:
+        singularities = detect_phase_singularities(report, derived)
+    milestone_turns = [s["turn"] for s in singularities]
+
+    # 1. 首轮意图摘要（用户原文，可能为中文——语义素材保持原文）
+    first_prompt_summary = getattr(report.usage, "first_prompt", "") or ""
+    if not first_prompt_summary and dialogue:
+        for ln in dialogue:
+            if ln.startswith("[用户]"):
+                first_prompt_summary = ln[4:].strip()[:300]
+                break
+    if not first_prompt_summary:
+        first_prompt_summary = getattr(report.meta, "title", "") or "routine coding session"
+
+    hot_files = list(report.files_touched_details.keys())[:8] if report.files_touched_details else []
+
+    # 用户消息摘录：dialogue 中第 k 条 [用户] 行 ≈ 第 U_k 轮的输入原文
+    user_msg_by_idx: dict[int, str] = {}
+    if dialogue:
+        k = 0
+        for ln in dialogue:
+            if ln.startswith("[用户]"):
+                k += 1
+                user_msg_by_idx.setdefault(k, ln[4:].strip()[:160])
+
+    # 终局交付证据：最后 5 个工具动作 + 是否执行过验证 + 收尾是否干净
+    ops_by_turn = derived.get("ops_by_turn") or {}
+    final_actions: list[str] = []
+    if ops_by_turn and stats:
+        max_turn = max((getattr(s, "turn", 0) for s in stats), default=0)
+        tail_ops = []
+        for t in range(max_turn, max_turn - 4, -1):
+            for op in ops_by_turn.get(t) or []:
+                nm = getattr(op, "tool", "") or "?"
+                pth = (getattr(op, "path", "") or "")[-48:]
+                tail_ops.append(f"{nm} {pth}".strip())
+        final_actions = list(reversed(tail_ops[-5:]))
+    verification_performed = any(
+        "bash" in a.lower() or "test" in a.lower() for a in final_actions)
+    exit_clean = bool(stats) and getattr(stats[-1], "errors", 0) == 0
+
+    state = {
+        "intent_specification": {
+            "initial_prompt": first_prompt_summary,
+            "total_user_messages": report.usage.user_msgs,
+        },
+        "terminal_deliverable": {
+            "total_turns": total_turns,
+            "final_net_loc": derived.get("net_loc", 0),
+            "final_files_touched": hot_files,
+            "final_actions": final_actions,
+            "verification_performed": verification_performed,
+            "exit_clean": exit_clean,
+        },
+        "thermodynamic_dissipation": {
+            "total_tokens": derived.get("total_tokens", 0) or (report.usage.input_tokens + report.usage.output_tokens),
+            "tool_errors": report.usage.tool_errors,
+            "rework_deleted_loc": derived.get("rework_loc", 0),
+            "churn_rate": round(float(derived.get("churn_rate") or 0.0), 3),
+        },
+        "control_sequence": [
+            {
+                "turn": s["turn"],
+                "user_turn": s.get("user_turn"),
+                "phase_kind": s["kind"],
+                "phase_note": _KIND_EN.get(s["kind"], s["kind"]),
+                "user_msg_excerpt": user_msg_by_idx.get(s.get("user_turn") or 0, ""),
+                "investigation_style": s.get("debt_local", "neutral"),
+                "tool_calls": s["tool_calls"],
+                "tool_errors": s["errors"],
+                "loc_added": s["loc_added"],
+                "loc_deleted": s["loc_deleted"],
+            }
+            for s in singularities
+        ],
+    }
+
+    # 2. 并行 Questions（严格遵循 TypeSafe System One API Schema；题面英文）
+    questions: dict = {
+        "convergence_type": {
+            "type": "choice",
+            "instructions": (
+                "Judge the overall outcome from the final delivery and how well it fits "
+                "the user's original intent. STRICT RULE: a long session and intermediate "
+                "errors are normal exploration cost for a complex task - as long as the "
+                "final code closes the loop on the core requirement, it counts as converged."
+            ),
+            "criteria": {
+                "dirac": "core goal reached smoothly; working code delivered and verified",
+                "escaped": "setbacks or detours occurred, but after a key turnaround the session recovered and reached the goal",
+                "trapped": "never overcame the core difficulty; stuck in errors or loops, nothing delivered",
+                "wandering": "aimless exploration with no effective convergence",
+                "other": "none of the above",
+            },
+        },
+        "barrier_crossed": {
+            "type": "noul",
+            "instructions": "Did the AI successfully overcome the core technical blocker and pass the key turning point, after which development proceeded steadily toward completion?",
+            "criteria": {
+                "true": "the core blocker was overcome; steady progress followed",
+                "false": "not overcome, or the session was plain routine work with no blocker",
+            },
+        },
+        "attractor_trapped": {
+            "type": "noul",
+            "instructions": "Did the session ultimately fail to complete because it was stuck in a retry loop it never escaped? (If there were retries early on but they were resolved later, answer false.)",
+            "criteria": {
+                "true": "still stuck in a loop at the end; task unfinished",
+                "false": "never trapped, or successfully escaped and resolved",
+            },
+        },
+        "intent_entropy": {
+            "type": "choice",
+            "instructions": "How ambiguous or open-ended was the user's initial request?",
+            "criteria": {
+                "low": "precise requirements with clear specs or steps",
+                "mid": "fairly routine; some room for interpretation",
+                "high": "highly vague, open-ended, or exploratory",
+            },
+        },
+        "primary_bottleneck": {
+            "type": "choice",
+            "instructions": "What was the main source of friction or wasted effort across the session? (For retrospective learning only; it does NOT affect whether the goal was achieved.)",
+            "criteria": {
+                "prompt_ambiguity": "the initial request was vague or missing key constraints, causing early wandering",
+                "blind_mutation": "the AI changed code without enough prior investigation, causing secondary errors and rework",
+                "cascade_breakage": "a change broke existing behavior elsewhere (fix one thing, break another)",
+                "retry_loop": "the same error was retried mechanically in a loop",
+                "none": "smooth overall; no serious bottleneck",
+            },
+        },
+        "intent_formalization": {
+            "type": "score",
+            "instructions": "Rate how accurately the AI understood and structured the user's requirement (0-4):",
+            "criteria": [
+                "badly misunderstood the requirement",
+                "missed several key requirements",
+                "caught the main intent with rough edges",
+                "accurately understood and decomposed a complex requirement",
+                "crystal clear, even anticipated hidden edge cases",
+            ],
+        },
+        "drift_sensitivity": {
+            "type": "score",
+            "instructions": "Rate how quickly the AI noticed when it was off track or had introduced a bug (0-4):",
+            "criteria": [
+                "never noticed; kept compounding errors",
+                "dull; needed several severe failures to notice",
+                "normal; recognized problems after errors",
+                "sharp; backed off at the first sign of trouble",
+                "exceptional; self-corrected before damage spread",
+            ],
+        },
+        "feedback_mutual_info": {
+            "type": "score",
+            "instructions": "Rate how effectively the AI absorbed and acted on the user's interventions and corrections (0-4):",
+            "criteria": [
+                "ignored the user's input entirely",
+                "acknowledged but did not act on it",
+                "obeyed mechanically without integrating",
+                "absorbed guidance and adjusted course quickly",
+                "grasped the intent precisely and fixed all related code in one pass",
+            ],
+        },
+        "epistemic_balance": {
+            "type": "score",
+            "instructions": "Rate the AI's discipline of investigating before changing code, and its willingness to cut losses on a dead path (0-4):",
+            "criteria": [
+                "kept blind-coding into a dead end; heavy sunk cost",
+                "only shallow retries; no real retreat",
+                "normal probing; adjusted course when reasonable",
+                "willingly reverted wrong code and abandoned dead paths",
+                "decisive; rolled back immediately when diverging, near-zero waste",
+            ],
+        },
+    }
+
+    # 各里程碑五维原子问题（相态/动能/方向/事件/距离；debt 已本地推导不发问）
+    for t_num in milestone_turns:
+        questions[f"regime_t{t_num}"] = {
+            "type": "choice",
+            "instructions": f"Which working phase was the AI in at turn {t_num}?",
+            "criteria": {
+                "gas": "exploring (reading files, searching code, inspecting; no big changes yet)",
+                "liquid": "building (adding or modifying core logic, steady progress)",
+                "glass": "stuck (frequent errors, retrying the same thing, confused)",
+                "crystal": "wrapping up (tests passing, polish, final verification)",
+                "other": "other transitional state",
+            },
+        }
+        questions[f"trigger_t{t_num}"] = {
+            "type": "choice",
+            "instructions": f"What mainly drove the change of direction or behavior at turn {t_num}?",
+            "criteria": {
+                "user": "a new user instruction or correction",
+                "ai": "the AI's own planning or initiative",
+                "env": "a compile/test failure or non-zero tool exit",
+                "none": "plain inertia, routine continuation",
+            },
+        }
+        questions[f"vector_t{t_num}"] = {
+            "type": "choice",
+            "instructions": f"What was the direction of the work at turn {t_num}?",
+            "criteria": {
+                "positive": "moving toward the final goal",
+                "neutral": "holding steady or exploring sideways",
+                "negative": "introducing bugs or drifting off the main line",
+            },
+        }
+        questions[f"event_t{t_num}"] = {
+            "type": "choice",
+            "instructions": f"What kind of event happened at turn {t_num}?",
+            "criteria": {
+                "normal": "routine steady progress",
+                "barrier_leap": "broke through the key technical blocker; steady progress followed",
+                "retry_loop": "hit an error or fell into a retry loop",
+                "course_correction": "responded to a correction (user's or its own) and adjusted course",
+                "stabilization": "tests passed; locking in results and wrapping up",
+            },
+        }
+        questions[f"distance_t{t_num}"] = {
+            "type": "score",
+            "instructions": f"How far from full completion with correct verification was the task at turn {t_num} (0-4)?",
+            "criteria": [
+                "fully complete and verified",
+                "core done; minor polish left",
+                "about half of the core done; still working",
+                "only a rough prototype or direction",
+                "just started or badly off track",
+            ],
+        }
+
+    # 关键转折直接指认（#3：select instead of generate——候选=里程碑回合号）
+    if len(milestone_turns) >= 2:
+        questions["turnaround_pick"] = {
+            "type": "choice",
+            "instructions": (
+                "At which milestone did the decisive turn toward successful completion "
+                "happen (the single key turnaround point)? Pick the turn where the session "
+                "stopped struggling and started converging for good. Pick 'none' if the "
+                "session never turned around."
+            ),
+            "criteria": {
+                **{f"t{s['turn']}": f"Turn {s['turn']} ({s['kind']})" for s in singularities},
+                "none": "no decisive turnaround happened",
+            },
+        }
+
+    return state, questions
+
+
+def build_jev_pass2_autopsy_payload(
+    report,
+    derived: dict,
+    pass1_response: dict,
+    dialogue: list[str] | None = None,
+    singularities: list[dict] | None = None,
+) -> tuple[dict, dict]:
+    """构建第二阶段：核心转折点深挖与反事实推演的 (state, questions)。
+
+    基于 Pass 1 的宏观裁决，确定性锁定最关键的 1 个节点（T_crit；优先 Pass 1
+    直接指认的转折点），提取其邻域微观证据链，发起深挖裁决：
+      - 深层原因 crit_causal_attribution
+      - 反事实检验 crit_counterfactual_preventable（前置单测/约束能否避免）
+      - 连带破坏 crit_waterbed_breakage（改一处坏别处）
+      - 认知过载 crit_cognitive_overload
+      - 责任占比 blame_ai / blame_user / blame_env（0-4 分，报告归一化为份额）
+      - 干预处方 prescriptive_action
+
+    证据来自 derived 确定性遥测（ops_by_turn / loc_by_turn / retry_spans）：
+    dialogue 行只有 [用户]/[AI]/[工具] 前缀、无回合标号，不可按回合定位，
+    仅作全局用户消息摘录（显式标注 non-turn-bound，绝不伪装成回合证据）。
+    题面英文（Jev 主要训练语言为英语）；用户消息素材保持原文。
+    """
+    if singularities is None:
+        singularities = detect_phase_singularities(report, derived)
+    answers = (pass1_response or {}).get("answers", {})
+
+    # 1. 锁定 T_crit。优先级：Pass 1 直接指认的转折点 → barrier → attractor → 第二节点
+    crit_s = None
+    pick = str((answers.get("turnaround_pick") or {}).get("choice", "")) \
+        if isinstance(answers.get("turnaround_pick"), dict) else ""
+    pick_turn = None
+    if pick.startswith("t") and pick[1:].isdigit():
+        pick_turn = int(pick[1:])
+    if pick_turn is not None:
+        crit_s = next((s for s in singularities if s["turn"] == pick_turn), None)
+    if crit_s is None:
+        for s in singularities:
+            if s.get("kind") == "barrier":
+                crit_s = s
+                break
+    trap_s = None
+    for s in singularities:
+        ev = answers.get(f"event_t{s['turn']}", {})
+        if (isinstance(ev, dict) and "retry_loop" in str(ev.get("choice", ""))) \
+                or s.get("kind") == "attractor" or s.get("errors", 0) > 0:
+            trap_s = s
+            break
+    if crit_s is None:
+        crit_s = trap_s
+    if crit_s:
+        crit_turn = crit_s["turn"]
+        crit_kind = crit_s["kind"]
+    elif len(singularities) > 1:
+        crit_turn = singularities[1]["turn"]
+        crit_kind = singularities[1]["kind"]
+    else:
+        crit_turn = 1
+        crit_kind = "init"
+
+    # 2. 提取 T_crit 邻域确定性证据（±1 回合）。ops_by_turn 键 0-based。
+    stats = derived.get("stats") or []
+    stat_by_num = {getattr(s, "turn", 0) + 1: s for s in stats}
+    st = stat_by_num.get(crit_turn)
+    loc_map = derived.get("loc_by_turn") or {}
+    add_l, del_l = loc_map.get(crit_turn - 1, (0, 0))
+
+    evidence_lines = []
+    ops_by_turn = derived.get("ops_by_turn") or {}
+    for t_key in (crit_turn - 2, crit_turn - 1, crit_turn):
+        ops = ops_by_turn.get(t_key) or []
+        tag = f"T{t_key + 1}"
+        for op in ops[:4]:
+            path_s = (getattr(op, "path", "") or "")[-60:]
+            evidence_lines.append(f"[{tag}] {getattr(op, 'tool', '')}" + (f" ...{path_s}" if path_s else ""))
+    if evidence_lines:
+        evidence_lines.insert(
+            0, f"Tool actions around the critical turn (T{max(1, crit_turn - 1)}~T{crit_turn + 1}):")
+    else:
+        evidence_lines.append(f"Turn metrics: +{add_l} lines added / -{del_l} lines deleted")
+    if st and getattr(st, "errors", 0) > 0:
+        evidence_lines.append(f"Tool failures: turn T{crit_turn} recorded {st.errors} error exits")
+    for a, b in derived.get("retry_spans", []):
+        if a <= crit_turn - 1 <= b:
+            evidence_lines.append(f"A retry-loop span covers this turn (T{a + 1}~T{b + 1})")
+            break
+    # 用户消息为全局摘录（dialogue 无回合标号），标注 non-turn-bound
+    if dialogue:
+        excerpts = [ln[4:].strip()[:80] for ln in dialogue if ln.startswith("[用户]")][:3]
+        for i, msg in enumerate(excerpts, 1):
+            evidence_lines.append(f"User message excerpt {i} (session-wide, NOT turn-bound): {msg}")
+
+    conv_choice = str((answers.get("convergence_type") or {}).get("choice", "dirac")).split(":")[0].strip().lower() \
+        if isinstance(answers.get("convergence_type"), dict) else "dirac"
+    bottleneck_choice = str((answers.get("primary_bottleneck") or {}).get("choice", "none")).split(":")[0].strip().lower() \
+        if isinstance(answers.get("primary_bottleneck"), dict) else "none"
+
+    state = {
+        "macro_diagnosis": {
+            "convergence_type": conv_choice,
+            "primary_bottleneck": bottleneck_choice,
+        },
+        "critical_singularity": {
+            "turn": crit_turn,
+            "kind": crit_kind,
+            "investigation_style": next(
+                (s.get("debt_local") for s in singularities
+                 if s["turn"] == crit_turn), "neutral"),
+            "loc_added": add_l,
+            "loc_deleted": del_l,
+            "errors": getattr(st, "errors", 0) if st else 0,
+            "evidence_summary": evidence_lines,
+        },
+    }
+    if trap_s and trap_s["turn"] != crit_turn:
+        state["preceding_obstacle"] = {
+            "turn": trap_s["turn"],
+            "errors": trap_s.get("errors", 0),
+        }
+
+    questions: dict = {
+        "crit_causal_attribution": {
+            "type": "choice",
+            "instructions": f"For the dynamics at turn {crit_turn}, what was the deep-rooted cause of the trouble (or the key to the breakthrough)?",
+            "criteria": {
+                "specification_gap": "the user's initial request lacked a key constraint, leading the exploration astray",
+                "context_blindspot": "the AI modified code without reading all the callers first; located the wrong place",
+                "hallucinated_contract": "the AI assumed an API, method signature, or dependency that does not exist",
+                "cascading_regression": "the change broke existing working behavior elsewhere (fix one thing, break another)",
+                "clean_breakthrough": "precisely located the root cause and applied a minimal surgical fix",
+            },
+        },
+        "crit_counterfactual_preventable": {
+            "type": "noul",
+            "instructions": f"Counterfactual check: if the user had provided explicit unit tests or the exact error log up front, would the rework/stall around turn {crit_turn} most likely have been avoided?",
+            "criteria": {
+                "true": "with sufficient upfront constraints or a reproduction log, this detour was largely avoidable",
+                "false": "it was unavoidable technical exploration, unrelated to prompt constraints",
+            },
+        },
+        "crit_waterbed_breakage": {
+            "type": "noul",
+            "instructions": f"Did the code change at turn {crit_turn} trigger secondary errors or rework in other files afterwards (fix one thing, break another)?",
+            "criteria": {
+                "true": "the change caused secondary failures or later rework elsewhere",
+                "false": "the change was clean and isolated; no secondary damage",
+            },
+        },
+        "crit_cognitive_overload": {
+            "type": "score",
+            "instructions": f"Rate the AI's context load and confusion level at turn {crit_turn} (0-4):",
+            "criteria": [
+                "highly focused; every tool call had a precise purpose",
+                "light probing, within a reasonable answer space",
+                "locally hesitant; repeated reads or vague searches",
+                "clearly lost; actions contradicting the previous turn",
+                "severely overloaded; lost context coherence entirely",
+            ],
+        },
+        "blame_ai": {
+            "type": "score",
+            "instructions": f"Attribute the trouble around turn {crit_turn}: how much belongs to the AI itself (misreading the requirement, acting without checking, ignoring context)? (0-4)",
+            "criteria": [
+                "none of it",
+                "a minor part",
+                "a moderate part",
+                "a major part",
+                "dominant cause",
+            ],
+        },
+        "blame_user": {
+            "type": "score",
+            "instructions": f"...and how much belongs to the user's side (unclear requirements, missing constraints, late or ambiguous corrections)? (0-4)",
+            "criteria": [
+                "none of it",
+                "a minor part",
+                "a moderate part",
+                "a major part",
+                "dominant cause",
+            ],
+        },
+        "blame_env": {
+            "type": "score",
+            "instructions": f"...and how much belongs to the environment (compiler/test failures, dependency or tool issues outside anyone's control)? (0-4)",
+            "criteria": [
+                "none of it",
+                "a minor part",
+                "a moderate part",
+                "a major part",
+                "dominant cause",
+            ],
+        },
+        "prescriptive_action": {
+            "type": "choice",
+            "instructions": "Given this session's dynamics, what is the best collaboration adjustment for future sessions?",
+            "criteria": {
+                "pin_test_anchor": "test anchor: write assertion tests before letting the AI modify code",
+                "decompose_scope": "decompose: split each change into edits smaller than ~30 lines",
+                "context_dump": "context injection: proactively paste the exact traceback and relevant code slices",
+                "rollback_reset": "cut losses: roll back to the last stable point after two consecutive failures",
+                "maintain_course": "keep the current collaboration pattern",
+            },
+        },
+    }
+
+    return state, questions
+
+
+def synthesize_authoritative_dynamics_report(
+    report,
+    derived: dict,
+    pass1_response: dict,
+    pass2_response: dict | None = None,
+    singularities: list[dict] | None = None,
+) -> tuple[str, dict]:
+    """将 TypeSafe Jev 多阶段裁决结果与非平衡相变动力学微积分场闭环合成为权威级复盘报告。
+
+    Returns:
+        (markdown_report_text, dynamics_data_dict)
+    """
+    p1_answers = (pass1_response or {}).get("answers", {})
+    p2_answers = (pass2_response or {}).get("answers", {}) if pass2_response else {}
+
+    stats = derived.get("stats") or []
+    total_turns = len(stats) or report.usage.assistant_msgs or 1
+    if singularities is None:
+        singularities = detect_phase_singularities(report, derived)
+    milestone_turns = [s["turn"] for s in singularities]
+
+    def _clean_choice(answers: dict, k: str, default: str) -> str:
+        ans = answers.get(k, {})
+        val = ans.get("choice", default) if isinstance(ans, dict) else default
+        return str(val).split(":")[0].strip().lower()
+
+    # 1. 全局判定与概率分布解析
+    conv_ans = p1_answers.get("convergence_type", {})
+    conv_type = _clean_choice(p1_answers, "convergence_type", "dirac")
+    if conv_type not in ("dirac", "escaped", "trapped", "wandering"):
+        conv_type = "dirac"
+    conv_conf = float(conv_ans.get("confidence", 0.88)) if isinstance(conv_ans, dict) else 0.88
+    conv_probs = conv_ans.get("probabilities", {}) if isinstance(conv_ans, dict) else {}
+
+    p_main = float(conv_probs.get(conv_type, conv_conf))
+    alt_probs = [(k, float(v)) for k, v in conv_probs.items() if k != conv_type and float(v) > 0.05]
+    alt_probs.sort(key=lambda x: x[1], reverse=True)
+    conv_labels = {
+        "dirac": "平稳收敛（一次到位）",
+        "escaped": "先受挫后纠偏（最终达成目标）",
+        "trapped": "原地打转（卡壳未解决）",
+        "wandering": "方向发散（未形成有效推进）",
+    }
+    p_alt_str = "、".join(f"{conv_labels.get(k, k)} {p:.0%}" for k, p in alt_probs[:2]) if alt_probs else "态势明确，无显著混淆"
+
+    intent_entropy = _clean_choice(p1_answers, "intent_entropy", "mid")
+    if intent_entropy not in ("low", "mid", "high"):
+        intent_entropy = "mid"
+    entropy_labels = {"low": "清晰（需求明确精确）", "mid": "常规（存在一定理解空间）", "high": "模糊（需求高度发散、探索性强）"}
+
+    bottleneck = _clean_choice(p1_answers, "primary_bottleneck", "none")
+    bottleneck_map = {
+        "prompt_ambiguity": "用户初始需求模糊或关键约束遗漏，引发早期试探性游走",
+        "blind_mutation": "AI 动手前探查不足，盲改引发次生错误与代码返工",
+        "cascade_breakage": "修改引发连锁破坏（按下葫芦浮起瓢），一处改动牵出多处问题",
+        "retry_loop": "同一错误反复机械重试，陷入死循环出不来",
+        "none": "全流程推进平稳顺畅，各阶段衔接紧凑无严重瓶颈",
+    }
+    bottleneck_desc = bottleneck_map.get(bottleneck, bottleneck_map["none"])
+
+    noul_barrier = p1_answers.get("barrier_crossed", {})
+    barrier_prob = float(noul_barrier.get("noul", 0.5)) if isinstance(noul_barrier, dict) else 0.5
+    barrier_crossed = barrier_prob >= 0.50
+
+    noul_trap = p1_answers.get("attractor_trapped", {})
+    trap_prob = float(noul_trap.get("noul", 0.3)) if isinstance(noul_trap, dict) else 0.3
+    attractor_trapped = trap_prob >= 0.50
+
+    # 能力分 (0-4 级 Score -> 0-100)
+    caps: dict[str, int] = {}
+    for cap_key in ("intent_formalization", "drift_sensitivity", "feedback_mutual_info", "epistemic_balance"):
+        ans_cap = p1_answers.get(cap_key, {})
+        score_val = float(ans_cap.get("score", 2.5)) if isinstance(ans_cap, dict) else 2.5
+        caps[cap_key] = max(0, min(100, int(round((score_val / 4.0) * 100))))
+
+    # 2. 轨迹流形构建与物理计算
+    trajectory: list[dict] = []
+    stat_by_num = {getattr(s, "turn", 0) + 1: s for s in stats}
+    barrier_turn = None
+    barrier_trigger = "ai"
+    started_above = False
+
+    for t_num in milestone_turns:
+        st = stat_by_num.get(t_num)
+        u_num = getattr(st, "user_turn", None) if st else None
+        if u_num is None:
+            sing_match = next((s for s in singularities if s.get("turn") == t_num), None)
+            if sing_match and sing_match.get("user_turn") is not None:
+                u_num = sing_match["user_turn"]
+            else:
+                user_msgs = getattr(report.usage, "user_msgs", 1) or 1
+                u_num = max(1, min(user_msgs, int(round((t_num / max(1, total_turns)) * user_msgs))))
+
+        dist_ans = p1_answers.get(f"distance_t{t_num}", {})
+        raw_ds = float(dist_ans.get("score", 2.0)) if isinstance(dist_ans, dict) else 2.0
+        ds = round(max(0.0, min(1.0, raw_ds / 4.0)), 4)
+
+        conf = 0.85
+        if isinstance(dist_ans, dict) and "confidence" in dist_ans:
+            conf = float(dist_ans["confidence"])
+        snr = round(max(0.10, min(1.0, conf)), 3)
+
+        regime = _clean_choice(p1_answers, f"regime_t{t_num}", "liquid")
+        if regime not in ("gas", "liquid", "glass", "crystal"):
+            regime = "liquid"
+
+        trigger = _clean_choice(p1_answers, f"trigger_t{t_num}", "ai")
+        if trigger not in ("user", "ai", "env", "none"):
+            trigger = "ai"
+
+        vector = _clean_choice(p1_answers, f"vector_t{t_num}", "positive")
+        if vector not in ("positive", "neutral", "negative"):
+            vector = "positive"
+
+        event = _clean_choice(p1_answers, f"event_t{t_num}", "normal")
+        if event not in ("normal", "barrier_leap", "retry_loop", "course_correction", "stabilization"):
+            event = "normal"
+        if st and getattr(st, "errors", 0) > 0 and event == "normal":
+            event = "test_fail"
+
+        # 先查后改风格：消费本地确定性推导（debt_local），不再依赖 Jev debt 答案
+        debt_local = next(
+            (s.get("debt_local") for s in singularities if s.get("turn") == t_num),
+            None)
+        if debt_local == "prudent":
+            e_debt = 0.45
+        elif debt_local == "reckless":
+            e_debt = 4.20
+        elif regime == "glass":
+            e_debt = 3.50
+        elif vector == "positive":
+            e_debt = 1.10
+        else:
+            e_debt = 1.60
+
+        cost_frac = (t_num - 1) / max(1, total_turns - 1)
+        pot_energy = _metrics.compute_waddington_potential(ds, cost_frac)
+
+        if ds > 0.55:
+            started_above = True
+        elif (started_above or event == "barrier_leap") and ds <= 0.52 and barrier_turn is None:
+            barrier_turn = t_num
+            barrier_trigger = trigger
+
+        # 注：不在本地用 event==retry_loop 覆盖 attractor_trapped——中途重试不代表
+        # 最终受困，Jev 的 noul 判定已含「前期有重试但后续脱困选 false」语义，
+        # 本地覆盖会让资源耗散反过来污染目标达成判定（违背解耦原则）。
+
+        node: dict = {
+            "turn": t_num,
+            "user_turn": u_num,
+            "semantic_distance": ds,
+            "snr": snr,
+            "vector": vector,
+            "event": event,
+            "potential_energy": pot_energy,
+            "epistemic_debt": e_debt,
+            "regime": regime,
+            "trigger": trigger,
+            "confidence": round(conf, 3),
+            "note": f"T{t_num}·U{u_num} [{regime}] {vector}",
+        }
+        if u_num is not None:
+            node["user_impulse"] = {"flux": "high" if u_num == 1 else "mid", "note": f"U{u_num} 用户交互介入"}
+
+        trajectory.append(node)
+
+    # 3. 闭环控制论阻尼比、卡诺效率与李雅普诺夫指数
+    zeta, _, zeta_desc = _metrics.compute_cybernetic_damping(trajectory)
+    net_loc = derived.get("net_loc", 0) or 0
+    rework_loc = derived.get("rework_loc", 0) or 0
+    comp_tok = derived.get("compaction_tokens", 0) or 0
+    tot_tok = derived.get("total_tokens", 0) or 0
+    _, carnot = _metrics.compute_landauer_dissipation(net_loc, rework_loc, comp_tok, tot_tok)
+
+    if len(trajectory) >= 2:
+        deltas = [trajectory[i]["semantic_distance"] - trajectory[i-1]["semantic_distance"] for i in range(1, len(trajectory))]
+        neg_count = sum(1 for d in deltas if d < 0)
+        frac = neg_count / len(deltas)
+        lyap_exp = round(-0.55 * frac + 0.35 * (1.0 - frac), 2)
+    else:
+        lyap_exp = -0.32 if conv_type in ("dirac", "escaped") else 0.15
+
+    # 寻找并锁定关键转折点 barrier_turn 与其对应的用户反馈轮次 turnaround_u。
+    # 优先级：Jev 直接指认（turnaround_pick，select instead of generate）→
+    # 本地 Ds 阈值检测（上面循环内）→ singularities 的 barrier 候选兜底
+    import re as _re
+    _pick = p1_answers.get("turnaround_pick")
+    _pick_choice = (str(_pick.get("choice", "")).split(":")[0].strip().lower()
+                    if isinstance(_pick, dict) else "")
+    _m = _re.match(r"^t(\d+)$", _pick_choice)
+    if _m and int(_m.group(1)) in milestone_turns:
+        barrier_turn = int(_m.group(1))
+        barrier_trigger = _clean_choice(p1_answers, f"trigger_t{barrier_turn}", "ai")
+        if barrier_trigger not in ("user", "ai", "env", "none"):
+            barrier_trigger = "ai"
+    if barrier_turn is None:
+        for s in singularities:
+            if s.get("kind") == "barrier":
+                barrier_turn = s["turn"]
+                barrier_trigger = "ai"
+                break
+
+    turnaround_st = stat_by_num.get(barrier_turn) if barrier_turn else None
+    turnaround_u = getattr(turnaround_st, "user_turn", None) if turnaround_st else None
+    if turnaround_u is None and barrier_turn:
+        sing_match = next((s for s in singularities if s.get("turn") == barrier_turn), None)
+        if sing_match and sing_match.get("user_turn") is not None:
+            turnaround_u = sing_match["user_turn"]
+        else:
+            user_msgs = getattr(report.usage, "user_msgs", 1) or 1
+            turnaround_u = max(1, min(user_msgs, int(round((barrier_turn / max(1, total_turns)) * user_msgs))))
+
+    # 4. 第二阶段微观法医裁判解析
+    autopsy_summary = None
+    if p2_answers:
+        causal_raw = _clean_choice(p2_answers, "crit_causal_attribution", "clean_breakthrough")
+        causal_map = {
+            "specification_gap": "提示词规格空缺：用户需求缺乏明确边界或关键单测约束",
+            "context_blindspot": "探查盲区盲改：AI未读全调用方代码即修改，引发定位偏差",
+            "hallucinated_contract": "虚构接口协议：AI臆想了不存在的函数签名或第三方接口",
+            "cascading_regression": "水床连锁回退：改动局部引发了其他正常功能的次生破坏",
+            "clean_breakthrough": "精准一击必中：实施最小手术式精准重构，顺利攻克卡点",
+        }
+        causal_desc = causal_map.get(causal_raw, causal_map["clean_breakthrough"])
+
+        p_prevent = float(p2_answers.get("crit_counterfactual_preventable", {}).get("noul", 0.5))
+        p_waterbed = float(p2_answers.get("crit_waterbed_breakage", {}).get("noul", 0.2))
+        cog_score = float(p2_answers.get("crit_cognitive_overload", {}).get("score", 1.0))
+
+        # 责任占比（三方 score 归一化；与通用 LLM 报告的「责任占比」章节同构——
+        # 用户约定：混合责任必须说清份额，不许和稀泥）
+        def _blame_val(key: str) -> float | None:
+            ans = p2_answers.get(key)
+            if not isinstance(ans, dict):
+                return None
+            v = ans.get("score")
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        b_ai, b_user, b_env = (_blame_val(k) for k in ("blame_ai", "blame_user", "blame_env"))
+        blame_share = None
+        if None not in (b_ai, b_user, b_env):
+            b_tot = b_ai + b_user + b_env
+            if b_tot > 0.3:
+                blame_share = {
+                    "ai": b_ai / b_tot, "user": b_user / b_tot, "env": b_env / b_tot,
+                }
+
+        presc_choice = _clean_choice(p2_answers, "prescriptive_action", "maintain_course")
+        presc_map = {
+            "pin_test_anchor": "【单测固锚策略】在让 AI 动手修改前，先要求其写出自动化断言单测，用红绿灯闭环驱动修改，彻底根除返工。",
+            "decompose_scope": "【微颗粒度切片】将当前任务进一步拆解为粒度 <30 行的原子操作，避免一次性生成大段复杂代码。",
+            "context_dump": "【高信噪比上下文注入】主动贴出完整的错误栈 Traceback 与关键调用方代码片段，消除 AI 的探查盲区。",
+            "rollback_reset": "【快刀回滚止损】连续出现两次报错时立即回滚至上一稳定版本，杜绝在错误基础上错上加错。",
+            "maintain_course": "【保持协同航向】当前提示词深度与代码修改节奏高度匹配，继续保持当前交互模式即可。",
+        }
+        presc_desc = presc_map.get(presc_choice, presc_map["maintain_course"])
+
+        autopsy_summary = {
+            "causal_desc": causal_desc,
+            "p_prevent": p_prevent,
+            "p_waterbed": p_waterbed,
+            "cog_score": cog_score,
+            "presc_desc": presc_desc,
+            "blame": blame_share,
+        }
+
+    # 5. 组装标准 dynamics_data 供相空间相图渲染
+    # 死锁位置取本地检测的 attractor 奇点（报错/返工峰值回合），无则不标注——
+    # 不再用 milestone_turns[1]（第二个里程碑与死锁位置无关）
+    attractor_turn_val = None
+    if attractor_trapped:
+        attractor_turn_val = next(
+            (s["turn"] for s in singularities if s.get("kind") == "attractor"), None)
+
+    # 判定与本地客观事实的交叉校验。官方文档：概率校准是群体层面的统计性质，
+    # 「不保证单次判定正确」——矛盾时显式亮警示，供用户折扣采信（公正性最后一块）
+    final_clean = bool(stats) and getattr(stats[-1], "errors", 0) == 0
+    tensions: list[str] = []
+    if conv_type in ("trapped", "wandering") and net_loc > 0 and final_clean:
+        tensions.append(
+            f"Jev 判定「未收敛」，但本地遥测显示会话正常收尾且产出净增代码（+{net_loc} 行）"
+            "——判定可能与客观证据存在张力，建议人工复核")
+    if conv_type in ("dirac", "escaped") and net_loc <= 0:
+        tensions.append(
+            "Jev 判定「已达成」，但本地遥测显示无净增代码产出"
+            "——判定可能与客观证据存在张力，建议人工复核")
+    # 低置信度 → 建议升级通用大模型深挖（System 1 → System 2，opt-in 不自动发请求）
+    low_confidence = (p_main < 0.60) or (conv_conf < 0.70)
+
+    dynamics_data: dict = {
+        "intent_entropy": intent_entropy,
+        "attractor_trapped": attractor_trapped,
+        "attractor_turn": attractor_turn_val,
+        "convergence_type": conv_type,
+        "barrier_crossed": barrier_crossed,
+        "barrier_turn": barrier_turn,
+        "turnaround_turn": barrier_turn,
+        "turnaround_u": turnaround_u,
+        "damping_ratio": zeta,
+        "carnot_efficiency": carnot,
+        "trajectory": trajectory,
+        "capabilities": caps,
+        "lyapunov_exponent": lyap_exp,
+        "evidence_tension": tensions,
+        "low_confidence": low_confidence,
+    }
+    if autopsy_summary:
+        dynamics_data["autopsy"] = autopsy_summary
+
+    # 通过 ground_dynamics_user_turns 做确定性接地与物理补全
+    dynamics_data = ground_dynamics_user_turns(dynamics_data, derived)
+    trajectory = dynamics_data.get("trajectory", trajectory)
+
+    # 6. 生成长篇复盘审计报告（Markdown；术语平实化——读者画像为非计算机专业
+    #    本科生，禁物理黑话，与 #38 通用 LLM 报告的替换表同一口径）
+    trigger_cn_map = {
+        "user": "用户的指令或纠偏",
+        "ai": "AI 自主推进",
+        "env": "报错或测试失败推动",
+        "none": "常规惯性推进",
+    }
+    regime_cn_map = {
+        "gas": "探索期",
+        "liquid": "构建期",
+        "glass": "卡壳期",
+        "crystal": "收尾期",
+    }
+    vector_cn_map = {
+        "positive": "向目标推进",
+        "neutral": "维持现状/横向探索",
+        "negative": "偏离目标/引入新问题",
+    }
+    event_cn_map = {
+        "normal": "稳步推进",
+        "barrier_leap": "突破关键技术卡点",
+        "retry_loop": "陷入连续重试或死循环",
+        "course_correction": "响应纠偏指示，修正方向",
+        "stabilization": "测试通过，进入收尾交付",
+        "test_fail": "遇到测试失败或工具报错",
+        # ground_dynamics_user_turns 空洞插值节点的专有事件（用户介入微调）
+        "user_impulse": "用户介入微调",
+    }
+
+    # 构造清晰易读的时序流卡片（势能 V 留在明细表与遥测，正文行只保留读者
+    # 决策所需三要素：距目标多远、方向如何、这一轮归因）。
+    # 字段一律 .get 兜底——ground_dynamics_user_turns 的空洞插值节点只携带
+    # turn/ds/vector/event/regime 等核心字段，无 trigger/confidence/snr
+    milestone_lines = []
+    for pt in trajectory:
+        t_n = pt["turn"]
+        u_str = f" · 用户交互 U{pt['user_turn']}" if "user_turn" in pt else ""
+        r_cn = regime_cn_map.get(pt.get("regime") or "liquid")
+        v_cn = vector_cn_map.get(pt.get("vector") or "neutral")
+        tr_cn = trigger_cn_map.get(pt.get("trigger") or "none")
+        ev_cn = event_cn_map.get(pt.get("event") or "normal")
+        ds_val = pt["semantic_distance"]
+        c_val = pt.get("confidence", pt.get("snr", 0.85))
+        milestone_lines.append(
+            f"- **【T{t_n}{u_str} · {r_cn}】** 距目标 {ds_val:.0%} · 推进: {v_cn}（置信度: {c_val:.0%}）\n"
+            f"  - *这一轮归因*：{ev_cn}；主要推动力是【{tr_cn}】。整体处于{'收尾冲刺（很接近目标）' if ds_val < 0.50 else '攻坚阶段（正在过关键关口）' if ds_val <= 0.60 else '前期探索（离目标还较远）'}。"
+        )
+
+    # 构造表格行备查
+    table_lines = [
+        "| 回合 | 用户轮 | 距目标 Ds | 所处阶段 | 主要推动力 | 推进方向 | 势能 V（越低越接近目标） | 关键事件 | 置信度 |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for pt in trajectory:
+        u_str = f"U{pt['user_turn']}" if "user_turn" in pt else "-"
+        r_cn = regime_cn_map.get(pt.get("regime") or "liquid")
+        tr_cn = trigger_cn_map.get(pt.get("trigger") or "none")
+        v_cn = vector_cn_map.get(pt.get("vector") or "neutral")
+        ev_cn = event_cn_map.get(pt.get("event") or "normal")
+        c_val = pt.get("snr", pt.get("confidence", 0.85))
+        table_lines.append(
+            f"| T{pt['turn']} | {u_str} | {pt['semantic_distance']:.2f} | {r_cn} | {tr_cn} | {v_cn} | {pt.get('potential_energy', 0):.2f} | {ev_cn} | {c_val:.0%} |"
+        )
+
+    # 明确转折定位与归因
+    if barrier_turn:
+        u_suffix = f"（紧随用户干预第 U{turnaround_u} 轮之后）" if turnaround_u else ""
+        turnaround_loc_str = f"关键转正拐点发生于 **【第 T{barrier_turn} 回合{u_suffix}】**"
+        turnaround_why_str = (
+            f"AI 在此阶段攻克了关键技术难关，从探索/卡壳转入稳定推进，"
+            f"主要推动力是【{trigger_cn_map.get(barrier_trigger, 'AI 自主推进')}】。"
+        )
+    else:
+        turnaround_loc_str = "全流程推进平稳连续，未出现剧烈的方向突变关口"
+        turnaround_why_str = "初始需求清晰，AI 平稳推进并直接完成交付，没有明显卡壳拐点。"
+
+    is_achieved = conv_type in ("dirac", "escaped")
+    if is_achieved:
+        goal_status_str = "【核心目标已达成 · 业务闭环交付】"
+    elif conv_type == "trapped":
+        goal_status_str = "【局部卡壳受阻 · 存在未解决问题】"
+    else:
+        goal_status_str = "【任务探索发散 · 未形成有效收敛】"
+
+    fb_score = caps.get("feedback_mutual_info", 75)
+    if fb_score >= 80:
+        feedback_seq_eval_str = f"反馈清晰高效（协同得分 {fb_score}/100），你的每次干预都能被 AI 迅速吸收并纠正方向。"
+    elif fb_score >= 60:
+        feedback_seq_eval_str = f"反馈质量良好（协同得分 {fb_score}/100），个别地方要多轮提示才完全对齐。"
+    else:
+        feedback_seq_eval_str = f"反馈吸收效率偏低（协同得分 {fb_score}/100），建议纠偏时附上报错堆栈与期望结果，减少情绪化催促。"
+
+    # 人机协同建议
+    if autopsy_summary:
+        collab_advice = autopsy_summary["presc_desc"]
+    else:
+        lowest_cap = min(caps.items(), key=lambda x: x[1])
+        cap_advices = {
+            "intent_formalization": "【需求拆解建议】AI 对长句或含混需求的还原偏弱。首轮提问建议按「背景-目标-不可破坏的现有约束」结构化描述，避免一次性抛出宽泛需求。",
+            "drift_sensitivity": "【跑偏提醒建议】AI 发现自己跑偏较迟钝。建议开启分步确认机制，关键逻辑完成时先要求它自测再继续往下写。",
+            "feedback_mutual_info": "【精准纠偏建议】AI 对纠偏信息的吸收效率有待提升。纠偏时明确引用报错日志或具体函数名，给出可对照的依据，减少情绪化催促。",
+            "epistemic_balance": "【及时止损建议】面对连续报错或方向走偏，应果断回退（git checkout 或重新开始），不要在错误路线上继续投入。",
+        }
+        collab_advice = cap_advices.get(lowest_cap[0], "保持现有的精准提问与快速反馈协作习惯。")
+
+    md_lines = [
+        "# 相空间收敛分析报告（Jev 判定引擎）",
+        "",
+        "> 判定数值（概率/评分）由 TypeSafe Jev（System One）返回；成文由 TCER 按固定模板在本地合成，不参与任何指标计算。",
+        "",
+        "### 【执行摘要与核心裁决】",
+        f"- **目标是否达成**：{goal_status_str}（最终形态: 【{conv_labels.get(conv_type, conv_type)}】，Jev 主判定概率: `{p_main:.1%}`，判定置信度: `{conv_conf:.0%}`）",
+        f"- **转折发生在哪**：{turnaround_loc_str}",
+        f"- **转折驱动归因**：{turnaround_why_str}",
+        f"- **反馈序列评价**：{feedback_seq_eval_str}",
+        f"- **主要效率瓶颈**：{bottleneck_desc}",
+        f"- **过程开销（与目标达成分开评价）**：全会话 {total_turns} 回合 · 消耗 {tot_tok:,} Token · 净增 +{net_loc} 行（返工自删 {rework_loc} 行） · 工具报错 {report.usage.tool_errors} 次",
+        f"- **过程效率指标**：推进稳定性 ζ = `{zeta:.2f}`（{zeta_desc}） · 推进趋势 λ = `{lyap_exp:+.2f}`（负值=逐步接近目标） · 代码有效率 η = `{carnot:.1%}`",
+        *(f"- ⚠ **判定与客观证据的张力**：{t}" for t in tensions),
+        *([f"- **判定不确定性较高**（主概率 `{p_main:.0%}`，置信度 `{conv_conf:.0%}`）：建议再用「通用大模型」引擎生成深度复盘做交叉验证（时间线弹窗 → 相空间分析 → 选通用大模型）"] if low_confidence else []),
+        "",
+        "## 一、开局：需求的清晰程度与理解还原",
+        f"- **初始需求清晰度**：{entropy_labels.get(intent_entropy, intent_entropy)}",
+        f"- **需求理解与还原程度**：得分 `{caps['intent_formalization']}` / 100。" + (
+            "需求表达清晰、边界明确，为后续平稳推进打下了好基础。" if intent_entropy == "low" else
+            "初始意图存在一定模糊度或开放性，AI 在探索阶段进行了多轮上下文试探定位。"
+        ),
+        "",
+        "## 二、推进过程与关键转折（逐节点轨迹）",
+        "以下按时间顺序列出各关键节点（距目标 = 离最终完成的远近，0% = 已完成，100% = 刚起步）：",
+        "",
+        *milestone_lines,
+        "",
+        "### 【关键回合明细表】",
+        *table_lines,
+        "",
+    ]
+
+    # 如果有第二阶段深挖裁决结果，插入关键转折深挖章节
+    if autopsy_summary:
+        md_lines.extend([
+            "## 三、关键转折点深挖（第二阶段分析）",
+            f"- **深层原因**：{autopsy_summary['causal_desc']}",
+            f"- **假如当初……（反事实验证）**：`{autopsy_summary['p_prevent']:.1%}` 概率下，若提前给出明确的单测或约束，这次返工/卡壳本可避免",
+            f"- **改一处、坏别处的概率（连带破坏）**：`{autopsy_summary['p_waterbed']:.1%}`",
+            f"- **AI 上下文过载程度**：`{autopsy_summary['cog_score']:.1f}` / 4.0（" + (
+                "状态高度专注，每步操作逻辑紧密" if autopsy_summary['cog_score'] < 1.0 else
+                "存在局部犹豫与试探性操作" if autopsy_summary['cog_score'] <= 2.0 else
+                "出现明显上下文迷茫与反复读取"
+            ) + "）",
+            *([] if not autopsy_summary.get("blame") else [
+                "- **责任占比**：AI {ai:.0%} · 用户 {user:.0%} · 环境 {env:.0%}（关键转折成因的三方拆解，混合责任说清份额）".format(**autopsy_summary["blame"])
+            ]),
+            "",
+        ])
+
+    md_lines.extend([
+        "## 四、卡壳与反复修改分析",
+        f"- **死循环卡壳状态**：{'【曾陷入死循环陷阱】（判定概率: ' + f'{trap_prob:.1%}' + '）' if attractor_trapped else '【全流程未受困】（判定概率: ' + f'{trap_prob:.1%}' + '）'}",
+        f"- **推进节奏（震荡程度 ζ = `{zeta:.2f}`，{zeta_desc}）**：" + (
+            "一次做对，极少推翻重构，抗干扰能力极佳。" if zeta_desc == "平稳收敛" else
+            "存在一定程度的前后横跳或局部反复修改，但在外力或报错反馈后逐步恢复稳定。" if zeta_desc == "反复横跳" else
+            "推进过程较为迟滞，在部分卡壳环节消耗了较多等待或无效重试。"
+        ),
+        f"- **先查后改的克制力**：得分 `{caps['epistemic_balance']}` / 100。" + (
+            "AI 修改前充分定位调用链路，先查后改，有效避免了「按下葫芦浮起瓢」的连带破坏。" if caps['epistemic_balance'] >= 70 else
+            "AI 存在未充分探查就匆忙修改核心代码的现象，造成了一定的返工和连带问题。"
+        ),
+        "",
+        "## 五、四项工程能力评分与协作建议",
+        f"- **需求理解力**：`{caps['intent_formalization']}` / 100",
+        f"- **发现跑偏的敏感度**：`{caps['drift_sensitivity']}` / 100",
+        f"- **响应纠偏指令的效率**：`{caps['feedback_mutual_info']}` / 100",
+        f"- **先查后改的克制力**：`{caps['epistemic_balance']}` / 100",
+        "",
+        f"> **【给你的协作建议：优化反馈方式与及时止损】**：{collab_advice}",
+        "",
+        "## 六、动力学遥测数据",
+        "```json",
+        json.dumps(dynamics_data, ensure_ascii=False, indent=2),
+        "```",
+    ])
+    text = "\n".join(md_lines)
+    return text, dynamics_data
+
+
+def build_jev_dynamics_payload(report, derived: dict, dialogue=None) -> tuple[dict, dict]:
+    """兼容旧接口：调用第一阶段宏观相拓扑 Payload 构建器。"""
+    return build_jev_pass1_topology_payload(report, derived, dialogue=dialogue)
+
+
+def synthesize_jev_dynamics_data(report, derived: dict, jev_response: dict) -> tuple[str, dict]:
+    """兼容旧接口：调用权威报告合成引擎。"""
+    return synthesize_authoritative_dynamics_report(report, derived, pass1_response=jev_response, pass2_response=None)
+

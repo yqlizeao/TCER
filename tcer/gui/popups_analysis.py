@@ -350,7 +350,7 @@ class SessionTimelinePopup:
             compound="left")
         self._dyn_btn.pack(side="left", padx=(4, 0))
         Tooltip(self._dyn_btn, "生成专属《相空间收敛动力学报告》"
-                                "（含狄拉克目标坍缩相图与三能力雷达，作为单独报告入库）")
+                                "（含收敛过程相图与能力雷达，作为单独报告入库）")
         self._legend = tk.Frame(head, bg=theme.BG)
         self._legend.pack(side="right")
         self._render_legend()
@@ -807,14 +807,66 @@ class SessionTimelinePopup:
         if self._llm_busy:
             return
         from tkinter import messagebox
+        from threading import Thread
         from tcer.core import llm_prefs, llm_prompts
-        if not llm_prefs.enabled():
+
+        ts_avail = llm_prefs.typesafe_enabled()
+        gen_avail = llm_prefs.enabled()
+
+        if not ts_avail and not gen_avail:
             messagebox.showinfo(
-                "相空间分析", "请先点击工具栏「LLM设置」完成服务配置。",
+                "相空间分析", "请先点击主界面工具栏「LLM设置」完成服务配置（可配置 TypeSafe Jev 或通用大模型）。",
                 parent=self._win)
             return
-        scopes = llm_prefs.scopes()
+
         derived = self._llm_derived()
+
+        # 双引擎可用时，询问是否优先使用 TypeSafe Jev 极速判定
+        use_typesafe = False
+        if ts_avail and gen_avail:
+            ans = messagebox.askyesnocancel(
+                "相空间动力学分析引擎选择",
+                "检测到您已同时配置 TypeSafe Jev 与通用大模型。\n\n"
+                "是否优先使用【TypeSafe Jev 极速判定】？\n\n"
+                "• [是(Y)]：使用 Jev 快速判定（测定整体形态、各阶段轨迹与四项能力评分）\n"
+                f"• [否(N)]：使用通用大模型（{llm_prefs.model()}）生成长文本解读报告\n"
+                "• [取消]：放弃分析",
+                parent=self._win)
+            if ans is None:
+                return
+            use_typesafe = ans
+        elif ts_avail:
+            if not messagebox.askyesno(
+                    "TypeSafe Jev 极速相空间分析",
+                    f"将向 TypeSafe System One 发起单请求并行评估：\n"
+                    f"模型：{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}\n\n"
+                    "分析内容：整体收敛形态、关键卡点突破、各关键回合所处阶段与推动力、四项工程能力评分。\n"
+                    "单次请求耗时仅约 300~500ms。\n\n是否立即开始？",
+                    parent=self._win):
+                return
+            use_typesafe = True
+        else:
+            use_typesafe = False
+
+        if use_typesafe:
+            self._llm_busy = True
+            btn = getattr(self, "_dyn_btn", None)
+            if btn is not None and btn.winfo_exists():
+                btn.config(text="Jev 级联判定中…", state="disabled")
+            for w_ in self._llm_panel.winfo_children():
+                w_.destroy()
+            target_lbl = f"{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}"
+            self._jev_status_lbl = tk.Label(
+                self._llm_panel,
+                text=f"正在调用 TypeSafe Jev 判定引擎分析会话动力学… ({target_lbl})",
+                bg=theme.PANEL, fg=theme.FG_WHITE, font=theme.FONT_UI_SMALL,
+            )
+            self._jev_status_lbl.pack(fill="x", padx=6, pady=4)
+            self._llm_panel.pack(fill="x", padx=10, pady=(0, 6), before=self.canvas)
+            Thread(target=self._typesafe_dynamics_work, args=(derived,), daemon=True).start()
+            return
+
+        scopes = llm_prefs.scopes()
         est = llm_prompts.estimate_request_tokens(
             self._report, derived, scopes, detail=llm_prefs.dialog_detail())
         if llm_prefs.has_scope("dialog", scopes):
@@ -828,7 +880,7 @@ class SessionTimelinePopup:
                 f"将生成专属《相空间动力学报告》并发送数据到：\n{llm_prefs.model()} @ "
                 f"{llm_prefs.base_url()}\n\n"
                 f"出境范围：{scope_labels}\n\n"
-                f"分析框架：初始语义熵降低、相空间游走、平庸代码吸引子俘获、狄拉克目标收敛。\n"
+                f"分析框架：把需求说清楚、逐步接近目标、避开惯性套路、最终回到正题的完整收敛过程。\n"
                 f"预估约 {est:,} tokens。报告将作为独立专属报告收入「LLM 报告」页签。\n\n"
                 "生成可能需要数十秒，请保持本窗口开启（关闭则结果丢弃）。",
                 parent=self._win):
@@ -844,8 +896,51 @@ class SessionTimelinePopup:
                  bg=theme.PANEL, fg=theme.FG_WHITE, font=theme.FONT_UI_SMALL).pack(
                      fill="x", padx=6, pady=4)
         self._llm_panel.pack(fill="x", padx=10, pady=(0, 6), before=self.canvas)
-        from threading import Thread
         Thread(target=self._llm_work, args=(scopes, derived, True), daemon=True).start()
+
+    def _update_jev_status(self, text: str) -> None:
+        lbl = getattr(self, "_jev_status_lbl", None)
+        if lbl is not None and lbl.winfo_exists():
+            lbl.config(text=text)
+
+    def _typesafe_dynamics_work(self, derived: dict) -> None:
+        """TypeSafe Jev 多阶段层次化极速动力学判定（异步 worker 线程内执行）。"""
+        from tcer.core import typesafe_client, llm_prefs
+        dialogue = None
+        if self._load_dialogue:
+            try:
+                dialogue = self._load_dialogue()
+            except Exception:
+                dialogue = None
+
+        def _on_prog(msg: str) -> None:
+            self._ui_queue.put(lambda: self._update_jev_status(msg))
+            try:
+                self._after_host.after(0, self._drain_ui_queue)
+            except Exception:
+                pass
+
+        try:
+            text, dyn_data = typesafe_client.evaluate_dynamics_cascade(
+                self._report,
+                derived,
+                api_key=llm_prefs.typesafe_api_key() or "",
+                base_url=llm_prefs.typesafe_base_url(),
+                model=llm_prefs.typesafe_model(),
+                dialogue=dialogue,
+                on_progress=_on_prog,
+            )
+            ok, payload = True, text
+        except typesafe_client.TypesafeError as e:
+            ok, payload = False, str(e)
+        except Exception as e:
+            ok, payload = False, f"TypeSafe Jev 判定失败：{e}"
+
+        self._ui_queue.put(lambda: self._llm_done(ok, payload, ["metrics"], is_dynamics=True, provider="typesafe"))
+        try:
+            self._after_host.after(0, self._drain_ui_queue)
+        except Exception:
+            pass
 
     def _llm_work(self, scope, derived: dict, is_dynamics: bool = False) -> None:
         """worker 主体（同步方法，测试可直接调）：懒加载对话数据 → 组 prompt → 调 LLM → 回主线程。"""
@@ -912,7 +1007,7 @@ class SessionTimelinePopup:
         except (tk.TclError, RuntimeError):
             pass
 
-    def _llm_done(self, ok: bool, payload: str, scope, is_dynamics: bool = False) -> None:
+    def _llm_done(self, ok: bool, payload: str, scope, is_dynamics: bool = False, provider: str = "general") -> None:
         """主线程回填（setter 层兜底：弹窗刚销毁的窗口期不炸）。"""
         import time as _time
         from tcer.core import llm_prefs, llm_reports, llm_prompts
@@ -947,9 +1042,16 @@ class SessionTimelinePopup:
                 kind = "session"
                 title = meta.title or meta.session_id or "会话解读"
 
-            # 机械审计校验（与右键直达路径同口径，确定性本地规则）
+            # 机械审计校验（与右键直达路径同口径，确定性本地规则；
+            # Jev 级联报告为本地确定性合成章节，按其实际标题校验必备节）
             audit_flags = llm_prompts.audit_warnings(
-                payload if ok else "", is_dynamics)
+                payload if ok else "", is_dynamics, provider)
+            if provider == "typesafe":
+                model_used = llm_prefs.typesafe_model()
+                scope_used = "metrics"
+            else:
+                model_used = llm_prefs.model()
+                scope_used = llm_prefs.scopes_summary(scope) if isinstance(scope, list) else str(scope)
             entry = {
                 "id": str(int(_time.time() * 1000)),
                 "created_at": int(_time.time() * 1000),
@@ -959,8 +1061,8 @@ class SessionTimelinePopup:
                 "session_id": meta.session_id,
                 "session_title": meta.title,
                 "source": meta.source or "claude",
-                "model": llm_prefs.model(),
-                "scope": llm_prefs.scopes_summary(scope) if isinstance(scope, list) else str(scope),
+                "model": model_used,
+                "scope": scope_used,
                 "turns": len(self._stats),
                 "net_loc": self._report.net_loc,
                 "cost_display": f"${self._report.cost:.2f}",
@@ -972,7 +1074,12 @@ class SessionTimelinePopup:
                 return  # 弹窗已关：报告已保存，页签里仍可回看
             for w_ in self._llm_panel.winfo_children():
                 w_.destroy()
-            label_text = "✓ 相空间动力学报告已生成并入库（主界面「LLM 报告」页签查看）" if is_dynamics else "✓ 解读已生成并保存（主界面「LLM 报告」页签查看）"
+            if provider == "typesafe":
+                label_text = "✓ TypeSafe Jev 极速相空间动力学报告已生成并入库（主界面「LLM 报告」页签查看）"
+            elif is_dynamics:
+                label_text = "✓ 相空间动力学报告已生成并入库（主界面「LLM 报告」页签查看）"
+            else:
+                label_text = "✓ 解读已生成并保存（主界面「LLM 报告」页签查看）"
             tk.Label(self._llm_panel,
                      text=label_text,
                      bg=theme.PANEL, fg=theme.SUCCESS,

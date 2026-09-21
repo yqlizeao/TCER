@@ -579,7 +579,9 @@ def aggregate_usage(
 
             first_ts = None
             last_ts = None
-            current_turn = 0
+            # turn 0-based（与 Claude/omp/grok 等源一致；llm_prompts 里程碑提取与
+            # ground_dynamics_user_turns 均按 0-based 键消费 turn_stats）
+            current_turn = -1
 
             for _, stype, status, meta, payload in step_rows:
                 if cancel_check:
@@ -635,6 +637,7 @@ def aggregate_usage(
                             ts=ts_ms,
                             tool_calls=t_calls,
                             errors=0,
+                            user_turn=u.user_msgs if u.user_msgs > 0 else 1,
                         )
                     )
 
@@ -696,7 +699,8 @@ def session_loc_full(
             )
             step_rows = cur.fetchall()
 
-            current_turn = 0
+            # turn 0-based（与 aggregate_usage 同口径，turn_net_locs 键空间一致）
+            current_turn = -1
             for _, stype, payload in step_rows:
                 if cancel_check:
                     cancel_check()

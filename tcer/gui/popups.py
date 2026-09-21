@@ -1668,6 +1668,22 @@ class LlmConfigPopup:
             svc, "模型", self._model_var,
             placeholder="如 qwen3:8b / claude-sonnet-5")
 
+        # TypeSafe Jev (System One) 判定卡片（与通用 LLM 结构一致）
+        ts_card = self._card(inner, "TypeSafe（Jev System One 判定服务）")
+        self._typesafe_url_var = tk.StringVar(value=str(config.get("typesafe_base_url") or "https://api.typesafe.ai"))
+        self._typesafe_key_var = tk.StringVar(value=str(config.get("typesafe_key") or ""))
+        self._typesafe_model_var = tk.StringVar(value=str(config.get("typesafe_model") or "jev-latest"))
+
+        self._labeled_entry(
+            ts_card, "服务地址", self._typesafe_url_var,
+            placeholder="默认 https://api.typesafe.ai（可省略 /v1）")
+        self._labeled_entry(
+            ts_card, "API Key", self._typesafe_key_var,
+            placeholder="留空 = 未启用；明文存本机")
+        self._labeled_entry(
+            ts_card, "模型", self._typesafe_model_var,
+            placeholder="默认 jev-latest（或 jev-preview）")
+
         scope_card = self._card(inner, "数据出境范围（可多选）")
         stored_scopes = set(self._llm_prefs.normalize_scopes(
             config.get("scopes") if "scopes" in config else config.get("scope")))
@@ -1969,13 +1985,21 @@ class LlmConfigPopup:
             "scopes": sel_scopes,
             "scope": self._llm_prefs.scopes_summary(sel_scopes),
             "dialog_detail": self._detail_var.get(),
+            "typesafe_key": self._typesafe_key_var.get().strip(),
+            "typesafe_base_url": self._typesafe_url_var.get().strip() or "https://api.typesafe.ai",
+            "typesafe_model": self._typesafe_model_var.get().strip() or "jev-latest",
         }
         if bool(cfg["base_url"]) != bool(cfg["model"]):
-            self.set_status("服务地址与模型需同时填写（或同时留空以清除配置）",
+            self.set_status("通用 LLM 服务地址与模型需同时填写（或同时留空以清除配置）",
                             error=True)
             return
         self._on_save(**cfg)
-        self.set_status("已保存" + ("" if cfg["base_url"] else "（配置已清除，界面入口隐藏）"))
+        status_msg = "已保存配置"
+        if cfg["typesafe_key"]:
+            status_msg += f"（TypeSafe {cfg['typesafe_model']} 已就绪）"
+        if not cfg["base_url"]:
+            status_msg += "（通用 LLM 入口已清除）"
+        self.set_status(status_msg)
 
 
 def _copy(win, text: str) -> None:

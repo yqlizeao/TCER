@@ -684,6 +684,7 @@ def _add_turn_usage(u: TokenUsage, usage: dict, model: str, turn: int, ts: int |
     u.turn_stats.append(TurnStat(
         turn=turn, ts=ts,
         input_tokens=i, cache_write=cw, cache_read=cr, output_tokens=o,
+        user_turn=u.user_msgs if u.user_msgs > 0 else 1,
         model=key,
     ))
 

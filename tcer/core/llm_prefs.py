@@ -124,6 +124,9 @@ def load() -> dict:
         "base_url": "", "api_key": "", "model": "",
         "scopes": list(DEFAULT_SCOPES), "scope": DEFAULT_SCOPE,
         "dialog_detail": DEFAULT_DIALOG_DETAIL,
+        "typesafe_key": "",
+        "typesafe_base_url": "https://api.typesafe.ai",
+        "typesafe_model": "jev-latest",
     }
     try:
         with _prefs_path().open("r", encoding="utf-8") as fh:
@@ -132,9 +135,14 @@ def load() -> dict:
         return prefs
     if not isinstance(stored, dict):
         return prefs
-    for key in ("base_url", "api_key", "model"):
+    for key in ("base_url", "api_key", "model", "typesafe_key", "typesafe_base_url", "typesafe_model"):
         val = stored.get(key)
-        prefs[key] = val.strip() if isinstance(val, str) else ""
+        if isinstance(val, str):
+            prefs[key] = val.strip()
+    if not prefs["typesafe_base_url"]:
+        prefs["typesafe_base_url"] = "https://api.typesafe.ai"
+    if not prefs["typesafe_model"]:
+        prefs["typesafe_model"] = "jev-latest"
     raw_scopes = stored.get("scopes") if "scopes" in stored else stored.get("scope")
     prefs["scopes"] = normalize_scopes(raw_scopes)
     prefs["scope"] = scopes_summary(prefs["scopes"])
@@ -206,3 +214,27 @@ def normalize_dialog_detail(raw) -> str:
 def dialog_detail() -> str:
     """当前过程数据供给档（standard/rich/full）。"""
     return load()["dialog_detail"]
+
+
+def typesafe_enabled() -> bool:
+    """判断是否已显式配置 TypeSafe API Key。"""
+    return bool(load().get("typesafe_key"))
+
+
+def typesafe_api_key() -> str | None:
+    """获取当前配置的 TypeSafe API Key。"""
+    key = load().get("typesafe_key")
+    return key or None
+
+
+def typesafe_base_url() -> str:
+    """获取当前配置的 TypeSafe Base URL。"""
+    return load().get("typesafe_base_url") or "https://api.typesafe.ai"
+
+
+def typesafe_model() -> str:
+    """获取当前配置的 TypeSafe 模型名（默认 jev-latest）。"""
+    return load().get("typesafe_model") or "jev-latest"
+
+# 注：刻意不提供「从本机检测 TypeSafe 凭据」的功能（读 ~/.claude/settings.json 等）——
+# 用户明确要求 TypeSafe 与通用 LLM 一致：只在设置弹窗显式填写，不从本机环境注入。

@@ -800,6 +800,7 @@ def _scan_session_uncached(
                         turn=current_turn, ts=ts,
                         input_tokens=i, cache_write=cw, cache_read=cr,
                         output_tokens=o,
+                        user_turn=u.user_msgs if u.user_msgs > 0 else 1,
                         model=(pricing.normalize(model_raw)
                                if isinstance(model_raw, str) and model_raw
                                and model_raw != "<synthetic>" else ""),

@@ -1100,7 +1100,7 @@ class FilterBar:
         menu.add_command(label="会话时间线", command=c.show_session_timeline)
         menu.add_command(label="会话对比", command=c.show_session_compare)
         menu.add_separator()
-        menu.add_command(label="LLM 动力学与复盘配置…", command=c.show_llm_config)
+        menu.add_command(label="LLM 设置…", command=c.show_llm_config)
         menu.add_command(label="计算个人基准…", command=c.compute_baselines)
         for dn in self._task_display_names.values():
             menu.add_radiobutton(label=dn, variable=self.task_var, value=dn,
@@ -5645,16 +5645,30 @@ class PhasePortraitWidget:
                               font=theme.FONT_UI_SMALL_BOLD, anchor="w")
 
             # 事件标签标注（连续同类事件如重试死锁，仅在首轮标记一次，杜绝重叠堆叠）
-            is_new_event = (event_tag != prev_event_tag or event_tag in ("breakthrough", "compaction"))
-            if is_new_event and event_tag in ("retry_loop", "breakthrough", "compaction", "test_fail"):
+            is_new_event = (event_tag != prev_event_tag or event_tag in ("breakthrough", "barrier_leap", "compaction", "course_correction", "prune"))
+            recognized_events = ("retry_loop", "breakthrough", "barrier_leap", "compaction", "test_fail", "course_correction", "prune")
+            if is_new_event and event_tag in recognized_events:
                 evt_labels = {
                     "retry_loop": "重试",
                     "breakthrough": "突破",
+                    "barrier_leap": "转正突破",
+                    "course_correction": "转折纠偏",
+                    "prune": "回退剪枝",
                     "compaction": "压缩",
                     "test_fail": "报错",
                 }
                 lbl_text = evt_labels.get(event_tag, "")
-                evt_col = theme.SUCCESS if event_tag == "breakthrough" else theme.ERROR
+                if event_tag in ("breakthrough", "barrier_leap"):
+                    evt_col = theme.SUCCESS
+                elif event_tag == "course_correction":
+                    evt_col = theme.ACCENT
+                elif event_tag == "prune":
+                    evt_col = theme.WARNING
+                elif event_tag == "compaction":
+                    evt_col = theme.MUTED
+                else:
+                    evt_col = theme.ERROR
+
                 evt_y = cand_y + (10 if offset_y >= 0 else -10) if can_draw else y + 12
                 evt_anchor = anchor_pos if can_draw else "center"
                 c.create_text(cand_x if can_draw else x, evt_y,
@@ -5662,7 +5676,7 @@ class PhasePortraitWidget:
                               font=theme.FONT_UI_SMALL, anchor=evt_anchor)
             prev_event_tag = event_tag
 
-            if t_val in bif_turns and event_tag not in ("retry_loop", "breakthrough", "compaction", "test_fail"):
+            if t_val in bif_turns and event_tag not in recognized_events:
                 c.create_text(cand_x if can_draw else x, (cand_y + 10) if can_draw else (y + 12),
                               text="失控拐点", fill=theme.ERROR,
                               font=theme.FONT_UI_SMALL, anchor=anchor_pos if can_draw else "center")
@@ -6544,6 +6558,9 @@ class LlmReportsView:
             elif cls._LIST_RE.match(s_strip):
                 _flush()
                 buf = raw.rstrip()
+            elif s_strip.startswith("|"):
+                _flush()
+                out.append(s_strip)
             elif buf and buf[-1].isascii() and buf[-1].isalnum() \
                     and s_strip and s_strip[0].isascii() and s_strip[0].isalnum():
                 buf += " " + s_strip
@@ -6640,6 +6657,17 @@ class LlmReportsView:
             tb.insert("end", "─" * 48 + "\n", ("divider",))
             return
 
+        # 表格行
+        if s_strip.startswith("|") and s_strip.endswith("|"):
+            # 分隔行，如 |---|---|...|
+            if re.match(r"^\|[\s\-:|]+\|$", s_strip):
+                tb.insert("end", "─" * 48 + "\n", ("divider",))
+                return
+            cells = [c.strip() for c in s_strip.strip("|").split("|")]
+            formatted = " │ ".join(cells)
+            tb.insert("end", "  " + formatted + "\n", ("code_block",))
+            return
+
         # 普通段落
         self._insert_inline(tb, s_strip, line_tag="body")
         tb.insert("end", "\n")
@@ -6704,6 +6732,13 @@ class LlmReportsView:
         tb.delete("1.0", "end")
         in_code_block = False
         text = self.clean_math_syntax(text)
+        # 清理报告尾部供相空间相图消费的裸 JSON 遥测代码块（正文流无需倾倒整段 JSON，相图与复制全文已保留）
+        text = re.sub(
+            r"(?:##\s*(?:[一二三四五六七八九十\d]+[\.、\s]*)?动力学遥测数据[^\n]*\n+)?```json\s*\{[\s\S]*?\"trajectory\"[\s\S]*?\}\s*```",
+            "> ▎ 动力学遥测数据已就绪（详见上方交互式相空间相图，点击右上角「复制全文」可导出原始 JSON 遥测）",
+            text,
+            flags=re.IGNORECASE
+        )
         for ln in self._reflow_lines(text):
             if ln.strip().startswith("```"):
                 in_code_block = not in_code_block

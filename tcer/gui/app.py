@@ -1381,31 +1381,72 @@ class TcerGui:
         from uuid import uuid4
         from tcer.core import llm_prefs, llm_prompts
 
-        if not llm_prefs.enabled():
-            messagebox.showinfo(
-                "相空间分析" if is_dynamics else "LLM 解读",
-                "请先点击工具栏「LLM设置」完成服务配置。",
-                parent=self.root)
-            self.show_llm_config()
-            return
+        ts_avail = llm_prefs.typesafe_enabled()
+        gen_avail = llm_prefs.enabled()
 
-        # 每次直达都弹知情确认（端点/出境范围/预估 tokens）——数据出境是不可
-        # 逆动作，与时间线弹窗路径同口径；曾试过「确认一次记住」但体验上确认框
-        # 时有时无反而不可预期（重存 LLM 配置会重置记住态），固定为每次确认。
-        if not self._confirm_llm_direct(report, is_dynamics):
-            return
+        use_typesafe = False
+        if is_dynamics:
+            if not ts_avail and not gen_avail:
+                messagebox.showinfo(
+                    "相空间分析",
+                    "请先点击工具栏「LLM设置」完成服务配置（可配置 TypeSafe Jev 或通用大模型）。",
+                    parent=self.root)
+                self.show_llm_config()
+                return
+            if ts_avail and gen_avail:
+                ans = messagebox.askyesnocancel(
+                    "相空间动力学分析引擎选择",
+                    "检测到您已同时配置 TypeSafe Jev 与通用大模型。\n\n"
+                    "是否优先使用【TypeSafe Jev 多阶段级联判定】？\n\n"
+                    "• [是(Y)]：使用 Jev 两阶段级联分析（快速判定整体形态、关键转折成因与反事实推演）\n"
+                    f"• [否(N)]：使用通用大模型（{llm_prefs.model()}）生成长文本解读报告\n"
+                    "• [取消]：放弃分析",
+                    parent=self.root)
+                if ans is None:
+                    return
+                use_typesafe = ans
+            elif ts_avail:
+                if not messagebox.askyesno(
+                        "TypeSafe Jev 级联相空间分析",
+                        f"将向 TypeSafe System One 发起两阶段级联评估：\n"
+                        f"模型：{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}\n\n"
+                        "分析内容：整体形态判定、关键卡点突破、关键转折点深挖、反事实检验与四项能力评分。\n"
+                        "总耗时仅约 1~2 秒。\n\n是否立即开始？",
+                        parent=self.root):
+                    return
+                use_typesafe = True
+            else:
+                if not self._confirm_llm_direct(report, is_dynamics):
+                    return
+                use_typesafe = False
+        else:
+            if not gen_avail:
+                messagebox.showinfo(
+                    "LLM 解读",
+                    "请先点击工具栏「LLM设置」完成通用大模型服务配置。",
+                    parent=self.root)
+                self.show_llm_config()
+                return
+            if not self._confirm_llm_direct(report, is_dynamics):
+                return
+            use_typesafe = False
 
         # 去重：同一会话的同类任务运行/排队中只派发一次（双发 = 双倍成本与出境）。
         sid = report.meta.session_id or report.meta.path.stem
         kind = "dynamics" if is_dynamics else "session"
         dedup_key = (sid, kind)
         if any(t["key"] == dedup_key for t in self._llm_tasks.values()):
-            self.filter.set_status("该会话的同类 LLM 任务已在生成中，请在收信箱稍候")
+            self.filter.set_status("该会话的同类任务已在生成中，请在收信箱稍候")
             return
 
-        scopes = llm_prefs.scopes()
+        scopes = ["metrics"] if use_typesafe else llm_prefs.scopes()
         derived = llm_prompts.build_llm_derived(report)
-        action_name = "相空间收敛动力学分析" if is_dynamics else "LLM 过程收敛解读"
+        if use_typesafe:
+            action_name = "TypeSafe Jev 相空间分析"
+        elif is_dynamics:
+            action_name = "相空间收敛动力学分析"
+        else:
+            action_name = "LLM 过程收敛解读"
         session_title = report.meta.title or sid[:12]
         task_id = uuid4().hex
         task_desc = f"{session_title} · {action_name}"
@@ -1416,17 +1457,18 @@ class TcerGui:
 
         # 登记活跃并发任务（submit 在登记前：排队中的任务也占去重位）
         future = self._llm_executor.submit(
-            self._llm_worker, report, derived, scopes, is_dynamics, task_id, task_desc)
+            self._llm_worker, report, derived, scopes, is_dynamics, task_id, task_desc, use_typesafe)
         self._llm_tasks[task_id] = {"key": dedup_key, "desc": task_desc, "future": future}
         n_running = len(self._llm_tasks)
+        target_name = llm_prefs.typesafe_model() if use_typesafe else llm_prefs.model()
         if n_running == 1:
             self.filter.set_status(
-                f"正在请求 {llm_prefs.model()} 生成: {session_title}…", fg=theme.ACCENT)
+                f"正在请求 {target_name} 生成: {session_title}…", fg=theme.ACCENT)
         else:
             self.filter.set_status(
-                f"正在并发生成 {n_running} 项 LLM 报告…", fg=theme.ACCENT)
+                f"正在并发生成 {n_running} 项任务…", fg=theme.ACCENT)
 
-        print(f"[LLM Task] Started: {task_desc} (Target: {llm_prefs.model()} @ {llm_prefs.base_url()})")
+        print(f"[LLM Task] Started: {task_desc} (Target: {target_name})")
 
     def _confirm_llm_direct(self, report, is_dynamics: bool) -> bool:
         """右键直达的首次知情确认（内容口径与时间线弹窗确认一致）。"""
@@ -1451,16 +1493,18 @@ class TcerGui:
             parent=self.root)
 
     def _llm_worker(self, report, derived: dict, scopes, is_dynamics: bool,
-                    task_id: str, task_desc: str) -> None:
-        """worker 主体（线程池内执行）：懒加载对话 → 组 prompt → 调 LLM → 经 UI 队列回主线程。"""
+                    task_id: str, task_desc: str, use_typesafe: bool = False) -> None:
+        """worker 主体（线程池内执行）：调 Jev / 调 LLM → 经 UI 队列回主线程。"""
         from uuid import uuid4
-        from tcer.core import llm_client, llm_prefs, llm_prompts, llm_reports
+        from tcer.core import llm_prefs, llm_prompts, llm_reports
         import time as _time
         import sys as _sys
         try:
-            dialogue = None
-            texts: list[str] = []
-            if llm_prefs.has_scope("dialog", scopes):
+            meta = report.meta
+            session_title = meta.title or meta.session_id or "会话"
+            if use_typesafe:
+                from tcer.core import typesafe_client
+                dialogue = None
                 src = report.meta.source or "claude"
                 if src == "claude" and report.meta.path:
                     try:
@@ -1469,41 +1513,78 @@ class TcerGui:
                             report.meta.path, detail=llm_prefs.dialog_detail())
                     except Exception:
                         dialogue = None
-                if dialogue is None:
+
+                def _on_prog(msg: str) -> None:
+                    self._llm_ui_queue.put(lambda: self.filter.set_status(f"[{session_title}] {msg}"))
                     try:
-                        texts = TcerGui._load_user_messages(report, [])[0]
+                        self.root.after(0, self._drain_llm_ui_queue)
                     except Exception:
-                        texts = []
+                        pass
 
-            detail = llm_prefs.dialog_detail()
-            if is_dynamics:
-                system, user = llm_prompts.dynamics_prompt(
-                    report, derived, scopes, dialogue, texts, detail)
-            else:
-                system, user = llm_prompts.convergence_prompt(
-                    report, derived, scopes, dialogue, texts, detail)
-
-            reply = llm_client.chat(
-                base_url=llm_prefs.base_url() or "",
-                api_key=llm_prefs.api_key(),
-                model=llm_prefs.model() or "",
-                system=system, user=user)
-
-            meta = report.meta
-            if is_dynamics:
-                text, dyn_data = llm_prompts.parse_dynamics_payload(reply, derived)
+                text, dyn_data = typesafe_client.evaluate_dynamics_cascade(
+                    report,
+                    derived,
+                    api_key=llm_prefs.typesafe_api_key() or "",
+                    base_url=llm_prefs.typesafe_base_url(),
+                    model=llm_prefs.typesafe_model(),
+                    dialogue=dialogue,
+                    on_progress=_on_prog,
+                )
                 kind = "dynamics"
-                title = f"{meta.title or meta.session_id or '会话'} · 相空间分析"
+                title = f"{session_title} · 相空间分析"
+                model_name = llm_prefs.typesafe_model()
+                scope_str = "metrics"
             else:
-                text = reply
-                dyn_data = None
-                kind = "session"
-                title = meta.title or meta.session_id or "会话解读"
+                from tcer.core import llm_client
+                dialogue = None
+                texts: list[str] = []
+                if llm_prefs.has_scope("dialog", scopes):
+                    src = report.meta.source or "claude"
+                    if src == "claude" and report.meta.path:
+                        try:
+                            from tcer.core import reader
+                            dialogue = reader.read_dialogue(
+                                report.meta.path, detail=llm_prefs.dialog_detail())
+                        except Exception:
+                            dialogue = None
+                    if dialogue is None:
+                        try:
+                            texts = TcerGui._load_user_messages(report, [])[0]
+                        except Exception:
+                            texts = []
+
+                detail = llm_prefs.dialog_detail()
+                if is_dynamics:
+                    system, user = llm_prompts.dynamics_prompt(
+                        report, derived, scopes, dialogue, texts, detail)
+                else:
+                    system, user = llm_prompts.convergence_prompt(
+                        report, derived, scopes, dialogue, texts, detail)
+
+                reply = llm_client.chat(
+                    base_url=llm_prefs.base_url() or "",
+                    api_key=llm_prefs.api_key(),
+                    model=llm_prefs.model() or "",
+                    system=system, user=user)
+
+                if is_dynamics:
+                    text, dyn_data = llm_prompts.parse_dynamics_payload(reply, derived)
+                    kind = "dynamics"
+                    title = f"{session_title} · 相空间分析"
+                else:
+                    text = reply
+                    dyn_data = None
+                    kind = "session"
+                    title = f"{session_title} · 会话解读"
+                model_name = llm_prefs.model()
+                scope_str = llm_prefs.scopes_summary(scopes) if isinstance(scopes, list) else str(scopes)
 
             # uuid 作 id：毫秒时间戳在并发完成时会碰撞（同 id 报告删除时会被连带误删）。
             entry_id = f"{int(_time.time() * 1000)}_{uuid4().hex[:8]}"
-            # 机械审计校验（确定性本地规则，兜住高谄媚倾向模型的输出违约）
-            audit_flags = llm_prompts.audit_warnings(text, is_dynamics)
+            # 机械审计校验（确定性本地规则，兜住高谄媚倾向模型的输出违约；
+            # Jev 级联报告为本地确定性合成章节，按其实际标题校验必备节）
+            audit_flags = llm_prompts.audit_warnings(
+                text, is_dynamics, "typesafe" if use_typesafe else "general")
             entry = {
                 "id": entry_id,
                 "created_at": int(_time.time() * 1000),
@@ -1513,8 +1594,8 @@ class TcerGui:
                 "session_id": meta.session_id,
                 "session_title": meta.title,
                 "source": meta.source or "claude",
-                "model": llm_prefs.model(),
-                "scope": llm_prefs.scopes_summary(scopes) if isinstance(scopes, list) else str(scopes),
+                "model": model_name,
+                "scope": scope_str,
                 "turns": len(derived["stats"]),
                 "net_loc": report.net_loc,
                 "cost_display": f"${report.cost:.2f}",
@@ -1531,8 +1612,8 @@ class TcerGui:
             self._llm_ui_queue.put(
                 lambda: self._on_llm_task_error(task_id, task_desc, err_text))
 
-    def _poll_llm_ui_queue(self) -> None:
-        """主线程定时轮询队列，安全执行跨线程 UI 回调（防 Windows 跨线程 after 丢失）。"""
+    def _drain_llm_ui_queue(self) -> None:
+        """单次排空 LLM UI 队列，安全执行跨线程 UI 回调。"""
         try:
             while True:
                 fn = self._llm_ui_queue.get_nowait()
@@ -1544,6 +1625,10 @@ class TcerGui:
             pass
         except Exception:
             pass
+
+    def _poll_llm_ui_queue(self) -> None:
+        """主线程定时轮询队列，安全执行跨线程 UI 回调（防 Windows 跨线程 after 丢失）。"""
+        self._drain_llm_ui_queue()
         try:
             self.root.after(60, self._poll_llm_ui_queue)
         except (tk.TclError, RuntimeError):
@@ -1620,6 +1705,12 @@ class TcerGui:
         # 过程数据供给档（standard/rich/full）：弹窗「过程数据供给量」单选
         if isinstance(_extra.get("dialog_detail"), str) and _extra["dialog_detail"]:
             cfg["dialog_detail"] = llm_prefs.normalize_dialog_detail(_extra["dialog_detail"])
+        if "typesafe_key" in _extra:
+            cfg["typesafe_key"] = str(_extra["typesafe_key"] or "").strip()
+        if "typesafe_base_url" in _extra:
+            cfg["typesafe_base_url"] = str(_extra["typesafe_base_url"] or "").strip()
+        if "typesafe_model" in _extra:
+            cfg["typesafe_model"] = str(_extra["typesafe_model"] or "").strip()
         llm_prefs.save(cfg)
 
     def show_session_compare(self) -> None:

@@ -1630,6 +1630,44 @@ def _drain_llm_queue(app, root, timeout: float = 5.0):
         time.sleep(0.02)
 
 
+def test_app_session_typesafe_dynamics_dispatch(root, reports, monkeypatch, tmp_path):
+    """验证使用 TypeSafe Jev 级联分析时，进度回调与入库正常无 AttributeError。"""
+    from tcer.core import llm_prefs, llm_reports, typesafe_client
+    from tcer.gui.app import TcerGui
+
+    monkeypatch.setattr(llm_prefs, "_prefs_path", lambda: tmp_path / "tcer_llm.json")
+    monkeypatch.setattr(llm_reports, "_path", lambda: tmp_path / "llm_reports.json")
+    llm_prefs.save({
+        "typesafe_key": "ts-test-key",
+        "typesafe_base_url": "https://api.typesafe.ai",
+        "typesafe_model": "jev-latest",
+    })
+
+    # mock evaluate_dynamics_cascade
+    prog_called = []
+    def mock_cascade(report, derived, api_key, base_url, model, on_progress=None, **kw):
+        if on_progress:
+            on_progress("Phase 1: 宏观扫描中…")
+            prog_called.append(True)
+        return "# 动力学报告\n\n测试内容", {"convergence_type": "dirac"}
+
+    monkeypatch.setattr(typesafe_client, "evaluate_dynamics_cascade", mock_cascade)
+    monkeypatch.setattr(TcerGui, "refresh_projects", lambda self: None)
+
+    app = TcerGui(root)
+    # 直接调用 _llm_worker 模拟 use_typesafe=True
+    derived = {"stats": []}
+    app._llm_worker(reports[0], derived, ["metrics"], is_dynamics=True,
+                    task_id="t_ts", task_desc="TypeSafe测试", use_typesafe=True)
+
+    _drain_llm_queue(app, root)
+    assert prog_called == [True]
+    saved = llm_reports.load()
+    assert len(saved) == 1
+    assert saved[0]["kind"] == "dynamics"
+    assert "动力学报告" in saved[0]["text"]
+
+
 def test_app_session_llm_task_error_path_clears_registry(root, reports, monkeypatch, tmp_path):
     """失败路径必须清任务表 + 状态栏红字（回归：on_err 曾是死代码，任务永久泄漏零反馈）。"""
     import time
@@ -1990,3 +2028,43 @@ def test_llm_reports_audit_badge(root, monkeypatch, tmp_path):
     v.select_report("a3")
     root.update_idletasks()
     assert v._audit_badge.cget("text") == ""
+
+
+def test_llm_reports_view_reflow_and_fill_body_tables_and_json(root):
+    from tcer.gui.views import LlmReportsView
+
+    # 1. 验证 Markdown 表格行绝不被合并压缩到同一行
+    table_md = (
+        "前置引导说明\n\n"
+        "| 回合 | 语义距离 | 相态 |\n"
+        "|---|---|---|\n"
+        "| T1 | 0.95 | gas |\n"
+        "| T2 | 0.42 | liquid |\n\n"
+        "后续分析正文\n"
+    )
+    lines = LlmReportsView._reflow_lines(table_md)
+    assert "| 回合 | 语义距离 | 相态 |" in lines
+    assert "|---|---|---|" in lines
+    assert "| T1 | 0.95 | gas |" in lines
+    assert "| T2 | 0.42 | liquid |" in lines
+
+    # 2. 验证正文阅读区中尾部 JSON 遥测块优雅收纳为提示徽标
+    v = LlmReportsView(root)
+    full_report_text = (
+        "# 动力学分析报告\n\n"
+        "正文说明内容\n\n"
+        "## 五、动力学遥测数据\n"
+        "```json\n"
+        "{\n"
+        '  "trajectory": [\n'
+        '    {"turn": 1, "semantic_distance": 0.95}\n'
+        "  ]\n"
+        "}\n"
+        "```\n"
+    )
+    v._fill_body(full_report_text)
+    body_content = v._body_lbl.get("1.0", "end")
+    assert "动力学遥测数据已就绪" in body_content
+    # 确保正文文本阅读区不出现裸露的原始 JSON 代码
+    assert '"semantic_distance": 0.95' not in body_content
+
