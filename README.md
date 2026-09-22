@@ -65,12 +65,16 @@ python -m tcer
 
 **HTML 报告导出**：导出菜单支持项目级 / 会话级自包含单文件 HTML 报告（深色主题、可排序会话表、CTEI 排名条、模型对比表），零依赖、可直接分享；另有 Markdown / JSON / CSV。
 
+**团队术语库与语义判定层（SharedBrain MVP）**：第 7 页签提供概念定义、MDA 语义通道对齐、常见误解防范；支持反向查询 (F3)、歧义探测 (F4) 与会话术语考古 (F2)。
+
 ## 文档
 
 - [指标公式与计算步骤](doc/metrics.md)
 - [JSONL 数据格式](doc/data-format.md)
 - [架构与工程规范](doc/architecture.md)
 - [项目规格](CLAUDE.md)
+
+> 团队术语库（SharedBrain）的设计依据与实施规格不在本仓库维护，归档于调研目录 `terminology-baseline/`。
 
 ## 许可
 

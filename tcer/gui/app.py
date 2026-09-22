@@ -316,6 +316,7 @@ class TcerGui:
         tab_t = tk.Frame(nb, bg=theme.PANEL)
         tab_r = tk.Frame(nb, bg=theme.PANEL)
         tab_l = tk.Frame(nb, bg=theme.BG)
+        tab_term = tk.Frame(nb, bg=theme.BG)
         tabs_spec = [
             (tab_m, "指标看板", "grid"),
             (tab_c, "模型对比", "compare"),
@@ -323,6 +324,7 @@ class TcerGui:
             (tab_t, "趋势分析", "trend"),
             (tab_r, "项目聚合", "layers"),
             (tab_l, "LLM 报告", "chat"),
+            (tab_term, "术语库", "book"),
         ]
         for child, text, icon in tabs_spec:
             nb.add(child, text=text, icon=icon)
@@ -334,7 +336,9 @@ class TcerGui:
         self.real_projects_view = views.RealProjectsView(tab_r, controller=self)
         self.llm_reports_view = views.LlmReportsView(
             tab_l, controller=self, on_cancel_tasks=self._on_cancel_llm_tasks)
+        self.termbase_view = views.TermbaseView(tab_term, controller=self)
         self._llm_tab = tab_l
+        self._term_tab = tab_term
         # 项目聚合页签独立于当前分析（后台扫全部项目），首次切入加载。
         self._realproj_loaded = False
         self._realproj_scanning = False
@@ -745,6 +749,10 @@ class TcerGui:
 
     def _render_tab(self, idx: int) -> None:
         """渲染指定页签（未标脏则跳过）。补渲染时按脏标记决定是否重灌数据。"""
+        if idx == 6:
+            # 术语库页签不依赖 self._current（读持久化词条库），每次切入重载。
+            self.termbase_view.on_show()
+            return
         if idx == 5:
             # LLM 报告页签不依赖 self._current（读持久化文件），每次切入重载。
             self.llm_reports_view.on_show()
@@ -768,9 +776,15 @@ class TcerGui:
         else:
             if full:
                 self.trend_chart.update(self._current.reports)
-            # Highlight selected session in trend chart (without rebuild — zoom)
             if self._selected_session_id:
                 self.trend_chart.select_session_by_sid(self._selected_session_id)
+
+    def switch_to_termbase(self, slug: str | None = None) -> None:
+        """切换至第 7 页签（术语库），并可选定位高亮具体词条。"""
+        if hasattr(self, "_nb"):
+            self._nb.select(6)
+            if hasattr(self, "termbase_view") and slug:
+                self.termbase_view.select_term(slug)
 
     def _update_ranking_view(self) -> None:
         """按视角驱动综合效率分排名右栏（对齐指标分类/模型对比的项目/会话切换）。
@@ -1498,8 +1512,197 @@ class TcerGui:
                 lambda: self._on_llm_task_done(task_id, task_desc.split(" · ")[0], entry_id))
         except Exception as e:
             print(f"[LLM Task Error] {task_desc}: {e}", file=_sys.stderr)
+            # 同考古 worker:except 变量 e 块外被删,先落局部再闭包
+            err_text = str(e)
             self._llm_ui_queue.put(
-                lambda: self._on_llm_task_error(task_id, task_desc, str(e)))
+                lambda: self._on_llm_task_error(task_id, task_desc, err_text))
+
+    def run_terms_archaeology_current(self) -> None:
+        """从术语库页签触发考古：若有选中会话则针对选中会话，否则针对当前项目首个会话。"""
+        rep = None
+        if self._selected_session_id:
+            rep = self._session_report(self._selected_session_id)
+        if not rep and self._current and self._current.reports:
+            rep = self._current.reports[0]
+        if not rep:
+            from tkinter import messagebox
+            messagebox.showinfo("术语考古", "请先在左侧选择一个项目或会话后再行考古。", parent=self.root)
+            return
+        self.run_session_terms_archaeology(rep)
+
+    def run_session_terms_archaeology(self, report) -> None:
+        """从右键菜单直接发起：术语考古与黑话挖掘（F2 考古流水线）。
+
+        严格遵守抽样纪律（优先纠正消息，上限 40 条，每条 400 字符）。
+        若配置了通用 LLM 与 TypeSafe Key 则发起新词提名与 Jev 归属（遵守 D-4 每次确认）；
+        若未配置则优雅降级为本地纯离线热力图统计。
+        """
+        from tkinter import messagebox
+        from concurrent.futures import ThreadPoolExecutor
+        from uuid import uuid4
+        from tcer.core import llm_prefs
+
+        has_llm = llm_prefs.enabled()
+        has_jev = llm_prefs.typesafe_enabled()
+
+        if has_llm and has_jev:
+            try:
+                n_msgs = len(report.usage.user_msgs or 0) or 0
+            except Exception:
+                n_msgs = 0
+            if not messagebox.askyesno(
+                "术语考古（数据出境确认）",
+                "将向 LLM 与 TypeSafe Jev 引擎发送抽样的**用户消息文本**进行团队黑话挖掘：\n"
+                f"通用 LLM：{llm_prefs.model()} @ {llm_prefs.base_url()}\n"
+                f"Jev 引擎：{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}\n"
+                f"出境范围：抽样用户消息（优先纠正措辞，最多 40 条，每条截断 400 字符）\n"
+                "预计成本：不足 1 美分。\n\n"
+                "分析结果将保存至「LLM 报告」收信箱，不参与任何指标计算；出境后不可撤销。\n\n"
+                "是否立即开始？",
+                parent=self.root,
+            ):
+                return
+        else:
+            if not messagebox.askyesno(
+                "术语考古（纯离线热力图模式）",
+                "当前未配置通用 LLM 或 TypeSafe API Key。\n\n"
+                "TCER 将以**纯离线模式**运行：仅统计术语库已知词条在历史消息中的命中热力图与上下文，"
+                "跳过新词自动挖掘。\n\n"
+                "是否继续？",
+                parent=self.root,
+            ):
+                return
+
+        sid = report.meta.session_id or report.meta.path.stem
+        dedup_key = (sid, "terms")
+        if any(t["key"] == dedup_key for t in self._llm_tasks.values()):
+            self.filter.set_status("该会话的术语考古任务已在生成中，请在收信箱稍候")
+            return
+
+        session_title = report.meta.title or sid[:12]
+        task_id = uuid4().hex
+        task_desc = f"{session_title} · 术语考古"
+        if self._llm_executor is None:
+            self._llm_executor = ThreadPoolExecutor(
+                max_workers=3, thread_name_prefix="tcer-llm"
+            )
+        future = self._llm_executor.submit(
+            self._terms_archaeology_worker, report, task_id, task_desc, has_llm and has_jev
+        )
+        self._llm_tasks[task_id] = {"key": dedup_key, "desc": task_desc, "future": future}
+        self.filter.set_status(f"正在进行术语考古: {session_title}…", fg=theme.ACCENT)
+
+    def _terms_archaeology_worker(
+        self, report, task_id: str, task_desc: str, run_remote: bool
+    ) -> None:
+        """术语考古 worker（线程池内执行）。"""
+        from uuid import uuid4
+        from tcer.core import llm_client, llm_prefs, llm_prompts, llm_reports, termbase, typesafe_client
+        import time as _time
+        import sys as _sys
+
+        try:
+            messages = TcerGui._load_user_messages(report, [])[0]
+            if not messages:
+                raise typesafe_client.TypesafeError("本会话未读到用户消息（或该源不支持）")
+
+            sampled_messages = llm_prompts.sample_archaeology_messages(messages)
+            tb = termbase.load_termbase(termbase.default_termbase_path())
+
+            heatmap = llm_prompts.analyze_term_heatmap(sampled_messages, tb)
+            candidate_verdicts = None
+            is_degraded = not run_remote
+            degraded_reason = "" if run_remote else "未配置通用 LLM 或 TypeSafe API Key，已跳过新词自动挖掘"
+
+            if run_remote:
+                nomination_msgs = llm_prompts.build_term_nomination_prompt(sampled_messages)
+                raw_nomination = llm_client.chat(
+                    base_url=llm_prefs.base_url(),
+                    api_key=llm_prefs.api_key() or "",
+                    model=llm_prefs.model(),
+                    system=nomination_msgs[0]["content"],
+                    user=nomination_msgs[1]["content"],
+                    max_tokens=8192,  # 提名 JSON 上限 15 候选;默认 32768 会让
+                    # 慢尾模型(~58 字符/秒)拖数分钟——用户实测「AI 已返回
+                    # 却一直显示正在进行」的主要窗口
+                )
+                # 阶段进度:remote 是两枪(LLM 提名 → Jev 归属),第一枪返回
+                # 后立刻反馈,让用户能分辨卡在哪一环
+                self._llm_ui_queue.put(
+                    lambda: self.filter.set_status(
+                        f"LLM 提名完成,正在进行 Jev 归属判定: {report.meta.title or report.meta.session_id[:12]}…",
+                        fg=theme.ACCENT))
+                candidates = llm_prompts.parse_nominated_terms(raw_nomination)
+                if candidates:
+                    state, questions = llm_prompts.build_archaeology_jev_payload(candidates, tb)
+                    resp = typesafe_client.evaluate(
+                        state,
+                        questions,
+                        api_key=llm_prefs.typesafe_api_key() or "",
+                        base_url=llm_prefs.typesafe_base_url(),
+                        model=llm_prefs.typesafe_model(),
+                    )
+                    answers = (resp or {}).get("answers", {})
+                    candidate_verdicts = []
+                    for i, cand in enumerate(candidates):
+                        # 键名必须与 build_archaeology_jev_payload 生成的
+                        # questions 键一致（choice_{i+1}/noul_{i+1}，1-based）——
+                        # 曾用自造键名 cand_{i}/cand_{i}_tech 全部取到 None，
+                        # route 内又无守卫直接 AttributeError（2026-09-22 实锤）
+                        choice_ans = answers.get(f"choice_{i + 1}")
+                        noul_ans = answers.get(f"noul_{i + 1}")
+                        v = llm_prompts.route_archaeology_candidate(cand, choice_ans, noul_ans)
+                        candidate_verdicts.append(v)
+                else:
+                    candidate_verdicts = []
+
+            meta = report.meta
+            session_title = meta.title or meta.session_id or "会话"
+            entry_id = f"{int(_time.time() * 1000)}_{uuid4().hex[:8]}"
+
+            text, struct_data = llm_prompts.format_terms_report(
+                heatmap,
+                candidate_verdicts,
+                total_messages_sampled=len(sampled_messages),
+                is_degraded=is_degraded,
+                degraded_reason=degraded_reason,
+                has_terms=bool(tb.active_terms()),
+            )
+            audit_flags = llm_prompts.audit_warnings(text, False, "terms")
+            entry = {
+                "id": entry_id,
+                "created_at": int(_time.time() * 1000),
+                "kind": "terms",
+                "title": f"{session_title} · 术语考古",
+                "audit_warnings": audit_flags,
+                "audit_semantic": None,
+                "session_id": meta.session_id,
+                "session_title": meta.title,
+                "source": meta.source or "claude",
+                "model": llm_prefs.model() if run_remote else "local",
+                "scope": "user_messages",
+                "turns": 0,
+                "net_loc": report.net_loc,
+                "cost_display": "",
+                "text": text,
+                "terms_data": struct_data,
+            }
+            llm_reports.append(entry)
+            print(f"[LLM Task] Success: saved terms archaeology {entry_id}")
+            self._llm_ui_queue.put(
+                lambda: self._on_llm_task_done(task_id, task_desc.split(" · ")[0],
+                                               entry_id, jump=True)
+            )
+        except Exception as e:
+            print(f"[LLM Task Error] {task_desc}: {e}", file=_sys.stderr)
+            # 先落局部变量再闭包——except 块结束后 e 被隐式删除,lambda 延迟
+            # 执行时引用 e 直接 NameError 且被 drain 吞掉:错误回填从未到达,
+            # 任务表永不清理,状态栏永远停在「正在进行」(2026-09-22 实锤,
+            # 同款写法见 _llm_work 的 err_text)
+            err_text = str(e)
+            self._llm_ui_queue.put(
+                lambda: self._on_llm_task_error(task_id, task_desc, err_text)
+            )
 
     def _run_session_llm(self, report, is_dynamics: bool) -> None:
         """从会话列表直接派发 LLM 任务（收信箱模型：首次确认 + 去重 + 有界线程池 + UI 队列回填）。"""
@@ -1783,8 +1986,14 @@ class TcerGui:
         except (tk.TclError, RuntimeError):
             pass
 
-    def _on_llm_task_done(self, task_id: str, title: str, entry_id: str) -> None:
-        """主线程：任务完成回填（清任务表 → 状态栏 → 刷新收信箱）。"""
+    def _on_llm_task_done(self, task_id: str, title: str, entry_id: str,
+                          *, jump: bool = False) -> None:
+        """主线程：任务完成回填（清任务表 → 状态栏 → 刷新收信箱）。
+
+        jump=True 时直接切到「LLM 报告」页签并选中该条——供结果即全部产出的
+        功能（术语考古）使用：右键发起后用户停在项目列表页，仅状态栏一闪
+        等于「处理完了但没结果」（用户实测打回）。
+        """
         self._llm_tasks.pop(task_id, None)
         remain = len(self._llm_tasks)
         if remain > 0:
@@ -1796,6 +2005,9 @@ class TcerGui:
             self.llm_reports_view._refresh_list()
         except Exception as e:
             print(f"[LLM Task] refresh inbox failed: {e}", file=sys.stderr)
+        if jump:
+            self._on_llm_report_saved(entry_id)
+            return
         # 若用户当前就停在 LLM 报告页签，自动选中查看
         if self._nb.index("current") == self._nb.index(self._llm_tab):
             self.llm_reports_view.select_report(entry_id)

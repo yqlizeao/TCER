@@ -43,3 +43,20 @@ def save(prefs: dict) -> None:
 def valid_geometry(geometry) -> bool:
     """True 当 geometry 是形如 ``1600x900+160+40`` 的合法串。"""
     return isinstance(geometry, str) and bool(_GEOMETRY_RE.match(geometry))
+
+
+def get_termbase_path() -> str | None:
+    """返回自定义术语库路径（如有）；未配置时返回 None。"""
+    p = load().get("termbase_path")
+    return str(p) if p else None
+
+
+def set_termbase_path(path: str | None) -> None:
+    """保存或清除自定义术语库路径。"""
+    prefs = load()
+    if path:
+        prefs["termbase_path"] = str(path)
+    else:
+        prefs.pop("termbase_path", None)
+    save(prefs)
+

@@ -139,6 +139,22 @@ def write_session():
     return _write
 
 
+@pytest.fixture(autouse=True)
+def _isolate_llm_reports(tmp_path, monkeypatch):
+    """全局兜底:LLM 报告库在本测试期间一律指向 tmp。
+
+    根因(2026-09-22 抓的现行):GUI 测试 dispatch 的 daemon worker 线程
+    生命周期可跨越测试 monkeypatch teardown——晚到的 ``llm_reports.append``
+    在 patch 已恢复后执行,写入用户真实 ``~/.tcer/tcer_llm_reports.json``
+    (实测每轮 pytest 后真实文件多出一份「标题-s1」假报告,进程内插桩因
+    解释器退出阶段 stdout 已关而抓不到)。本 fixture 把默认 ``_path`` 钉到
+    tmp:各测试自己的更窄 patch 照常生效(后设置者覆盖),忘 patch 或晚到
+    的写入全部落 tmp,真实文件零污染。
+    """
+    from tcer.core import llm_reports
+    monkeypatch.setattr(llm_reports, "_path", lambda: tmp_path / "tcer_llm_reports_isolated.json")
+
+
 @pytest.fixture(scope="session")
 def root():
     """全测试会话共享的单个 Tk root。

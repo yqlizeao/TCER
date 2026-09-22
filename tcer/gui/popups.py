@@ -2528,6 +2528,954 @@ class LlmConfigPopup:
         self.set_status(status_msg)
 
 
+class TermLookupPopup:
+    """术语反向查询弹窗（F3 MVP · termbase-handoff.md §6）。
+
+    本地命中优先；未命中且配置了 TypeSafe API Key 时经出境确认后由 Jev 语义推断。
+    """
+
+    def __init__(
+        self, parent, controller=None, initial_query: str = "", termbase=None
+    ) -> None:
+        from tcer.core import termbase as _termbase_mod
+
+        self._controller = controller
+        self._parent = parent
+        self._tb = termbase if termbase is not None else _termbase_mod.load_termbase()
+
+        win = _new_window(parent, "术语反向查询", "680x580")
+        self._win = win
+        # worker 线程只 put 队列；主线程 60ms 轮询消费（裸跨线程 after 在无
+        # mainloop 的 Tk 上抛 RuntimeError——#38 ⓒ 教训，handoff 已知坑 #1）
+        import queue as _queue
+        self._ui_queue: "_queue.Queue" = _queue.Queue()
+        self._poll_ui_queue()
+
+        # 头部
+        header = tk.Frame(win, bg=theme.BG)
+        header.pack(fill="x", padx=16, pady=(12, 6))
+        tk.Label(
+            header,
+            text="术语反向查询",
+            bg=theme.BG,
+            fg=theme.FG,
+            font=theme.FONT_HEADING,
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text="本地匹配优先 · 支持 Jev 语义兜底",
+            bg=theme.BG,
+            fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL,
+        ).pack(side="left", padx=10, pady=(4, 0))
+
+        # 搜索输入行
+        search_frame = tk.Frame(win, bg=theme.BG)
+        search_frame.pack(fill="x", padx=16, pady=6)
+
+        self._query_var = tk.StringVar(value=initial_query)
+        self._entry = tk.Entry(
+            search_frame,
+            textvariable=self._query_var,
+            bg=theme.CONTROL_BG,
+            fg=theme.FG,
+            insertbackground=theme.FG,
+            font=theme.FONT_UI,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=theme.BORDER,
+            highlightcolor=theme.ACCENT,
+        )
+        self._entry.pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 8))
+        self._entry.bind("<Return>", lambda _e: self.do_search())
+
+        self._btn_search = flat_button(
+            search_frame,
+            "查询",
+            primary=True,
+            command=self.do_search,
+        )
+        self._btn_search.pack(side="right")
+
+        # 状态行
+        self._status_lbl = tk.Label(
+            win,
+            text="输入研发黑话、缩写或概念别名（按回车执行查询）",
+            bg=theme.BG,
+            fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL,
+            anchor="w",
+        )
+        self._status_lbl.pack(fill="x", padx=18, pady=(0, 6))
+
+        # 滚动结果展示区
+        self._sf = ScrollFrame(win, bg=theme.PANEL)
+        self._sf.canvas.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        if initial_query:
+            self.do_search()
+        else:
+            self._entry.focus_set()
+
+    def do_search(self) -> None:
+        from tcer.core import termbase
+
+        q = self._query_var.get().strip()
+        if not q:
+            return
+
+        # 清空结果区
+        for child in list(self._sf.inner.winfo_children()):
+            child.destroy()
+
+        # 1. 本地优先匹配
+        hits = termbase.find_terms_in_text(q, self._tb)
+        matched_terms = [h.term for h in hits]
+
+        if not matched_terms:
+            q_lower = q.lower()
+            for t in self._tb.terms:
+                labels = [t.pref_label, t.slug, t.term_en] + list(t.alt_labels)
+                if any(q_lower == (lbl or "").strip().lower() for lbl in labels):
+                    matched_terms.append(t)
+
+        if matched_terms:
+            unique = list({t.slug: t for t in matched_terms}.values())
+            self._status_lbl.config(
+                text=f"本地术语库命中 {len(unique)} 个词条",
+                fg=theme.SUCCESS,
+            )
+            if len(unique) == 1:
+                self._render_term_card(self._sf.inner, unique[0])
+            else:
+                self._render_term_picker(self._sf.inner, unique)
+            return
+
+        # 2. 本地无命中 -> 检查是否配置了 TypeSafe Jev
+        from tcer.core import llm_prefs, typesafe_client
+
+        has_key = llm_prefs.typesafe_enabled()
+
+        if not has_key:
+            self._status_lbl.config(
+                text="本地未命中，且未配置 TypeSafe API Key",
+                fg=theme.WARNING,
+            )
+            tk.Label(
+                self._sf.inner,
+                text=f"本地术语库未找到与「{q}」匹配的词条。\n\n"
+                     "若已在「设置 → LLM 配置」中填入 TypeSafe API Key，"
+                     "系统可调用 Jev System One 语义反向推断该黑话最可能所属的已有概念。",
+                bg=theme.PANEL,
+                fg=theme.FG,
+                font=theme.FONT_UI,
+                justify="left",
+                wraplength=600,
+            ).pack(anchor="w", padx=12, pady=16)
+            return
+
+        # 3. 出境确认弹窗（D-4 口径，绝不自动记住）
+        from tkinter import messagebox
+
+        ok = messagebox.askyesno(
+            "出境确认",
+            f"本地术语库未直接命中「{q}」。\n\n"
+            "即将向 TypeSafe Jev 发起 1 次反向语义推断（预估 ~200 Tokens，操作不可撤销）。\n\n"
+            "是否继续发送查询？",
+            parent=self._win,
+        )
+        if not ok:
+            self._status_lbl.config(text="用户取消了 Jev 语义推断", fg=theme.MUTED)
+            return
+
+        # 4. 后台线程调用 Jev
+        self._status_lbl.config(text="正在通过 Jev 语义反向推断所属概念…", fg=theme.ACCENT)
+        self._btn_search.config(state="disabled")
+
+        import threading
+
+        def _worker():
+            from tcer.core import llm_prompts, llm_prefs
+            try:
+                active_terms = self._tb.active_terms()
+                state, questions = llm_prompts.build_lookup_payload(q, active_terms)
+                res = typesafe_client.evaluate(
+                    state, questions,
+                    api_key=llm_prefs.typesafe_api_key() or "",
+                    base_url=llm_prefs.typesafe_base_url(),
+                    model=llm_prefs.typesafe_model(),
+                )
+                ans = res.get("answers", {})
+                parsed = llm_prompts.parse_lookup_answer(ans, self._tb)
+                self._ui_queue.put(lambda: self._on_jev_done(q, parsed))
+            except Exception as e:
+                self._ui_queue.put(lambda err=str(e): self._on_jev_error(err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _poll_ui_queue(self) -> None:
+        import queue as _queue
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except _queue.Empty:
+            pass
+        try:
+            if self._win.winfo_exists():
+                self._win.after(60, self._poll_ui_queue)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _on_jev_error(self, err_msg: str) -> None:
+        self._btn_search.config(state="normal")
+        self._status_lbl.config(text=f"Jev 查询失败: {err_msg}", fg=theme.DANGER)
+
+    def _on_jev_done(self, query: str, result: dict) -> None:
+        self._btn_search.config(state="normal")
+        status = result.get("status")
+
+        if status == "hit":
+            slug = result.get("term_slug")
+            conf = result.get("confidence", 0.0)
+            term = self._tb.by_slug(slug)
+            pref = term.pref_label if term else slug
+            self._status_lbl.config(
+                text=f"Jev 判定与概念 [{pref}] 语义吻合（置信度 {conf:.0%}）",
+                fg=theme.SUCCESS,
+            )
+            if term:
+                self._render_term_card(self._sf.inner, term)
+            else:
+                tk.Label(self._sf.inner, text=f"命中标识 '{slug}'，但在当前活跃列表中未找到。", bg=theme.PANEL, fg=theme.WARNING).pack()
+        elif status == "candidates":
+            self._status_lbl.config(
+                text="Jev 语义推荐可能相关的概念候选（置信度 < 60%）",
+                fg=theme.WARNING,
+            )
+            cands = result.get("top_candidates", [])
+            tk.Label(
+                self._sf.inner,
+                text=f"「{query}」未达到单一强吻合阈值，以下为最接近的已有概念（点击可查看详情）：",
+                bg=theme.PANEL,
+                fg=theme.FG,
+                font=theme.FONT_UI,
+            ).pack(anchor="w", padx=12, pady=(8, 4))
+
+            for slug, p in cands:
+                term = self._tb.by_slug(slug)
+                label_text = f"{term.pref_label} ({slug}) · 匹配度 {p:.1%}" if term else f"{slug} · 匹配度 {p:.1%}"
+                card_btn = flat_button(
+                    self._sf.inner,
+                    label_text,
+                    primary=False,
+                    command=lambda t=term: self._show_candidate_term(t),
+                )
+                card_btn.pack(anchor="w", padx=12, pady=4)
+        else:
+            reason = result.get("reason", "未找到匹配项")
+            self._status_lbl.config(text=f"未找到相关概念: {reason}", fg=theme.MUTED)
+            tk.Label(
+                self._sf.inner,
+                text=f"Jev 分析「{query}」后未发现与现有术语库相符的概念。\n原因: {reason}\n\n建议在开发中通过「术语考古」扫描收录为全新词条。",
+                bg=theme.PANEL,
+                fg=theme.FG,
+                font=theme.FONT_UI,
+                justify="left",
+                wraplength=600,
+            ).pack(anchor="w", padx=12, pady=16)
+
+    def _show_candidate_term(self, term) -> None:
+        for child in list(self._sf.inner.winfo_children()):
+            child.destroy()
+        if term:
+            self._render_term_card(self._sf.inner, term)
+
+    def _render_term_picker(self, parent, terms: list) -> None:
+        tk.Label(
+            parent,
+            text="命中多个可能词条，请选择查看：",
+            bg=theme.PANEL,
+            fg=theme.FG,
+            font=theme.FONT_UI,
+        ).pack(anchor="w", padx=12, pady=(8, 4))
+        for t in terms:
+            btn = flat_button(
+                parent,
+                f"{t.pref_label}（{t.slug}）",
+                primary=False,
+                command=lambda term=t: self._show_candidate_term(term),
+            )
+            btn.pack(anchor="w", padx=12, pady=3)
+
+    def _render_term_card(self, parent, term) -> None:
+        from tcer.core.termbase import MDA_LAYERS, ROLE_LABELS, STATUS_LABELS
+
+        card = tk.Frame(parent, bg=theme.BG, bd=1, relief="solid")
+        card.pack(fill="x", pady=6, padx=6)
+
+        head_row = tk.Frame(card, bg=theme.BG)
+        head_row.pack(fill="x", padx=14, pady=(10, 4))
+
+        en_part = f"（{term.term_en}）" if term.term_en else ""
+        tk.Label(
+            head_row,
+            text=f"{term.pref_label}{en_part}",
+            bg=theme.BG,
+            fg=theme.FG,
+            font=theme.FONT_HEADING,
+        ).pack(side="left")
+
+        def _goto_term(slug=term.slug):
+            if self._controller and hasattr(self._controller, "switch_to_termbase"):
+                self._controller.switch_to_termbase(slug)
+                self._win.destroy()
+
+        if self._controller and hasattr(self._controller, "switch_to_termbase"):
+            from .views import ui_icon
+            from .widgets import flat_button
+
+            flat_button(
+                head_row,
+                "在术语库中查看",
+                _goto_term,
+                image=ui_icon(head_row, "book"),
+                padx=6,
+                pady=1,
+            ).pack(side="right")
+
+        status_cn = STATUS_LABELS.get(term.status, term.status)
+        mda_cn = MDA_LAYERS.get(term.mda_layer, term.mda_layer)
+        meta_str = f"状态: {status_cn}"
+        if term.owner:
+            meta_str += f" | 负责人: {term.owner}"
+        if mda_cn:
+            meta_str += f" | 概念层面: {mda_cn}"
+        tk.Label(
+            card,
+            text=meta_str,
+            bg=theme.BG,
+            fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL,
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
+        if term.definition:
+            tk.Label(
+                card,
+                text=f"标准定义:\n{term.definition}",
+                bg=theme.BG,
+                fg=theme.FG,
+                font=theme.FONT_UI,
+                wraplength=580,
+                justify="left",
+            ).pack(anchor="w", padx=14, pady=(0, 6))
+
+        if term.alt_labels:
+            tk.Label(
+                card,
+                text=f"别名 / 黑话: {'、'.join(term.alt_labels)}",
+                bg=theme.BG,
+                fg=theme.MUTED,
+                font=theme.FONT_UI_SMALL,
+            ).pack(anchor="w", padx=14, pady=(0, 6))
+
+        if term.renderings:
+            tk.Label(
+                card,
+                text="各职能理解:",
+                bg=theme.BG,
+                fg=theme.ACCENT,
+                font=theme.FONT_UI_BOLD,
+            ).pack(anchor="w", padx=14, pady=(6, 2))
+            for rk in sorted(term.renderings.keys()):
+                rcn = ROLE_LABELS.get(rk, rk)
+                tk.Label(
+                    card,
+                    text=f"• {rcn}: {term.renderings[rk]}",
+                    bg=theme.BG,
+                    fg=theme.FG,
+                    font=theme.FONT_UI_SMALL,
+                    wraplength=560,
+                    justify="left",
+                ).pack(anchor="w", padx=20, pady=(0, 2))
+
+        if term.misconceptions:
+            tk.Label(
+                card,
+                text="常见误解防范:",
+                bg=theme.BG,
+                fg=theme.WARNING,
+                font=theme.FONT_UI_BOLD,
+            ).pack(anchor="w", padx=14, pady=(8, 2))
+            for m in term.misconceptions:
+                rcn = ROLE_LABELS.get(m.get("role", ""), m.get("role", "全员"))
+                wrong = m.get("wrong", "")
+                actual = m.get("actual", "")
+                tk.Label(
+                    card,
+                    text=f"• {rcn}: 以为「{wrong}」→ 实际「{actual}」",
+                    bg=theme.BG,
+                    fg=theme.FG,
+                    font=theme.FONT_UI_SMALL,
+                    wraplength=560,
+                    justify="left",
+                ).pack(anchor="w", padx=20, pady=(0, 2))
+
+        tk.Frame(card, height=8, bg=theme.BG).pack()
+
+
+class AmbiguityDetectPopup:
+    """F4 歧义检测弹窗（单会话 / 需求文本的 D3 探针探测）。
+
+    支持输入需求/任务描述文本，本地提取已知词条与误解陷阱，
+    若配置了 TypeSafe Key 则发起 Jev 探针概率估算（遵守 D-4 每次确认），
+    生成合规 Markdown 报告并持久化至「LLM 报告」收信箱。
+    """
+
+    def __init__(self, parent, controller=None, termbase=None, initial_text: str = "") -> None:
+        from .widgets import flat_button, new_window, ScrollFrame
+        from .views import ui_icon
+        from tcer.core.termbase import default_termbase_path, load_termbase
+
+        self.controller = controller
+        self.termbase = termbase or load_termbase(default_termbase_path())
+        self._win = new_window(parent, "需求文本术语歧义探测", "720x640")
+        # worker 线程只 put 队列；主线程 60ms 轮询消费（同 TermLookupPopup，
+        # 裸跨线程 after 在无 mainloop 的 Tk 上抛 RuntimeError）
+        import queue as _queue
+        self._ui_queue: "_queue.Queue" = _queue.Queue()
+        self._poll_ui_queue()
+
+        # 头部说明
+        head = tk.Frame(self._win, bg=theme.PANEL, padx=14, pady=10)
+        head.pack(fill="x")
+        tk.Label(
+            head,
+            text="需求文本术语歧义探测",
+            bg=theme.PANEL,
+            fg=theme.FG,
+            font=theme.FONT_HEADING,
+        ).pack(anchor="w")
+        tk.Label(
+            head,
+            text="输入需求文本，自动匹配库内概念并触发跨职能误读探针；识别潜伏的理解偏差与沟通灰色地带。",
+            bg=theme.PANEL,
+            fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # 输入区域
+        input_frame = tk.Frame(self._win, bg=theme.BG, padx=14, pady=8)
+        input_frame.pack(fill="x")
+
+        tk.Label(
+            input_frame,
+            text="待检测文本（需求文档、任务描述或用户提示词）：",
+            bg=theme.BG,
+            fg=theme.FG,
+            font=theme.FONT_UI_BOLD,
+        ).pack(anchor="w", pady=(0, 4))
+
+        self._text_box = tk.Text(
+            input_frame,
+            height=6,
+            bg=theme.PANEL_2,
+            fg=theme.FG,
+            insertbackground=theme.FG,
+            font=theme.FONT_MONO,
+            relief="flat",
+            padx=6,
+            pady=6,
+        )
+        self._text_box.pack(fill="x")
+        if initial_text:
+            self._text_box.insert("1.0", initial_text)
+
+        btn_bar = tk.Frame(input_frame, bg=theme.BG)
+        btn_bar.pack(fill="x", pady=(6, 0))
+
+        self._run_btn = flat_button(
+            btn_bar,
+            "开始歧义探测",
+            self._on_run,
+            primary=True,
+            image=ui_icon(btn_bar, "sparkle"),
+            padx=12,
+            pady=4,
+        )
+        self._run_btn.pack(side="left")
+
+        self._status_lbl = tk.Label(
+            btn_bar,
+            text="",
+            bg=theme.BG,
+            fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL,
+        )
+        self._status_lbl.pack(side="left", padx=10)
+
+        # 结果展示区
+        res_frame = tk.Frame(self._win, bg=theme.BG, padx=14, pady=4)
+        res_frame.pack(fill="both", expand=True)
+
+        self._scroll = ScrollFrame(res_frame, bg=theme.PANEL)
+        self._content = self._scroll.inner
+
+        self._render_placeholder("点击「开始歧义探测」运行检测")
+
+    def _render_placeholder(self, text: str) -> None:
+        for w in self._content.winfo_children():
+            w.destroy()
+        tk.Label(
+            self._content,
+            text=text,
+            bg=theme.PANEL,
+            fg=theme.MUTED,
+            font=theme.FONT_UI,
+            pady=40,
+        ).pack(expand=True)
+
+    def _on_run(self) -> None:
+        from tkinter import messagebox
+        from tcer.core.termbase import find_terms_in_text
+        from tcer.core import llm_prefs
+
+        raw_text = self._text_box.get("1.0", "end").strip()
+        if not raw_text:
+            messagebox.showwarning("提示", "请输入待检测文本", parent=self._win)
+            return
+
+        hits = find_terms_in_text(raw_text, self.termbase)
+        if not hits:
+            self._render_placeholder("未在输入文本中匹配到术语库收录的已知概念。")
+            self._status_lbl.config(text="未匹配到已知概念", fg=theme.MUTED)
+            return
+
+        # 去重提取词条
+        seen_slugs = set()
+        matched_terms = []
+        for h in hits:
+            if h.term.slug not in seen_slugs:
+                seen_slugs.add(h.term.slug)
+                matched_terms.append(h.term)
+
+        probes_count = sum(len(t.misconceptions or []) for t in matched_terms)
+        if probes_count == 0:
+            self._render_placeholder(
+                f"匹配到 {len(matched_terms)} 个词条（{', '.join(t.pref_label for t in matched_terms)}），"
+                "但这些词条均未配置常见误解防范项（misconceptions）。\n请在术语库中补充误解清单后再行探测。"
+            )
+            self._status_lbl.config(text="词条无误解配置", fg=theme.WARNING)
+            return
+
+        if not llm_prefs.typesafe_enabled():
+            # 离线纯本地降级展示
+            self._run_local_degraded(matched_terms, raw_text)
+            return
+
+        # D-4 每次出境确认
+        if not messagebox.askyesno(
+            "歧义探测（数据出境确认）",
+            "将向 TypeSafe Jev 引擎发送误读探针做语义概率估算：\n"
+            f"模型：{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}\n"
+            f"涉及词条：{len(matched_terms)} 个 · 探针数：{probes_count} 项\n"
+            "预计成本：不足 1 美分（单请求 Noul 扇出）。\n\n"
+            "判定结果将同时保存至「LLM 报告」收信箱；出境后不可撤销。\n\n"
+            "是否立即开始？",
+            parent=self._win,
+        ):
+            return
+
+        self._status_lbl.config(text="正在进行 Jev 探针概率估算…", fg=theme.ACCENT)
+        self._run_btn.config(state="disabled")
+
+        import threading
+        threading.Thread(
+            target=self._jev_worker,
+            args=(matched_terms, raw_text),
+            daemon=True,
+        ).start()
+
+    def _jev_worker(self, matched_terms, raw_text: str) -> None:
+        import time
+        from uuid import uuid4
+        from tcer.core import llm_prefs, llm_prompts, llm_reports, typesafe_client
+
+        try:
+            state, questions = llm_prompts.build_ambiguity_payload(raw_text, matched_terms)
+            resp = typesafe_client.evaluate(
+                state,
+                questions,
+                api_key=llm_prefs.typesafe_api_key() or "",
+                base_url=llm_prefs.typesafe_base_url(),
+                model=llm_prefs.typesafe_model(),
+            )
+            answers = (resp or {}).get("answers", {})
+            report_text, struct_data = llm_prompts.format_ambiguity_report(
+                raw_text, matched_terms, answers,
+                model=llm_prefs.typesafe_model(),
+            )
+
+            # 保存报告至 LLM 报告收信箱
+            entry_id = f"{int(time.time() * 1000)}_{uuid4().hex[:8]}"
+            entry = {
+                "id": entry_id,
+                "created_at": int(time.time() * 1000),
+                "kind": "ambiguity",
+                "title": f"需求文本术语歧义探测 · {matched_terms[0].pref_label}等",
+                "audit_warnings": [],
+                "audit_semantic": None,
+                "session_id": "",
+                "session_title": "需求文本歧义探测",
+                "source": "text",
+                "model": llm_prefs.typesafe_model(),
+                "scope": "requirement_text",
+                "turns": 0,
+                "net_loc": 0,
+                "cost_display": "",
+                "text": report_text,
+                "ambiguity_data": struct_data,
+            }
+            llm_reports.append(entry)
+
+            self._ui_queue.put(lambda: self._on_jev_success(report_text, struct_data))
+        except Exception as e:
+            self._ui_queue.put(lambda err=str(e): self._on_jev_error(err))
+
+    def _poll_ui_queue(self) -> None:
+        import queue as _queue
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except _queue.Empty:
+            pass
+        try:
+            if self._win.winfo_exists():
+                self._win.after(60, self._poll_ui_queue)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _run_local_degraded(self, matched_terms, raw_text: str) -> None:
+        from tcer.core import llm_prompts
+
+        report_text, struct_data = llm_prompts.format_ambiguity_report(
+            raw_text,
+            matched_terms,
+            {},
+            is_degraded=True,
+        )
+        self._on_jev_success(report_text, struct_data)
+        self._status_lbl.config(text="已完成本地降级比对（未配置 Key）", fg=theme.WARNING)
+
+    def _on_jev_success(self, report_text: str, struct_data: dict) -> None:
+        self._run_btn.config(state="normal")
+        self._status_lbl.config(text="探测完成", fg=theme.SUCCESS)
+
+        for w in self._content.winfo_children():
+            w.destroy()
+
+        # 展示探测摘要
+        n_flagged = len(struct_data.get("flagged_terms") or [])
+        n_gray = len(struct_data.get("gray_zone_probes") or [])
+
+        summary_box = tk.Frame(self._content, bg=theme.PANEL_2, padx=10, pady=8)
+        summary_box.pack(fill="x", padx=6, pady=6)
+
+        sum_left = tk.Frame(summary_box, bg=theme.PANEL_2)
+        sum_left.pack(side="left", fill="x", expand=True)
+
+        if n_flagged > 0:
+            tk.Label(
+                sum_left,
+                text=f"⚠ 发现 {n_flagged} 个存在高风险误读的术语！",
+                bg=theme.PANEL_2,
+                fg=theme.ERROR,
+                font=theme.FONT_UI_BOLD,
+            ).pack(anchor="w")
+        else:
+            tk.Label(
+                sum_left,
+                text="✓ 未检测到强误读倾向（各探针 P ≤ 50%）",
+                bg=theme.PANEL_2,
+                fg=theme.SUCCESS,
+                font=theme.FONT_UI_BOLD,
+            ).pack(anchor="w")
+
+        if n_gray > 0:
+            tk.Label(
+                sum_left,
+                text=f"• 存在 {n_gray} 项灰色地带探针（40%–60%），建议沟通澄清",
+                bg=theme.PANEL_2,
+                fg=theme.WARNING,
+                font=theme.FONT_UI_SMALL,
+            ).pack(anchor="w", pady=(2, 0))
+
+        from .views import ui_icon
+
+        flat_button(
+            summary_box,
+            "复制报告",
+            lambda: _copy(self._win, report_text),
+            image=ui_icon(summary_box, "copy"),
+            padx=8,
+            pady=2,
+        ).pack(side="right")
+
+        # 渲染完整 Markdown 纯文本查看框
+        out_text = tk.Text(
+            self._content,
+            height=20,
+            bg=theme.PANEL,
+            fg=theme.FG,
+            font=theme.FONT_UI,
+            relief="flat",
+            padx=8,
+            pady=8,
+        )
+        out_text.pack(fill="both", expand=True, padx=6, pady=6)
+        out_text.insert("1.0", report_text)
+        out_text.config(state="disabled")
+
+    def _on_jev_error(self, err: str) -> None:
+        self._run_btn.config(state="normal")
+        self._status_lbl.config(text=f"检测失败: {err[:40]}", fg=theme.ERROR)
+
+
+class TermImportPopup:
+    """JSON 词条片段导入弹窗（支持单条、列表或考古提案片段）。"""
+
+    def __init__(self, parent, on_imported=None) -> None:
+        from .widgets import flat_button, new_window
+
+        self.on_imported = on_imported
+        self._win = new_window(parent, "导入词条 JSON 片段", "620x500")
+
+        head = tk.Frame(self._win, bg=theme.PANEL, padx=14, pady=10)
+        head.pack(fill="x")
+        tk.Label(
+            head,
+            text="导入词条 JSON 片段",
+            bg=theme.PANEL,
+            fg=theme.FG,
+            font=theme.FONT_HEADING,
+        ).pack(anchor="w")
+        tk.Label(
+            head,
+            text="粘贴符合规范的 JSON 词条代码块（来自术语考古报告或团队共享）：",
+            bg=theme.PANEL,
+            fg=theme.MUTED,
+            font=theme.FONT_UI_SMALL,
+        ).pack(anchor="w", pady=(2, 0))
+
+        body = tk.Frame(self._win, bg=theme.BG, padx=14, pady=8)
+        body.pack(fill="both", expand=True)
+
+        self._text = tk.Text(
+            body,
+            bg=theme.PANEL_2,
+            fg=theme.FG,
+            insertbackground=theme.FG,
+            font=theme.FONT_MONO,
+            relief="flat",
+            padx=8,
+            pady=8,
+        )
+        self._text.pack(fill="both", expand=True)
+
+        bot = tk.Frame(self._win, bg=theme.PANEL, padx=14, pady=8)
+        bot.pack(fill="x")
+
+        from .views import ui_icon
+
+        flat_button(
+            bot,
+            "从最新考古报告载入提案",
+            self._load_from_latest_report,
+            image=ui_icon(bot, "sparkle"),
+            padx=8,
+            pady=4,
+        ).pack(side="left")
+
+        flat_button(
+            bot,
+            "解析并导入",
+            self._do_import,
+            primary=True,
+            padx=12,
+            pady=4,
+        ).pack(side="right")
+
+    def _load_from_latest_report(self) -> None:
+        import json
+        import re
+        from tkinter import messagebox
+        from tcer.core import llm_reports
+
+        reports = llm_reports.load()
+        term_reports = [
+            r for r in reports
+            if getattr(r, "kind", "") == "terms" or (isinstance(r, dict) and r.get("kind") == "terms")
+        ]
+        if not term_reports:
+            messagebox.showinfo(
+                "无考古报告",
+                "未找到术语考古报告。\n请先在会话列表中右键点击会话，选择「术语考古」挖掘新词提案。",
+                parent=self._win,
+            )
+            return
+
+        latest = term_reports[0]  # load() 为新→旧排序，取最新一份
+        content = latest.text if hasattr(latest, "text") else latest.get("text", "")
+        # 报告含多个独立 ```json 提案块（一个新词一块）——必须 findall 全量
+        # 提取合并为列表；曾用 re.search 非贪婪只取第一块，12 份提案只载入
+        # 1 份（用户实测「怎么就生成了一个词汇」）
+        blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)```", content)
+        entries = []
+        for b in blocks:
+            try:
+                obj = json.loads(b.strip())
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                entries.append(obj)
+            elif isinstance(obj, list):
+                entries.extend(x for x in obj if isinstance(x, dict))
+        if entries:
+            snippet = json.dumps(entries, ensure_ascii=False, indent=2)
+        else:
+            snippet = content.strip()
+
+        self._text.delete("1.0", "end")
+        self._text.insert("1.0", snippet)
+
+        rep_title = getattr(latest, "title", None) or (latest.get("title") if isinstance(latest, dict) else "最新考古报告")
+        toast = tk.Label(
+            self._win,
+            text=f"已从「{rep_title[:24]}」载入提案片段",
+            bg=theme.SUCCESS,
+            fg=theme.BG,
+            font=theme.FONT_UI_SMALL,
+            padx=10,
+            pady=3,
+        )
+        toast.place(relx=0.5, rely=0.03, anchor="n")
+        self._win.after(2200, toast.destroy)
+
+    def _do_import(self) -> None:
+        import json
+        from tkinter import messagebox
+        from tcer.core.termbase import (
+            default_termbase_path,
+            load_termbase,
+            save_termbase,
+            TermEntry,
+            validate_entry,
+        )
+
+        raw = self._text.get("1.0", "end").strip()
+        if not raw:
+            messagebox.showwarning("提示", "请输入 JSON 内容", parent=self._win)
+            return
+
+        if raw.startswith("```"):
+            lines = raw.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw = "\n".join(lines).strip()
+
+        try:
+            parsed = json.loads(raw)
+        except Exception as e:
+            messagebox.showerror("JSON 解析失败", f"无效的 JSON 格式：\n{e}", parent=self._win)
+            return
+
+        entries_to_import: list[dict] = []
+        if isinstance(parsed, dict):
+            if "candidates" in parsed and isinstance(parsed["candidates"], list):
+                for c in parsed["candidates"]:
+                    if isinstance(c, dict) and "term" in c:
+                        entries_to_import.append({
+                            "slug": c.get("slug") or f"term-{abs(hash(c['term'])) % 100000}",
+                            "pref_label": c["term"],
+                            "definition": c.get("suggested_definition") or c.get("rationale") or "",
+                            "status": "draft",
+                        })
+            else:
+                entries_to_import.append(parsed)
+        elif isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    entries_to_import.append(item)
+
+        if not entries_to_import:
+            messagebox.showwarning("提示", "未在 JSON 中识别到有效的词条数据", parent=self._win)
+            return
+
+        tb = load_termbase(default_termbase_path())
+        existing_slugs = {t.slug for t in tb.terms}
+        imported_count = 0
+
+        # 红线「AI 提案、人裁决」：落盘前把全部待导入条目列明细做一次
+        # 显式确认——考古提案是 AI 生成的，用户必须看到即将写入什么
+        preview_lines = []
+        for d in entries_to_import[:20]:
+            _slug = str(d.get("slug", "?"))
+            _label = str(d.get("pref_label", "?"))
+            _mark = "  (覆盖已有)" if _slug in existing_slugs else ""
+            preview_lines.append(f"· {_label}  [{_slug}]{_mark}")
+        if len(entries_to_import) > 20:
+            preview_lines.append(f"…等共 {len(entries_to_import)} 条")
+        if not messagebox.askyesno(
+            "确认导入词条",
+            f"即将向术语库写入以下 {len(entries_to_import)} 条词条（均为草稿，"
+            "可稍后在术语库页签编辑修订）：\n\n" + "\n".join(preview_lines)
+            + "\n\n是否确认导入？",
+            parent=self._win,
+        ):
+            return
+
+        for d in entries_to_import:
+            entry = TermEntry.from_dict(d)
+            errs = validate_entry(entry)
+            if errs:
+                messagebox.showerror(
+                    "词条校验失败",
+                    f"词条「{entry.pref_label}」存在错误：\n" + "\n".join(errs),
+                    parent=self._win,
+                )
+                return
+
+            if entry.slug in existing_slugs:
+                if not messagebox.askyesno(
+                    "覆盖确认",
+                    f"词条 slug '{entry.slug}' 已存在，是否覆盖更新？",
+                    parent=self._win,
+                ):
+                    continue
+                tb.terms = [t for t in tb.terms if t.slug != entry.slug]
+
+            tb.terms.append(entry)
+            existing_slugs.add(entry.slug)
+            imported_count += 1
+
+        if imported_count > 0:
+            save_termbase(tb)
+            messagebox.showinfo("导入成功", f"成功导入 {imported_count} 个词条！", parent=self._win)
+            if self.on_imported:
+                self.on_imported()
+            self._win.destroy()
+
+
+
 def _copy(win, text: str) -> None:
     win.clipboard_clear()
     win.clipboard_append(text)

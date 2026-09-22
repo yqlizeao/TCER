@@ -813,7 +813,8 @@ class ActivityBar:
         # 上半区：主视图页组（每图标切换主区一页）
         for i, (label, icon_name) in enumerate((
                 ("指标看板", "dashboard"), ("模型对比", "model"), ("效率榜", "rank"),
-                ("趋势分析", "trend"), ("项目聚合", "layers"), ("LLM 报告", "sparkle"))):
+                ("趋势分析", "trend"), ("项目聚合", "layers"), ("LLM 报告", "sparkle"),
+                ("术语库", "book"))):
             self._add_nav_item(f"page:{i}", icon_name, label,
                                lambda idx=i: self.controller._nb.select(idx))
 
@@ -1936,6 +1937,12 @@ class SessionColumn:
             label="纠正信号交叉验证",
             command=lambda: self.controller.run_correction_crosscheck(report),
             image=_crosscheck, compound="left",
+        )
+        _book = ui_icon(self.container, "book")
+        menu.add_command(
+            label="术语考古",
+            command=lambda: self.controller.run_session_terms_archaeology(report),
+            image=_book, compound="left",
         )
 
         menu.add_separator()
@@ -6017,6 +6024,8 @@ class LlmReportsView:
         "session":  {"label": "会话", "color": theme.CHART_PALETTE[2], "desc": "会话过程收敛解读", "icon": "session"},
         "dynamics": {"label": "相空间", "color": theme.CHART_PALETTE[4], "desc": "相空间收敛动力学分析", "icon": "layers"},
         "crosscheck": {"label": "对账", "color": theme.CHART_PALETTE[1], "desc": "纠正信号双引擎交叉验证（正则 vs Jev）", "icon": "crosscheck"},
+        "terms":    {"label": "术语", "color": theme.ACCENT, "desc": "从会话历史挖掘团队术语", "icon": "book"},
+        "ambiguity": {"label": "歧义", "color": theme.WARNING, "desc": "需求文本术语歧义探测", "icon": "target"},
         "project":  {"label": "项目", "color": theme.CHART_PALETTE[0], "desc": "项目全局架构解读", "icon": "project"},
         "compare":  {"label": "对比", "color": theme.CHART_PALETTE[3], "desc": "多模型/跨源对比解读", "icon": "compare"},
         "anomaly":  {"label": "诊断", "color": theme.WARNING, "desc": "异常卡死/返工诊断", "icon": "tools"},
@@ -6087,13 +6096,15 @@ class LlmReportsView:
         self._pill_btns: dict[str, RoundedPill] = {}
 
         pills = [
-            ("all", "全部", 50),
-            ("session", "会话", 50),
-            ("dynamics", "相空间", 58),
-            ("crosscheck", "对账", 50),
-            ("project", "项目", 50),
-            ("compare", "对比", 50),
-            ("other", "其他", 46),
+            ("all", "全部", 44),
+            ("session", "会话", 44),
+            ("dynamics", "相空间", 54),
+            ("crosscheck", "对账", 44),
+            ("terms", "术语", 44),
+            ("ambiguity", "歧义", 44),
+            ("project", "项目", 44),
+            ("compare", "对比", 44),
+            ("other", "其他", 42),
         ]
         for k, lbl, w in pills:
             btn = RoundedPill(pill_box, text=lbl, width=w, height=22, radius=5,
@@ -6459,6 +6470,14 @@ class LlmReportsView:
                 rail_col = theme.ERROR
             elif cnts.get("jev_only") or cnts.get("jev_uncertain"):
                 rail_col = theme.WARNING
+            else:
+                rail_col = theme.SUCCESS
+        elif kind == "terms":
+            rail_col = theme.ACCENT
+        elif kind == "ambiguity":
+            amb = r.get("ambiguity_data") or {}
+            if amb.get("flagged_terms"):
+                rail_col = theme.ERROR
             else:
                 rail_col = theme.SUCCESS
         elif kind == "session":
@@ -7359,3 +7378,972 @@ class LlmReportsView:
     @classmethod
     def _fmt_session(cls, r: dict) -> str:
         return cls._fmt_title(cls._resolve_title(r))
+
+
+# 术语库表单的中文显示值 SSOT（key → 界面文案；保存时反查）。
+# GUI 全中文红线：不向用户暴露 slug/status/mda_layer 等字段名与英文枚举。
+_STATUS_CN = {"active": "活跃", "draft": "草稿", "deprecated": "已废弃"}
+_MDA_CN = {"": "不限", "mechanics": "机制", "dynamics": "动态", "aesthetics": "体验"}
+_STATUS_CN_KEY = {v: k for k, v in _STATUS_CN.items()}
+_MDA_CN_KEY = {v: k for k, v in _MDA_CN.items()}
+
+
+class TermbaseView:
+    """第 7 页签：团队术语库（SharedBrain MVP · F1 核心工作台）。
+
+    左侧：词条卡片列表（状态筛选胶囊 + 实时搜索 + 新建/删除/导入/导出/考古/检测工具条）。
+    右侧：词条编辑表单（即时校验 + 显式保存 + 角色通道渲染 + 误解陷阱清单）。
+    """
+
+    def __init__(self, parent, controller=None) -> None:
+        from .widgets import flat_button, FlatMenu, Card, ScrollFrame, RoundedSearchBox, RoundedPill
+        from tcer.core.termbase import default_termbase_path, load_termbase
+
+        self.container = parent
+        self.controller = controller
+        self._termbase_path = default_termbase_path()
+        self._termbase = load_termbase(self._termbase_path)
+        self._selected_slug: str | None = None
+        self._status_filter = "all"
+        self._search_kw = ""
+        self._cards: list[Card] = []
+        self._card_map: dict[str, Card] = {}
+        self._misconception_rows: list[dict] = []
+        self._rendering_entries: dict[str, tk.Entry] = {}
+        self._baseline_snapshot: dict | None = None
+
+        paned = tk.PanedWindow(parent, orient="horizontal", bg=theme.BG, sashwidth=3)
+        paned.pack(fill="both", expand=True, padx=theme.PAD_S, pady=theme.PAD_S)
+        self._paned_ref = paned
+
+        left = tk.Frame(paned, bg=theme.BG)
+        right = tk.Frame(paned, bg=theme.BG)
+        paned.add(left, minsize=280, width=330)
+        paned.add(right, minsize=500)
+        self._left_frame = left
+        self._right_frame = right
+
+        # --- 左侧工具顶栏 ---
+        bar = tk.Frame(left, bg=theme.BG)
+        bar.pack(fill="x", pady=(0, 4))
+
+        self._count_lbl = tk.Label(
+            bar, text="共 0 个词条", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL
+        )
+        self._count_lbl.pack(side="left")
+
+        btn_box = tk.Frame(bar, bg=theme.BG)
+        btn_box.pack(side="right")
+
+        _plus = ui_icon(btn_box, "plus")
+        self._new_btn = flat_button(
+            btn_box, "新建", self._create_new_term, primary=True, image=_plus, padx=4, pady=1
+        )
+        self._new_btn.pack(side="left", padx=(0, 2))
+        Tooltip(self._new_btn, "新建空白词条草稿")
+
+        _trash = ui_icon(btn_box, "trash")
+        self._del_btn = flat_button(
+            btn_box, "删除", self._delete_current_term, image=_trash, padx=4, pady=1
+        )
+        self._del_btn.pack(side="left", padx=(0, 2))
+        Tooltip(self._del_btn, "删除当前选中的词条（不可恢复）")
+
+        _more_btn = flat_button(btn_box, "操作 ▾", self._on_more_menu, padx=4, pady=1)
+        _more_btn.pack(side="left")
+        self._more_btn = _more_btn
+
+        # 过滤与搜索条
+        filter_box = tk.Frame(left, bg=theme.BG)
+        filter_box.pack(fill="x", pady=(0, 4))
+
+        pill_box = tk.Frame(filter_box, bg=theme.BG)
+        pill_box.pack(fill="x", pady=(0, 2))
+        self._pill_btns: dict[str, RoundedPill] = {}
+        pills = (("all", "全部", 52), ("active", "活跃", 52), ("draft", "草稿", 52), ("deprecated", "已废弃", 60))
+        for k, lbl, w in pills:
+            btn = RoundedPill(
+                pill_box,
+                text=lbl,
+                width=w,
+                height=22,
+                radius=5,
+                fill=theme.CONTROL_BG,
+                hover_fill=theme.HOVER_BG,
+                bg=theme.BG,
+                fg=theme.FG,
+                font=theme.FONT_UI_SMALL,
+                command=lambda _p=None, st=k: self._set_status_filter(st),
+            )
+            btn.pack(side="left", padx=(0, 2))
+            self._pill_btns[k] = btn
+
+        self._search_var = tk.StringVar(value="")
+        self._search_box = RoundedSearchBox(
+            filter_box,
+            textvariable=self._search_var,
+            icon=ui_icon(filter_box, "search"),
+            width=240,
+            height=22,
+            radius=5,
+            fill=theme.CONTROL_BG,
+            bg=theme.BG,
+            fg=theme.FG,
+        )
+        self._search_box.pack(fill="x", pady=(2, 2))
+        self._search_var.trace_add("write", lambda *_: self._on_search_changed())
+
+        # 词条列表容器
+        left_list_frame = tk.Frame(left, bg=theme.BG)
+        left_list_frame.pack(fill="both", expand=True)
+        self._scroll = ScrollFrame(left_list_frame, bg=theme.BG)
+        self._list_container = self._scroll.inner
+
+        # --- 右侧编辑区 ---
+        right_edit_frame = tk.Frame(right, bg=theme.BG)
+        right_edit_frame.pack(fill="both", expand=True)
+        self._edit_scroll = ScrollFrame(right_edit_frame, bg=theme.BG)
+        self._edit_container = self._edit_scroll.inner
+
+        self.on_show()
+
+    def on_show(self) -> None:
+        """页签切入或外部变动时重载术语库数据。"""
+        from tcer.core.termbase import default_termbase_path, load_termbase
+
+        self._termbase_path = default_termbase_path()
+        self._termbase = load_termbase(self._termbase_path)
+        if not self._selected_slug and self._termbase.terms:
+            self._selected_slug = self._termbase.terms[0].slug
+        elif self._selected_slug and not any(t.slug == self._selected_slug for t in self._termbase.terms):
+            self._selected_slug = self._termbase.terms[0].slug if self._termbase.terms else None
+
+        self._refresh_list()
+        self._render_editor()
+
+    def _set_status_filter(self, st: str) -> None:
+        if self._status_filter == st:
+            return
+        if not self._check_unsaved_and_confirm():
+            return
+        self._status_filter = st
+        self._refresh_list()
+
+    def _on_search_changed(self) -> None:
+        self._search_kw = self._search_var.get().strip().lower()
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        from .widgets import Card
+
+        for w in self._list_container.winfo_children():
+            w.destroy()
+        self._cards.clear()
+        self._card_map.clear()
+
+        terms = self._termbase.terms
+        counts = {
+            "all": len(terms),
+            "active": sum(1 for t in terms if t.status == "active"),
+            "draft": sum(1 for t in terms if t.status == "draft"),
+            "deprecated": sum(1 for t in terms if t.status == "deprecated"),
+        }
+
+        # 更新胶囊状态与数量
+        for k, btn in self._pill_btns.items():
+            cnt = counts.get(k, 0)
+            active = k == self._status_filter
+            bg = theme.SEL_ROW_ACTIVE if active else theme.CONTROL_BG
+            fg = theme.FG_WHITE if active else theme.MUTED
+            lbl = {"all": "全部", "active": "活跃", "draft": "草稿", "deprecated": "已废弃"}.get(k, k)
+            btn.config(text=f"{lbl} {cnt}", bg=bg, fg=fg)
+
+        self._count_lbl.config(text=f"共 {len(terms)} 个词条")
+
+        # 过滤
+        filtered = []
+        for t in terms:
+            if self._status_filter != "all" and t.status != self._status_filter:
+                continue
+            if self._search_kw:
+                blob = f"{t.pref_label} {t.slug} {t.term_en} {t.definition} {' '.join(t.alt_labels)}".lower()
+                if self._search_kw not in blob:
+                    continue
+            filtered.append(t)
+
+        if not filtered:
+            if not terms:
+                # 提示空库并引导运行考古或新建
+                empty_frame = tk.Frame(self._list_container, bg=theme.BG, pady=30)
+                empty_frame.pack(fill="x", padx=14)
+                tk.Label(
+                    empty_frame,
+                    text="当前术语库为空。\n\n"
+                         "您可以点击上方「新建」录入新词条，\n"
+                         "从操作菜单中「从考古报告合入新词」，\n"
+                         "或在会话列表中右键运行「术语考古」。",
+                    bg=theme.BG,
+                    fg=theme.MUTED,
+                    font=theme.FONT_UI,
+                    justify="center",
+                ).pack(pady=(0, 12))
+                from .widgets import flat_button
+
+                btn_row = tk.Frame(empty_frame, bg=theme.BG)
+                btn_row.pack()
+                flat_button(
+                    btn_row,
+                    "新建词条",
+                    self._create_new_term,
+                    primary=True,
+                    image=ui_icon(btn_row, "plus"),
+                ).pack(side="left", padx=3)
+                flat_button(
+                    btn_row,
+                    "合入考古提案",
+                    self._open_import_from_reports,
+                    primary=False,
+                    image=ui_icon(btn_row, "sparkle"),
+                ).pack(side="left", padx=3)
+            else:
+                tk.Label(
+                    self._list_container,
+                    text="无匹配词条",
+                    bg=theme.BG,
+                    fg=theme.MUTED,
+                    font=theme.FONT_UI,
+                    pady=20,
+                ).pack()
+            return
+
+        for t in filtered:
+            card = self._make_term_card(t)
+            self._cards.append(card)
+            self._card_map[t.slug] = card
+            if t.slug == self._selected_slug:
+                card.set_selected(True)
+
+    def _make_term_card(self, term) -> Card:
+        from .widgets import Card
+        from tcer.core.termbase import STATUS_LABELS
+
+        slug = term.slug
+        card = Card(
+            self._list_container,
+            on_click=lambda c, _s=slug: self.select_term(_s),
+            bg=theme.PANEL,
+            padx=2,
+            pady=2,
+        )
+
+        # State rail 着色
+        rail_col = (
+            theme.ACCENT
+            if term.status == "active"
+            else (theme.WARNING if term.status == "draft" else theme.MUTED)
+        )
+        card.set_state_rail(rail_col)
+
+        # Row 1: pref_label + status badge
+        row1 = tk.Frame(card.frame, bg=card._bg)
+        row1.pack(fill="x", padx=6, pady=(3, 1))
+        card.track_bg(row1)
+
+        name_lbl = tk.Label(
+            row1,
+            text=term.pref_label,
+            bg=card._bg,
+            fg=theme.FG_WHITE,
+            font=theme.FONT_UI_BOLD,
+            anchor="w",
+        )
+        name_lbl.pack(side="left", fill="x", expand=True)
+        card.track_bg(name_lbl)
+        card.bind_to(name_lbl)
+
+        st_text = STATUS_LABELS.get(term.status, term.status)
+        st_fg = (
+            theme.ACCENT
+            if term.status == "active"
+            else (theme.WARNING if term.status == "draft" else theme.MUTED)
+        )
+        st_lbl = tk.Label(
+            row1,
+            text=st_text,
+            bg=theme.PANEL_2,
+            fg=st_fg,
+            font=theme.FONT_UI_SMALL,
+            padx=4,
+            pady=1,
+        )
+        st_lbl.pack(side="right")
+        card.bind_to(st_lbl)
+
+        # Row 2: slug + term_en
+        row2 = tk.Frame(card.frame, bg=card._bg)
+        row2.pack(fill="x", padx=6, pady=(1, 1))
+        card.track_bg(row2)
+
+        sub_parts = [term.slug]
+        if term.term_en:
+            sub_parts.append(term.term_en)
+        if term.mda_layer:
+            sub_parts.append(f"[{_MDA_CN.get(term.mda_layer, term.mda_layer)}]")
+
+        sub_lbl = tk.Label(
+            row2,
+            text=" · ".join(sub_parts),
+            bg=card._bg,
+            fg=theme.MUTED,
+            font=theme.FONT_MONO,
+            anchor="w",
+        )
+        sub_lbl.pack(side="left", fill="x", expand=True)
+        card.track_bg(sub_lbl)
+        card.bind_to(sub_lbl)
+
+        # Row 3: definition snippet
+        def_txt = (term.definition or "").strip().replace("\n", " ")
+        if len(def_txt) > 36:
+            def_txt = def_txt[:35] + "…"
+        if def_txt:
+            row3 = tk.Frame(card.frame, bg=card._bg)
+            row3.pack(fill="x", padx=6, pady=(1, 3))
+            card.track_bg(row3)
+
+            desc_lbl = tk.Label(
+                row3,
+                text=def_txt,
+                bg=card._bg,
+                fg=theme.MUTED,
+                font=theme.FONT_UI_SMALL,
+                anchor="w",
+            )
+            desc_lbl.pack(side="left", fill="x", expand=True)
+            card.track_bg(desc_lbl)
+            card.bind_to(desc_lbl)
+
+        return card
+
+    def _get_form_snapshot(self) -> dict | None:
+        if not hasattr(self, "_f_slug") or not self._f_slug.winfo_exists():
+            return None
+        return {
+            "slug": self._f_slug.get().strip(),
+            "pref_label": self._f_pref.get().strip(),
+            "status": self._f_status.get().strip(),
+            "term_en": self._f_en.get().strip(),
+            "mda_layer": self._f_mda.get().strip(),
+            "owner": self._f_owner.get().strip(),
+            "alt_labels": self._f_alts.get().strip(),
+            "definition": self._f_def.get("1.0", "end").strip(),
+            "renderings": {
+                rk: ent.get().strip()
+                for rk, ent in self._rendering_entries.items()
+                if ent.winfo_exists()
+            },
+            "misconceptions": [
+                {
+                    "role": r["role_var"].get().strip(),
+                    "wrong": r["wrong_ent"].get().strip(),
+                    "actual": r["act_ent"].get().strip(),
+                }
+                for r in self._misconception_rows
+                if r["wrong_ent"].winfo_exists()
+            ],
+            "notes": self._f_notes.get().strip(),
+        }
+
+    def _has_unsaved_changes(self) -> bool:
+        if self._baseline_snapshot is None:
+            return False
+        cur = self._get_form_snapshot()
+        if cur is None:
+            return False
+        return cur != self._baseline_snapshot
+
+    def _check_unsaved_and_confirm(self) -> bool:
+        if not self._has_unsaved_changes():
+            return True
+        from tkinter import messagebox
+        parent_win = getattr(self.controller, "root", None) or self.container.winfo_toplevel()
+        pref = self._f_pref.get().strip() if hasattr(self, "_f_pref") and self._f_pref.winfo_exists() else ""
+        pref = pref or self._selected_slug or "当前词条"
+        res = messagebox.askyesnocancel(
+            "未保存修改",
+            f"词条「{pref}」有未保存的修改，是否在切换前保存？",
+            parent=parent_win,
+        )
+        if res is True:
+            return self._save_current_entry()
+        elif res is False:
+            return True
+        else:
+            return False
+
+    def select_term(self, slug: str) -> None:
+        if self._selected_slug == slug and self._card_map.get(slug):
+            return
+        if not self._check_unsaved_and_confirm():
+            return
+        if self._selected_slug and self._selected_slug in self._card_map:
+            self._card_map[self._selected_slug].set_selected(False)
+        self._selected_slug = slug
+        if slug in self._card_map:
+            self._card_map[slug].set_selected(True)
+        self._render_editor()
+
+    def _render_editor(self) -> None:
+        from .widgets import flat_button
+        from tcer.core.termbase import MDA_LAYERS, ROLE_LABELS, STATUS_LABELS
+
+        for w in self._edit_container.winfo_children():
+            w.destroy()
+        self._misconception_rows.clear()
+        self._rendering_entries.clear()
+
+        term = next((t for t in self._termbase.terms if t.slug == self._selected_slug), None)
+        if not term:
+            empty = tk.Frame(self._edit_container, bg=theme.BG, pady=60)
+            empty.pack(fill="both", expand=True)
+            tk.Label(
+                empty,
+                text="请在左侧选择词条，或点击上方「新建」创建新词条",
+                bg=theme.BG,
+                fg=theme.MUTED,
+                font=theme.FONT_UI,
+            ).pack()
+            return
+
+        # 头部控制栏
+        head = tk.Frame(self._edit_container, bg=theme.PANEL, padx=14, pady=10)
+        head.pack(fill="x")
+
+        head_left = tk.Frame(head, bg=theme.PANEL)
+        head_left.pack(side="left", fill="x", expand=True)
+
+        tk.Label(
+            head_left,
+            text=f"编辑词条: {term.pref_label}",
+            bg=theme.PANEL,
+            fg=theme.FG_WHITE,
+            font=theme.FONT_HEADING,
+        ).pack(anchor="w")
+
+        self._save_status_lbl = tk.Label(
+            head_left,
+            text="",
+            bg=theme.PANEL,
+            fg=theme.SUCCESS,
+            font=theme.FONT_UI_SMALL,
+        )
+        self._save_status_lbl.pack(anchor="w", pady=(2, 0))
+
+        head_right = tk.Frame(head, bg=theme.PANEL)
+        head_right.pack(side="right")
+
+        _save_icon = ui_icon(head_right, "save")
+        save_btn = flat_button(
+            head_right,
+            "保存词条",
+            self._save_current_entry,
+            primary=True,
+            image=_save_icon,
+            padx=12,
+            pady=4,
+        )
+        save_btn.pack(side="right")
+
+        # 表单主体
+        body = tk.Frame(self._edit_container, bg=theme.BG, padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+
+        def make_entry(parent, label_text: str, default_val: str = "", width: int = 24):
+            f = tk.Frame(parent, bg=theme.BG)
+            f.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            tk.Label(f, text=label_text, bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
+                anchor="w"
+            )
+            ent = tk.Entry(
+                f,
+                bg=theme.CONTROL_BG,
+                fg=theme.FG,
+                insertbackground=theme.FG,
+                font=theme.FONT_UI,
+                relief="flat",
+                highlightthickness=0,
+            )
+            ent.insert(0, default_val)
+            ent.pack(fill="x", pady=(2, 0))
+            return ent
+
+        # Row 1: 主标签 / 标识 / 状态
+        r1 = tk.Frame(body, bg=theme.BG)
+        r1.pack(fill="x", pady=(0, theme.PAD_M))
+        self._f_pref = make_entry(r1, "主标签（必填）", term.pref_label)
+        self._f_slug = make_entry(r1, "标识（小写英文、数字、连字符）", term.slug)
+
+        # Status 下拉（项目惯例 ttk.Combobox；显示纯中文，保存时反查 key）
+        st_frame = tk.Frame(r1, bg=theme.BG)
+        st_frame.pack(side="left", padx=(0, theme.PAD_M))
+        tk.Label(st_frame, text="状态", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
+            anchor="w"
+        )
+        self._f_status = tk.StringVar(
+            value=_STATUS_CN.get(term.status, _STATUS_CN["active"]))
+        st_menu = ttk.Combobox(
+            st_frame, textvariable=self._f_status, state="readonly",
+            values=list(_STATUS_CN.values()))
+        st_menu.pack(pady=(2, 0))
+
+        # Row 2: 英文名 / 概念层面 / 负责人
+        r2 = tk.Frame(body, bg=theme.BG)
+        r2.pack(fill="x", pady=(0, theme.PAD_M))
+        self._f_en = make_entry(r2, "英文名称", term.term_en)
+
+        mda_frame = tk.Frame(r2, bg=theme.BG)
+        mda_frame.pack(side="left", padx=(0, theme.PAD_M))
+        _mda_lbl = tk.Label(mda_frame, text="概念层面", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL)
+        _mda_lbl.pack(anchor="w")
+        Tooltip(_mda_lbl, "机制＝代码实现规则；动态＝实际运行行为；体验＝用户感受。不确定可留空")
+        self._f_mda = tk.StringVar(
+            value=_MDA_CN.get(term.mda_layer or "", _MDA_CN[""]))
+        mda_menu = ttk.Combobox(
+            mda_frame, textvariable=self._f_mda, state="readonly",
+            values=list(_MDA_CN.values()))
+        mda_menu.pack(pady=(2, 0))
+
+        self._f_owner = make_entry(r2, "负责人", term.owner)
+
+        # Row 3: 别名
+        r3 = tk.Frame(body, bg=theme.BG)
+        r3.pack(fill="x", pady=(0, theme.PAD_M))
+        alt_str = ", ".join(term.alt_labels)
+        self._f_alts = make_entry(r3, "别名与俗称（多个用逗号分隔）", alt_str)
+
+        # Row 4: 释义
+        r4 = tk.Frame(body, bg=theme.BG)
+        r4.pack(fill="x", pady=(0, theme.PAD_M + theme.PAD_XS))
+        tk.Label(
+            r4, text="释义（必填）", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL
+        ).pack(anchor="w")
+        self._f_def = tk.Text(
+            r4,
+            height=4,
+            bg=theme.CONTROL_BG,
+            fg=theme.FG,
+            insertbackground=theme.FG,
+            font=theme.FONT_UI,
+            relief="flat",
+            padx=6,
+            pady=6,
+            highlightthickness=0,
+        )
+        self._f_def.insert("1.0", term.definition)
+        self._f_def.pack(fill="x", pady=(2, 0))
+
+        # Section: 各职能怎么理解它
+        r_rend = tk.Frame(body, bg=theme.BG)
+        r_rend.pack(fill="x", pady=(theme.PAD_S, theme.PAD_M + theme.PAD_XS))
+        _rend_lbl = tk.Label(
+            r_rend,
+            text="各职能怎么理解它",
+            bg=theme.BG,
+            fg=theme.FG_WHITE,
+            font=theme.FONT_UI_BOLD,
+        )
+        _rend_lbl.pack(anchor="w", pady=(0, theme.PAD_S))
+        Tooltip(_rend_lbl, "同一条术语在不同职能语境下的说法；留空的职能在歧义检测中沿用主释义")
+
+        rend_grid = tk.Frame(r_rend, bg=theme.BG)
+        rend_grid.pack(fill="x")
+        for i, (rk, rlabel) in enumerate(ROLE_LABELS.items()):
+            row_idx = i // 2
+            col_idx = i % 2
+            cell = tk.Frame(rend_grid, bg=theme.BG)
+            cell.grid(row=row_idx, column=col_idx, sticky="ew",
+                      padx=(0, theme.PAD_M), pady=(0, theme.PAD_S + theme.PAD_XS))
+            rend_grid.columnconfigure(col_idx, weight=1)
+
+            tk.Label(
+                cell, text=f"{rlabel}：", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL
+            ).pack(anchor="w")
+            ent = tk.Entry(
+                cell,
+                bg=theme.CONTROL_BG,
+                fg=theme.FG,
+                insertbackground=theme.FG,
+                font=theme.FONT_UI_SMALL,
+                relief="flat",
+                highlightthickness=0,
+            )
+            ent.insert(0, term.renderings.get(rk, ""))
+            ent.pack(fill="x", pady=(2, 0))
+            self._rendering_entries[rk] = ent
+
+        # Section: 常见误解
+        r_misc = tk.Frame(body, bg=theme.BG)
+        r_misc.pack(fill="x", pady=(theme.PAD_S, theme.PAD_M + theme.PAD_XS))
+
+        misc_head = tk.Frame(r_misc, bg=theme.BG)
+        misc_head.pack(fill="x", pady=(0, theme.PAD_S))
+        _misc_lbl = tk.Label(
+            misc_head,
+            text="常见误解",
+            bg=theme.BG,
+            fg=theme.FG_WHITE,
+            font=theme.FONT_UI_BOLD,
+        )
+        _misc_lbl.pack(side="left")
+        Tooltip(_misc_lbl, "该词条容易被哪个职能误解成什么、真相是什么；歧义检测据此生成提醒")
+
+        flat_button(
+            misc_head,
+            "添加一条误解",
+            self._add_misconception_row,
+            padx=6,
+            pady=1,
+        ).pack(side="right")
+
+        self._misc_container = tk.Frame(r_misc, bg=theme.BG)
+        self._misc_container.pack(fill="x")
+
+        for m in term.misconceptions:
+            self._add_misconception_row(m)
+
+        # Row Notes
+        r_notes = tk.Frame(body, bg=theme.BG)
+        r_notes.pack(fill="x", pady=(theme.PAD_S, theme.PAD_M + theme.PAD_XS))
+        self._f_notes = make_entry(r_notes, "备注", term.notes)
+
+        # 记录基线快照供防丢脏检查
+        self._baseline_snapshot = self._get_form_snapshot()
+
+    def _add_misconception_row(self, data: dict | None = None) -> None:
+        from .widgets import flat_button
+        from tcer.core.termbase import ROLE_LABELS, _ROLE_KEY_ALIASES
+
+        row_frame = tk.Frame(self._misc_container, bg=theme.PANEL, padx=8, pady=4)
+        row_frame.pack(fill="x", pady=(0, theme.PAD_S))
+
+        # 职能下拉（纯中文显示，保存反查 key）
+        raw_role = (data or {}).get("role", "designer")
+        role_key = _ROLE_KEY_ALIASES.get(raw_role, raw_role)
+        if role_key not in ROLE_LABELS:
+            role_key = "designer"
+
+        role_var = tk.StringVar(value=ROLE_LABELS.get(role_key, "策划"))
+        role_menu = ttk.Combobox(
+            row_frame, textvariable=role_var, state="readonly", width=8,
+            values=list(ROLE_LABELS.values()))
+        role_menu.pack(side="left", padx=(0, theme.PAD_S))
+
+        # 误解内容
+        tk.Label(row_frame, text="误读以为：", bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
+            side="left"
+        )
+        wrong_ent = tk.Entry(
+            row_frame,
+            bg=theme.CONTROL_BG,
+            fg=theme.FG,
+            insertbackground=theme.FG,
+            font=theme.FONT_UI_SMALL,
+            relief="flat",
+            width=22,
+            highlightthickness=0,
+        )
+        wrong_ent.insert(0, (data or {}).get("wrong", ""))
+        wrong_ent.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
+
+        # 澄清
+        tk.Label(row_frame, text="实际是：", bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
+            side="left"
+        )
+        act_ent = tk.Entry(
+            row_frame,
+            bg=theme.CONTROL_BG,
+            fg=theme.FG,
+            insertbackground=theme.FG,
+            font=theme.FONT_UI_SMALL,
+            relief="flat",
+            width=22,
+            highlightthickness=0,
+        )
+        act_ent.insert(0, (data or {}).get("actual", ""))
+        act_ent.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
+
+        # 删除行（小图标按钮，不用文本符号）
+        del_btn = flat_button(
+            row_frame,
+            "",
+            lambda: self._remove_misconception_row(row_item),
+            image=ui_icon(row_frame, "trash"),
+            padx=4,
+            pady=1,
+        )
+        del_btn.pack(side="right")
+
+        row_item = {
+            "frame": row_frame,
+            "role_var": role_var,
+            "wrong_ent": wrong_ent,
+            "act_ent": act_ent,
+        }
+        self._misconception_rows.append(row_item)
+
+    def _remove_misconception_row(self, row_item: dict) -> None:
+        if row_item in self._misconception_rows:
+            self._misconception_rows.remove(row_item)
+            row_item["frame"].destroy()
+
+    def _save_current_entry(self) -> bool:
+        import re
+        from tcer.core.termbase import save_termbase, TermEntry, validate_entry
+
+        if not self._selected_slug:
+            return False
+
+        slug = self._f_slug.get().strip()
+        norm_slug = re.sub(r"[^a-zA-Z0-9-]+", "-", slug.replace("_", "-")).lower().strip("-")
+        if norm_slug and norm_slug != slug:
+            slug = norm_slug
+            self._f_slug.delete(0, "end")
+            self._f_slug.insert(0, slug)
+
+        pref_label = self._f_pref.get().strip()
+
+        status = _STATUS_CN_KEY.get(self._f_status.get().strip(), "active")
+
+        term_en = self._f_en.get().strip()
+
+        mda_layer = _MDA_CN_KEY.get(self._f_mda.get().strip(), "")
+
+        owner = self._f_owner.get().strip()
+        notes = self._f_notes.get().strip()
+
+        alt_raw = self._f_alts.get().strip()
+        raw_parts = re.split(r"[,，;；\n]+", alt_raw)
+        seen_alts = set()
+        alt_labels = []
+        for a in raw_parts:
+            s = a.strip()
+            if s and s != pref_label and s not in seen_alts:
+                seen_alts.add(s)
+                alt_labels.append(s)
+
+        definition = self._f_def.get("1.0", "end").strip()
+
+        renderings = {}
+        for rk, ent in self._rendering_entries.items():
+            val = ent.get().strip()
+            if val:
+                renderings[rk] = val
+
+        misconceptions = []
+        from tcer.core.termbase import ROLE_LABELS as _RL
+        _role_cn_key = {v: k for k, v in _RL.items()}
+        for r_item in self._misconception_rows:
+            role = _role_cn_key.get(r_item["role_var"].get().strip(), "designer")
+            wrong = r_item["wrong_ent"].get().strip()
+            actual = r_item["act_ent"].get().strip()
+            if wrong or actual:
+                misconceptions.append({"role": role, "wrong": wrong, "actual": actual})
+
+        orig_term = next((t for t in self._termbase.terms if t.slug == self._selected_slug), None)
+        extra = dict(orig_term.extra) if orig_term and orig_term.extra else {}
+
+        new_entry = TermEntry(
+            slug=slug,
+            pref_label=pref_label,
+            term_en=term_en,
+            alt_labels=alt_labels,
+            mda_layer=mda_layer,
+            status=status,
+            owner=owner,
+            definition=definition,
+            renderings=renderings,
+            misconceptions=misconceptions,
+            notes=notes,
+            extra=extra,
+        )
+
+        other_slugs = {t.slug for t in self._termbase.terms if t.slug != self._selected_slug}
+        errs = validate_entry(new_entry, other_slugs)
+        if errs:
+            self._save_status_lbl.config(text=f"保存失败: {errs[0]}", fg=theme.ERROR)
+            return False
+
+        # 更新词条并原子保存
+        idx = next((i for i, t in enumerate(self._termbase.terms) if t.slug == self._selected_slug), -1)
+        if idx >= 0:
+            self._termbase.terms[idx] = new_entry
+        else:
+            self._termbase.terms.append(new_entry)
+
+        self._selected_slug = slug
+        save_termbase(self._termbase, self._termbase_path)
+        self._baseline_snapshot = self._get_form_snapshot()
+        self._save_status_lbl.config(text="✓ 已保存修改", fg=theme.SUCCESS)
+        self._refresh_list()
+        return True
+
+    def _create_new_term(self) -> None:
+        if not self._check_unsaved_and_confirm():
+            return
+        from tcer.core.termbase import save_termbase, TermEntry
+
+        base_slug = "new-concept"
+        slug = base_slug
+        count = 1
+        existing = {t.slug for t in self._termbase.terms}
+        while slug in existing:
+            slug = f"{base_slug}-{count}"
+            count += 1
+
+        entry = TermEntry(
+            slug=slug,
+            pref_label="新词条",
+            status="draft",
+            definition="",
+        )
+        self._termbase.terms.insert(0, entry)
+        self._selected_slug = slug
+        save_termbase(self._termbase, self._termbase_path)
+        self._refresh_list()
+        self._render_editor()
+        if hasattr(self, "_f_pref") and self._f_pref.winfo_exists():
+            self._f_pref.focus_set()
+            self._f_pref.select_range(0, "end")
+
+    def _delete_current_term(self) -> None:
+        from tkinter import messagebox
+        from tcer.core.termbase import save_termbase
+
+        if not self._selected_slug:
+            return
+
+        term = next((t for t in self._termbase.terms if t.slug == self._selected_slug), None)
+        if not term:
+            return
+
+        parent_win = getattr(self.controller, "root", None) or self.container.winfo_toplevel()
+        if not messagebox.askyesno(
+            "删除词条",
+            f"确定彻底删除词条「{term.pref_label}」（{term.slug}）？\n（该操作不可恢复）",
+            parent=parent_win,
+        ):
+            return
+
+        self._baseline_snapshot = None
+        self._termbase.terms = [t for t in self._termbase.terms if t.slug != self._selected_slug]
+        self._selected_slug = self._termbase.terms[0].slug if self._termbase.terms else None
+        save_termbase(self._termbase, self._termbase_path)
+        self._refresh_list()
+        self._render_editor()
+
+    def _on_more_menu(self) -> None:
+        from .widgets import FlatMenu
+
+        menu = FlatMenu(self.container)
+        menu.add_command(label="从考古报告合入新词…", command=self._open_import_from_reports)
+        menu.add_command(label="粘贴导入词条（JSON）…", command=self._open_import)
+        menu.add_separator()
+        menu.add_command(label="按名称或黑话查词条", command=self._open_lookup)
+        menu.add_command(label="检测一段话的误解风险", command=self._open_ambiguity)
+        menu.add_command(label="从会话历史挖掘术语", command=self._open_archaeology)
+        menu.add_separator()
+        menu.add_command(label="导出词条库（JSON）…", command=self._export_json)
+        menu.add_command(label="导出对照表（Markdown）…", command=self._export_markdown)
+        menu.add_separator()
+        menu.add_command(label="切换词条库文件…", command=self._choose_path)
+
+        x = self._more_btn.winfo_rootx()
+        y = self._more_btn.winfo_rooty() + self._more_btn.winfo_height()
+        menu.tk_popup(x, y)
+
+    def _open_import_from_reports(self) -> None:
+        from .popups import TermImportPopup
+
+        popup = TermImportPopup(self.container, on_imported=self.on_show)
+        popup._load_from_latest_report()
+
+    def _open_lookup(self) -> None:
+        from .popups import TermLookupPopup
+
+        TermLookupPopup(self.container, controller=self.controller, termbase=self._termbase)
+
+    def _open_ambiguity(self) -> None:
+        from .popups import AmbiguityDetectPopup
+
+        AmbiguityDetectPopup(self.container, controller=self.controller, termbase=self._termbase)
+
+    def _open_archaeology(self) -> None:
+        if self.controller and hasattr(self.controller, "run_terms_archaeology_current"):
+            self.controller.run_terms_archaeology_current()
+        else:
+            from tkinter import messagebox
+
+            messagebox.showinfo(
+                "术语考古",
+                "请在左侧会话列表中右键点击具体会话，选择「术语考古」，\n"
+                "或在分析完成后从会话上下文触发。",
+                parent=self.container.winfo_toplevel(),
+            )
+
+    def _open_import(self) -> None:
+        from .popups import TermImportPopup
+
+        TermImportPopup(self.container, on_imported=self.on_show)
+
+    def _export_json(self) -> None:
+        import json
+        from tkinter import filedialog, messagebox
+
+        p = filedialog.asksaveasfilename(
+            title="导出词条库为 JSON",
+            defaultextension=".json",
+            filetypes=[("JSON 文件", "*.json"), ("全部文件", "*.*")],
+            parent=self.container.winfo_toplevel(),
+        )
+        if not p:
+            return
+        try:
+            from tcer.core.termbase import save_termbase
+
+            save_termbase(self._termbase, Path(p))
+            messagebox.showinfo("导出成功", f"词条库已导出至:\n{p}", parent=self.container.winfo_toplevel())
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e), parent=self.container.winfo_toplevel())
+
+    def _export_markdown(self) -> None:
+        from tkinter import filedialog, messagebox
+        from tcer.core.termbase import export_markdown
+
+        p = filedialog.asksaveasfilename(
+            title="导出词条库为 Markdown",
+            defaultextension=".md",
+            filetypes=[("Markdown 文件", "*.md"), ("全部文件", "*.*")],
+            parent=self.container.winfo_toplevel(),
+        )
+        if not p:
+            return
+        try:
+            md = export_markdown(self._termbase)
+            Path(p).write_text(md, encoding="utf-8")
+            messagebox.showinfo("导出成功", f"Markdown 对照表已导出至:\n{p}", parent=self.container.winfo_toplevel())
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e), parent=self.container.winfo_toplevel())
+
+    def _choose_path(self) -> None:
+        from tkinter import filedialog
+        from tcer.core import ui_prefs
+
+        chosen = filedialog.askopenfilename(
+            title="选择词条库 JSON 文件",
+            filetypes=[("JSON 文件", "*.json"), ("全部文件", "*.*")],
+            parent=self.container.winfo_toplevel(),
+        )
+        if not chosen:
+            return
+        ui_prefs.set_termbase_path(chosen)
+        self.on_show()
