@@ -1752,24 +1752,22 @@ class SessionColumn:
         dur_ms = getattr(r.usage, "session_duration_ms", 0) or 0
         act_ms = getattr(r.usage, "active_duration_ms", None) or 0
         dur = fmt_duration_ms(dur_ms) if dur_ms else "-"
-        # 当既有整场历经时长、又有 AI 计算耗时且两者存在显著差距时，卡片呈现：2.0 小时 (AI 28分)
-        dur_card = dur
-        if dur_ms > 0 and act_ms > 0 and act_ms < dur_ms * 0.95:
-            dur_card = f"{dur} (AI {fmt_duration_ms(act_ms, short=True)})"
-        sum_parts = [p for p in (model_name, dur_card) if p and p != "-"]
+        # 卡片摘要行保持极简（模型短名 · 持续时长），避免窄栏拥挤截断
+        sum_parts = [p for p in (model_name, dur) if p and p != "-"]
         sum_row = tk.Frame(card.frame, bg=card._bg)
         sum_row.pack(fill="x", padx=6, pady=(1, 3))
         card.track_bg(sum_row)
-        sum_lbl = tk.Label(sum_row, text=" · ".join(sum_parts) or "-",
-                           bg=card._bg, fg=theme.MUTED,
-                           font=theme.FONT_UI_SMALL, anchor="w")
-        sum_lbl.pack(side="left", fill="x", expand=True)
 
+        # 关键：先 pack 右侧金额（固定宽度优先保证），再 pack 左侧可伸缩摘要，绝不发生金额截断
         cost_fg = theme.WARNING if r.cost >= 50.0 else theme.FG
         cost_lbl = tk.Label(sum_row, text=f"${r.cost:.2f}", bg=card._bg, fg=cost_fg,
                             font=theme.FONT_VALUE, anchor="e")
         cost_lbl.pack(side="right", padx=(4, 0))
 
+        sum_lbl = tk.Label(sum_row, text=" · ".join(sum_parts) or "-",
+                           bg=card._bg, fg=theme.MUTED,
+                           font=theme.FONT_UI_SMALL, anchor="w")
+        sum_lbl.pack(side="left", fill="x", expand=True)
         # Tooltip：完整标题 + ID + 详细摘要（回合/LOC/返工在此悬浮可见）
         turns = r.usage.assistant_msgs
         net_loc = r.net_loc or 0
