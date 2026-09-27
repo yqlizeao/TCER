@@ -442,10 +442,12 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
 
     if saw_cost:
         u.reported_cost_usd = total_cost
-    if active_duration_ms > 0:
+    if u.started_at and u.ended_at and u.ended_at > u.started_at:
+        u.session_duration_ms = u.ended_at - u.started_at
+    elif active_duration_ms > 0:
         u.session_duration_ms = active_duration_ms
     elif u.started_at and u.ended_at:
-        u.session_duration_ms = u.ended_at - u.started_at
+        u.session_duration_ms = max(0, u.ended_at - u.started_at)
     return u
 
 

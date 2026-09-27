@@ -130,6 +130,27 @@ def test_aggregate_usage_basic(tmp_path):
     assert t.duration_ms == 900
     assert t.model == "claude-opus-4-8"
 
+def test_multiturn_wall_clock_duration(tmp_path):
+    """When session spans time, session_duration_ms must reflect wall clock
+    (ended_at - started_at) matching the metric panel and card displays."""
+    t0 = "2026-09-27T10:00:00.000Z"
+    t1 = "2026-09-27T12:00:00.000Z"  # 2 hours later
+    p = _write_omp(tmp_path / "s.jsonl", [
+        {"type": "session", "id": "s1", "timestamp": t0, "cwd": "/repo"},
+        {"type": "message", "timestamp": t0, "message": {"role": "user", "content": "hi"}},
+        {"type": "message", "timestamp": t0, "message": {"role": "assistant",
+                                                         "usage": {"input": 10, "output": 5, "totalTokens": 15},
+                                                         "duration": 5000}},
+        {"type": "message", "timestamp": t1, "message": {"role": "user", "content": "next"}},
+        {"type": "message", "timestamp": t1, "message": {"role": "assistant",
+                                                         "usage": {"input": 20, "output": 10, "totalTokens": 30},
+                                                         "duration": 5000}},
+    ])
+    u = omp_reader.aggregate_usage(p)
+    # Total active generation duration is only 10s (5000ms + 5000ms)
+    # but wall-clock span is 2 hours (7200000ms)
+    assert u.session_duration_ms == 2 * 3600 * 1000
+
 
 def test_model_change_strips_provider_prefix(tmp_path):
     """model_change carries 'provider/model'; pricing.normalize drops the prefix."""
