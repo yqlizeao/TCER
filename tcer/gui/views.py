@@ -3430,8 +3430,8 @@ class ModelCompareView:
                          font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
             v_name = pricing.vendor(mc.model_id)
             if v_name:
-                tk.Label(row0, text=v_name, bg=theme.CONTROL_BG, fg=theme.MUTED,
-                         font=theme.FONT_UI_SMALL, padx=4, pady=1).pack(side="left", padx=(0, 6))
+                tk.Label(row0, text=v_name, bg=theme.VENDOR_BADGE_BG, fg=theme.VENDOR_BADGE_FG,
+                         font=theme.FONT_UI_SMALL_BOLD, padx=6, pady=1).pack(side="left", padx=(0, 8))
             name_lbl = tk.Label(row0, text=mc.display_name, bg=theme.PANEL_2, fg=theme.FG_WHITE,
                                 font=theme.FONT_VALUE, anchor="w")
             name_lbl.pack(side="left")
@@ -3588,6 +3588,39 @@ class ModelCompareView:
             gs.body.pack_forget()
         else:
             gs.body.pack(fill="x")
+def _format_model_description(extra: str) -> str:
+    """Format description text into clean bullet items with non-breaking spaces.
+
+    Prevents Tkinter wraplength from creating awkward line breaks after ASCII words
+    (e.g. '2026 ', 'Bug ', 'Adaptive ') when followed by CJK characters.
+    """
+    import re
+    parts = [p.strip() for p in extra.split("；") if p.strip()]
+    if not parts:
+        return ""
+    items: list[str] = []
+    current_acc: list[str] = []
+    for p in parts[1:]:
+        if any(p.startswith(pref) for pref in ("Batch", "Fast", "缓存读", "数据驻留", "分段计费")):
+            current_acc.append(p)
+        else:
+            if current_acc:
+                items.append("；".join(current_acc))
+                current_acc = []
+            items.append(p)
+    if current_acc:
+        items.append("；".join(current_acc))
+
+    nbsp = "\u00a0"
+    def _glue(text: str) -> str:
+        t = re.sub(r'([\u4e00-\u9fa5])\s+([A-Za-z0-9])', lambda m: m.group(1) + nbsp + m.group(2), text)
+        return re.sub(r'([A-Za-z0-9])\s+([\u4e00-\u9fa5])', lambda m: m.group(1) + nbsp + m.group(2), t)
+
+    res = [f"\nℹ️ 描述：{_glue(parts[0])}"]
+    for it in items:
+        res.append(f"  • {_glue(it)}")
+    return "\n".join(res)
+
 
 def _model_price_tip(mc) -> str:
     """Tooltip text: a model's full list price (the four $/MTok billing rates).
@@ -3613,7 +3646,7 @@ def _model_price_tip(mc) -> str:
     v_prefix = f"[{v}] " if v else ""
     extra = pricing.note_for(mc.model_id)
     if extra:
-        note += f"\nℹ️ 描述：{extra}"
+        note += _format_model_description(extra)
     return (
         f"{v_prefix}{mc.display_name} · {title}（$/百万 Token）\n"
         f"输入　　　{_rate(r['input'])}\n"

@@ -73,7 +73,7 @@ class Tooltip:
         self.tip.configure(bg=theme.BORDER)  # 外层露 1px 作边框（深色主题）
         lbl = tk.Label(self.tip, text=self.text, justify="left",
                        bg=theme.PANEL_2, fg=theme.FG,
-                       wraplength=460, font=theme.FONT_UI, padx=8, pady=5)
+                       wraplength=540, font=theme.FONT_UI, padx=10, pady=6)
         lbl.pack(padx=1, pady=1)  # 1px 边框 = Toplevel(bg=BORDER) 透出
         self.tip.update_idletasks()
         tip_w = max(160, self.tip.winfo_reqwidth())

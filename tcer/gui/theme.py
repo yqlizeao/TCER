@@ -33,6 +33,9 @@ HOVER_ACCENT = "#3b82f6"    # 活力焦点蓝 hover
 SEL_ROW_BG = "#1e293b"      # 非聚焦选中底色
 SEL_ROW_ACTIVE = "#1e3a8a"  # 聚焦高亮底色 (Cobalt 宝石蓝，与卡片/高能主题浑然一体)
 ACCENT = "#2563eb"          # 充满精气神的现代高能焦点蓝
+VENDOR_BADGE_BG = "#1a365d"    # 模型对比厂商铭牌暗蓝底色（高对比度）
+VENDOR_BADGE_FG = "#93c5fd"    # 模型对比厂商铭牌清亮冰蓝文本（清晰醒目）
+
 
 # rail（左侧竖条）宽度 SSOT：3px=内容卡选中/数据状态轨；2px=导航指示条（活动栏/页签）
 RAIL_W = 3

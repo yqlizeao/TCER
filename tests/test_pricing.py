@@ -408,7 +408,9 @@ def test_model_price_tip_display():
     assert "输出　　　$15/百万" in tip
     assert "缓存创建　$3.75/百万" in tip
     assert "缓存命中　$0.3/百万" in tip
-    assert "ℹ️ 描述：Anthropic 混合推理模型" in tip
+    assert "ℹ️ 描述：" in tip
+    assert "Anthropic" in tip and "混合推理模型" in tip
+    assert "  • " in tip
 
     # 未知模型应展示默认配置价警示
     unknown_mc = SimpleNamespace(model_id="unknown-test-model", display_name="Unknown Model")
