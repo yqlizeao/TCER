@@ -146,6 +146,7 @@ def report_row_dict(r: SessionReport) -> dict:
         "api_calls": r.usage.api_calls,
         "avg_request_latency_ms": r.avg_request_latency_ms,
         "session_duration_minutes": r.session_duration_minutes,
+        "active_duration_minutes": r.active_duration_minutes,
         # --- tool usage ---
         "read_write_ratio": r.read_write_ratio,
         "edit_ratio": r.edit_ratio,
@@ -278,7 +279,7 @@ _CSV_FIELDS = [
     "task_type", "ta_tcer",
     "score", "tier", "score_output_axis", "score_cost_axis", "score_quality_axis",
     "code_added", "code_deleted", "churn_ratio", "unseen_writes",
-    "api_calls", "avg_request_latency_ms", "session_duration_minutes",
+    "api_calls", "avg_request_latency_ms", "session_duration_minutes", "active_duration_minutes",
     "read_write_ratio", "edit_ratio", "exploration_ratio",
     "cache_efficiency", "cache_write_ratio", "non_cached_input_ratio",
     "high_churn_file_count", "test_net_loc", "doc_net_loc", "test_loc_ratio", "doc_loc_ratio",

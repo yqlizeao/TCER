@@ -215,6 +215,12 @@ class TokenUsage:
         """
         return self.assistant_msgs
 
+    @property
+    def active_duration_ms(self) -> int | None:
+        """Sum of authoritative AI generation durations across turns, if available."""
+        durs = [t.duration_ms for t in self.turn_stats if t.duration_ms]
+        return sum(durs) if durs else None
+
     def bucket(self, model: str) -> ModelUsage:
         """Return (creating if needed) the per-model bucket for ``model``."""
         mu = self.per_model.get(model)
@@ -456,6 +462,7 @@ class SessionReport:
     # --- timing metrics ---
     avg_request_latency_ms: float | None = None  # mean(turn_stats.duration_ms)，cc-switch「平均延迟」同口径
     session_duration_minutes: float | None = None  # session_duration_ms / 60000
+    active_duration_minutes: float | None = None  # active_duration_ms / 60000 (纯计算耗时)
     # --- tool usage pattern ---
     read_write_ratio: float | None = None  # Read / (Write + Edit)
     edit_ratio: float | None = None  # Edit / (Edit + Write)

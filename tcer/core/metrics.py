@@ -1487,6 +1487,7 @@ def compute(
     _dur_ok = meta.source in ("grok", "omp", "pi")
     avg_turn_lat = avg_request_latency_ms(u) if _dur_ok else None
     session_dur_min = (u.session_duration_ms / 60000) if u.session_duration_ms else None
+    active_dur_min = (u.active_duration_ms / 60000) if (u.active_duration_ms and _dur_ok) else None
 
     # --- tool usage pattern ---
     tool_m = tool_usage_metrics(u)
@@ -1613,6 +1614,7 @@ def compute(
         # --- timing ---
         avg_request_latency_ms=avg_turn_lat,
         session_duration_minutes=session_dur_min,
+        active_duration_minutes=active_dur_min,
         # --- tool usage ---
         read_write_ratio=tool_m["read_write_ratio"],
         edit_ratio=tool_m["edit_ratio"],

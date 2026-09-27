@@ -80,7 +80,11 @@ GROUPS: list[Group] = [
         Metric("started", "开始时间", "", "会话首个事件的时间戳（Claude 为首条助手回复；其余源含会话头/首条用户消息）。", "basic"),
         Metric("last_time", "结束时间", "", "会话最后事件的时间戳（Claude 为末条助手回复；其余源含收尾事件），配合「开始时间」可判断活跃时段。", "basic"),
         Metric("duration", "持续时长", "",
-               "首条到末条助手回复的时间差，含用户阅读暂停，非 AI 纯计算时间。", "basic"),
+               "会话从首条事件到末条事件的真实跨度（历经时长），含用户阅读、测试、排错与暂停等待。", "basic"),
+        Metric("active_duration", "计算耗时", "",
+               "模型实际生成与运行的累计时间（AI 纯计算耗时），不含用户思考、阅读与等待。\n"
+               "与「持续时长」对比可直观展现人机协作中 AI 的真实占用时间。\n"
+               "说明：Codex / Grok / Oh My Pi 提供单次补全精确耗时；Claude 仅记录整轮墙钟，显示「不适用」。", "basic"),
         Metric("models", "模型", "", "该会话使用的 AI 模型（友好名），同一会话可能混用多个。", "basic"),
         Metric("tools", "工具调用", "",
                "Claude Code 调用的工具及次数，点击查看详细列表。", "basic"),
@@ -409,6 +413,11 @@ def _duration_hours(report: SessionReport) -> str:
     if u.started_at and u.ended_at:
         return fmt.fmt_duration_ms(u.ended_at - u.started_at)
     return "-"
+def _active_duration_display(report: SessionReport) -> str:
+    act = report.usage.active_duration_ms
+    return fmt.fmt_duration_ms(act) if act else "-"
+
+
 
 
 def _tools_summary(report: SessionReport) -> str:
@@ -450,7 +459,7 @@ def _task_category_name(category_key: str | None) -> str | None:
 _SESSION_FMT: dict[str, str] = {
     # G1 — text / custom display (see _DISPLAY_EXTRACTORS), grade is plain text
     "subagent": "text", "turns": "text", "started": "text", "last_time": "text",
-    "duration": "text", "models": "text", "tools": "text", "entrypoint": "text",
+    "duration": "text", "active_duration": "text", "models": "text", "tools": "text", "entrypoint": "text",
     "task_type": "text", "tier": "text", "cli_version": "text",
     "thread_source": "text", "approval_policy": "text",
     "sandbox_policy": "text", "reasoning_effort": "text",
@@ -633,6 +642,7 @@ _DISPLAY_EXTRACTORS = {
     "started": lambda r: fmt.fmt_dt(r.usage.started_at),
     "last_time": lambda r: fmt.fmt_dt(r.usage.ended_at),
     "duration": _duration_hours,
+    "active_duration": _active_duration_display,
     "models": lambda r: fmt.models_label(r.usage) if r.usage.models else "-",
     "tools": _tools_summary,
     "entrypoint": lambda r: r.meta.entrypoint or "-",
@@ -708,6 +718,9 @@ def raw_value(report, key: str) -> float | None:
             if u.started_at and u.ended_at:
                 return (u.ended_at - u.started_at) / 3600_000
             return None
+        if key == "active_duration":
+            act = report.usage.active_duration_ms
+            return act / 3600_000 if act else None
         if key == "tools":
             return float(sum(u.tool_calls.values())) if u.tool_calls else None
         if key == "image_inputs":
@@ -854,6 +867,7 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "aborted_tasks": frozenset({"codex", "omp", "pi"}),
     # Grok signals.json / events.jsonl 独有
     "cancellations": frozenset({"grok"}),
+    "active_duration": frozenset({"codex", "grok", "omp", "pi"}),
     "regenerations": frozenset({"grok"}),
     "reverted_lines": frozenset({"grok"}),
     "user_modified": frozenset({"claude"}),

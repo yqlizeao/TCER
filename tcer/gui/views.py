@@ -1749,8 +1749,14 @@ class SessionColumn:
         # Row 3: 摘要行——左「模型短名 · 时长」，右成本金额
         from tcer.core.format import fmt_duration_ms
         model_name = dominant_model_label(r.usage)
-        dur = fmt_duration_ms(getattr(r.usage, "session_duration_ms", 0))
-        sum_parts = [p for p in (model_name, dur) if p and p != "-"]
+        dur_ms = getattr(r.usage, "session_duration_ms", 0) or 0
+        act_ms = getattr(r.usage, "active_duration_ms", None) or 0
+        dur = fmt_duration_ms(dur_ms) if dur_ms else "-"
+        # 当既有整场历经时长、又有 AI 计算耗时且两者存在显著差距时，卡片呈现：2.0 小时 (AI 28分)
+        dur_card = dur
+        if dur_ms > 0 and act_ms > 0 and act_ms < dur_ms * 0.95:
+            dur_card = f"{dur} (AI {fmt_duration_ms(act_ms, short=True)})"
+        sum_parts = [p for p in (model_name, dur_card) if p and p != "-"]
         sum_row = tk.Frame(card.frame, bg=card._bg)
         sum_row.pack(fill="x", padx=6, pady=(1, 3))
         card.track_bg(sum_row)
@@ -1771,8 +1777,11 @@ class SessionColumn:
         churn = r.churn_ratio or 0.0
         rework_str = ("极少返工" if churn < 0.05
                       else f"{'高' if churn >= 0.20 else ''}返工 {churn*100:.0f}%")
+        timing_str = f"持续 {dur}"
+        if act_ms > 0 and act_ms < dur_ms * 0.95:
+            timing_str += f"（AI 耗时 {fmt_duration_ms(act_ms)}）"
         detail = " · ".join(filter(None, [
-            dur if dur != "-" else "", f"{turns:,} 回合" if turns else "",
+            timing_str if dur != "-" else "", f"{turns:,} 回合" if turns else "",
             loc_str, rework_str]))
         tip_text = (f"{title}\nID: {sid}\n{detail}\n"
                     "双击查看会话详情，右键更多操作")
