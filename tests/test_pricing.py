@@ -1,4 +1,5 @@
 """Tests for per-model pricing resolution (data/model_pricing.json + pricing.py)."""
+import json
 import pytest
 
 from tcer.core import metrics, pricing
@@ -311,3 +312,146 @@ def test_newly_added_models_and_current_time_pricing():
     # o3-mini 降价
     assert pricing.resolve("o3-mini") == {"input": 0.55, "output": 2.2, "cache_read": 0.275, "cache_write": 0.0}
 
+
+
+def test_expanded_models_and_consistent_notes():
+    """Verify 2026 cutting-edge frontier models (Claude Opus 5.5, Sonnet 5.5,
+    GPT-6 Sol, Gemini 3.8 Pro, Grok 5, DeepSeek V4.5, Qwen 4 Coder, etc.)
+    and standardized note format."""
+    # 1. 2026-09 Released Claude Opus 5.5 & Claude 5.5 Family
+    assert pricing.is_table_priced("claude-opus-5-5")
+    op55 = pricing.resolve("claude-opus-5-5")
+    assert op55 == {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 5.0}
+    assert pricing.label("claude-opus-5-5") == "Claude Opus 5.5"
+    assert pricing.table_key("claude-opus-5-5") == "claude-opus-5-5"
+    # Regression guard: must NOT collapse onto older claude-opus-5
+    assert pricing.normalize("claude-opus-5-5") == "claude-opus-5-5"
+    assert pricing.resolve("claude-opus-5-5") != pricing.resolve("claude-opus-5")
+    assert pricing.is_table_priced("claude-sonnet-5-5")
+    assert pricing.resolve("claude-sonnet-5-5") == {"input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 1.875}
+    assert pricing.is_table_priced("claude-haiku-5-5")
+
+    # 2. OpenAI GPT-6 Cutting-Edge Series
+    assert pricing.is_table_priced("gpt-6-sol")
+    assert pricing.resolve("gpt-6-sol") == {"input": 6.0, "output": 30.0, "cache_read": 0.6, "cache_write": 7.5}
+    assert pricing.is_table_priced("gpt-6-codex")
+    assert pricing.is_table_priced("gpt-6-luna")
+
+    # 3. Google Gemini 3.8 Pro & 3.9
+    assert pricing.is_table_priced("gemini-3.8-pro")
+    assert pricing.resolve("gemini-3.8-pro") == {"input": 1.25, "output": 10.0, "cache_read": 0.125, "cache_write": 0.0}
+    assert pricing.is_table_priced("gemini-3.9-pro")
+
+    # 4. xAI Grok 5 & Grok 4.6 Build
+    assert pricing.is_table_priced("grok-5")
+    assert pricing.resolve("grok-5") == {"input": 5.0, "output": 20.0, "cache_read": 1.0, "cache_write": 0.0}
+    assert pricing.is_table_priced("grok-4.6-build")
+
+    # 5. DeepSeek 2026 Frontier (V4.5 & R1)
+    assert pricing.is_table_priced("deepseek-v4.5")
+    assert pricing.resolve("deepseek-v4.5") == {"input": 0.35, "output": 1.4, "cache_read": 0.007, "cache_write": 0.0}
+    assert pricing.is_table_priced("deepseek-r1")
+
+    # 6. Qwen 4 Coder & Max
+    assert pricing.is_table_priced("qwen4-coder")
+    assert pricing.resolve("qwen4-coder") == {"input": 0.3, "output": 0.9, "cache_read": 0.03, "cache_write": 0.0}
+    assert pricing.is_table_priced("qwen4-max")
+
+    # 7. Meta LLaMA 4 Series
+    assert pricing.is_table_priced("llama-4-scion")
+    assert pricing.is_table_priced("llama-4-maverick")
+
+    # 8. Note 格式一致性：所有 note 使用全角分号隔开，不使用半角分号，不含有未经整理的碎句
+    raw_models = pricing._load()["models"]
+    for mid, entry in raw_models.items():
+        note = entry.get("_note")
+        if note is not None:
+            assert isinstance(note, str)
+            assert len(note.strip()) > 0
+            # 统一要求：不得使用半角分号
+            assert ";" not in note, f"Model {mid} note contains half-width semicolon: {note}"
+            # 统一要求：括号应为全角括号
+            assert "(" not in note and ")" not in note, f"Model {mid} note contains half-width parens: {note}"
+
+
+def test_pricing_vendor_and_description():
+    """Verify pricing.vendor and pricing.description lookups."""
+    assert pricing.vendor("claude-opus-5-5") == "Anthropic"
+    assert pricing.vendor("gpt-6-astra") == "OpenAI"
+    assert pricing.vendor("gemini-3.8-flash") == "Google"
+    assert pricing.vendor("grok-5") == "xAI"
+    assert pricing.vendor("deepseek-r1") == "DeepSeek"
+    assert pricing.vendor("qwen4-coder") == "Alibaba"
+    assert pricing.vendor("glm-5.5") == "Zhipu AI"
+    assert pricing.vendor("kimi-k3.5") == "Moonshot AI"
+    assert pricing.vendor("minimax-m3.5") == "MiniMax"
+    assert pricing.vendor("llama-4-scion") == "Meta"
+    assert pricing.vendor("codestral-latest") == "Mistral AI"
+    assert pricing.vendor(None) == ""
+    assert pricing.vendor("") == ""
+
+    # description alias
+    desc = pricing.description("claude-opus-5-5")
+    assert desc is not None
+    assert "Anthropic 2026 前沿旗舰智能体模型" in desc
+
+
+def test_model_price_tip_display():
+    """Verify GUI price tooltip renders cleanly with vendor and standardized descriptions."""
+    from types import SimpleNamespace
+    from tcer.gui.views import _model_price_tip
+
+    mc = SimpleNamespace(model_id="claude-3-7-sonnet", display_name="Claude 3.7 Sonnet")
+    tip = _model_price_tip(mc)
+    assert "[Anthropic] Claude 3.7 Sonnet · 官方标价（$/百万 Token）" in tip
+    assert "输入　　　$3/百万" in tip
+    assert "输出　　　$15/百万" in tip
+    assert "缓存创建　$3.75/百万" in tip
+    assert "缓存命中　$0.3/百万" in tip
+    assert "ℹ️ 描述：Anthropic 混合推理模型" in tip
+
+    # 未知模型应展示默认配置价警示
+    unknown_mc = SimpleNamespace(model_id="unknown-test-model", display_name="Unknown Model")
+    unknown_tip = _model_price_tip(unknown_mc)
+    assert "默认配置价（未在价表中）" in unknown_tip
+    assert "⚠️ 该模型未在价表中" in unknown_tip
+
+
+def test_claude_2_1_283_drift_fixes(tmp_path):
+    """Verify fixes for Claude Code 2.1.283 format drift:
+    1. Deep head sampling (head_n=60) extracts effort past early attachments.
+    2. Top-level type: 'mode' events record plan mode transitions.
+    """
+    from tcer.core import reader
+
+    # 构造模拟 2.1.283 头部：先出现连续 25 个 attachment / snapshot，再出现 effort=high 的 assistant
+    lines = [
+        {"type": "mode", "mode": "normal", "sessionId": "s-test-283"},
+        {"type": "permission-mode", "permissionMode": "bypassPermissions", "sessionId": "s-test-283"},
+    ]
+    for i in range(25):
+        lines.append({"type": "attachment", "attachment": {"type": "environment", "index": i}})
+    lines.append({
+        "type": "assistant",
+        "effort": "high",
+        "perTurnEffort": "high",
+        "version": "2.1.283",
+        "sessionId": "s-test-283",
+        "message": {"role": "assistant", "id": "m1", "model": "claude-opus-5-5",
+                    "usage": {"input_tokens": 10, "output_tokens": 5}},
+    })
+    # 模拟进入 plan 模式的顶层 mode 事件
+    lines.append({"type": "mode", "mode": "plan", "sessionId": "s-test-283"})
+
+    p = tmp_path / "session_283.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+    meta = reader._read_session_meta_uncached(p)
+    assert meta.cli_version == "2.1.283"
+    assert meta.reasoning_effort == "high"
+    assert meta.permission_profile == "bypassPermissions"
+
+    usage, loc = reader.scan_session(p)
+    assert usage.plan_mode_count == 1
+    assert "claude-opus-5-5" in usage.models
+    assert "claude-opus-5-5" in usage.per_model

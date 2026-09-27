@@ -3369,6 +3369,7 @@ class ModelCompareView:
 
     def _build_header(self) -> None:
         """Model summary（多模型时附成本占比条与模型卡片组）。"""
+        from tcer.core import pricing
         header = tk.Frame(self._container, bg=theme.PANEL_2, padx=10, pady=6)
         header.pack(fill="x", pady=(1, 0))
         tk.Label(header, text="模型对比", bg=theme.PANEL_2, fg=theme.FG,
@@ -3427,6 +3428,10 @@ class ModelCompareView:
                 dot_color = theme.CHART_PALETTE[j % len(theme.CHART_PALETTE)]
                 tk.Label(row0, text="●", bg=theme.PANEL_2, fg=dot_color,
                          font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
+            v_name = pricing.vendor(mc.model_id)
+            if v_name:
+                tk.Label(row0, text=v_name, bg=theme.CONTROL_BG, fg=theme.MUTED,
+                         font=theme.FONT_UI_SMALL, padx=4, pady=1).pack(side="left", padx=(0, 6))
             name_lbl = tk.Label(row0, text=mc.display_name, bg=theme.PANEL_2, fg=theme.FG_WHITE,
                                 font=theme.FONT_VALUE, anchor="w")
             name_lbl.pack(side="left")
@@ -3604,11 +3609,13 @@ def _model_price_tip(mc) -> str:
     note = "" if known else "\n⚠️ 该模型未在价表中，按 Anthropic 通用 list 价回退，非其厂商官方价。"
     # 价表条目备注（_note）：多轨价（促销/峰时/Batch）、分段计费、别名跟随等，
     # 与四个展示单价同源，悬浮可见，让用户知道这套价取的是哪一轨。
+    v = pricing.vendor(mc.model_id)
+    v_prefix = f"[{v}] " if v else ""
     extra = pricing.note_for(mc.model_id)
     if extra:
-        note += f"\nℹ️ {extra}"
+        note += f"\nℹ️ 描述：{extra}"
     return (
-        f"{mc.display_name} · {title}（$/百万 Token）\n"
+        f"{v_prefix}{mc.display_name} · {title}（$/百万 Token）\n"
         f"输入　　　{_rate(r['input'])}\n"
         f"输出　　　{_rate(r['output'])}\n"
         f"缓存创建　{_rate(r['cache_write'])}\n"
@@ -8346,4 +8353,4 @@ class TermbaseView:
         if not chosen:
             return
         ui_prefs.set_termbase_path(chosen)
-        self.on_show()
+        self.on_show()

@@ -230,6 +230,29 @@ def label(model: str | None) -> str:
 def model_count() -> int:
     return len(_load()["models"])
 
+@lru_cache(maxsize=512)
+def vendor(model: str | None) -> str:
+    """Friendly vendor/provider name for a model id (e.g. 'Anthropic', 'OpenAI', 'Google').
+
+    Falls back to vendor prefix from path (e.g. 'openai/gpt-5' -> 'openai') or empty string.
+    """
+    if not model:
+        return ""
+    mid = _match_id(model)
+    if mid is not None:
+        v = _load()["models"][mid].get("vendor")
+        if v:
+            return v
+    if "/" in model:
+        return model.split("/", 1)[0]
+    return ""
+
+
+def description(model: str | None) -> str | None:
+    """Alias for ``note_for(model)`` returning model positioning & description."""
+    return note_for(model)
+
+
 
 @lru_cache(maxsize=512)
 def note_for(model: str | None) -> str | None:

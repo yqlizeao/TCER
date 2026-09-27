@@ -829,8 +829,8 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "subagent": frozenset({"claude", "grok"}),
     "memory_files": frozenset({"claude"}),
     # Claude 的推理输出并入「输出」，不单独上报
-    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "grok", "pi", "antigravity"}),
-    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "grok", "pi", "antigravity"}),
+    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "grok", "omp", "pi", "antigravity"}),
+    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "grok", "omp", "pi", "antigravity"}),
     # Codex/Grok 运行时信号（Grok 来自 signals.json）
     "context_window": frozenset({"codex", "grok"}),
     "context_window_used": frozenset({"codex", "grok"}),

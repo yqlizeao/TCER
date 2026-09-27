@@ -668,7 +668,8 @@ def _add_turn_usage(u: TokenUsage, usage: dict, model: str, turn: int, ts: int |
     cw = _as_int(usage.get("cacheWrite"))
     o = _as_int(usage.get("output"))
     cw1h = _as_int(usage.get("cacheWrite1h"))   # Pi 1h-cache-write subset
-    reasoning = _as_int(usage.get("reasoning"))  # Pi reasoning output tokens
+    # Pi 采用 reasoning，OMP 18.x 采用 reasoningTokens
+    reasoning = _as_int(usage.get("reasoning") or usage.get("reasoningTokens"))
     if i + cr + cw + o + cw1h + reasoning == 0:
         u.empty_usage_skipped += 1
         return

@@ -580,6 +580,12 @@ def _scan_session_uncached(
                 u.read_truncation_count += 1
             continue
 
+        # Claude Code 2.1.x 顶层 mode 事件：{"type": "mode", "mode": "plan", ...}
+        if obj.get("type") == "mode":
+            if obj.get("mode") in ("plan", "plan_mode"):
+                u.plan_mode_count += 1
+            continue
+
         # 非 message 行：system 子类型携带真实回合耗时 / 限流 / 压缩信号。
         if obj.get("type") == "system":
             sub = obj.get("subtype")
@@ -1007,7 +1013,8 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
     Tail must outrank head — head lines are older, so a stale head title must never
     overwrite a fresher tail one.
     """
-    head, tail = _read_head_tail_lines(path, head_n=20, tail_n=30)
+    # cc 2.1.x 头部常注入 10+ 条环境 attachment / snapshot，扩大采样深至 60 确保覆盖首条 assistant
+    head, tail = _read_head_tail_lines(path, head_n=60, tail_n=30)
     session_id: str | None = None
     cwd: str | None = None
     entrypoint: str | None = None
