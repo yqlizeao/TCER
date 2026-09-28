@@ -2078,3 +2078,22 @@ def test_llm_reports_view_reflow_and_fill_body_tables_and_json(root):
     # 确保正文文本阅读区不出现裸露的原始 JSON 代码
     assert '"semantic_distance": 0.95' not in body_content
 
+
+def test_weekly_report_popup_smoke(root):
+    from tcer.gui.popups_analysis import WeeklyReportPopup
+
+    class MockController:
+        def _selected_project(self):
+            return None
+
+    popup = WeeklyReportPopup(root, MockController())
+    assert popup.win.winfo_exists()
+    # 验证预设切换
+    popup._on_preset_change("last_week")
+    assert popup.since_var.get() != ""
+    assert popup.until_var.get() != ""
+    # 验证文本框占位
+    content = popup.text_widget.get("1.0", "end")
+    assert "AI 研发周报生成器" in content
+    popup.win.destroy()
+

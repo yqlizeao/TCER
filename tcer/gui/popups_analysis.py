@@ -1633,3 +1633,523 @@ class CrossSourceModelsPopup:
     @staticmethod
     def _int(v):
         return "-" if v is None else fmt.fmt_int(v)
+
+
+class WeeklyReportPopup:
+    """生成研发周报 — 多代理会话事实提取、客观聚合与 LLM 润色提炼，自动沉淀至 LLM 报告。"""
+
+    def __init__(self, parent, controller) -> None:
+        from uuid import uuid4
+        import threading
+        import time as _time
+        from tcer.core import weekly, llm_prefs, llm_reports
+        from .views import ui_icon
+        from .widgets import RoundedPill, flat_button
+
+        self.controller = controller
+        self._current_entry = None
+        self._generating = False
+
+        # 1. 窗口创建（居中暗色窗口，深色沉浸标题栏，Esc 键快速关闭）
+        self.win = _new_window(parent, "生成研发周报", "980x720")
+
+        top_card = tk.Frame(self.win, bg=theme.PANEL, padx=16, pady=12)
+        top_card.pack(fill="x", padx=12, pady=(10, 8))
+
+        # 2.1 第一行：Header 标题栏与主操作按钮
+        head_row = tk.Frame(top_card, bg=theme.PANEL)
+        head_row.pack(fill="x", pady=(0, 10))
+
+        title_left = tk.Frame(head_row, bg=theme.PANEL)
+        title_left.pack(side="left")
+
+        ico = ui_icon(title_left, "calendar", size=22)
+        if ico is not None:
+            tk.Label(title_left, image=ico, bg=theme.PANEL).pack(side="left", padx=(0, 8))
+        tk.Label(title_left, text="AI 研发周报生成器", bg=theme.PANEL, fg=theme.FG_WHITE,
+                 font=theme.FONT_HEADING).pack(side="left")
+        tk.Label(title_left, text="全源会话事实提取 · 自动归档至 LLM 报告",
+                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left", padx=(8, 0))
+
+        # 主操作生成按钮（中性暗底，文字与图标并排，无突兀亮蓝底）
+        gen_ico = ui_icon(head_row, "sparkle")
+        self.gen_btn = flat_button(head_row, "生成周报", self._start_generation,
+                                   image=gen_ico, compound="left",
+                                   bg=theme.CONTROL_BG, fg=theme.FG_WHITE,
+                                   padx=14, pady=5)
+        self.gen_btn.pack(side="right")
+        Tooltip(self.gen_btn, "提取所选周期与范围内的会话事实，生成研发周报并入库")
+
+        # 2.2 第二行：时间周期设置（自适应扁平按钮组 + 联动起止输入框）
+        row_time = tk.Frame(top_card, bg=theme.PANEL)
+        row_time.pack(fill="x", pady=(0, 7))
+
+        tk.Label(row_time, text="时间周期:", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_BOLD, width=8, anchor="w").pack(side="left")
+
+        self.preset_var = tk.StringVar(value="this_week")
+        self.workday_only_var = tk.BooleanVar(value=False)
+        s_init, u_init, _ = weekly.resolve_week_range("this_week", workday_only=False)
+        self.since_var = tk.StringVar(value=s_init)
+        self.until_var = tk.StringVar(value=u_init)
+
+        self._time_labels = {
+            "this_week": "本周",
+            "last_week": "上周",
+            "last_30_days": "近30天",
+            "custom": "自定义",
+        }
+        self._time_btns: dict[str, tk.Widget] = {}
+        for val, label in self._time_labels.items():
+            btn = self._create_tab_btn(row_time, val, label, self._select_preset, val == "this_week")
+            btn.pack(side="left", padx=(0, 6))
+            self._time_btns[val] = btn
+
+        # 细微竖向分隔符
+        tk.Label(row_time, text="│", bg=theme.PANEL, fg=theme.BORDER,
+                 font=theme.FONT_UI_SMALL).pack(side="left", padx=(2, 6))
+
+        # 独立附加口径：是否包含周末（完全正交，零歧义）
+        self._weekend_btns: dict[bool, tk.Widget] = {}
+        for w_only, w_label in [(False, "包含周末"), (True, "仅工作日")]:
+            btn = self._create_tab_btn(row_time, str(w_only), w_label,
+                                       lambda _v, o=w_only: self._select_weekend_mode(o),
+                                       w_only == False)
+            btn.pack(side="left", padx=(0, 6))
+            if w_only:
+                Tooltip(btn, "截止对齐至周五，不计入周六周日加班会话")
+            else:
+                Tooltip(btn, "包含自然周全部 7 天（周一至周日）完整数据")
+            self._weekend_btns[w_only] = btn
+        # 联动起止日期输入槽
+        date_box = tk.Frame(row_time, bg=theme.PANEL)
+        date_box.pack(side="left", padx=(10, 0))
+
+        tk.Label(date_box, text="起", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
+        self.since_entry = tk.Entry(date_box, textvariable=self.since_var, width=11,
+                                    bg=theme.CONTROL_BG, fg=theme.FG,
+                                    insertbackground=theme.FG, relief="flat", bd=0,
+                                    font=theme.FONT_MONO, highlightthickness=0)
+        self.since_entry.pack(side="left", padx=(0, 8), ipady=2)
+
+        tk.Label(date_box, text="至", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
+        self.until_entry = tk.Entry(date_box, textvariable=self.until_var, width=11,
+                                    bg=theme.CONTROL_BG, fg=theme.FG,
+                                    insertbackground=theme.FG, relief="flat", bd=0,
+                                    font=theme.FONT_MONO, highlightthickness=0)
+        self.until_entry.pack(side="left", padx=(0, 6), ipady=2)
+
+        # 动态显示星期范围与天数（明确周一至周日 vs 周一至周五）
+        self.span_lbl = tk.Label(row_time, text="", bg=theme.PANEL,
+                                 fg=theme.FG_WHITE, font=theme.FONT_UI_SMALL_BOLD)
+        self.span_lbl.pack(side="left", padx=(10, 0))
+        self.since_var.trace_add("write", lambda *_: self._update_span_label())
+        self.until_var.trace_add("write", lambda *_: self._update_span_label())
+        self._update_span_label()
+        row_scope = tk.Frame(top_card, bg=theme.PANEL)
+        row_scope.pack(fill="x", pady=(0, 7))
+
+        tk.Label(row_scope, text="项目范围:", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_BOLD, width=8, anchor="w").pack(side="left")
+
+        self.scope_var = tk.StringVar(value="all")
+        curr_proj = getattr(controller, "_selected_project", lambda: None)()
+        curr_name = (getattr(curr_proj, "display_name", None) or
+                     getattr(curr_proj, "name", "当前项目")) if curr_proj else "当前项目"
+
+        self._scope_labels = {
+            "all": "全部项目",
+            "current": "当前项目",
+        }
+        self._scope_btns: dict[str, tk.Widget] = {}
+        for s_val, s_lbl in self._scope_labels.items():
+            btn = self._create_tab_btn(row_scope, s_val, s_lbl, self._select_scope, s_val == "all")
+            btn.pack(side="left", padx=(0, 8))
+            if s_val == "all":
+                Tooltip(btn, "汇总当前机器所有数据源与项目会话事实")
+            else:
+                Tooltip(btn, f"仅分析当前选中的项目: {curr_name}")
+            self._scope_btns[s_val] = btn
+        # 2.4 第四行：生成引擎选择（独立一行，自适应宽度不截断）
+        row_engine = tk.Frame(top_card, bg=theme.PANEL)
+        row_engine.pack(fill="x")
+
+        tk.Label(row_engine, text="生成引擎:", bg=theme.PANEL, fg=theme.MUTED,
+                 font=theme.FONT_UI_BOLD, width=8, anchor="w").pack(side="left")
+
+        self.engine_var = tk.StringVar(value="llm" if llm_prefs.enabled() else "offline")
+        m_name = llm_prefs.model() or "未配置"
+
+        self._engine_labels = {
+            "llm": "大模型提炼",
+            "offline": "离线规则",
+        }
+        self._engine_btns: dict[str, tk.Widget] = {}
+        for e_val, e_lbl in self._engine_labels.items():
+            btn = self._create_tab_btn(row_engine, e_val, e_lbl, self._select_engine, e_val == self.engine_var.get())
+            btn.pack(side="left", padx=(0, 8))
+            if e_val == "llm":
+                Tooltip(btn, f"调用已配置的大模型 ({m_name}) 进行智能业务成果提炼与协作复盘")
+            else:
+                Tooltip(btn, "纯本地规则确定性聚合，免任何网络与 Token 消耗")
+            self._engine_btns[e_val] = btn
+
+        # 3. 中间正文阅读区
+        body_frame = tk.Frame(self.win, bg=theme.PANEL)
+        body_frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        vsb = ttk.Scrollbar(body_frame, orient="vertical")
+        self.text_widget = tk.Text(
+            body_frame, wrap="word", bg=theme.PANEL, fg=theme.FG,
+            font=(theme.FONT_CJK, 10), relief="flat", bd=0, highlightthickness=0,
+            padx=20, pady=16, yscrollcommand=vsb.set,
+            selectbackground=theme.SEL_ROW_ACTIVE, selectforeground=theme.FG_WHITE,
+            inactiveselectbackground=theme.SEL_ROW_BG, cursor="arrow")
+        vsb.config(command=self.text_widget.yview)
+        vsb.pack(side="right", fill="y")
+        self.text_widget.pack(side="left", fill="both", expand=True)
+
+        self._config_markdown_tags()
+        self._set_placeholder()
+
+        # 4. 底部状态与操作栏
+        bot_bar = tk.Frame(self.win, bg=theme.BG, padx=4, pady=6)
+        bot_bar.pack(fill="x", padx=12, pady=(0, 10))
+
+        self.status_lbl = tk.Label(bot_bar, text="", bg=theme.BG,
+                                   fg=theme.MUTED, font=theme.FONT_UI_SMALL)
+        self.status_lbl.pack(side="left")
+
+        jump_ico = ui_icon(bot_bar, "sparkle")
+        self.jump_btn = flat_button(bot_bar, "查看归档", self._jump_to_llm_tab,
+                                    image=jump_ico, compound="left",
+                                    bg=theme.CONTROL_BG, fg=theme.FG_WHITE,
+                                    state="disabled", padx=14, pady=5)
+        self.jump_btn.pack(side="right", padx=(8, 0))
+        Tooltip(self.jump_btn, "前往主界面「LLM 报告」页签查看已沉淀的历史周报")
+
+        copy_ico = ui_icon(bot_bar, "copy")
+        self.copy_btn = flat_button(bot_bar, "复制周报", self._copy_content,
+                                    image=copy_ico, compound="left",
+                                    bg=theme.CONTROL_BG, fg=theme.FG_WHITE,
+                                    state="disabled", padx=14, pady=5)
+        self.copy_btn.pack(side="right")
+        Tooltip(self.copy_btn, "复制完整 Markdown 报告至系统剪贴板")
+
+    def _config_markdown_tags(self) -> None:
+        tw = self.text_widget
+        tw.tag_configure("md_h1", font=(theme.FONT_CJK, 14, "bold"),
+                         foreground=theme.FG_WHITE, spacing1=16, spacing3=8)
+        tw.tag_configure("md_h2", font=(theme.FONT_CJK, 11, "bold"),
+                         foreground=theme.ACCENT, spacing1=14, spacing3=4)
+        tw.tag_configure("md_h3", font=(theme.FONT_CJK, 10, "bold"),
+                         foreground=theme.FG_WHITE, spacing1=10, spacing3=2)
+        tw.tag_configure("md_bold", font=(theme.FONT_CJK, 10, "bold"),
+                         foreground=theme.FG_WHITE)
+        tw.tag_configure("md_muted", font=(theme.FONT_CJK, 9),
+                         foreground=theme.MUTED)
+        tw.tag_configure("md_code", font=(theme.FONT_MONO_NAME, 9),
+                         foreground=theme.CHART_PALETTE[1], background=theme.CONTROL_BG)
+        tw.tag_configure("md_bullet", lmargin1=12, lmargin2=24,
+                         font=(theme.FONT_CJK, 10), foreground=theme.FG)
+        tw.tag_configure("md_normal", font=(theme.FONT_CJK, 10),
+                         foreground=theme.FG)
+
+    def _create_tab_btn(self, parent, val: str, label: str, on_click, is_act: bool) -> tk.Label:
+        """纯文字 Tab：背景始终为透明平齐的 theme.PANEL，hover 仅文字微光，永不弹正方形灰框。"""
+        btn = tk.Label(parent, text=f"● {label}" if is_act else label,
+                       bg=theme.PANEL,
+                       fg=theme.FG_WHITE if is_act else theme.MUTED,
+                       font=theme.FONT_UI_BOLD if is_act else theme.FONT_UI,
+                       cursor=CLICK_CURSOR, padx=6, pady=2)
+        btn._is_active = is_act
+
+        def _on_enter(_e):
+            btn.config(fg=theme.FG_WHITE)
+
+        def _on_leave(_e):
+            cur = getattr(btn, "_is_active", False)
+            btn.config(fg=theme.FG_WHITE if cur else theme.MUTED)
+
+        btn.bind("<Enter>", _on_enter)
+        btn.bind("<Leave>", _on_leave)
+        btn.bind("<Button-1>", lambda _e: on_click(val))
+        return btn
+
+    def _select_weekend_mode(self, workday_only: bool) -> None:
+        from tcer.core import weekly
+        self.workday_only_var.set(workday_only)
+        for w_only, btn in self._weekend_btns.items():
+            is_act = (w_only == workday_only)
+            btn._is_active = is_act
+            lbl = "仅工作日" if w_only else "包含周末"
+            btn.config(
+                text=f"● {lbl}" if is_act else lbl,
+                bg=theme.PANEL,
+                fg=theme.FG_WHITE if is_act else theme.MUTED,
+                font=theme.FONT_UI_BOLD if is_act else theme.FONT_UI,
+            )
+        preset = self.preset_var.get()
+        if preset in ("this_week", "last_week"):
+            s, u, _ = weekly.resolve_week_range(preset, workday_only=workday_only)
+            self.since_var.set(s)
+            self.until_var.set(u)
+
+    def _select_preset(self, preset: str) -> None:
+        from tcer.core import weekly
+        self.preset_var.set(preset)
+        for val, btn in self._time_btns.items():
+            is_act = (val == preset)
+            btn._is_active = is_act
+            lbl = self._time_labels.get(val, val)
+            btn.config(
+                text=f"● {lbl}" if is_act else lbl,
+                bg=theme.PANEL,
+                fg=theme.FG_WHITE if is_act else theme.MUTED,
+                font=theme.FONT_UI_BOLD if is_act else theme.FONT_UI,
+            )
+        if preset in ("this_week", "last_week"):
+            workday_only = self.workday_only_var.get()
+            s, u, _ = weekly.resolve_week_range(preset, workday_only=workday_only)
+            self.since_var.set(s)
+            self.until_var.set(u)
+        elif preset == "last_30_days":
+            s, u, _ = weekly.resolve_week_range(preset)
+            self.since_var.set(s)
+            self.until_var.set(u)
+        else:
+            self.since_entry.focus_set()
+
+    _on_preset_change = _select_preset
+
+    def _select_scope(self, scope: str) -> None:
+        self.scope_var.set(scope)
+        for val, btn in self._scope_btns.items():
+            is_act = (val == scope)
+            btn._is_active = is_act
+            lbl = self._scope_labels.get(val, val)
+            btn.config(
+                text=f"● {lbl}" if is_act else lbl,
+                bg=theme.PANEL,
+                fg=theme.FG_WHITE if is_act else theme.MUTED,
+                font=theme.FONT_UI_BOLD if is_act else theme.FONT_UI,
+            )
+
+    def _select_engine(self, engine: str) -> None:
+        self.engine_var.set(engine)
+        for val, btn in self._engine_btns.items():
+            is_act = (val == engine)
+            btn._is_active = is_act
+            lbl = self._engine_labels.get(val, val)
+            btn.config(
+                text=f"● {lbl}" if is_act else lbl,
+                bg=theme.PANEL,
+                fg=theme.FG_WHITE if is_act else theme.MUTED,
+                font=theme.FONT_UI_BOLD if is_act else theme.FONT_UI,
+            )
+
+    def _update_span_label(self) -> None:
+        from tcer.core import weekly
+        s = self.since_var.get()
+        u = self.until_var.get()
+        desc = weekly.format_date_span(s, u)
+        if hasattr(self, "span_lbl") and self.span_lbl.winfo_exists():
+            self.span_lbl.config(text=desc)
+    def _render_markdown(self, raw_md: str) -> None:
+        tw = self.text_widget
+        tw.config(state="normal")
+        tw.delete("1.0", "end")
+        lines = raw_md.split("\n")
+        for ln in lines:
+            s = ln.strip()
+            if s.startswith("# "):
+                tw.insert("end", ln + "\n", ("md_h1",))
+            elif s.startswith("## "):
+                tw.insert("end", ln + "\n", ("md_h2",))
+            elif s.startswith("### "):
+                tw.insert("end", ln + "\n", ("md_h3",))
+            elif s.startswith("- ") or s.startswith("* "):
+                tw.insert("end", "  • ", ("md_muted",))
+                self._insert_formatted_line(ln[2:])
+                tw.insert("end", "\n")
+            elif s.startswith("  - "):
+                tw.insert("end", "    - ", ("md_muted",))
+                self._insert_formatted_line(ln[4:])
+                tw.insert("end", "\n")
+            elif s.startswith("> "):
+                tw.insert("end", "  │ ", ("md_muted",))
+                self._insert_formatted_line(ln[2:])
+                tw.insert("end", "\n")
+            else:
+                self._insert_formatted_line(ln)
+                tw.insert("end", "\n")
+        tw.config(state="disabled")
+
+    def _insert_formatted_line(self, text: str) -> None:
+        tw = self.text_widget
+        import re
+        tokens = re.split(r"(\*\*.*?\*\*|`.*?`|\*.*?\*)", text)
+        for tk_str in tokens:
+            if not tk_str:
+                continue
+            if tk_str.startswith("**") and tk_str.endswith("**"):
+                tw.insert("end", tk_str[2:-2], ("md_bold",))
+            elif tk_str.startswith("`") and tk_str.endswith("`"):
+                tw.insert("end", f" {tk_str[1:-1]} ", ("md_code",))
+            elif tk_str.startswith("*") and tk_str.endswith("*"):
+                tw.insert("end", tk_str[1:-1], ("md_muted",))
+            else:
+                tw.insert("end", tk_str, ("md_normal",))
+
+    def _set_placeholder(self) -> None:
+        placeholder_md = (
+            "# AI 研发周报生成器\n\n"
+            "请确认上方时间周期、项目范围与生成引擎，点击右上角 **「立即生成周报」**。\n\n"
+            "---\n\n"
+            "### 核心特性\n"
+            "- **全源会话事实抽取**：自动扫描 Claude Code, Grok, OMP, Codex, Antigravity 等多代理会话事实；\n"
+            "- **真实工作意图聚类**：聚合真人 Prompt 需求、改动核心文件、净增代码量、算力成本与自返工率；\n"
+            "- **智能业务交付提炼**：由大模型或本地规则提炼业务交付成果与技术攻坚亮点，诊断人机协作卡点；\n"
+            "- **持久化闭环归档**：周报自动沉淀至主界面「LLM 报告」收信箱，随时回看与跨周期比对。\n"
+        )
+        self._render_markdown(placeholder_md)
+
+    def _start_generation(self) -> None:
+        if self._generating:
+            return
+        from uuid import uuid4
+        import threading
+        import time as _time
+        from tcer.core import weekly, llm_prefs, llm_reports
+
+        since = self.since_var.get().strip()
+        until = self.until_var.get().strip()
+        if not since or not until:
+            self.status_lbl.config(text="● 请填写有效的起止日期 (YYYY-MM-DD)", fg=theme.ERROR)
+            return
+
+        scope = self.scope_var.get()
+        project_refs = None
+        if scope == "current":
+            curr_p = getattr(self.controller, "_selected_project", lambda: None)()
+            if curr_p:
+                project_refs = [curr_p]
+
+        use_llm = (self.engine_var.get() == "llm")
+        if use_llm and not llm_prefs.enabled():
+            use_llm = False
+
+        self._generating = True
+        self.gen_btn.config(state="disabled")
+        self.copy_btn.config(state="disabled")
+        self.jump_btn.config(state="disabled")
+        self.status_lbl.config(text="● 正在扫描多源会话事实…", fg=theme.ACCENT)
+
+        def _worker() -> None:
+            try:
+                def _on_prog(curr, tot, name):
+                    def _ui():
+                        if self.win.winfo_exists():
+                            self.status_lbl.config(text=f"● 正在扫描会话 [{curr}/{tot}] {name}…")
+                    self.win.after(0, _ui)
+
+                agg = weekly.collect_weekly_data(
+                    since, until, project_refs=project_refs, progress_callback=_on_prog
+                )
+
+                entry_id = str(uuid4())
+                model_name = "离线规则聚合"
+                if use_llm:
+                    def _ui_llm():
+                        if self.win.winfo_exists():
+                            self.status_lbl.config(text=f"● 数据汇总完毕，正在由 LLM ({llm_prefs.model()}) 润色提炼…")
+                    self.win.after(0, _ui_llm)
+
+                    sys_p, user_p = weekly.build_weekly_prompt_payload(agg)
+                    try:
+                        from tcer.core import llm_client
+                        text = llm_client.chat(
+                            base_url=llm_prefs.base_url(),
+                            api_key=llm_prefs.api_key(),
+                            model=llm_prefs.model(),
+                            system=sys_p,
+                            user=user_p,
+                        )
+                        model_name = llm_prefs.model()
+                    except Exception as err:
+                        offline_md = weekly.generate_offline_markdown(agg)
+                        text = f"> ⚠️ **提示**：调用大模型提炼失败（{err}），已自动回退为本地离线客观事实聚合。\n\n{offline_md}"
+                else:
+                    text = weekly.generate_offline_markdown(agg)
+
+                title = f"研发周报 ({since} ~ {until})"
+                scope_str = f"{agg.total_sessions} 会话 · {len(agg.project_summaries)} 项目"
+                entry = {
+                    "id": entry_id,
+                    "created_at": int(_time.time() * 1000),
+                    "kind": "weekly",
+                    "title": title,
+                    "source": "all" if not project_refs or len(project_refs) > 1 else getattr(project_refs[0], "source", "claude"),
+                    "model": model_name,
+                    "scope": scope_str,
+                    "net_loc": agg.total_net_loc,
+                    "cost_display": f"${agg.total_cost:.2f}",
+                    "text": text,
+                    "weekly_data": {
+                        "since": since,
+                        "until": until,
+                        "total_sessions": agg.total_sessions,
+                        "total_net_loc": agg.total_net_loc,
+                        "total_cost": agg.total_cost,
+                    },
+                }
+                llm_reports.append(entry)
+                self._current_entry = entry
+
+                def _finish():
+                    if not self.win.winfo_exists():
+                        return
+                    self._generating = False
+                    self.gen_btn.config(state="normal")
+                    self.copy_btn.config(state="normal")
+                    self.jump_btn.config(state="normal")
+                    self._render_markdown(text)
+                    self.status_lbl.config(
+                        text=f"● 已完成：{scope_str} · 净增 {agg.total_net_loc:+d} 行 · 成本 ${agg.total_cost:.2f} · 已入库收信箱",
+                        fg=theme.SUCCESS,
+                    )
+                    if hasattr(self.controller, "llm_reports_view"):
+                        try:
+                            self.controller.llm_reports_view._refresh_list()
+                        except Exception:
+                            pass
+
+                self.win.after(0, _finish)
+
+            except Exception as e:
+                def _err():
+                    if not self.win.winfo_exists():
+                        return
+                    self._generating = False
+                    self.gen_btn.config(state="normal")
+                    self.status_lbl.config(text=f"● 生成失败：{e}", fg=theme.ERROR)
+                self.win.after(0, _err)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _copy_content(self) -> None:
+        content = self.text_widget.get("1.0", "end-1c")
+        if not content:
+            return
+        self.win.clipboard_clear()
+        self.win.clipboard_append(content)
+        self.status_lbl.config(text="✓ Markdown 全文已复制到系统剪贴板！", fg=theme.SUCCESS)
+
+    def _jump_to_llm_tab(self) -> None:
+        if hasattr(self.controller, "_nb") and hasattr(self.controller, "_llm_tab"):
+            self.controller._nb.select(self.controller._llm_tab)
+            if self._current_entry and hasattr(self.controller, "llm_reports_view"):
+                self.controller.llm_reports_view.select_report(self._current_entry["id"])
+        self.win.destroy()

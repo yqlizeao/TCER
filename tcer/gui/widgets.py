@@ -845,11 +845,14 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, pady=No
     macOS 下用 ``_MacButton``（tk.Label）绕开 Aqua 主题 tk.Button 的白背景 bug。
     """
     custom_bg = kw.pop("bg", None)
+    custom_fg = kw.pop("fg", None)
     base_bg = custom_bg if custom_bg is not None else (theme.ACCENT if primary else theme.PANEL)
     hover_bg = theme.HOVER_ACCENT if primary else theme.HOVER_BG
-    fg = theme.FG_WHITE if primary else theme.FG
+    fg = custom_fg if custom_fg is not None else (theme.FG_WHITE if primary else theme.FG)
     pad_x = theme.PAD_M if padx is None else padx
     pad_y = theme.PAD_XS if pady is None else pady
+    if "image" in kw and text and "compound" not in kw:
+        kw["compound"] = "left"
     if PLATFORM == "darwin":
         return _MacButton(parent, command=command, base_bg=base_bg, hover_bg=hover_bg,
                           text=text, bg=base_bg, fg=fg, font=theme.FONT_UI,

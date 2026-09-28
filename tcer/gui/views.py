@@ -1123,6 +1123,8 @@ class FilterBar:
         )
 
     def _build_export_menu(self, menu) -> None:
+        menu.add_command(label="生成研发周报…", command=self.controller.show_weekly_report)
+        menu.add_separator()
         for label, fmt in (("项目报告 (HTML)", "html"), ("项目报告 (Markdown)", "md"),
                            ("项目数据 (JSON)", "json"), ("项目数据 (CSV)", "csv")):
             menu.add_command(label=label, command=lambda f=fmt: self.controller.export(f))
@@ -6075,6 +6077,7 @@ class LlmReportsView:
         "ambiguity": {"label": "歧义", "color": theme.WARNING, "desc": "需求文本术语歧义探测", "icon": "target"},
         "project":  {"label": "项目", "color": theme.CHART_PALETTE[0], "desc": "项目全局架构解读", "icon": "project"},
         "compare":  {"label": "对比", "color": theme.CHART_PALETTE[3], "desc": "多模型/跨源对比解读", "icon": "compare"},
+        "weekly":   {"label": "周报", "color": theme.CHART_PALETTE[0], "desc": "周期研发效能与业务交付周报", "icon": "calendar"},
         "anomaly":  {"label": "诊断", "color": theme.WARNING, "desc": "异常卡死/返工诊断", "icon": "tools"},
         "general":  {"label": "通用", "color": theme.MUTED, "desc": "综合解读报告", "icon": "sparkle"},
     }
@@ -6584,11 +6587,13 @@ class LlmReportsView:
                 status_fg = theme.ERROR
             else:
                 status_text = "双引擎一致"
-                status_fg = theme.SUCCESS
+        elif kind == "weekly":
+            loc_val = r.get("net_loc", 0)
+            status_text = f"+{loc_val}行" if loc_val >= 0 else f"{loc_val}行"
+            status_fg = theme.SUCCESS if loc_val > 0 else theme.MUTED
         elif r.get("audit_warnings") == []:
             status_text = "✓ 守约"
             status_fg = theme.SUCCESS
-
         if status_text:
             st_lbl = tk.Label(row1, text=status_text, bg=card._bg, fg=status_fg,
                               font=theme.FONT_UI_SMALL, anchor="e")
@@ -6620,7 +6625,8 @@ class LlmReportsView:
             sum_parts.append(m_short)
         if r.get("turns"):
             sum_parts.append(f"{r['turns']}轮")
-
+        elif r.get("scope"):
+            sum_parts.append(str(r["scope"]))
         sum_txt = " · ".join(sum_parts) or "—"
         sum_lbl = tk.Label(row3, text=sum_txt, bg=card._bg, fg=theme.MUTED,
                            font=theme.FONT_UI_SMALL, anchor="w")
@@ -6818,6 +6824,8 @@ class LlmReportsView:
         if kind == "dynamics":
             _status_key, s_lbl, s_col = self._resolve_dynamics_status(r)
             self._kind_badge.config(text=f"相空间 · {s_lbl}", fg=s_col)
+        elif kind == "weekly":
+            self._kind_badge.config(text="研发周报", fg=kind_meta["color"])
         else:
             self._kind_badge.config(
                 text=f"{kind_meta['label']}解读", fg=kind_meta["color"])
@@ -7484,21 +7492,26 @@ class TermbaseView:
 
         _plus = ui_icon(btn_box, "plus")
         self._new_btn = flat_button(
-            btn_box, "新建", self._create_new_term, primary=True, image=_plus, padx=4, pady=1
+            btn_box, "新建词条", self._create_new_term, image=_plus,
+            compound="left", bg=theme.CONTROL_BG, fg=theme.FG_WHITE, padx=8, pady=2
         )
-        self._new_btn.pack(side="left", padx=(0, 2))
+        self._new_btn.pack(side="left", padx=(0, 4))
         Tooltip(self._new_btn, "新建空白词条草稿")
 
         _trash = ui_icon(btn_box, "trash")
         self._del_btn = flat_button(
-            btn_box, "删除", self._delete_current_term, image=_trash, padx=4, pady=1
+            btn_box, "删除词条", self._delete_current_term, image=_trash,
+            compound="left", bg=theme.CONTROL_BG, fg=theme.FG, padx=8, pady=2
         )
-        self._del_btn.pack(side="left", padx=(0, 2))
+        self._del_btn.pack(side="left", padx=(0, 4))
         Tooltip(self._del_btn, "删除当前选中的词条（不可恢复）")
 
-        _more_btn = flat_button(btn_box, "操作 ▾", self._on_more_menu, padx=4, pady=1)
-        _more_btn.pack(side="left")
+        _more_btn = flat_button(
+            btn_box, "操作 ▾", self._on_more_menu,
+            bg=theme.CONTROL_BG, fg=theme.FG, padx=8, pady=2
+        )
         self._more_btn = _more_btn
+        _more_btn.pack(side="left")
 
         # 过滤与搜索条
         filter_box = tk.Frame(left, bg=theme.BG)
@@ -7642,7 +7655,6 @@ class TermbaseView:
                     btn_row,
                     "新建词条",
                     self._create_new_term,
-                    primary=True,
                     image=ui_icon(btn_row, "plus"),
                 ).pack(side="left", padx=3)
                 flat_button(
@@ -7894,12 +7906,15 @@ class TermbaseView:
             head_right,
             "保存词条",
             self._save_current_entry,
-            primary=True,
             image=_save_icon,
+            compound="left",
+            bg=theme.CONTROL_BG,
+            fg=theme.FG_WHITE,
             padx=12,
             pady=4,
         )
         save_btn.pack(side="right")
+        Tooltip(save_btn, "保存当前编辑的词条内容")
 
         # 表单主体
         body = tk.Frame(self._edit_container, bg=theme.BG, padx=14, pady=12)

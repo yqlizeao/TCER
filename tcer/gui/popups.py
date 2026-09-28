@@ -3508,4 +3508,5 @@ def _copy(win, text: str) -> None:
 from .popups_analysis import (  # noqa: E402,F401
     CrossSourceModelsPopup, ProjectOverviewPopup, ProjectProfilePopup,
     SessionComparePopup, SessionTimelinePopup, ToolSequencePopup,
+    WeeklyReportPopup,
 )

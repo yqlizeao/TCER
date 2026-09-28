@@ -1391,6 +1391,101 @@ class TcerGui:
             load_dialogue=load_dialogue,
             on_report_saved=self._on_llm_report_saved)
 
+    def show_weekly_report(self) -> None:
+        """打开生成研发周报弹窗：支持选定周期与项目范围，自动入库 LLM 报告。"""
+        popups.WeeklyReportPopup(self.root, self)
+
+    def run_weekly_report(self, since: str, until: str, *,
+                          project_refs=None, use_llm: bool = True,
+                          on_done=None) -> None:
+        """从外部或快捷指令直接派发研发周报生成任务。"""
+        from uuid import uuid4
+        from tcer.core import llm_prefs, llm_reports, weekly
+        import time as _time
+        import sys as _sys
+
+        task_id = str(uuid4())
+        task_desc = f"研发周报 ({since} ~ {until})"
+        self._llm_tasks[task_id] = {
+            "key": (f"{since}_{until}", "weekly"),
+            "desc": task_desc,
+        }
+        self.filter.set_status(f"正在汇总分析周报数据… ({since} ~ {until})", fg=theme.ACCENT)
+
+        def _work() -> None:
+            try:
+                def _prog(curr, tot, name):
+                    self._llm_ui_queue.put(
+                        lambda c=curr, t=tot, n=name: self.filter.set_status(
+                            f"正在扫描会话 [{c}/{t}] {n}…"
+                        )
+                    )
+
+                agg = weekly.collect_weekly_data(
+                    since, until, project_refs=project_refs, progress_callback=_prog
+                )
+                entry_id = str(uuid4())
+                model_name = "离线规则聚合"
+
+                if use_llm and llm_prefs.enabled():
+                    self._llm_ui_queue.put(
+                        lambda: self.filter.set_status(
+                            f"数据汇总完毕，正在由 LLM ({llm_prefs.model()}) 润色提炼周报…"
+                        )
+                    )
+                    sys_p, user_p = weekly.build_weekly_prompt_payload(agg)
+                    try:
+                        from tcer.core import llm_client
+                        text = llm_client.chat(
+                            base_url=llm_prefs.base_url(),
+                            api_key=llm_prefs.api_key(),
+                            model=llm_prefs.model(),
+                            system=sys_p,
+                            user=user_p,
+                        )
+                        model_name = llm_prefs.model()
+                    except Exception as err:
+                        offline_md = weekly.generate_offline_markdown(agg)
+                        text = f"> ⚠️ **提示**：调用大模型生成失败（{err}），已自动回退为本地离线事实聚合。\n\n{offline_md}"
+                else:
+                    text = weekly.generate_offline_markdown(agg)
+
+                title = f"研发周报 ({since} ~ {until})"
+                scope_str = f"{agg.total_sessions} 会话 · {len(agg.project_summaries)} 项目"
+                entry = {
+                    "id": entry_id,
+                    "created_at": int(_time.time() * 1000),
+                    "kind": "weekly",
+                    "title": title,
+                    "source": "all" if not project_refs or len(project_refs) > 1 else getattr(project_refs[0], "source", "claude"),
+                    "model": model_name,
+                    "scope": scope_str,
+                    "net_loc": agg.total_net_loc,
+                    "cost_display": f"${agg.total_cost:.2f}",
+                    "text": text,
+                    "weekly_data": {
+                        "since": since,
+                        "until": until,
+                        "total_sessions": agg.total_sessions,
+                        "total_net_loc": agg.total_net_loc,
+                        "total_cost": agg.total_cost,
+                    },
+                }
+                llm_reports.append(entry)
+                print(f"[LLM Task] Success: saved weekly report {entry_id} ({title})")
+                self._llm_ui_queue.put(
+                    lambda: self._on_llm_task_done(task_id, title, entry_id, jump=True)
+                )
+                if on_done:
+                    self._llm_ui_queue.put(lambda: on_done(entry))
+            except Exception as e:
+                print(f"[LLM Task Error] {task_desc}: {e}", file=_sys.stderr)
+                err_text = str(e)
+                self._llm_ui_queue.put(
+                    lambda: self._on_llm_task_error(task_id, task_desc, err_text)
+                )
+
+        self._llm_executor.submit(_work)
     def _on_llm_report_saved(self, report_id: str) -> None:
         """解读生成落盘后：切到「LLM 报告」页签并选中该条（大区阅读）。"""
         self._nb.select(self._llm_tab)
