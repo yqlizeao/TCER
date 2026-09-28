@@ -1524,6 +1524,22 @@ class UploadDialog:
         detail_row.bind("<Button-1>", toggle_detail)
         detail_lbl.bind("<Button-1>", toggle_detail)
 
+        # 团队概念分析授权（server 端 concepts 模块，doc/concept-alignment-server.md §8.2）：
+        # 与「附带明细」分开——同意把对话传上去回看 ≠ 同意纳入团队分析。仅实名 + 带明细时生效。
+        self._consent_var = tk.BooleanVar(value=bool(config.get("semantic_consent")))
+        consent_row = tk.Frame(cfg_card, bg=theme.PANEL, cursor=CLICK_CURSOR)
+        consent_row.pack(fill="x", pady=(4, 0))
+        self._consent_box, toggle_consent = self._create_checkbox_widget(
+            consent_row, self._consent_var, on_toggle=self._on_detail_toggle)
+        self._consent_box.pack(side="left", padx=(0, 6))
+        consent_lbl = tk.Label(
+            consent_row, text="允许团队概念分析（统计术语用法，不参与效率评分；需填 Auth Token 且附带明细）",
+            bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI, anchor="w",
+            cursor=CLICK_CURSOR, wraplength=600, justify="left")
+        consent_lbl.pack(side="left", fill="x", expand=True)
+        consent_row.bind("<Button-1>", toggle_consent)
+        consent_lbl.bind("<Button-1>", toggle_consent)
+
         # -- 项目选择卡（按目录分组显示，同目录多个 agent 集中排布，默认收起紧凑展示） --
         card3 = self._card(inner, "项目选择（按工作目录分组，默认收起；可展开查看与选择各 Agent）")
 
@@ -1966,16 +1982,18 @@ class UploadDialog:
             auth_token=self._token_var.get(),
             detail=self._detail_var.get(),
             auto_upload=self._auto_upload_var.get(),
+            semantic_consent=self._consent_var.get(),
         )
         self._on_save_prefs(prefs)
 
     def _save_config_safe(self, **kwargs) -> None:
-        try:
-            self._on_save_config(**kwargs)
-        except TypeError:
-            # 兼容仅接收 3 个参数的测试 mock
-            legacy = {k: v for k, v in kwargs.items() if k in ("url", "auth_token", "detail")}
-            self._on_save_config(**legacy)
+        # 逐级降级兼容旧签名回调（测试 mock / 外部集成）：去掉较新的可选键重试。
+        for drop in ((), ("semantic_consent",), ("semantic_consent", "auto_upload")):
+            try:
+                self._on_save_config(**{k: v for k, v in kwargs.items() if k not in drop})
+                return
+            except TypeError:
+                continue
 
     # -- small builders --
     def _card(self, inner, title: str) -> tk.Frame:

@@ -102,6 +102,8 @@ import diagnosis  # noqa: E402
 import insights  # noqa: E402
 import personas  # noqa: E402
 import projectview  # noqa: E402
+from concepts import api as concepts_api  # noqa: E402
+from concepts import pipeline as concepts_pipeline  # noqa: E402
 
 _FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend").resolve()
 _MAX_BODY = 64 * 1024 * 1024  # 64 MiB upload cap
@@ -192,6 +194,8 @@ class Handler(BaseHTTPRequestHandler):
             self._h_create_token()
         elif route == "/api/visibility":
             self._h_set_visibility()
+        elif route.startswith("/api/concepts/"):
+            self._h_concepts(route, post=True)
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -246,6 +250,8 @@ class Handler(BaseHTTPRequestHandler):
             self._guard(lambda: self._h_insights(qs))
         elif route == "/api/tokens":
             self._guard(self._h_list_tokens)
+        elif route.startswith("/api/concepts/"):
+            self._h_concepts(route, qs=qs)
         elif route.startswith("/api/"):
             self._send_json({"error": "not found"}, 404)
         else:
@@ -394,15 +400,20 @@ class Handler(BaseHTTPRequestHandler):
         # no longer decides whether sessions are stored at all.
         sessions = data.get("sessions")
         generated_at = data.get("generated_at")
+        # 语义分析授权：匿名上传一律不进入团队概念分析（无法关联职能与本人视图，E5）。
+        consent = bool(data.get("semantic_consent")) and bool(user) and not anonymous
         try:
             n = db.insert_records(
                 uploaded_by=user or "anonymous", person=person, project=project,
                 aggregate=aggregate, sessions=sessions,
                 generated_at=int(generated_at) if generated_at else None,
+                semantic_consent=consent,
             )
         except Exception as e:  # malformed payload shouldn't crash the server
             self._send_json({"error": f"insert failed: {e}"}, 400)
             return
+        if sessions:
+            concepts_pipeline.schedule()
         self._send_json({"inserted": n})
 
     def _h_filters(self) -> None:
@@ -617,6 +628,24 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_json({"ok": True})
 
+    # -- concepts ---------------------------------------------------------- #
+    def _h_concepts(self, route: str, qs: dict | None = None, post: bool = False) -> None:
+        user = self._auth_user()
+        if not user:
+            self._send_json({"error": "unauthorized"}, 401)
+            return
+        try:
+            if post:
+                body = self._read_json()
+                if body is None:
+                    self._send_json({"error": "invalid or too-large body"}, 400)
+                    return
+                self._send_json(concepts_api.handle_post(route, body, user))
+            else:
+                self._send_json(concepts_api.handle_get(route, qs or {}, user))
+        except concepts_api.ApiError as e:
+            self._send_json({"error": str(e)}, e.status)
+
     # -- static ------------------------------------------------------------ #
     def _serve_static(self, route: str) -> None:
         rel = route.lstrip("/") or "index.html"
@@ -640,6 +669,8 @@ def main() -> None:
     # Bootstrap a default admin/admin account on an empty DB for first-run.
     if db.user_count() == 0:
         db.create_user("admin", "admin")
+        # 首启管理员同时获得概念模块的「系统管理员」角色（角色表为空时的引导）。
+        db.init_db()
         sys.stderr.write("[tcer-server] created default user admin/admin — change it!\n")
     host = os.environ.get("TCER_SERVER_HOST", "127.0.0.1")
     port = int(os.environ.get("TCER_SERVER_PORT", "8890"))

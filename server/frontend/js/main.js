@@ -6,6 +6,10 @@ const VIEWS = {
   engineering: { title: "工程效能", render: renderEngineering },
   diagnosis: { title: "问题诊断", render: renderDiagnosis },
   sessions: { title: "会话明细", render: renderSessions },
+  "concepts-me": { title: "我的概念", render: renderConceptsMe },
+  "concepts-org": { title: "团队概念", render: renderConceptsOrg },
+  "concepts-diag": { title: "概念诊断", render: renderConceptsDiag },
+  "concepts-admin": { title: "概念治理", render: renderConceptsAdmin },
   aliases: { title: "聚合配置", render: renderAliases },
   tokens: { title: "Auth Token", render: renderTokens },
 };
@@ -14,6 +18,10 @@ async function route() {
   const v = VIEWS[S.view];
   document.getElementById("view-title").textContent = v.title;
   document.getElementById("content").innerHTML = `<div class="empty">加载中…</div>`;
+  // 团队概念页不受顶部时间 / 成员 / 项目筛选影响（个人视图按登录身份、管理视图只出聚合），隐藏以免误导。
+  const isConcept = S.view.startsWith("concepts-");
+  document.querySelector(".topbar-filters").classList.toggle("hidden", isConcept);
+  document.getElementById("content").classList.toggle("cx-page", isConcept);
   disposeCharts();
   try { await v.render(); }
   catch (e) {

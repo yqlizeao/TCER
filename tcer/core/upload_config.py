@@ -12,7 +12,8 @@
       "upload": {
         "url": "https://your-server.example",  # 服务器地址；空 → 未配置
         "auth_token": "",              # Auth Token；空 → 匿名上传
-        "detail": true                 # 是否附带每会话明细（对话）
+        "detail": true,                # 是否附带每会话明细（对话）
+        "semantic_consent": false      # 是否允许服务端团队概念分析（仅 detail 且非匿名生效）
       },
       "geometry": ...                  # 其它界面偏好
     }
@@ -38,6 +39,8 @@ DEFAULT_URL = ""
 DEFAULT_DETAIL = True
 # 默认不启用每小时自动上传
 DEFAULT_AUTO_UPLOAD = False
+# 默认不授权团队概念分析（opt-in：同意把对话传到服务器回看 ≠ 同意纳入团队分析）。
+DEFAULT_SEMANTIC_CONSENT = False
 
 _SECTION = "upload"
 
@@ -68,6 +71,12 @@ def upload_detail() -> bool:
     """是否附带每会话明细。未配置时用内置默认 :data:`DEFAULT_DETAIL`。"""
     v = _section().get("detail")
     return bool(v) if isinstance(v, bool) else DEFAULT_DETAIL
+
+
+def semantic_consent() -> bool:
+    """是否授权服务端团队概念分析（server/backend/concepts）。默认 False。"""
+    v = _section().get("semantic_consent")
+    return bool(v) if isinstance(v, bool) else DEFAULT_SEMANTIC_CONSENT
 
 
 def upload_enabled() -> bool:
@@ -112,13 +121,14 @@ def stored_config() -> dict:
         "auth_token": str(sec.get("auth_token") or "").strip(),
         "detail": sec.get("detail") if isinstance(sec.get("detail"), bool) else DEFAULT_DETAIL,
         "auto_upload": sec.get("auto_upload") if isinstance(sec.get("auto_upload"), bool) else DEFAULT_AUTO_UPLOAD,
+        "semantic_consent": semantic_consent(),
         "last_upload_ts": last_upload_ts(),
         "default_url": DEFAULT_URL,
     }
 
 
 def save(*, url: str, auth_token: str, detail: bool, auto_upload: bool = False,
-         last_upload_ts: int | None = None) -> None:
+         last_upload_ts: int | None = None, semantic_consent: bool | None = None) -> None:
     """把上传配置写回 ``tcer_ui.json`` 的 ``upload`` 段（load-merge，不抹其它段）。
 
     只持久化用户填的原始值（url/token 去首尾空白）：空串照存空串——``server_url``/
@@ -133,6 +143,9 @@ def save(*, url: str, auth_token: str, detail: bool, auto_upload: bool = False,
         "auth_token": (auth_token or "").strip(),
         "detail": bool(detail),
         "auto_upload": bool(auto_upload),
+        # None = 调用方未涉及该项（旧签名），保留原值
+        "semantic_consent": bool(old_sec.get("semantic_consent"))
+        if semantic_consent is None else bool(semantic_consent),
     }
     if out_ts is not None:
         sec_data["last_upload_ts"] = int(out_ts)

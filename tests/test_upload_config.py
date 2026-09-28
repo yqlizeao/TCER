@@ -77,6 +77,7 @@ def test_stored_config_returns_raw_values(tmp_path, monkeypatch):
     assert c == {"url": "", "auth_token": "",
                  "detail": upload_config.DEFAULT_DETAIL,
                  "auto_upload": upload_config.DEFAULT_AUTO_UPLOAD,
+                 "semantic_consent": upload_config.DEFAULT_SEMANTIC_CONSENT,
                  "last_upload_ts": None,
                  "default_url": upload_config.DEFAULT_URL}
     _write_prefs(tmp_path, {"upload": {"url": "https://x.io", "auth_token": "t1", "detail": False, "auto_upload": True, "last_upload_ts": 1720000000000}})
@@ -131,3 +132,34 @@ def test_auto_upload_and_timestamp_persistence(tmp_path, monkeypatch):
     assert upload_config.upload_detail() is False
     assert upload_config.auto_upload() is True
     assert upload_config.last_upload_ts() == 1726000000123
+
+def test_semantic_consent_default_off_and_preserved(tmp_path, monkeypatch):
+    """团队概念分析授权默认关闭；旧签名 save（不传该项）不得抹掉已有授权。"""
+    _point_prefs(tmp_path, monkeypatch)
+    assert upload_config.semantic_consent() is False
+    upload_config.save(url="https://srv", auth_token="t", detail=True, semantic_consent=True)
+    assert upload_config.semantic_consent() is True
+    upload_config.save(url="https://srv", auth_token="t", detail=True)
+    assert upload_config.semantic_consent() is True
+    upload_config.save(url="https://srv", auth_token="t", detail=True, semantic_consent=False)
+    assert upload_config.semantic_consent() is False
+
+
+def test_payload_consent_requires_detail_and_identity():
+    """payload 的授权位只在「带明细 + 实名」时为真（服务端对匿名同样兜底忽略）。"""
+    from types import SimpleNamespace
+    from tcer.core import upload_client
+    import tcer.core.export as export
+    monkeypatch_row = lambda r: {"session_id": "x"}  # noqa: E731
+    orig = export.report_row_dict
+    export.report_row_dict = monkeypatch_row
+    try:
+        agg = SimpleNamespace()
+        mk = lambda **kw: upload_client.build_payload(  # noqa: E731
+            aggregate=agg, reports=[], n_sessions=0, project="p", user="u", **kw)
+        assert mk(anonymous=False, detail=True, semantic_consent=True)["semantic_consent"] is True
+        assert mk(anonymous=True, detail=True, semantic_consent=True)["semantic_consent"] is False
+        assert mk(anonymous=False, detail=False, semantic_consent=True)["semantic_consent"] is False
+        assert mk(anonymous=False, detail=True)["semantic_consent"] is False
+    finally:
+        export.report_row_dict = orig

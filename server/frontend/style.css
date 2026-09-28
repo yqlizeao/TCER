@@ -723,3 +723,33 @@ details[open] > summary .blk-toggle-cue::after {
 .user-menu-item.active { color: var(--accent); }
 .user-menu-ic { width: 16px; height: 16px; flex: none; display: flex; }
 .user-menu-ic svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.7; }
+
+/* ---------------- 团队概念对齐 ---------------- */
+.rail-sep { font-size: var(--fs-eyebrow); letter-spacing: 1.2px; color: var(--tx-mute); padding: 14px 10px 4px; }
+.cx-note { margin: 0 0 var(--gap); font-size: var(--fs-sm); line-height: 1.6; }
+.cx-switch { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.cx-kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+.cx-kv > div { display: flex; flex-direction: column; gap: 2px; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; }
+.cx-kv span { font-size: var(--fs-xs); color: var(--tx-mute); }
+.cx-kv b { font-size: 18px; font-weight: 600; }
+.cx-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cx-item { border-bottom: 1px solid var(--line-soft); padding: 10px 0; }
+.cx-item:last-child { border-bottom: none; }
+.cx-item-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.cx-right { margin-left: auto; font-size: var(--fs-xs); color: var(--tx-mute); }
+.cx-ev { font-size: var(--fs-sm); color: var(--tx-dim); line-height: 1.6; padding: 2px 0; }
+.cx-lbl { display: inline-block; font-size: var(--fs-eyebrow); color: var(--accent); background: var(--chip); border-radius: 3px; padding: 0 6px; margin-right: 6px; }
+.cx-sub { margin-top: 10px; }
+.cx-def { white-space: normal !important; text-align: left !important; color: var(--tx-dim); max-width: 380px; }
+.cx-row { cursor: pointer; }
+.cx-pre { white-space: pre-wrap; background: var(--bg); padding: 8px 10px; border-radius: 4px; font-size: var(--fs-sm); margin: 6px 0; max-height: 320px; overflow: auto; }
+.cx-detail { margin-bottom: var(--gap); }
+.cx-form { margin-top: var(--gap); display: flex; flex-direction: column; gap: 8px; }
+.cx-fgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 12px; }
+.cx-fgrid label, .cx-full { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-xs); color: var(--tx-mute); }
+.cx-full { width: 100%; }
+.cx-frow { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
+.cx-grow { flex: 1; min-width: 0; }
+textarea.filter { resize: vertical; padding: 6px 8px; line-height: 1.5; }
+.cx-page .tbl th.tx, .cx-page .tbl td.tx { text-align: left; white-space: normal; }
+.cx-textarea { width: 100%; margin-top: 8px; min-height: 110px; }

@@ -114,6 +114,7 @@ def build_payload(
     user: str | None,
     anonymous: bool,
     detail: bool,
+    semantic_consent: bool = False,
 ) -> dict[str, Any]:
     """Build the upload envelope from an analysis result.
 
@@ -147,6 +148,8 @@ def build_payload(
         "user": person,
         "project": project,
         "detail": bool(detail),
+        # 团队概念分析授权：只在带对话且实名时有意义（服务端对匿名上传一律忽略）。
+        "semantic_consent": bool(semantic_consent and detail and not anonymous),
         "generated_at": int(time.time() * 1000),
         "aggregate": agg_row,
     }
@@ -296,6 +299,7 @@ def token_upload(
     n_sessions: int,
     project: str,
     detail: bool,
+    semantic_consent: bool = False,
 ) -> int:
     """Build + upload a project's report using config-driven auth.
 
@@ -314,6 +318,6 @@ def token_upload(
     payload = build_payload(
         aggregate=aggregate, reports=reports, n_sessions=n_sessions,
         project=project, user=_anon_seed() if anonymous else None,
-        anonymous=anonymous, detail=detail,
+        anonymous=anonymous, detail=detail, semantic_consent=semantic_consent,
     )
     return upload(server_url, auth_token, payload)

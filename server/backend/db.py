@@ -219,6 +219,10 @@ def init_db() -> None:
                 "AND s.person IS uploads.person AND s.project IS uploads.project)"
             )
             conn.execute("PRAGMA user_version = 2")
+        # 团队概念对齐模块的表（doc/concept-alignment-server.md）。
+        from concepts import governance as _cg, schema as _cs
+        _cs.init(conn)
+        _cg.init(conn)
         conn.commit()
     finally:
         conn.close()
@@ -456,6 +460,7 @@ def insert_records(
     aggregate: dict | None,
     sessions: list[dict] | None,
     generated_at: int | None,
+    semantic_consent: bool = False,
 ) -> int:
     """Flatten and store an upload payload. Returns rows inserted OR updated.
 
@@ -545,6 +550,7 @@ def insert_records(
                 (person, project),
             )
         n_changed = 0
+        consent_flag = 1 if semantic_consent else 0
         # The aggregate row is dead weight when sessions are present (queries
         # re-derive the aggregate by summing session rows and drop it), so only
         # store it for aggregate-only uploads.
@@ -560,7 +566,11 @@ def insert_records(
                 conn.execute(update_sql,
                              (*(vals[idx[c]] for c in _upd_cols), row_id))
             else:
-                conn.execute(insert_sql, _vals(s, "session"))
+                row_id = conn.execute(insert_sql, _vals(s, "session")).lastrowid
+            # 语义分析授权逐行记录（doc/concept-alignment-server.md §8.2）：
+            # 客户端每次上传都携带当前意愿，重传即可撤回 / 开启。
+            conn.execute("UPDATE uploads SET semantic_consent=? WHERE id=?",
+                         (consent_flag, row_id))
             n_changed += 1
 
         conn.commit()

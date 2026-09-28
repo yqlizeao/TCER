@@ -4,6 +4,8 @@ Usage:
     python server/backend/manage.py adduser <username> <password>
     python server/backend/manage.py passwd  <username> <password>
     python server/backend/manage.py listusers
+    python server/backend/manage.py setroles <username> [role ...]   # 概念模块角色（空=仅成员）
+        角色：concept_owner reviewer manager steward admin
 """
 from __future__ import annotations
 
@@ -52,6 +54,15 @@ def main(argv: list[str]) -> int:
                 print(f"{r['username']}\t{r['created_at']}")
         finally:
             conn.close()
+        return 0
+    if cmd == "setroles" and len(argv) >= 2:
+        from concepts import rbac
+        try:
+            rbac.set_roles(argv[1], argv[2:])
+        except ValueError as e:
+            print(e)
+            return 1
+        print(f"{argv[1]}: {', '.join(sorted(rbac.roles_of(argv[1])))}")
         return 0
     print(__doc__)
     return 1

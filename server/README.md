@@ -49,6 +49,39 @@ server/
   - **队列对比**——任意配置维度分组，按「任务类型 × 会话规模」分层后对比，同时给出
     未分层差异（两者的落差就是混杂因素的大小）、95% bootstrap 区间与质量护栏。
 
+## 团队概念对齐（`backend/concepts/`）
+
+设计文档：[`doc/concept-alignment-server.md`](../doc/concept-alignment-server.md)。从成员上传的 AI 会话里
+统计团队术语的使用、AI 对术语的误解与换词、子代理派发时的术语保真，维护一份可评审、可质疑、
+有版本的团队术语库。纯标准库，**不参与任何效率评分**。
+
+- **数据门**：只分析上传时勾选「允许团队概念分析」（`semantic_consent`）、带对话明细、且非匿名的
+  会话；本人可在「我的概念」一键撤回，派生数据随即删除。
+- **四个页面**：我的概念（仅本人 / 本人授权的账号）· 团队概念（全员：基线定义库、候选新词、
+  共现网络、趋势）· 概念诊断（管理者，仅 ≥5 人聚合）· 概念治理（评审提案、处理质疑、导入导出
+  术语库、补充资料上传、成员职能、角色分配）。
+- **披露规则**集中在 `concepts/disclosure.py`，是所有概念数据的唯一出口。
+- **角色**：首启 `admin` 自动获得系统管理员；其余在「概念治理 → 角色分配」或
+  `python server/backend/manage.py setroles <用户> reviewer manager …` 设置。
+- 上传后后台增量重建；数据管理员可在「概念治理 → 分析任务」手动全量重建。
+- 造数：`TCER_SERVER_DB=/tmp/demo.db python server/backend/seed_concepts.py`（植入已知效应，
+  账号 admin/admin、dev1/dev1、plan1/plan1 …）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/concepts/me[?as=]` | 个人视图（`as` 仅限已授权给你的账号） |
+| GET | `/api/concepts/org` · `/concept?slug=` | 团队全貌 / 概念详情 |
+| GET | `/api/concepts/diagnosis` | 管理诊断（manager） |
+| GET | `/api/concepts/proposals` · `/disputes` · `/documents` · `/status` | 治理与任务状态 |
+| GET | `/api/concepts/termbase/export` · `/context?slugs=` | 导出术语库（客户端同构 JSON）/ 上下文术语段 |
+| GET | `/api/concepts/profiles` · `/roles` | 成员职能（steward）/ 角色（admin） |
+| POST | `/api/concepts/propose` · `/decide` · `/dispute` · `/dispute/resolve` | 提案与评审、质疑 |
+| POST | `/api/concepts/termbase/import` · `/candidate` · `/documents` · `/documents/delete` | 数据入口 |
+| POST | `/api/concepts/consent` · `/my-profile` · `/grant` | 本人授权 / 职能 / 授权他人查看 |
+| POST | `/api/concepts/profiles/import` · `/profiles/set` · `/roles` · `/rebuild` | 管理操作 |
+
+上传信封新增可选字段 `"semantic_consent": true`（仅 `detail=true` 且非匿名时生效）。
+
 ## 启动
 
 ```bash

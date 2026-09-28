@@ -2180,14 +2180,16 @@ class TcerGui:
         )
 
     def _save_upload_config(self, *, url: str, auth_token: str, detail: bool,
-                            auto_upload: bool = False) -> None:
+                            auto_upload: bool = False,
+                            semantic_consent: bool | None = None) -> None:
         """把 dialog 编辑的上传配置写回 ``tcer_ui.json`` 的 upload 段。
 
         写回后同步 ``self._ui_prefs``（退出时整体落盘的内存副本），避免 ``_on_close``
         用旧副本覆盖掉刚保存的 upload 段。
         """
         from tcer.core import upload_config
-        upload_config.save(url=url, auth_token=auth_token, detail=detail, auto_upload=auto_upload)
+        upload_config.save(url=url, auth_token=auth_token, detail=detail, auto_upload=auto_upload,
+                           semantic_consent=semantic_consent)
         self._ui_prefs = ui_prefs.load()
         if auto_upload:
             self._start_auto_upload_polling(1000)
@@ -2242,7 +2244,8 @@ class TcerGui:
             no_loc=self._no_loc,
         )
         cfg = dict(server_url=server_url, auth_token=upload_config.auth_token(),
-                   detail=upload_config.upload_detail())
+                   detail=upload_config.upload_detail(),
+                   semantic_consent=upload_config.semantic_consent())
         threading.Thread(
             target=self._upload_worker,
             args=(cfg, refs, missing, analysis_args, dialog),
@@ -2287,6 +2290,7 @@ class TcerGui:
                     server_url=server_url, auth_token=auth_token,
                     aggregate=a.aggregate, reports=a.reports,
                     n_sessions=a.n_sessions, project=key, detail=detail,
+                    semantic_consent=bool(cfg.get("semantic_consent")),
                 )
                 ok_projects += 1
             except Exception as e:  # noqa: BLE001 — collect per-project failures without aborting
@@ -2389,6 +2393,7 @@ class TcerGui:
             server_url=server_url,
             auth_token=upload_config.auth_token(),
             detail=upload_config.upload_detail(),
+            semantic_consent=upload_config.semantic_consent(),
         )
         threading.Thread(
             target=self._auto_upload_worker,
@@ -2449,6 +2454,7 @@ class TcerGui:
                         server_url=server_url, auth_token=auth_token,
                         aggregate=a.aggregate, reports=new_reports,
                         n_sessions=len(new_reports), project=key, detail=detail,
+                        semantic_consent=bool(cfg.get("semantic_consent")),
                     )
                     ok_projects += 1
                 except Exception as e:  # noqa: BLE001

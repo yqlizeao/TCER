@@ -54,6 +54,23 @@
         <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h10"/></svg></span>
         <span class="rail-tx">会话明细</span><span class="rail-hint">逐条查看</span>
       </button>
+      <div class="rail-sep">团队概念</div>
+      <button class="rail-item" data-view="concepts-me">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg></span>
+        <span class="rail-tx">我的概念</span><span class="rail-hint">仅本人可见</span>
+      </button>
+      <button class="rail-item" data-view="concepts-org">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 012-2h13v16H6a2 2 0 00-2 2z"/><path d="M4 19V5"/><path d="M9 8h6"/></svg></span>
+        <span class="rail-tx">团队概念</span><span class="rail-hint">基线定义 · 全貌</span>
+      </button>
+      <button class="rail-item" data-view="concepts-diag">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/><path d="M8 11h6"/></svg></span>
+        <span class="rail-tx">概念诊断</span><span class="rail-hint">管理者 · 仅聚合</span>
+      </button>
+      <button class="rail-item" data-view="concepts-admin">
+        <span class="rail-ic"><svg viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg></span>
+        <span class="rail-tx">概念治理</span><span class="rail-hint">评审 · 资料入口</span>
+      </button>
     </nav>
     <div class="rail-foot">
       <div class="user">
@@ -113,6 +130,7 @@
 <script src="js/view-sessions.js"></script>
 <script src="js/view-aliases.js"></script>
 <script src="js/view-tokens.js"></script>
+<script src="js/view-concepts.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>
