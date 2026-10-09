@@ -315,7 +315,6 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
             model = obj.get("model")
             if isinstance(model, str) and model:
                 current_model = pricing.normalize(model)
-                u.models.add(current_model)
             continue
 
         if typ == "mode_change":
@@ -372,8 +371,6 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
         model = _first_str(mm.get("model"))
         if model:
             current_model = pricing.normalize(model)
-            u.models.add(current_model)
-
         # A turn interrupted by the user or the runtime ends with
         # stopReason == "aborted" (analogous to Codex's turn_aborted event).
         # errorMessage carries a clean reason ("Interrupted by user",
@@ -448,6 +445,8 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
         u.session_duration_ms = active_duration_ms
     elif u.started_at and u.ended_at:
         u.session_duration_ms = max(0, u.ended_at - u.started_at)
+    if not u.models and current_model:
+        u.models.add(current_model)
     return u
 
 
@@ -683,6 +682,8 @@ def _add_turn_usage(u: TokenUsage, usage: dict, model: str, turn: int, ts: int |
     u.output_tokens += o
     u.reasoning_output_tokens += reasoning
     key = model or ""
+    if key:
+        u.models.add(key)
     u.bucket(key).add(i, cw, cr, o, cw1h)
     u.turn_stats.append(TurnStat(
         turn=turn, ts=ts,

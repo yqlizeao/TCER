@@ -307,10 +307,10 @@ def test_newly_added_models_and_current_time_pricing():
     assert pricing.resolve("gpt-5.6-sol") == {"input": 4.0, "output": 20.0, "cache_read": 0.4, "cache_write": 5.0}
     # Gemini 3.8 Flash 介绍期价格生效中
     assert pricing.resolve("gemini-3.8-flash") == {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0}
-    # DeepSeek V4 Pro 路由生效价
-    assert pricing.resolve("deepseek-v4-pro") == {"input": 0.3, "output": 1.2, "cache_read": 0.006, "cache_write": 0.0}
-    # o3-mini 降价
-    assert pricing.resolve("o3-mini") == {"input": 0.55, "output": 2.2, "cache_read": 0.275, "cache_write": 0.0}
+    # DeepSeek V4 Pro 恢复官方高峰档价（官方撤回路由公告）
+    assert pricing.resolve("deepseek-v4-pro") == {"input": 1.32, "output": 3.96, "cache_read": 0.044, "cache_write": 0.0}
+    # o3-mini 官方标准挂牌价
+    assert pricing.resolve("o3-mini") == {"input": 1.10, "output": 4.40, "cache_read": 0.55, "cache_write": 0.0}
 
 
 
@@ -333,9 +333,12 @@ def test_expanded_models_and_consistent_notes():
 
     # 2. OpenAI GPT-6 Cutting-Edge Series
     assert pricing.is_table_priced("gpt-6-sol")
-    assert pricing.resolve("gpt-6-sol") == {"input": 6.0, "output": 30.0, "cache_read": 0.6, "cache_write": 7.5}
+    assert pricing.resolve("gpt-6-sol") == {"input": 2.0, "output": 10.0, "cache_read": 0.2, "cache_write": 2.5}
+    assert pricing.is_table_priced("gpt-6.1-sol")
+    assert pricing.resolve("gpt-6.1-sol") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5}
     assert pricing.is_table_priced("gpt-6-codex")
     assert pricing.is_table_priced("gpt-6-luna")
+    assert pricing.resolve("gpt-6-luna") == {"input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write": 0.125}
 
     # 3. Google Gemini 3.8 Pro & 3.9
     assert pricing.is_table_priced("gemini-3.8-pro")
@@ -457,3 +460,75 @@ def test_claude_2_1_283_drift_fixes(tmp_path):
     assert usage.plan_mode_count == 1
     assert "claude-opus-5-5" in usage.models
     assert "claude-opus-5-5" in usage.per_model
+
+
+def test_upstream_synced_models_2026_10():
+    """Verify models and prices synchronized from upstream cc-switch in 2026-10."""
+    # 1. GPT-6.1 Sol and alias
+    assert pricing.is_table_priced("gpt-6.1-sol")
+    assert pricing.resolve("gpt-6.1-sol") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5}
+    assert pricing.resolve("gpt-6.1") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5}
+    assert pricing.vendor("gpt-6.1-sol") == "OpenAI"
+
+    # 2. GPT-5.6 Cyber
+    assert pricing.is_table_priced("gpt-5.6-cyber")
+    assert pricing.resolve("gpt-5.6-cyber") == {"input": 12.5, "output": 75.0, "cache_read": 1.25, "cache_write": 15.625}
+    assert pricing.vendor("gpt-5.6-cyber") == "OpenAI"
+
+    # 3. GPT-5.6 Terra & Luna updated prices
+    assert pricing.resolve("gpt-5.6-terra") == {"input": 2.0, "output": 12.0, "cache_read": 0.2, "cache_write": 2.5}
+    assert pricing.resolve("gpt-5.6-luna") == {"input": 0.2, "output": 1.2, "cache_read": 0.02, "cache_write": 0.25}
+
+    # 4. Step 5 Preview
+    assert pricing.is_table_priced("step-5-preview")
+    assert pricing.resolve("step-5-preview") == {"input": 0.98, "output": 2.8, "cache_read": 0.05, "cache_write": 0.0}
+    assert pricing.vendor("step-5-preview") == "StepFun"
+
+    # 5. Hunyuan Hy4 Preview
+    assert pricing.is_table_priced("hy4-preview")
+    assert pricing.resolve("hy4-preview") == {"input": 0.84, "output": 2.52, "cache_read": 0.042, "cache_write": 0.0}
+    assert pricing.resolve("hunyuan-hy4-preview") == {"input": 0.84, "output": 2.52, "cache_read": 0.042, "cache_write": 0.0}
+    assert pricing.vendor("hy4-preview") == "Tencent"
+
+    # 6. GLM-5.3-FlashX
+    assert pricing.is_table_priced("glm-5.3-flashx")
+    assert pricing.resolve("glm-5.3-flashx") == {"input": 0.37, "output": 1.25, "cache_read": 0.075, "cache_write": 0.0}
+    assert pricing.vendor("glm-5.3-flashx") == "Zhipu AI"
+
+    # 7. Qwen3.8 (2.4T A95B & 27B)
+    assert pricing.is_table_priced("qwen3.8-2.4t-a95b")
+    assert pricing.resolve("qwen3.8-2.4t-a95b") == {"input": 2.0, "output": 6.0, "cache_read": 0.25, "cache_write": 2.5}
+    assert pricing.is_table_priced("qwen3.8-27b")
+    assert pricing.resolve("qwen3.8-27b") == {"input": 0.5, "output": 3.0, "cache_read": 0.1, "cache_write": 0.625}
+    assert pricing.vendor("qwen3.8-27b") == "Alibaba"
+
+    # 8. Grok 4.7
+    assert pricing.is_table_priced("grok-4.7")
+    assert pricing.resolve("grok-4.7") == {"input": 2.0, "output": 6.0, "cache_read": 0.5, "cache_write": 0.0}
+    assert pricing.vendor("grok-4.7") == "xAI"
+
+    # 9. MiMo V2.6 Family & V2.5
+    assert pricing.is_table_priced("mimo-v2.6-pro")
+    assert pricing.resolve("mimo-v2.6-pro") == {"input": 0.435, "output": 0.87, "cache_read": 0.0036, "cache_write": 0.0}
+    assert pricing.is_table_priced("mimo-v2.6-flash")
+    assert pricing.resolve("mimo-v2.6-flash") == {"input": 0.14, "output": 0.28, "cache_read": 0.0028, "cache_write": 0.0}
+    assert pricing.is_table_priced("mimo-v2.6-pro-ultraspeed")
+    assert pricing.resolve("mimo-v2.6-pro-ultraspeed") == {"input": 4.35, "output": 8.7, "cache_read": 0.036, "cache_write": 0.0}
+    assert pricing.resolve("mimo-v2.5") == {"input": 0.14, "output": 0.28, "cache_read": 0.0028, "cache_write": 0.0}
+    assert pricing.vendor("mimo-v2.6-pro") == "Xiaomi"
+
+    # 10. DeepSeek Chat / Reasoner standard prices
+    assert pricing.resolve("deepseek-chat") == {"input": 0.44, "output": 1.32, "cache_read": 0.014, "cache_write": 0.0}
+    assert pricing.resolve("deepseek-reasoner") == {"input": 0.44, "output": 1.32, "cache_read": 0.014, "cache_write": 0.0}
+
+    # 11. Claude Haiku 5.5 (2026-10-07 price cut)
+    assert pricing.is_table_priced("claude-haiku-5-5")
+    assert pricing.resolve("claude-haiku-5-5") == {"input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write": 0.125}
+    assert pricing.vendor("claude-haiku-5-5") == "Anthropic"
+
+    # 12. Active frontier common models (Daybreak, LongCat, Qwen Omni)
+    assert pricing.resolve("gpt-daybreak-blue-latest") == {"input": 4.0, "output": 20.0, "cache_read": 0.4, "cache_write": 5.0}
+    assert pricing.resolve("gpt-daybreak-red-latest") == {"input": 12.5, "output": 75.0, "cache_read": 1.25, "cache_write": 15.625}
+    assert pricing.resolve("longcat-2.0") == {"input": 0.75, "output": 2.95, "cache_read": 0.015, "cache_write": 0.0}
+    assert pricing.vendor("longcat-2.0") == "Meituan"
+    assert pricing.resolve("qwen3.8-omni-flash") == {"input": 0.15, "output": 0.47, "cache_read": 0.016, "cache_write": 0.0}

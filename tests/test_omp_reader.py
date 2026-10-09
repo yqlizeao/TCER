@@ -179,6 +179,27 @@ def test_empty_usage_skipped(tmp_path):
     assert u.input_tokens == 50 and u.output_tokens == 10
 
 
+
+def test_zero_token_error_model_not_in_models(tmp_path):
+    """Initial model_change and 0-token 400 error turn must not pollute u.models."""
+    from tcer.core import format as fmt
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        _model_change("google/gemini-3.1-pro-preview"),
+        _user("start"),
+        _assistant([], _usage(0, 0), model="gemini-3.1-pro-preview", err={"status": 400}),
+        _model_change("VexelRouterGemini/gemini-3.8-flash-high"),
+        _user("retry"),
+        _assistant([_text("ok")], _usage(100, 20), model="gemini-3.8-flash-high"),
+    ])
+    u = omp_reader.aggregate_usage(p)
+    assert u.empty_usage_skipped == 1
+    assert u.assistant_msgs == 1
+    assert "gemini-3.1-pro-preview" not in u.models
+    assert "gemini-3.8-flash-high" in u.models
+    assert len(u.models) == 1
+    assert fmt.models_label(u) == "Gemini 3.8 Flash (High)"
+
 def test_custom_entries_ignored(tmp_path):
     """custom / custom_message entries must not crash or count as messages."""
     p = _write_omp(tmp_path / "s.jsonl", [

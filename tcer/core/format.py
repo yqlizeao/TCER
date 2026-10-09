@@ -105,7 +105,17 @@ def models_label(u: TokenUsage, max_n: int = 2) -> str:
     Filters out non-real models like ``<synthetic>`` and empty strings.
     """
     _SKIP = {"<synthetic>", ""}
-    labels = [pricing.label(m) for m in sorted(u.models) if m not in _SKIP]
+    # 若 per_model 中已有产生实际消耗的有效模型，优先展示实际产生 Token 的模型；
+    # 避免仅触发过 model_change 或 400 报错未产出 Token 的“隐身”模型污染展示。
+    active_models = {
+        m for m, mu in u.per_model.items()
+        if m not in _SKIP and (
+            mu.input_tokens + mu.output_tokens + mu.cache_read_input_tokens +
+            mu.cache_creation_input_tokens + mu.cache_write_1h_tokens
+        ) > 0
+    }
+    candidates = active_models if active_models else u.models
+    labels = [pricing.label(m) for m in sorted(candidates) if m not in _SKIP]
     if not labels:
         return "-"
     if len(labels) > max_n:
