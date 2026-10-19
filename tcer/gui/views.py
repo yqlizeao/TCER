@@ -59,7 +59,7 @@ _SCORE_SHORT = "效率分"                    # 窄列/徽标用简称
 _SCORE_TIP = metric_tip("score")          # 悬停完整解释
 from .widgets import (Card, CollapsibleSection, FlatMenu,
                       MetricCell, ScrollFrame, SelectableLabel, Tooltip, flat_button, WorkbenchTab,
-                      RoundedPill, RoundedSearchBox, RoundedKpiChip, get_rounded_rect_img)
+                      RoundedPill, RoundedSearchBox, RoundedKpiChip, get_rounded_rect_img, draw_rounded_rect_bg)
 from .platform import CLICK_CURSOR
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
@@ -2214,13 +2214,7 @@ class MetricPanel:
             ht = h.winfo_height()
             if w < 10 or ht < 10:
                 return
-            h.delete("hdr_bg")
-            img = get_rounded_rect_img(h, w, ht, 6, bg_col, theme.BG)
-            if img is not None:
-                h.create_image(0, 0, anchor="nw", image=img, tags="hdr_bg")
-            else:
-                h.create_rectangle(0, 0, w, ht, fill=bg_col, outline="", tags="hdr_bg")
-            h.tag_lower("hdr_bg")
+            draw_rounded_rect_bg(h, w, ht, 6, bg_col, theme.BG, "hdr_bg")
 
         header.bind("<Configure>", _redraw_hdr)
 
@@ -2578,7 +2572,7 @@ class ScoreRankingView:
         self._apply_displaycolumns()
         self._apply_layout()
         self._rebuild_tree()
-        self._draw_grade_bar()
+        self._draw_grade_bar(force=True)
         self._draw_decompose()
 
     def _apply_displaycolumns(self) -> None:
@@ -2653,10 +2647,8 @@ class ScoreRankingView:
 
     # -- grade bar ------------------------------------------------------------
 
-    def _draw_grade_bar(self) -> None:
+    def _draw_grade_bar(self, *, force: bool = False) -> None:
         c = self._grade_canvas
-        c.delete("all")
-        self._grade_rects.clear()
         w = c.winfo_width()
         if w < 10:
             return
@@ -2669,10 +2661,16 @@ class ScoreRankingView:
         total = sum(counts.values()) or 1
 
         bar_w = min(w - 24, 640)
+        state_key = (bar_w, self._grade_filter, id(self._ranking))
+        if not force and state_key == getattr(self, "_last_grade_bar_key", None):
+            return
+        self._last_grade_bar_key = state_key
+
+        c.delete("all")
+        self._grade_rects.clear()
         bar_h = 8
         x0 = 12
         y0 = 6
-
         # 背景凹槽 (深灰底)
         c.create_rectangle(x0, y0, x0 + bar_w, y0 + bar_h, fill=theme.CONTROL_BG, outline="", width=0)
 
@@ -2718,7 +2716,7 @@ class ScoreRankingView:
             if x0 <= event.x <= x1 and y0 <= event.y <= y1:
                 self._grade_filter = None if self._grade_filter == g else g
                 self._rebuild_tree()
-                self._draw_grade_bar()
+                self._draw_grade_bar(force=True)
                 self._draw_decompose()
                 return
 

@@ -332,11 +332,29 @@ class ScrollFrame:
         ch = self.canvas.winfo_height()
         if ch > 1 and (y1 - y0) <= ch + 6:
             y1 = y0 + ch  # scrollregion 高钳到 canvas 高 → yview (0,1) 锁定
-        self.canvas.configure(scrollregion=(x0, y0, x1, y1))
+        region = (x0, y0, x1, y1)
+        if getattr(self, "_last_scrollregion", None) != region:
+            self._last_scrollregion = region
+            self.canvas.configure(scrollregion=region)
 
     def _on_resize(self, event) -> None:
-        self.canvas.itemconfig(self._win, width=event.width)
+        new_w = event.width
+        if getattr(self, "_last_win_width", None) == new_w:
+            return
+        self._target_win_width = new_w
+        if getattr(self, "_resize_after", None) is not None:
+            return
+        self._resize_after = self.canvas.after(20, self._flush_win_width)
 
+    def _flush_win_width(self) -> None:
+        self._resize_after = None
+        w = getattr(self, "_target_win_width", None)
+        if w is not None and getattr(self, "_last_win_width", None) != w:
+            self._last_win_width = w
+            try:
+                self.canvas.itemconfig(self._win, width=w)
+            except tk.TclError:
+                pass
     def _on_inner_configure(self, _event=None) -> None:
         self._apply_scrollregion()
         if self._reset_pending:
@@ -425,6 +443,8 @@ class Card:
         self._registered_widgets: list[tk.Widget] = []
         self._label_fgs: dict[tk.Widget, str] = {}
         self._radius = radius
+        self._bg_img = None
+        self._last_draw_key = None
 
         # 自绘抗锯齿圆角底 Canvas 替代生硬直角
         self.frame = tk.Canvas(parent, bg=self._parent_bg, highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
@@ -447,14 +467,12 @@ class Card:
         h = self.frame.winfo_height()
         if w < 10 or h < 10:
             return
-        self.frame.delete("card_bg")
         fill_col = theme.SEL_ROW_ACTIVE if self._selected else (theme.HOVER_BG if self._hovered else self._bg)
-        self._bg_img = get_rounded_rect_img(self.frame, w, h, self._radius, fill_col, self._parent_bg)
-        if self._bg_img is not None:
-            self.frame.create_image(0, 0, anchor="nw", image=self._bg_img, tags="card_bg")
-        else:
-            self.frame.create_rectangle(0, 0, w, h, fill=fill_col, outline="", tags="card_bg")
-        self.frame.tag_lower("card_bg")
+        draw_key = (w, h, fill_col)
+        if draw_key == getattr(self, "_last_draw_key", None):
+            return
+        self._last_draw_key = draw_key
+        draw_rounded_rect_bg(self.frame, w, h, self._radius, fill_col, self._parent_bg, "card_bg")
 
     def set_state_rail(self, color: str | None) -> None:
         """设置左侧状态条颜色（例如收敛向心绿、逃逸橙红等）。"""
@@ -485,6 +503,7 @@ class Card:
             self._apply_bg(self._bg)
 
     def _apply_bg(self, bg_color: str) -> None:
+        self._last_draw_key = None
         self._redraw_bg()
         rail_col = self._state_rail_color or (theme.ACCENT if self._selected else bg_color)
         try:
@@ -696,9 +715,12 @@ class SelectableLabel(tk.Text):
         # 右键「复制全文」兜底：长消息拖选不便时一键复制。
         self.bind("<Button-3>", self._copy_menu, add="+")
         # 构造时尚未布局(pack 前 winfo_width=1 → count 把每字算成一行)，
-        # 首次 pack 获得真实宽度时由 <Configure> 重算修正。
         self._last_width = -1
         self.bind("<Configure>", self._on_configure, add="+")
+        self.bind("<Map>", self._on_map, add="+")
+        self._auto_height()
+
+    def _on_map(self, _event=None) -> None:
         self._auto_height()
 
     def set_text(self, text: str) -> None:
@@ -710,28 +732,19 @@ class SelectableLabel(tk.Text):
         self._auto_height()
 
     def _on_configure(self, event) -> None:
-        # 仅宽度变化时重算;height 自身变化触发的 Configure 被忽略,避免递归。
-        if event.width != self._last_width:
+        # 仅已映射且宽度真实有效(>1)发生变化时重算，避免未布局时算爆行数
+        if event.width > 1 and event.width != self._last_width:
             self._last_width = event.width
             self._auto_height()
 
     # ---- 高度测量合并结算 ----------------------------------------------- #
-    # 每个实例各自 ``update_idletasks()`` 再 count 是灾难：一次强制全量布局
-    # ~40ms，效率榜一次刷新建 47 个洞察条 → 47 次全量布局 ≈ 2s 主线程卡顿。
-    # 改为类级待测队列 + 单个 after_idle：布局只结算一次，逐个 count（便宜）。
-    # 定时器锚定到长命的 toplevel：tkinter 的 after 回调注册在调度 widget 名下，
-    # 该 widget 在 idle 前被销毁（重建流程常见）会连 tcl 命令一起删掉、定时器
-    # 永不触发——待测队列随之永久挂起。每次登记时校验锚存活自愈。
     _PENDING: "set[SelectableLabel]" = set()
     _PENDING_AFTER: str | None = None
     _ANCHOR: "tk.Misc | None" = None
-    _RETRY_MS = 30     # 未布局 widget 的重试间隔
-    _MAX_TRIES = 10    # 重试上限，超限走旧式强制测量兜底
 
     def _auto_height(self) -> None:
         """登记待测高；实际测量合并到下一个空闲点（见 _flush_pending_heights）。"""
         cls = type(self)
-        self._h_tries = 0
         cls._PENDING.add(self)
         cls._arm()
 
@@ -742,7 +755,7 @@ class SelectableLabel(tk.Text):
         try:
             if anchor is not None and not anchor.winfo_exists():
                 anchor = None
-                cls._PENDING_AFTER = None  # 锚已死：旧定时器必失效，重排
+                cls._PENDING_AFTER = None
         except tk.TclError:
             anchor = None
             cls._PENDING_AFTER = None
@@ -766,29 +779,22 @@ class SelectableLabel(tk.Text):
         cls._PENDING_AFTER = None
         if not cls._PENDING:
             return
-        pending = [w for w in cls._PENDING if w.winfo_exists()]
+        try:
+            pending = [w for w in cls._PENDING if w.winfo_exists()]
+        except tk.TclError:
+            cls._PENDING.clear()
+            return
         cls._PENDING.clear()
-        stuck: list = []
         for w in pending:
             try:
-                if w.winfo_width() <= 1:
-                    # 尚未布局（宽度仍为初始 1）：此刻测量必错。短暂重试等
-                    # 布局；一直不布局（折叠区等未映射容器）超限后按旧式
-                    # update_idletasks 强制结算兜底。
-                    w._h_tries = getattr(w, "_h_tries", 0) + 1
-                    if w._h_tries <= cls._MAX_TRIES:
-                        stuck.append(w)
-                        continue
-                    w.update_idletasks()
+                # 仅对已映射在屏幕且具有真实有效宽度的 widget 测量；未映射容器等 <Map> 映射后再测
+                if not w.winfo_ismapped() or w.winfo_width() <= 1:
+                    continue
                 n = w.count("1.0", "end-1c", "displaylines")
                 lines = n[0] if n and n[0] else 1
                 w.configure(height=max(1, lines + 1))
-                w._h_tries = 0
             except tk.TclError:
-                pass  # 竞态销毁：放弃该实例
-        if stuck:
-            cls._PENDING.update(stuck)
-            cls._arm(cls._RETRY_MS)
+                pass
 
     def _copy_menu(self, event=None) -> None:
         menu = FlatMenu(self)
@@ -798,7 +804,6 @@ class SelectableLabel(tk.Text):
     def _copy_all(self) -> None:
         self.clipboard_clear()
         self.clipboard_append(self.get("1.0", "end-1c"))
-
 
 class _MacButton(tk.Label):
     """mac 上模拟扁平按钮：``tk.Label`` + 点击/hover 绑定。
@@ -1225,6 +1230,90 @@ class WorkbenchTab(tk.Frame):
 _ROUNDED_IMG_CACHE: dict[tuple, object] = {}
 
 
+_ROUNDED_CAPS_CACHE: dict[tuple, tuple[object, object]] = {}
+
+
+def get_rounded_caps(master, h: int, r: int, fill: str, parent_bg: str):
+    """生成并缓存左右圆角端头切片（宽度为 2*r，高度为 h）。
+
+    端头切片尺寸仅依赖 (h, r, fill, parent_bg)，与容器实际像素宽度完全解耦。
+    一次生成终生复用，无论宽度如何拖拽调整，PIL 计算与内存分配恒为 0。
+    """
+    tk_id = id(getattr(master, "tk", None))
+    key = (tk_id, h, r, fill, parent_bg)
+    if key in _ROUNDED_CAPS_CACHE:
+        return _ROUNDED_CAPS_CACHE[key]
+    try:
+        from PIL import Image, ImageDraw, ImageTk
+    except ImportError:
+        return None, None
+    ss = 2
+    cap_w = max(1, 2 * r)
+    W, H, R = max(1, 4 * r * ss), max(1, h * ss), max(1, r * ss)
+    im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill)
+    im = im.resize((4 * r, h), Image.Resampling.LANCZOS)
+    left_im = im.crop((0, 0, cap_w, h))
+    right_im = im.crop((4 * r - cap_w, 0, 4 * r, h))
+    left_photo = ImageTk.PhotoImage(left_im, master=master)
+    right_photo = ImageTk.PhotoImage(right_im, master=master)
+    _ROUNDED_CAPS_CACHE[key] = (left_photo, right_photo)
+    return left_photo, right_photo
+
+
+def draw_rounded_rect_bg(canvas: tk.Canvas, w: int, h: int, r: int, fill: str, parent_bg: str, tag: str = "bg") -> None:
+    """在 Canvas 上高效绘制自适应宽度的抗锯齿圆角背景（3-patch 端头切片拉伸技术）。
+
+    1. 若 fill == parent_bg（占卡片 99% 的未选中/未悬停常态），直接清空旧图元返回，
+       由 Canvas 原生背景色呈现纯色底，拖动时 0 计算开销。
+    2. 若 fill != parent_bg，复用 (h, r, fill, parent_bg) 的左右端头切片缓存，
+       中间以 Canvas 纯色矩形平滑拉伸；宽度变动时仅调用 coords 更新坐标（0.001ms 级），
+       彻底根除拖拽调整侧边栏宽度时的剧烈卡顿。
+    """
+    if w < 10 or h < 10:
+        return
+    if fill == parent_bg:
+        if canvas.find_withtag(tag):
+            canvas.delete(tag)
+        setattr(canvas, f"_{tag}_state", (h, r, fill, parent_bg))
+        return
+
+    if w < 4 * r:
+        canvas.delete(tag)
+        canvas.create_rectangle(0, 0, w, h, fill=fill, outline="", tags=tag)
+        canvas.tag_lower(tag)
+        setattr(canvas, f"_{tag}_state", (h, r, fill, parent_bg))
+        return
+
+    cap_w = 2 * r
+    left_img, right_img = get_rounded_caps(canvas, h, r, fill, parent_bg)
+    if left_img is None or right_img is None:
+        canvas.delete(tag)
+        canvas.create_rectangle(0, 0, w, h, fill=fill, outline="", tags=tag)
+        canvas.tag_lower(tag)
+        setattr(canvas, f"_{tag}_state", (h, r, fill, parent_bg))
+        return
+
+    left_item = canvas.find_withtag(f"{tag}_left")
+    mid_item = canvas.find_withtag(f"{tag}_mid")
+    right_item = canvas.find_withtag(f"{tag}_right")
+    last_state = getattr(canvas, f"_{tag}_state", None)
+    curr_state = (h, r, fill, parent_bg)
+
+    if left_item and mid_item and right_item and last_state == curr_state:
+        # 仅宽度改变，高度与颜色未变：纯坐标位移，0 毫秒极速更新
+        canvas.coords(mid_item, cap_w, 0, w - cap_w, h)
+        canvas.coords(right_item, w - cap_w, 0)
+    else:
+        canvas.delete(tag)
+        canvas.create_image(0, 0, anchor="nw", image=left_img, tags=(tag, f"{tag}_left"))
+        canvas.create_rectangle(cap_w, 0, w - cap_w, h, fill=fill, outline="", tags=(tag, f"{tag}_mid"))
+        canvas.create_image(w - cap_w, 0, anchor="nw", image=right_img, tags=(tag, f"{tag}_right"))
+        canvas.tag_lower(tag)
+        setattr(canvas, f"_{tag}_state", curr_state)
+
+
 def get_rounded_rect_img(master, w: int, h: int, r: int, fill: str, bg: str,
                          outline: str | None = None, outline_width: int = 1):
     """生成并缓存 2x 超采样抗锯齿圆角矩形背景图。"""
@@ -1232,6 +1321,10 @@ def get_rounded_rect_img(master, w: int, h: int, r: int, fill: str, bg: str,
     key = (tk_id, w, h, r, fill, bg, outline, outline_width)
     if key in _ROUNDED_IMG_CACHE:
         return _ROUNDED_IMG_CACHE[key]
+    if len(_ROUNDED_IMG_CACHE) > 256:
+        # LRU/剪枝防膨胀
+        for k in list(_ROUNDED_IMG_CACHE.keys())[:128]:
+            _ROUNDED_IMG_CACHE.pop(k, None)
     try:
         from PIL import Image, ImageDraw, ImageTk
     except ImportError:

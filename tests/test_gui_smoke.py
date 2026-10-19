@@ -2097,3 +2097,79 @@ def test_weekly_report_popup_smoke(root):
     assert "AI 研发周报生成器" in content
     popup.win.destroy()
 
+def test_draw_rounded_rect_bg_performance_and_accuracy(root):
+    """测试 3-patch 圆角切片技术：零冗余图元、同底色跳过、拉伸仅更新坐标。"""
+    from tcer.gui.widgets import draw_rounded_rect_bg, get_rounded_caps, _ROUNDED_CAPS_CACHE
+    canvas = tk.Canvas(root, width=240, height=24, bg="#252526")
+
+    # 1. 普通态 (fill == parent_bg)：无需图元，0 开销
+    draw_rounded_rect_bg(canvas, 240, 24, 5, "#252526", "#252526", "test_bg")
+    assert not canvas.find_withtag("test_bg"), "同底色不应产生任何背景图元"
+
+    # 2. 选中态 (fill != parent_bg)：产生左端、中间矩形、右端 3 个图元
+    draw_rounded_rect_bg(canvas, 240, 24, 5, "#094771", "#252526", "test_bg")
+    items = canvas.find_withtag("test_bg")
+    assert len(items) == 3, f"3-patch 结构应恰好由 3 个图元组成，实际: {len(items)}"
+
+    # 3. 连续调整宽度：图元数量恒定为 3，仅更新坐标，端头缓存命中
+    initial_cache_size = len(_ROUNDED_CAPS_CACHE)
+    for w in range(200, 320, 10):
+        draw_rounded_rect_bg(canvas, w, 24, 5, "#094771", "#252526", "test_bg")
+        assert len(canvas.find_withtag("test_bg")) == 3
+    # 端头缓存仅依赖 (h, r, fill, parent_bg)，与宽度 w 完全无关，缓存条目不应随 w 暴涨
+    assert len(_ROUNDED_CAPS_CACHE) == initial_cache_size
+
+    # 4. 切回普通态：图元被彻底清空
+    draw_rounded_rect_bg(canvas, 300, 24, 5, "#252526", "#252526", "test_bg")
+    assert not canvas.find_withtag("test_bg"), "切回普通态后图元应被彻底删除"
+    canvas.destroy()
+
+
+def test_card_resize_fast_without_redundant_pil(root):
+    """测试 Card 在侧边栏宽度变动时 0 开销跳过，选中时仅毫秒级更新坐标。"""
+    import time
+    from tcer.gui.widgets import Card
+    container = tk.Frame(root, bg="#252526")
+    cards = [
+        Card(container, on_click=lambda c: None, bg="#252526", radius=5)
+        for _ in range(20)
+    ]
+    # 只有第 0 张卡片被选中
+    cards[0].set_selected(True)
+
+    # 模拟容器宽度调整 30 次（相当于鼠标拖动 sash 30 像素）
+    t0 = time.perf_counter()
+    for w in range(200, 230):
+        for c in cards:
+            c.frame.configure(width=w)
+            c._redraw_bg()
+    dt_ms = (time.perf_counter() - t0) * 1000
+    # 20 张卡片连续 resize 30 次（共 600 次 _redraw_bg）应当在极短时间内完成（< 50ms）
+    assert dt_ms < 100.0, f"卡片连续 resize 耗时过长: {dt_ms:.2f} ms"
+
+    for c in cards:
+        c.frame.destroy()
+    container.destroy()
+
+
+def test_score_ranking_grade_bar_resize_skip(root):
+    """测试效率榜等级条在宽度大于 640 且未变动时短路跳过重绘。"""
+    from tcer.gui.views import ScoreRankingView
+    v = ScoreRankingView(root)
+    v._grade_canvas.configure(width=800)
+    v._draw_grade_bar(force=True)
+    call_count = [0]
+    orig_delete = v._grade_canvas.delete
+    def wrapped_delete(*args, **kwargs):
+        call_count[0] += 1
+        return orig_delete(*args, **kwargs)
+    v._grade_canvas.delete = wrapped_delete
+
+    # 连续改变宽度 800 -> 850（bar_w 始终锁定为 min(w-24, 640) = 640）
+    for w in range(800, 850, 5):
+        v._grade_canvas.configure(width=w)
+        v._draw_grade_bar()
+    # 由于 bar_w 封顶且 filter 没变，不应重复清空重绘
+    assert call_count[0] == 0, f"宽度变动时应跳过不必要重绘，实际重绘了 {call_count[0]} 次"
+    v._grade_canvas.delete = orig_delete
+

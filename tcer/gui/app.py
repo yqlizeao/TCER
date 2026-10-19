@@ -264,7 +264,11 @@ class TcerGui:
             pass
 
     def _build_body(self, container) -> None:
-        paned = tk.PanedWindow(container, orient="horizontal", bg=theme.BG, sashwidth=4)
+        # opaqueresize=False：拖拽只画预览线，松手才重排一次。实时重排时每次
+        # sash 位移都触发右侧整棵控件树 <Configure> 连锁（卡片/图表/ScrollFrame），
+        # Tcl 层节流只能减次数、减不了单次耗时，单次重排 >20ms 即失效。
+        paned = tk.PanedWindow(container, orient="horizontal", bg=theme.BG,
+                               sashwidth=4, opaqueresize=False)
         paned.pack(side="left", fill="both", expand=True)
 
         # 左侧全高侧边栏 (Primary Sidebar，通顶) — 紧凑索引，突出右侧主体展示
@@ -285,7 +289,8 @@ class TcerGui:
         # 挂载项目/会话视角切换按钮（取代原“资源管理器”文本）
         self.filter.mount_view_switcher(sb_head)
 
-        self.sidebar_paned = tk.PanedWindow(sidebar, orient="vertical", bg=theme.PANEL, sashwidth=4)
+        self.sidebar_paned = tk.PanedWindow(sidebar, orient="vertical", bg=theme.PANEL,
+                                            sashwidth=4, opaqueresize=False)
         self.sidebar_paned.pack(fill="both", expand=True)
 
         proj_pane = tk.Frame(self.sidebar_paned, bg=theme.PANEL)
