@@ -198,6 +198,13 @@ CREATE TABLE IF NOT EXISTS source_document (      -- web 预留入口：Wiki / �
     uploaded_at INTEGER NOT NULL
 );
 
+-- ============ 新词挖掘停用词（web 端可配置）============
+CREATE TABLE IF NOT EXISTS lexicon_stopword (
+    word     TEXT PRIMARY KEY,                  -- 小写
+    added_by TEXT NOT NULL,
+    added_at INTEGER NOT NULL
+);
+
 -- ============ 调度与审计 ============
 CREATE TABLE IF NOT EXISTS concept_meta (
     key   TEXT PRIMARY KEY,
@@ -240,6 +247,11 @@ def init(conn: sqlite3.Connection) -> None:
     for name, decl in UPLOAD_COLUMNS.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE uploads ADD COLUMN {name} {decl}")
+    if conn.execute("SELECT COUNT(*) FROM lexicon_stopword").fetchone()[0] == 0:
+        from concepts import lexicon as _lx
+        conn.executemany("INSERT OR IGNORE INTO lexicon_stopword(word, added_by, added_at) "
+                         "VALUES(?, 'system', strftime('%s','now'))",
+                         [(w,) for w in sorted(_lx.SEED_STOPWORDS)])
     # 首次启用：默认 admin 账号自动获得 admin 角色（与 server 首启 admin/admin 引导一致）。
     if conn.execute("SELECT COUNT(*) FROM user_role").fetchone()[0] == 0:
         if conn.execute("SELECT 1 FROM users WHERE username='admin'").fetchone():

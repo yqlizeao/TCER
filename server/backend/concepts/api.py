@@ -81,6 +81,14 @@ def handle_get(route: str, qs: dict, user: str) -> dict:
         return {"users": rbac.list_role_assignments(), "roles": rbac.ROLES}
     if sub == "/documents":
         return {"documents": _list_documents(user), "kinds": DOC_KINDS}
+    if sub == "/stopwords":
+        _need(user, "steward")
+        conn = db.connect()
+        try:
+            rows = conn.execute("SELECT word, added_by FROM lexicon_stopword ORDER BY word")
+            return {"words": [dict(r) for r in rows]}
+        finally:
+            conn.close()
     if sub == "/status":
         return pipeline.status() | {"rules": disclosure.rules()}
     raise ApiError(404, "not found")
@@ -161,6 +169,24 @@ def handle_post(route: str, body: dict, user: str) -> dict:
             return _add_document(user, b)
         if sub == "/documents/delete":
             return _delete_document(user, int(b["id"]))
+        if sub == "/stopwords":
+            _need(user, "steward")
+            import re as _re
+            import time as _t
+            add = {w.strip().lower() for w in _re.split(r"[\s,，、]+", b.get("add") or "") if w.strip()}
+            rem = [str(w).strip().lower() for w in (b.get("remove") or [])]
+            conn = db.connect()
+            try:
+                for w in add:
+                    conn.execute("INSERT OR IGNORE INTO lexicon_stopword(word, added_by, added_at) "
+                                 "VALUES(?,?,?)", (w, user, int(_t.time())))
+                for w in rem:
+                    conn.execute("DELETE FROM lexicon_stopword WHERE word=?", (w,))
+                conn.commit()
+            finally:
+                conn.close()
+            pipeline.schedule()
+            return {"ok": True, "added": len(add), "removed": len(rem)}
         if sub == "/rebuild":
             _need(user, "steward")
             stats = pipeline.rebuild(full=bool(b.get("full")))

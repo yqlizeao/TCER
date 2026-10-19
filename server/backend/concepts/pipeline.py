@@ -153,7 +153,13 @@ def mine_candidates(conn: sqlite3.Connection, tb) -> int:
         "SELECT text, person, project FROM utterance WHERE speaker='user'")]
     bg = [r[0] for r in conn.execute(
         "SELECT text FROM utterance WHERE speaker='assistant' ORDER BY RANDOM() LIMIT 20000")]
-    cands = lexicon.mine_candidates(user_utts, bg, lexicon.known_label_set(tb))
+    ident_src = [r[0] for r in conn.execute(
+        "SELECT text FROM utterance WHERE speaker IN ('assistant','subagent_prompt') "
+        "ORDER BY RANDOM() LIMIT 20000")]
+    stop = {r[0] for r in conn.execute("SELECT word FROM lexicon_stopword")}
+    cands = lexicon.mine_candidates(user_utts, bg, lexicon.known_label_set(tb),
+                                    identifiers=lexicon.extract_identifiers(ident_src),
+                                    stopwords=stop)
     decisions = {r["surface"]: r["status"] for r in conn.execute(
         "SELECT surface, status FROM candidate_decision")}
     now = int(time.time())

@@ -575,6 +575,7 @@ async function renderConceptsAdmin() {
         ${status.last_error ? `<div class="hi hi-bad cx-note">${escapeHTML(status.last_error)}</div>` : ""}
         <div class="tk-gen" style="margin-top:8px"><button class="btn-ghost" id="cx-rb">增量重建</button><button class="btn-ghost" id="cx-rb-full">全量重建</button><span id="cx-rb-msg"></span></div></div>
     </div>` : ""}
+    ${roles.has("steward") ? `<div class="panel" id="cx-stop-panel"><div class="panel-head"><span class="panel-title">新词挖掘停用词</span><span class="panel-note">数据管理员 · 命中的词不会进入候选队列</span></div>${cxEmpty("加载中…")}</div>` : ""}
     ${roles.has("admin") ? `<div class="panel" id="cx-roles-panel"><div class="panel-head"><span class="panel-title">角色分配</span><span class="panel-note">系统管理员 · 任何角色都不能查看他人的个人视图</span></div>${cxEmpty("加载中…")}</div>` : ""}`;
 
   const $ = (id) => document.getElementById(id);
@@ -630,7 +631,24 @@ async function renderConceptsAdmin() {
     $("cx-rb-full").addEventListener("click", rb(true));
     cxProfilesPanel();
   }
+  if ($("cx-stop-panel")) cxStopPanel();
   if ($("cx-roles-panel")) cxRolesPanel();
+}
+
+async function cxStopPanel() {
+  const el = document.getElementById("cx-stop-panel");
+  const d = await api("/api/concepts/stopwords");
+  el.innerHTML = `<div class="panel-head"><span class="panel-title">新词挖掘停用词</span><span class="panel-note">数据管理员 · 命中的词不会进入候选队列，保存后后台自动重挖</span></div>
+    <div class="tk-gen"><input id="cx-sw-add" class="filter cx-grow" type="text" placeholder="添加停用词，空格或逗号分隔（如 目录 报错 install）">
+      <button class="btn-primary" id="cx-sw-btn">添加</button><span id="cx-sw-msg"></span></div>
+    <div class="cx-tags">${d.words.map((w) =>
+      `<span class="ms-tag"><span class="ms-tag-tx">${escapeHTML(w.word)}</span><button class="ms-tag-x cx-sw-del" data-w="${escapeHTML(w.word)}" type="button" title="移除">×</button></span>`).join("")
+      || '<span class="panel-note">暂无</span>'}</div>`;
+  document.getElementById("cx-sw-btn").addEventListener("click", async () => {
+    const v = document.getElementById("cx-sw-add").value.trim(); if (!v) return;
+    try { await cxPost("stopwords", { add: v }); cxStopPanel(); } catch (e) { cxFlash(document.getElementById("cx-sw-msg"), e.message, true); }
+  });
+  cxBind(el, ".cx-sw-del", "click", async (b) => { await cxPost("stopwords", { remove: [b.dataset.w] }); cxStopPanel(); });
 }
 
 function cxFmtVal(v) {

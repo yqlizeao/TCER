@@ -19,6 +19,7 @@ _LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-\.#+]*[A-Za-z0-9+#]|[A-Za-z]
 
 CJK_MIN_N, CJK_MAX_N = 2, 6
 MIN_FREQ = 5
+IDENT_MIN_FREQ = 2   # 同时是项目标识符的词，用户侧只需提到 2 次
 MIN_PERSONS = 2
 # 邻接字多样性（accessor variety）：CJK 候选左右两侧各至少出现 N 种不同的邻接字
 # （句首 / 句尾每次算一种，但至少一侧要有真实邻接字），否则判为跨词边界的截断片段（「战令系统第」「励配置要调整」）。
@@ -46,6 +47,61 @@ _EN_STOP = {
     "http", "https", "www", "com", "true", "false", "none", "null", "json", "todo", "ok",
     "etc", "via", "per", "how", "why", "any", "each", "its", "our", "out", "has", "had",
 }
+
+# 默认种子：首次建表时写入 lexicon_stopword，之后由 web 端（数据管理员）增删，不再改代码。
+SEED_STOPWORDS = set("""
+重新 准确 审查 排查 后续 检查 调研 操作 优化 迭代 运行 生成 确认 分析 支持 相关 对应 完成 更新
+添加 删除 查看 增加 调整 正常 执行 结果 目录 构建 方案 模块 环境 报错 改动 提交 测试 数据 客户端
+工程 交互 tools source client server repos failed error errors build users codex claude agent
+agents user path name type data config script scripts output input result results status winget
+windows program install administrator downloads passed fatal found debug warning update version
+system loaded format exist head style kit dev review tasks workspace project editor framework
+component vendor games epic follow being because parallel blame utils target start publish
+development const catch virtual architecture setup local system32 microsoft coverage binaries
+engine sdk
+""".split())
+
+_IDENT_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[_\-][A-Za-z0-9]+)*")
+_CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _code_like(tok: str) -> bool:
+    """像代码命名：含下划线/连字符、驼峰、数字，或带 vx/vg 之类前缀的长词。"""
+    return ("_" in tok or "-" in tok or any(c.isdigit() for c in tok)
+            or (tok != tok.lower() and tok != tok.capitalize() and tok != tok.upper()))
+
+
+def extract_identifiers(texts: list[str]) -> Counter:
+    """项目自身标识符：AI 反引号片段与路径里的词。
+
+    只保留「像代码命名」的整词，或在 AI 普通文本（非反引号）里几乎不出现的纯小写词；
+    普通英文词（follow/being/because）在 AI 正文里高频出现，不算项目标识符。"""
+    raw: Counter = Counter()
+    prose: Counter = Counter()
+    code_like: set[str] = set()
+    for t in texts:
+        t = t[:_SCAN_CHARS]
+        segs = re.findall(r"`([^`\n]{2,80})`", t)
+        for seg in segs:
+            for tok in _IDENT_TOKEN_RE.findall(seg.replace("/", " ").replace("\\", " ").replace(".", " ")):
+                if len(tok) < 3:
+                    continue
+                raw[tok.lower()] += 1
+                if _code_like(tok):
+                    code_like.add(tok.lower())
+                parts = [p for p in _CAMEL_SPLIT_RE.split(tok.replace("_", " ").replace("-", " ")) if p.strip()]
+                if len(parts) > 1:
+                    for p in " ".join(parts).split():
+                        if len(p) >= 3:
+                            raw[p.lower()] += 1
+        plain = re.sub(r"`[^`\n]*`", " ", t)
+        for w in set(re.findall(r"[A-Za-z]{3,}", plain.lower())):
+            prose[w] += 1
+    out: Counter = Counter()
+    for w, n in raw.items():
+        if w in code_like or prose.get(w, 0) <= 1:
+            out[w] = n
+    return out
 
 
 def find_hits(text: str, tb: tb_mod.Termbase) -> list[tb_mod.TermHit]:
@@ -91,6 +147,18 @@ def _grams(text: str) -> set[str]:
     return out
 
 
+_QUOTED_RE = re.compile(r"`([^`\n]{2,30})`|「([^」\n]{2,20})」|“([^”\n]{2,20})”|\"([^\"\n]{2,20})\"|《([^》\n]{2,20})》")
+
+
+def _quoted(text: str) -> set[str]:
+    out = set()
+    for m in _QUOTED_RE.finditer(text[:_SCAN_CHARS]):
+        s = next(x for x in m.groups() if x).strip().lower()
+        if len(s) >= 2 and " " not in s.strip("."):
+            out.add(s)
+    return out
+
+
 def g2(a: int, b: int, n1: int, n2: int) -> float:
     """对数似然比（Dunning 1993）。a/n1 = 目标语料频率，b/n2 = 背景语料频率。
 
@@ -113,7 +181,8 @@ def g2(a: int, b: int, n1: int, n2: int) -> float:
 
 
 def mine_candidates(user_utts: list[dict], background_texts: list[str],
-                    known_labels: set[str]) -> list[dict]:
+                    known_labels: set[str], identifiers: Counter | None = None,
+                    stopwords: set[str] | None = None) -> list[dict]:
     """从 user 侧 utterance 挖候选新词。
 
     ``user_utts``: ``[{text, person, project}]``；``known_labels``：已入库标签（小写），
@@ -122,6 +191,9 @@ def mine_candidates(user_utts: list[dict], background_texts: list[str],
     freq: Counter = Counter()
     persons: dict[str, set] = defaultdict(set)
     projects: dict[str, set] = defaultdict(set)
+    proj_cnt: dict[str, Counter] = defaultdict(Counter)
+    quoted: Counter = Counter()
+    n_projects_all = len({u.get("project") for u in user_utts if u.get("project")})
     for u in user_utts:
         for g in _grams(u["text"]):
             freq[g] += 1
@@ -129,8 +201,14 @@ def mine_candidates(user_utts: list[dict], background_texts: list[str],
                 persons[g].add(u["person"])
             if u.get("project"):
                 projects[g].add(u["project"])
+                proj_cnt[g][u["project"]] += 1
+        for q in _quoted(u["text"]):
+            quoted[q] += 1
+    ident = identifiers or {}
     pool = [g for g, n in freq.items()
-            if n >= MIN_FREQ and len(persons[g]) >= MIN_PERSONS and g.lower() not in known_labels]
+            if (n >= MIN_FREQ or (n >= IDENT_MIN_FREQ and ident.get(g.lower(), 0) >= 2))
+            and len(persons[g]) >= MIN_PERSONS and g.lower() not in known_labels
+            and g.lower() not in (stopwords or ())]
     pool = _accessor_filter(pool, [u["text"] for u in user_utts])
     if not pool:
         return []
@@ -142,10 +220,30 @@ def mine_candidates(user_utts: list[dict], background_texts: list[str],
     n1, n2 = len(user_utts), len(background_texts)
     scored = []
     for g in pool:
-        s = g2(freq[g], bg[g], n1, n2)
-        if s <= 0 and n2 > 0:
+        # 项目铺开度：出现在大多数项目里的是通用口头禅（优化/界面/迭代），丢弃。
+        if n_projects_all >= 4 and len(projects[g]) / n_projects_all > 0.5:
             continue
-        scored.append((s if n2 > 0 else float(freq[g] * len(persons[g])), g))
+        # 项目集中度（1 - 归一化熵）：越集中于少数项目越像项目概念。
+        pc = proj_cnt[g]
+        tot = sum(pc.values())
+        if len(pc) > 1 and tot:
+            ent = -sum(c / tot * math.log(c / tot) for c in pc.values()) / math.log(len(pc))
+            conc = 1.0 - ent
+        else:
+            conc = 1.0
+        # AI 会复述用户的项目术语，背景频率只作软惩罚，不再一票否决。
+        base = g2(freq[g], bg[g], n1, n2) if n2 > 0 else 0.0
+        base = base if base > 0 else float(freq[g])
+        s = base * (0.3 + 0.7 * conc)
+        # 用户用反引号/引号/书名号圈出的词，直接是在指称概念，强加权。
+        if quoted.get(g, 0) >= 2:
+            s *= 3.0
+        # 同时是项目标识符（AI 在代码/路径里反复使用）且被用户提到：真实项目概念。
+        if identifiers and identifiers.get(g.lower(), 0) >= 2:
+            s *= 6.0
+            if _code_like(g):
+                s *= 3.0
+        scored.append((s, g))
     scored.sort(reverse=True)
     top = [g for _, g in scored[:MAX_CANDIDATES * 3]]
     score_of = {g: s for s, g in scored}
