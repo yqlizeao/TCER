@@ -74,7 +74,7 @@ server/
 | GET | `/api/concepts/diagnosis` | 管理诊断（manager） |
 | GET | `/api/concepts/proposals` · `/disputes` · `/documents` · `/status` | 治理与任务状态 |
 | GET | `/api/concepts/termbase/export` · `/context?slugs=` | 导出术语库（客户端同构 JSON）/ 上下文术语段 |
-| GET | `/api/concepts/profiles` · `/roles` | 成员职能（steward）/ 角色（admin） |
+| GET | `/api/concepts/profiles` · `/roles` | 成员职能（admin）/ 角色（admin） |
 | POST | `/api/concepts/propose` · `/decide` · `/dispute` · `/dispute/resolve` | 提案与评审、质疑 |
 | POST | `/api/concepts/termbase/import` · `/candidate` · `/documents` · `/documents/delete` | 数据入口 |
 | POST | `/api/concepts/consent` · `/my-profile` · `/grant` | 本人授权 / 职能 / 授权他人查看 |

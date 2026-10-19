@@ -72,7 +72,7 @@ def handle_get(route: str, qs: dict, user: str) -> dict:
         slugs = [s for s in (_one(qs, "slugs") or "").split(",") if s]
         return {"markdown": governance.context_markdown(slugs or None)}
     if sub == "/profiles":
-        _need(user, "steward")
+        _need(user, "admin")
         return {"profiles": list(profile.all_profiles().values()),
                 "known_persons": db.distinct_values().get("persons", []),
                 "functions": profile.ROLE_LABELS}
@@ -81,8 +81,11 @@ def handle_get(route: str, qs: dict, user: str) -> dict:
         return {"users": rbac.list_role_assignments(), "roles": rbac.ROLES}
     if sub == "/documents":
         return {"documents": _list_documents(user), "kinds": DOC_KINDS}
+    if sub == "/members":
+        _need(user, "admin")
+        return _members()
     if sub == "/stopwords":
-        _need(user, "steward")
+        _need(user, "admin")
         conn = db.connect()
         try:
             rows = conn.execute("SELECT word, added_by FROM lexicon_stopword ORDER BY word")
@@ -92,6 +95,29 @@ def handle_get(route: str, qs: dict, user: str) -> dict:
     if sub == "/status":
         return pipeline.status() | {"rules": disclosure.rules()}
     raise ApiError(404, "not found")
+
+
+def _members() -> dict:
+    """登录账号 + 已识别/聚合的上传成员，合并成一张表（职能 + 角色）。"""
+    accounts = rbac.list_role_assignments()
+    profs = profile.all_profiles()
+    by_user = {p["username"]: p for p in profs.values() if p.get("username")}
+    rows, used = [], set()
+    for a in accounts:
+        p = by_user.get(a["username"]) or profs.get(a["display"]) or {}
+        pname = p.get("person") or a["display"]
+        used |= {pname, a["display"]}
+        rows.append({"kind": "login", "username": a["username"], "person": pname,
+                     "display": a["display"], "roles": a["roles"],
+                     "function": p.get("function") or "", "team": p.get("team") or "",
+                     "source": p.get("function_source") or ""})
+    persons = set(db.distinct_values().get("persons", [])) | set(profs)
+    for n in sorted(persons - used):
+        p = profs.get(n, {})
+        rows.append({"kind": "person", "username": p.get("username") or "", "person": n,
+                     "display": n, "roles": [], "function": p.get("function") or "",
+                     "team": p.get("team") or "", "source": p.get("function_source") or ""})
+    return {"members": rows, "roles": rbac.ROLES, "functions": profile.ROLE_LABELS}
 
 
 def _list_documents(user: str) -> list[dict]:
@@ -153,10 +179,10 @@ def handle_post(route: str, body: dict, user: str) -> dict:
                 rbac.grant(user, b.get("grantee") or "")
             return {"ok": True, "grants": rbac.grants_of(user)}
         if sub == "/profiles/import":
-            _need(user, "steward")
+            _need(user, "admin")
             return profile.import_csv(b.get("csv") or "")
         if sub == "/profiles/set":
-            _need(user, "steward")
+            _need(user, "admin")
             profile.upsert(b["person"], function=b.get("function") or None,
                            team=b.get("team") or None, username=b.get("username") or None,
                            source="imported")
@@ -170,7 +196,7 @@ def handle_post(route: str, body: dict, user: str) -> dict:
         if sub == "/documents/delete":
             return _delete_document(user, int(b["id"]))
         if sub == "/stopwords":
-            _need(user, "steward")
+            _need(user, "admin")
             import re as _re
             import time as _t
             add = {w.strip().lower() for w in _re.split(r"[\s,，、]+", b.get("add") or "") if w.strip()}
@@ -188,7 +214,7 @@ def handle_post(route: str, body: dict, user: str) -> dict:
             pipeline.schedule()
             return {"ok": True, "added": len(add), "removed": len(rem)}
         if sub == "/rebuild":
-            _need(user, "steward")
+            _need(user, "admin")
             stats = pipeline.rebuild(full=bool(b.get("full")))
             return {"ok": True, "stats": stats}
     except (KeyError, TypeError) as e:
@@ -259,7 +285,7 @@ def _delete_document(user: str, did: int) -> dict:
         r = conn.execute("SELECT uploaded_by FROM source_document WHERE id=?", (did,)).fetchone()
         if r is None:
             raise ApiError(404, "文档不存在")
-        if r["uploaded_by"] != user and not rbac.has_role(user, "steward"):
+        if r["uploaded_by"] != user and not rbac.has_role(user, "admin"):
             raise ApiError(403, "只能删除自己上传的文档")
         conn.execute("DELETE FROM source_document WHERE id=?", (did,))
         conn.commit()

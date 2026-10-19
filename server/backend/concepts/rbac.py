@@ -1,7 +1,7 @@
 """最小 RBAC（文档 §8.1）+ 个人视图的本人授权。
 
-角色：member（默认，不入表）| concept_owner | reviewer | manager | steward | admin。
-admin 隐含全部角色，**但不隐含查看他人个人视图**——红线 R2：个人视图只有
+角色：member（默认，不入表）| concept_owner | reviewer | manager | admin。
+admin 只负责站点管理，不隐含任何业务角色（评审/管理诊断等由其分配）；个人视图——红线 R2：个人视图只有
 本人与本人主动授权的账号可见，任何角色都绕不过。
 """
 from __future__ import annotations
@@ -15,9 +15,31 @@ ROLES: dict[str, str] = {
     "concept_owner": "概念负责人",
     "reviewer": "评审",
     "manager": "管理者",
-    "steward": "数据管理员",
     "admin": "系统管理员",
 }
+
+
+def seed_admins_from_env() -> list[str]:
+    """``TCER_ADMIN``：逗号分隔，每项可写飞书 open_id（ou_ 开头）或完整登录名，
+    启动时幂等授予 admin 角色（只增不删）。"""
+    import os
+    raw = os.environ.get("TCER_ADMIN") or ""
+    names = []
+    for x in raw.replace("，", ",").replace(";", ",").split(","):
+        x = x.strip()
+        if not x:
+            continue
+        names.append(db.feishu_username(x) if x.startswith("ou_") else x)
+    if not names:
+        return []
+    conn = db.connect()
+    try:
+        for n in names:
+            conn.execute("INSERT OR IGNORE INTO user_role(username, role) VALUES(?, 'admin')", (n,))
+        conn.commit()
+    finally:
+        conn.close()
+    return names
 
 
 def roles_of(username: str | None) -> set[str]:
@@ -29,8 +51,6 @@ def roles_of(username: str | None) -> set[str]:
     finally:
         conn.close()
     out = {"member"} | {r["role"] for r in rows}
-    if "admin" in out:
-        out |= set(ROLES)
     return out
 
 

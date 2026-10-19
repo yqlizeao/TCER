@@ -5,7 +5,7 @@ Usage:
     python server/backend/manage.py passwd  <username> <password>
     python server/backend/manage.py listusers
     python server/backend/manage.py setroles <username> [role ...]   # 概念模块角色（空=仅成员）
-        角色：concept_owner reviewer manager steward admin
+        角色：concept_owner reviewer manager admin
 """
 from __future__ import annotations
 

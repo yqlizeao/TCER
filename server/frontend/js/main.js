@@ -10,6 +10,7 @@ const VIEWS = {
   "concepts-org": { title: "团队概念", render: renderConceptsOrg },
   "concepts-diag": { title: "概念诊断", render: renderConceptsDiag },
   "concepts-admin": { title: "概念治理", render: renderConceptsAdmin },
+  "concepts-site": { title: "成员与权限", render: renderConceptsSite },
   aliases: { title: "聚合配置", render: renderAliases },
   tokens: { title: "Auth Token", render: renderTokens },
 };
@@ -138,6 +139,7 @@ async function showApp() {
     localStorage.setItem("tcer_name", S.name);
     localStorage.setItem("tcer_avatar", S.avatar);
     renderUser(S.name, S.avatar);
+    cxInitAdminMenu();
   } catch (e) { /* 401 会自行 logout；其余忽略 */ }
   loadFilters();
   route();

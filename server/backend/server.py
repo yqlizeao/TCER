@@ -672,6 +672,13 @@ def main() -> None:
         # 首启管理员同时获得概念模块的「系统管理员」角色（角色表为空时的引导）。
         db.init_db()
         sys.stderr.write("[tcer-server] created default user admin/admin — change it!\n")
+    try:
+        from concepts import rbac as _rbac
+        seeded = _rbac.seed_admins_from_env()
+        if seeded:
+            sys.stderr.write(f"[tcer-server] concept admins from env: {', '.join(seeded)}\n")
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"[tcer-server] TCER_ADMIN 处理失败：{e}\n")
     host = os.environ.get("TCER_SERVER_HOST", "127.0.0.1")
     port = int(os.environ.get("TCER_SERVER_PORT", "8890"))
     httpd = ThreadingHTTPServer((host, port), Handler)

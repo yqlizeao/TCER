@@ -165,11 +165,9 @@ def list_proposals(status: str | None = "open") -> list[dict]:
 
 def can_review(user: str, proposal: dict) -> bool:
     roles = rbac.roles_of(user)
-    if "admin" in roles:
-        return True
     if "reviewer" not in roles:
         return False
-    return proposal["proposed_by"] != user  # 评审不能批自己的提案（admin 除外，用于冷启动）
+    return proposal["proposed_by"] != user  # 评审不能批自己的提案
 
 
 def decide(user: str, proposal_id: int, approve: bool, note: str = "") -> dict:
@@ -230,14 +228,14 @@ def import_termbase(user: str, data: dict | list, *, apply: bool = False,
                     reason: str = "导入术语库") -> dict:
     """导入客户端 termbase.json（``{"version":1,"terms":[…]}`` 或裸列表）。
 
-    默认按 slug 生成提案进评审；``apply=True`` 仅 admin/steward 可用（冷启动批量入库）。
+    默认按 slug 生成提案进评审；``apply=True`` 仅管理员可用（冷启动批量入库）。
     与现有条目完全相同的跳过。
     """
     terms = data.get("terms") if isinstance(data, dict) else data
     if not isinstance(terms, list):
         raise GovernanceError("缺少 terms 列表")
-    if apply and not (rbac.has_role(user, "admin") or rbac.has_role(user, "steward")):
-        raise PermissionError("直接入库需要管理员或数据管理员权限")
+    if apply and not rbac.has_role(user, "admin"):
+        raise PermissionError("直接入库需要管理员权限")
     stats = {"proposed": 0, "applied": 0, "unchanged": 0, "errors": []}
     for i, raw in enumerate(terms, 1):
         try:

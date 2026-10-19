@@ -753,3 +753,22 @@ details[open] > summary .blk-toggle-cue::after {
 textarea.filter { resize: vertical; padding: 6px 8px; line-height: 1.5; }
 .cx-page .tbl th.tx, .cx-page .tbl td.tx { text-align: left; white-space: normal; }
 .cx-textarea { width: 100%; margin-top: 8px; min-height: 110px; }
+/* ---------------- 概念页表单控件：宽度 / 文件选择 ---------------- */
+.cx-page .filter { max-width: none; }
+.cx-page select.filter { min-width: 110px; }
+.cx-fgrid .filter, .cx-full .filter, .cx-page .cx-textarea { width: 100%; }
+.cx-page .tk-gen input.filter[type=text] { min-width: 200px; }
+.cx-page .tk-gen input.cx-grow { flex: 1; }
+.cx-page td input.filter[type=text] { width: 100%; min-width: 120px; }
+.file-pick { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.file-btn {
+  display: inline-flex; align-items: center; height: 30px; padding: 0 12px; box-sizing: border-box;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius);
+  color: var(--tx-dim); font-size: var(--fs-sm);
+}
+.file-pick:hover .file-btn { border-color: var(--accent); color: var(--tx); }
+.file-name { font-size: var(--fs-xs); color: var(--tx-mute); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-page > .panel { margin-bottom: var(--gap); }
+.cx-page > .panel:last-child { margin-bottom: 0; }
+.cx-members td { vertical-align: middle; }
+.cx-role-ms { min-width: 240px; }

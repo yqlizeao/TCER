@@ -546,8 +546,8 @@ async function renderConceptsAdmin() {
     <div class="grid c2">
       <div class="panel"><div class="panel-head"><span class="panel-title">术语库导入 / 导出</span></div>
         <p class="tk-hint">导入客户端「术语库」页签导出的 JSON。默认逐条生成提案进入评审；管理员可勾选直接入库（冷启动用）。</p>
-        <div class="tk-gen" style="flex-wrap:wrap"><input type="file" id="cx-tb-file" accept=".json" class="filter">
-          ${roles.has("admin") || roles.has("steward") ? '<label class="panel-note"><input type="checkbox" id="cx-tb-apply"> 直接入库</label>' : ""}
+        <div class="tk-gen" style="flex-wrap:wrap">${cxFilePick("cx-tb-file", ".json")}
+          ${roles.has("admin") ? '<label class="panel-note"><input type="checkbox" id="cx-tb-apply"> 直接入库</label>' : ""}
           <button class="btn-primary" id="cx-tb-import">导入</button>
           <button class="btn-ghost" id="cx-tb-export">导出团队术语库</button></div>
         <div id="cx-tb-msg" class="tk-hint"></div></div>
@@ -557,7 +557,7 @@ async function renderConceptsAdmin() {
           <label>类型<select id="cx-doc-kind" class="filter">${Object.entries(kinds).map(([k, v]) => `<option value="${k}">${escapeHTML(v)}</option>`).join("")}</select></label>
           <label>标题<input id="cx-doc-title" class="filter" type="text"></label>
           <label>可见性<select id="cx-doc-vis" class="filter"><option value="public">团队可见（可作证据展示）</option><option value="private">仅自己</option></select></label>
-          <label>文件<input type="file" id="cx-doc-file" accept=".md,.txt,.csv" class="filter"></label>
+          <div class="cx-full"><span>文件</span>${cxFilePick("cx-doc-file", ".md,.txt,.csv")}</div>
         </div>
         <textarea id="cx-doc-text" class="filter cx-textarea" rows="6" placeholder="或直接粘贴正文"></textarea>
         <div class="tk-gen" style="margin-top:6px"><button class="btn-primary" id="cx-doc-add">上传</button><span id="cx-doc-msg"></span></div>
@@ -566,17 +566,7 @@ async function renderConceptsAdmin() {
           <td>${x.visibility === "public" ? "团队可见" : "仅自己"}</td><td class="num">${fmt.date(x.uploaded_at)}</td>
           <td><button class="btn-ghost cx-doc-del" data-id="${x.id}">删除</button></td></tr>`).join("")}</tbody></table>` : ""}</div>
     </div>
-    ${roles.has("steward") ? `<div class="grid c2">
-      <div class="panel" id="cx-profiles-panel"><div class="panel-head"><span class="panel-title">成员职能</span><span class="panel-note">数据管理员</span></div>${cxEmpty("加载中…")}</div>
-      <div class="panel"><div class="panel-head"><span class="panel-title">分析任务</span><span class="panel-note">数据管理员</span></div>
-        <div class="cx-kv"><div><span>上次重建</span><b>${status.last_rebuild_at ? fmt.datetime(status.last_rebuild_at) : "从未"}</b></div>
-          <div><span>状态</span><b>${status.running ? "运行中" : "空闲"}</b></div>
-          <div><span>用法</span><b>${st.usages != null ? st.usages : "—"}</b></div><div><span>误解事件</span><b>${st.misreads != null ? st.misreads : "—"}</b></div></div>
-        ${status.last_error ? `<div class="hi hi-bad cx-note">${escapeHTML(status.last_error)}</div>` : ""}
-        <div class="tk-gen" style="margin-top:8px"><button class="btn-ghost" id="cx-rb">增量重建</button><button class="btn-ghost" id="cx-rb-full">全量重建</button><span id="cx-rb-msg"></span></div></div>
-    </div>` : ""}
-    ${roles.has("steward") ? `<div class="panel" id="cx-stop-panel"><div class="panel-head"><span class="panel-title">新词挖掘停用词</span><span class="panel-note">数据管理员 · 命中的词不会进入候选队列</span></div>${cxEmpty("加载中…")}</div>` : ""}
-    ${roles.has("admin") ? `<div class="panel" id="cx-roles-panel"><div class="panel-head"><span class="panel-title">角色分配</span><span class="panel-note">系统管理员 · 任何角色都不能查看他人的个人视图</span></div>${cxEmpty("加载中…")}</div>` : ""}`;
+    ${roles.has("admin") ? `<div class="panel" id="cx-stop-panel"><div class="panel-head"><span class="panel-title">新词挖掘停用词</span><span class="panel-note">管理员 · 命中的词不会进入候选队列</span></div>${cxEmpty("加载中…")}</div>` : ""}`;
 
   const $ = (id) => document.getElementById(id);
   cxBind(content, ".cx-appr", "click", async (el) => { try { await cxPost("decide", { id: +el.dataset.id, approve: true }); route(); } catch (e) { alert(e.message); } });
@@ -590,6 +580,7 @@ async function renderConceptsAdmin() {
   };
   cxBind(content, ".cx-acc", "click", resolve(true));
   cxBind(content, ".cx-dny", "click", resolve(false));
+  cxBindFileName("cx-tb-file"); cxBindFileName("cx-doc-file");
   $("cx-tb-import").addEventListener("click", async () => {
     const f = $("cx-tb-file").files[0];
     if (!f) { cxFlash($("cx-tb-msg"), "请选择文件", true); return; }
@@ -621,24 +612,13 @@ async function renderConceptsAdmin() {
     if (!confirm("删除该资料？")) return;
     try { await cxPost("documents/delete", { id: +el.dataset.id }); route(); } catch (e) { alert(e.message); }
   });
-  if ($("cx-rb")) {
-    const rb = (full) => async () => {
-      cxFlash($("cx-rb-msg"), "运行中…");
-      try { const r = await cxPost("rebuild", { full }); cxFlash($("cx-rb-msg"), `完成：处理 ${r.stats.processed} · 跳过 ${r.stats.skipped} · 清除 ${r.stats.purged}`); }
-      catch (e) { cxFlash($("cx-rb-msg"), e.message, true); }
-    };
-    $("cx-rb").addEventListener("click", rb(false));
-    $("cx-rb-full").addEventListener("click", rb(true));
-    cxProfilesPanel();
-  }
   if ($("cx-stop-panel")) cxStopPanel();
-  if ($("cx-roles-panel")) cxRolesPanel();
 }
 
 async function cxStopPanel() {
   const el = document.getElementById("cx-stop-panel");
   const d = await api("/api/concepts/stopwords");
-  el.innerHTML = `<div class="panel-head"><span class="panel-title">新词挖掘停用词</span><span class="panel-note">数据管理员 · 命中的词不会进入候选队列，保存后后台自动重挖</span></div>
+  el.innerHTML = `<div class="panel-head"><span class="panel-title">新词挖掘停用词</span><span class="panel-note">管理员 · 命中的词不会进入候选队列，保存后后台自动重挖</span></div>
     <div class="tk-gen"><input id="cx-sw-add" class="filter cx-grow" type="text" placeholder="添加停用词，空格或逗号分隔（如 目录 报错 install）">
       <button class="btn-primary" id="cx-sw-btn">添加</button><span id="cx-sw-msg"></span></div>
     <div class="cx-tags">${d.words.map((w) =>
@@ -659,48 +639,92 @@ function cxFmtVal(v) {
   return String(v);
 }
 
-async function cxProfilesPanel() {
-  const el = document.getElementById("cx-profiles-panel");
-  const d = await api("/api/concepts/profiles");
-  const byP = Object.fromEntries(d.profiles.map((p) => [p.person, p]));
-  const persons = Array.from(new Set([...d.known_persons, ...Object.keys(byP)]));
+function cxFilePick(id, accept) {
+  return `<label class="file-pick"><input type="file" id="${id}" accept="${accept}" hidden><span class="file-btn">选择文件</span><span class="file-name" id="${id}-name">未选择文件</span></label>`;
+}
+function cxBindFileName(id) {
+  const i = document.getElementById(id); if (!i) return;
+  i.addEventListener("change", () => { document.getElementById(id + "-name").textContent = i.files[0] ? i.files[0].name : "未选择文件"; });
+}
+async function cxInitAdminMenu() {
+  try {
+    CX.who = null;
+    const w = await cxWho();
+    document.getElementById("menu-site").classList.toggle("hidden", !(w.roles || []).includes("admin"));
+    document.getElementById("rail-diag").classList.toggle("hidden", !(w.roles || []).includes("manager"));
+  } catch (e) { /* 未登录 */ }
+}
+
+// =============================== 成员与权限（头像菜单 · 仅管理员） =============================== //
+async function renderConceptsSite() {
+  await cxWho();
+  const content = document.getElementById("content");
+  if (!cxRoles().has("admin")) { content.innerHTML = cxEmpty("仅管理员可访问"); return; }
+  const [d, status] = await Promise.all([api("/api/concepts/members"), api("/api/concepts/status")]);
+  const st = status.last_stats || {};
   const fnOpts = (v) => `<option value="">未设置</option>` + Object.entries(d.functions).map(([k, n]) =>
     `<option value="${k}" ${v === k ? "selected" : ""}>${escapeHTML(n)}</option>`).join("");
-  el.innerHTML = `<div class="panel-head"><span class="panel-title">成员职能</span><span class="panel-note">数据管理员 · 系统推断的职能不会用于个人结论</span></div>
-    <p class="tk-hint">批量导入 CSV：每行「成员,职能,小组,登录名」，职能可写中文（策划/程序/美术/交互/音频/QA）。</p>
-    <div class="tk-gen"><input type="file" id="cx-pf-file" accept=".csv,.txt" class="filter"><button class="btn-ghost" id="cx-pf-import">导入</button><span id="cx-pf-msg"></span></div>
-    <table class="tbl" style="margin-top:8px"><thead><tr><th>成员</th><th>职能</th><th>小组</th><th>来源</th><th></th></tr></thead><tbody>${persons.map((p) => {
-      const r = byP[p] || {};
-      return `<tr data-p="${escapeHTML(p)}"><td>${escapeHTML(p)}</td><td><select class="filter cx-pf-fn">${fnOpts(r.function)}</select></td>
-        <td><input class="filter cx-pf-team" type="text" value="${escapeHTML(r.team || "")}"></td><td>${escapeHTML(CX_SRC[r.function_source] || "—")}</td>
-        <td><button class="btn-ghost cx-pf-save">保存</button></td></tr>`;
-    }).join("")}</tbody></table>`;
-  cxBind(el, ".cx-pf-save", "click", async (b) => {
-    const tr = b.closest("tr");
-    try { await cxPost("profiles/set", { person: tr.dataset.p, function: tr.querySelector(".cx-pf-fn").value, team: tr.querySelector(".cx-pf-team").value.trim() }); b.textContent = "已保存"; }
-    catch (e) { alert(e.message); }
+  const rows = d.members.map((m, i) => `<tr data-i="${i}" data-q="${escapeHTML((m.display + " " + m.username + " " + m.person).toLowerCase())}">
+      <td class="tx"><b>${escapeHTML(m.display)}</b> <span class="tag-agg">${m.kind === "login" ? "登录账号" : "已识别成员"}</span></td>
+      <td class="tx"><select class="filter cx-m-fn">${fnOpts(m.function)}</select></td>
+      <td class="tx"><input class="filter cx-m-team" type="text" placeholder="可选" value="${escapeHTML(m.team)}"></td>
+      <td class="tx">${m.kind === "login" ? '<div class="cx-role-ms"></div>' : '<span class="panel-note">未登录过，无角色</span>'}</td>
+      <td class="tx cx-m-msg panel-note">${escapeHTML(CX_SRC[m.source] || "")}</td></tr>`).join("");
+  content.innerHTML = `
+    <div class="panel">
+      <div class="panel-head"><span class="panel-title">成员与权限</span>
+        <span class="panel-note">管理员只负责站点管理，不隐含评审等业务角色；系统推断的职能不会用于个人结论；修改即时保存</span></div>
+      <div class="tk-gen" style="flex-wrap:wrap">
+        <input id="cx-m-q" class="filter cx-grow" type="text" placeholder="搜索成员">
+        ${cxFilePick("cx-pf-file", ".csv,.txt")}<button class="btn-ghost" id="cx-pf-import">导入职能 CSV</button><span id="cx-pf-msg"></span></div>
+      <p class="tk-hint">CSV 每行「成员,职能,小组,登录名」，职能可写中文（策划/程序/美术/交互/音频/QA）。</p>
+      <table class="tbl cx-members"><thead><tr><th class="tx">成员</th><th class="tx">职能</th><th class="tx">小组</th><th class="tx">角色（可多选）</th><th class="tx">来源</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5">${cxEmpty("暂无成员")}</td></tr>`}</tbody></table>
+    </div>
+    <div class="panel"><div class="panel-head"><span class="panel-title">分析任务</span></div>
+      <div class="cx-kv"><div><span>上次重建</span><b>${status.last_rebuild_at ? fmt.datetime(status.last_rebuild_at) : "从未"}</b></div>
+        <div><span>状态</span><b>${status.running ? "运行中" : "空闲"}</b></div>
+        <div><span>用法</span><b>${st.usages != null ? st.usages : "—"}</b></div><div><span>误解事件</span><b>${st.misreads != null ? st.misreads : "—"}</b></div></div>
+      ${status.last_error ? `<div class="hi hi-bad cx-note">${escapeHTML(status.last_error)}</div>` : ""}
+      <div class="tk-gen" style="margin-top:8px"><button class="btn-ghost" id="cx-rb">增量重建</button><button class="btn-ghost" id="cx-rb-full">全量重建</button><span id="cx-rb-msg"></span></div></div>`;
+
+  const flash = (tr, msg, bad) => cxFlash(tr.querySelector(".cx-m-msg"), msg, bad);
+  const saveProfile = async (tr) => {
+    const m = d.members[+tr.dataset.i];
+    try {
+      await cxPost("profiles/set", { person: m.person, username: m.username || "",
+        function: tr.querySelector(".cx-m-fn").value, team: tr.querySelector(".cx-m-team").value.trim() });
+      flash(tr, "已保存");
+    } catch (e) { flash(tr, e.message, true); }
+  };
+  const roleOpts = Object.entries(d.roles).filter(([k]) => k !== "member").map(([value, label]) => ({ value, label }));
+  content.querySelectorAll("tbody tr[data-i]").forEach((tr) => {
+    const m = d.members[+tr.dataset.i];
+    tr.querySelector(".cx-m-fn").addEventListener("change", () => saveProfile(tr));
+    tr.querySelector(".cx-m-team").addEventListener("change", () => saveProfile(tr));
+    const box = tr.querySelector(".cx-role-ms");
+    if (box) createMultiSelect(box, { options: roleOpts, values: m.roles, placeholder: "无角色", searchable: false,
+      onChange: async (vals) => {
+        try { await cxPost("roles", { username: m.username, roles: vals }); flash(tr, "已保存"); CX.who = null; }
+        catch (e) { flash(tr, e.message, true); }
+      } });
   });
+  document.getElementById("cx-m-q").addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    content.querySelectorAll("tbody tr[data-i]").forEach((tr) => { tr.style.display = !q || tr.dataset.q.includes(q) ? "" : "none"; });
+  });
+  cxBindFileName("cx-pf-file");
   document.getElementById("cx-pf-import").addEventListener("click", async () => {
     const f = document.getElementById("cx-pf-file").files[0]; if (!f) return;
     const r = await cxPost("profiles/import", { csv: await f.text() });
     cxFlash(document.getElementById("cx-pf-msg"), `导入 ${r.imported} 行` + (r.errors.length ? `，${r.errors.length} 行有误：${r.errors.join("；")}` : ""), !!r.errors.length);
-    if (!r.errors.length) cxProfilesPanel();
+    if (!r.errors.length) renderConceptsSite();
   });
-}
-
-async function cxRolesPanel() {
-  const el = document.getElementById("cx-roles-panel");
-  const d = await api("/api/concepts/roles");
-  const assignable = Object.entries(d.roles).filter(([k]) => k !== "member");
-  el.innerHTML = `<div class="panel-head"><span class="panel-title">角色分配</span><span class="panel-note">系统管理员 · 任何角色都不能查看他人的个人视图</span></div>
-    <table class="tbl"><thead><tr><th>账号</th>${assignable.map(([, n]) => `<th>${escapeHTML(n)}</th>`).join("")}<th></th></tr></thead><tbody>${d.users.map((u) =>
-      `<tr data-u="${escapeHTML(u.username)}"><td>${escapeHTML(u.display)}</td>${assignable.map(([k]) =>
-        `<td style="text-align:center"><input type="checkbox" class="cx-rl" value="${k}" ${u.roles.includes(k) ? "checked" : ""}></td>`).join("")}
-        <td><button class="btn-ghost cx-rl-save">保存</button></td></tr>`).join("")}</tbody></table>`;
-  cxBind(el, ".cx-rl-save", "click", async (b) => {
-    const tr = b.closest("tr");
-    const roles = Array.from(tr.querySelectorAll(".cx-rl:checked")).map((x) => x.value);
-    try { await cxPost("roles", { username: tr.dataset.u, roles }); b.textContent = "已保存"; CX.who = null; }
-    catch (e) { alert(e.message); }
-  });
+  const rb = (full) => async () => {
+    cxFlash(document.getElementById("cx-rb-msg"), "运行中…");
+    try { const r = await cxPost("rebuild", { full }); cxFlash(document.getElementById("cx-rb-msg"), `完成：处理 ${r.stats.processed} · 跳过 ${r.stats.skipped} · 清除 ${r.stats.purged}`); }
+    catch (e) { cxFlash(document.getElementById("cx-rb-msg"), e.message, true); }
+  };
+  document.getElementById("cx-rb").addEventListener("click", rb(false));
+  document.getElementById("cx-rb-full").addEventListener("click", rb(true));
 }

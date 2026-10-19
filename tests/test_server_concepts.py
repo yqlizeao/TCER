@@ -390,3 +390,33 @@ def test_document_ingestion(env):
     env["pipeline"].rebuild()
     d = env["views"].concept_detail("hot-update")
     assert d["stats"]["doc_mentions"] == 1
+
+
+def test_seed_admins_from_env(env, monkeypatch):
+    monkeypatch.setenv("TCER_ADMIN", "ou_abc123, legacy_user")
+    names = env["rbac"].seed_admins_from_env()
+    assert names == ["feishu:ou_abc123", "legacy_user"]
+    assert env["rbac"].has_role("feishu:ou_abc123", "admin")
+    assert not env["rbac"].has_role("feishu:ou_abc123", "reviewer")
+    assert env["rbac"].has_role("legacy_user", "admin")
+    env["rbac"].seed_admins_from_env()  # 幂等
+    assert not env["rbac"].has_role("alice", "admin")
+
+
+def test_admin_cannot_review_without_reviewer_role(env):
+    pid = env["governance"].propose("alice", {"slug": "new-x", "pref_label": "新词X",
+                                              "definition": "d"}, reason="t")
+    with pytest.raises(PermissionError):
+        env["governance"].decide("admin", pid, True)
+
+
+def test_stopwords_api_requires_admin_and_filters(env):
+    api = env["api"]
+    with pytest.raises(api.ApiError):
+        api.handle_post("/api/concepts/stopwords", {"add": "foo"}, "alice")
+    api.handle_post("/api/concepts/stopwords", {"add": "Foo, bar"}, "admin")
+    words = {w["word"] for w in api.handle_get("/api/concepts/stopwords", {}, "admin")["words"]}
+    assert {"foo", "bar"} <= words
+    utts = [{"text": "检查 vxcore 模块", "person": f"p{i}", "project": "g"} for i in range(6)]
+    got = {c["surface"] for c in env["lexicon"].mine_candidates(utts, [], set(), stopwords={"vxcore"})}
+    assert "vxcore" not in got

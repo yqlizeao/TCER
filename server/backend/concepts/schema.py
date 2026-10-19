@@ -252,6 +252,8 @@ def init(conn: sqlite3.Connection) -> None:
         conn.executemany("INSERT OR IGNORE INTO lexicon_stopword(word, added_by, added_at) "
                          "VALUES(?, 'system', strftime('%s','now'))",
                          [(w,) for w in sorted(_lx.SEED_STOPWORDS)])
+    conn.execute("UPDATE OR IGNORE user_role SET role='admin' WHERE role='steward'")
+    conn.execute("DELETE FROM user_role WHERE role='steward'")
     # 首次启用：默认 admin 账号自动获得 admin 角色（与 server 首启 admin/admin 引导一致）。
     if conn.execute("SELECT COUNT(*) FROM user_role").fetchone()[0] == 0:
         if conn.execute("SELECT 1 FROM users WHERE username='admin'").fetchone():
