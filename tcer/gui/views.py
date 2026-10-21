@@ -96,10 +96,11 @@ def _short_name(project_hash: str) -> str:
 def project_label(project) -> str:
     """Display label for a source-aware project ref or legacy Path."""
     source = getattr(project, "source", "claude")
-    if source in ("codex", "opencode", "grok", "omp", "pi", "antigravity"):
+    if source in ("codex", "opencode", "grok", "omp", "pi", "antigravity", "workbuddy"):
         default = {
             "codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
             "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
+            "workbuddy": "WorkBuddy",
         }.get(source, source)
         return getattr(project, "display_name", None) or getattr(project, "key", default)
     name = getattr(project, "name", None) or getattr(project, "key", str(project))
@@ -125,6 +126,7 @@ def project_drive(project) -> str | None:
 _SOURCE_DISPLAY = {
     "codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
     "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
+    "workbuddy": "WorkBuddy",
 }
 
 
@@ -247,6 +249,17 @@ def find_ref_by_uid(refs, uid):
 
 
 def project_open_path(project) -> str:
+    """返回项目在文件管理器中打开或复制路径的目标目录。
+
+    若项目已定位到本地真实存在的代码工程路径（path/cwd），优先使用该路径；
+    仅当项目无独立代码目录（如纯普通会话入口或临时目录）时回退到各数据源会话存储根。
+    """
+    cwd = getattr(project, "cwd", None)
+    path = getattr(project, "path", None)
+    target_dir = str(path or cwd or "")
+    if target_dir and Path(target_dir).exists():
+        return target_dir
+
     source = getattr(project, "source", "claude")
     if source == "codex":
         from tcer.core.paths import codex_sessions_dir
@@ -263,8 +276,9 @@ def project_open_path(project) -> str:
     if source == "antigravity":
         from tcer.core.paths import antigravity_conversations_dir
         return str(antigravity_conversations_dir())
-    path = getattr(project, "path", None)
-    cwd = getattr(project, "cwd", None)
+    if source == "workbuddy":
+        from tcer.core.paths import workbuddy_sessions_dir
+        return str(workbuddy_sessions_dir())
     return str(path or cwd or project)
 
 
@@ -973,6 +987,7 @@ class FilterBar:
             "omp": "Oh My Pi",
             "pi": "Pi",
             "antigravity": "Antigravity",
+            "workbuddy": "WorkBuddy",
         }
         self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
 
@@ -1993,7 +2008,7 @@ class SessionColumn:
         menu.add_separator()
 
         # Destructive action — last item, gated behind a二次确认对话框.
-        readonly = report.meta.source in ("codex", "opencode", "grok", "omp", "pi", "antigravity")
+        readonly = report.meta.source in ("codex", "opencode", "grok", "omp", "pi", "antigravity", "workbuddy")
         delete_state = "disabled" if readonly else "normal"
         delete_label = "删除会话…" if not readonly else f"删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(

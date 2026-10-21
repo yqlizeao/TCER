@@ -834,6 +834,7 @@ UNSUPPORTED_LABEL = "不适用"
 SOURCE_LABELS = {
     "claude": "Claude", "codex": "Codex", "opencode": "OpenCode",
     "grok": "Grok", "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
+    "workbuddy": "WorkBuddy",
 }
 
 # key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
@@ -842,8 +843,8 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "subagent": frozenset({"claude", "grok"}),
     "memory_files": frozenset({"claude"}),
     # Claude 的推理输出并入「输出」，不单独上报
-    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "grok", "omp", "pi", "antigravity"}),
-    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "grok", "omp", "pi", "antigravity"}),
+    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "grok", "omp", "pi", "antigravity", "workbuddy"}),
+    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "grok", "omp", "pi", "antigravity", "workbuddy"}),
     # Codex/Grok 运行时信号（Grok 来自 signals.json）
     "context_window": frozenset({"codex", "grok"}),
     "context_window_used": frozenset({"codex", "grok"}),
@@ -889,7 +890,7 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "rate_limit_hits": frozenset({"claude", "codex", "omp"}),
     "task_completion": frozenset({"codex", "grok"}),
     "compactions": frozenset({"claude", "codex", "opencode", "grok"}),
-    "web_searches": frozenset({"claude", "codex", "grok", "omp", "pi", "antigravity"}),
+    "web_searches": frozenset({"claude", "codex", "grok", "omp", "pi", "antigravity", "workbuddy"}),
     "image_inputs": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
     # Codex 不上报缓存写入 (reader 恒 0)，显示 0 会误导
     "cache_write": frozenset({"claude", "opencode", "omp", "pi"}),

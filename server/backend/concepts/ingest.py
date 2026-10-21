@@ -20,7 +20,7 @@ from tcer.core.parse_util import is_slash_command
 _INJECTED_BLOCK_RE = re.compile(
     r"<(system-reminder|command-name|command-message|command-args|local-command-stdout|"
     r"local-command-stderr|local-command-caveat|environment_context|user_instructions|"
-    r"ide_selection|ide_opened_file|bash-input|bash-stdout|bash-stderr)>"
+    r"ide_selection|ide_opened_file|bash-input|bash-stdout|bash-stderr)\b[^>]*>"
     r"[\s\S]*?</\1>",
     re.IGNORECASE,
 )

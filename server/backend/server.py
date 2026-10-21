@@ -399,6 +399,19 @@ class Handler(BaseHTTPRequestHandler):
         # each session row additionally carries the turn-by-turn conversation; it
         # no longer decides whether sessions are stored at all.
         sessions = data.get("sessions")
+        if not sessions:
+            fp = data.get("filePath") or data.get("file_path")
+            if fp and Path(fp).is_file():
+                try:
+                    import workbuddy_reader
+                except ImportError:
+                    from . import workbuddy_reader
+                row = workbuddy_reader.parse_session_file(Path(fp), user=person, project=project)
+                sessions = [row]
+                if not project:
+                    project = row.get("project")
+            elif isinstance(data.get("session"), dict):
+                sessions = [data["session"]]
         generated_at = data.get("generated_at")
         # 语义分析授权：匿名上传一律不进入团队概念分析（无法关联职能与本人视图，E5）。
         consent = bool(data.get("semantic_consent")) and bool(user) and not anonymous

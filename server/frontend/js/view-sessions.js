@@ -30,10 +30,29 @@ const SOURCE_INFO = {
   omp: { name: "Oh My Pi", icon: "assets/omp.png" },
   pi: { name: "Pi", icon: "assets/pi.png" },
   opencode: { name: "OpenCode", icon: "assets/opencode.png" },
+  antigravity: { name: "Antigravity", icon: "assets/antigravity.png" },
+  workbuddy: { name: "WorkBuddy", icon: "assets/workbuddy.png" },
+  codebuddy: { name: "WorkBuddy", icon: "assets/workbuddy.png" },
 };
 function getSourceInfo(source) {
   const s = String(source || "claude").toLowerCase().trim();
+  if (s === "codebuddy") return SOURCE_INFO.workbuddy;
   return SOURCE_INFO[s] || { name: s || "Claude Code", icon: "assets/claude.png" };
+}
+
+function cleanUserQueryDisplay(raw) {
+  if (!raw) return "";
+  let t = String(raw);
+  t = t.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/gi, "").trim();
+  t = t.replace(/<message_quote\b[^>]*>[\s\S]*?<original_text><!\[CDATA\[([\s\S]*?)\]\]><\/original_text>[\s\S]*?<\/message_quote>/gi, (_, q) => {
+    const lines = q.trim().split("\n").map((l) => `> ${l}`).join("\n");
+    return `\n${lines}\n\n`;
+  }).trim();
+  const m = t.match(/<user_query>([\s\S]*?)<\/user_query>/i);
+  if (m) {
+    t = m[1].trim();
+  }
+  return t;
 }
 function sourceBadgeHTML(source, showName = true) {
   const info = getSourceInfo(source);
@@ -362,18 +381,21 @@ function paintSessionDetail() {
 
 // escapeHTML 由 core.js 提供（全局）
 
-// tool → SVG 图标（不同工具不同 icon）
 const TOOL_ICON = {
   Read: '<path d="M4 4h11l5 5v11H4z"/><path d="M14 4v5h5"/>',
   Edit: '<path d="M4 20h16"/><path d="M14 4l6 6-9 9H5v-6z"/>',
   Write: '<path d="M12 4v16"/><path d="M4 8h16"/>',
   Bash: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3"/><path d="M13 15h4"/>',
+  PowerShell: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3"/><path d="M13 15h4"/>',
   Grep: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4-4"/>',
   Glob: '<path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>',
   TodoWrite: '<rect x="3" y="4" width="6" height="6" rx="1.5"/><path d="M5 7l1 1 2-2"/><path d="M12 7h9M12 17h9"/><rect x="3" y="14" width="6" height="6" rx="1.5"/><path d="M5 17l1 1 2-2"/>',
   Task: '<circle cx="12" cy="5" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M12 7.5v4M7.8 16l2.7-3M16.2 16l-2.7-3M10.5 11.5h3"/>',
   AskUserQuestion: '<path d="M21 11.5a8.5 8.5 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.5 8.5 0 01-3.8-.9L3 21l1.9-5.7a8.5 8.5 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.5 8.5 0 013.8-.9h.5a8.5 8.5 0 018 8v.5z"/><path d="M12 8.5a1.5 1.5 0 011.5 1.5c0 1-1.5 1.5-1.5 2"/><circle cx="12" cy="15" r=".5" fill="currentColor"/>',
   WebSearch: '<circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 000 18M12 3a14 14 0 010 18"/>',
+  ToolSearch: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4-4"/>',
+  DeferExecuteTool: '<circle cx="12" cy="12" r="8"/><path d="M12 6v6l4 2"/>',
+  present_files: '<path d="M4 4h11l5 5v11H4z"/><path d="M14 4v5h5"/>',
   LSP: '<path d="M7 8l-4 4 4 4"/><path d="M17 8l4 4-4 4"/><path d="M14 4l-4 16"/>',
   Skill: '<path d="M12 2l2.4 6.8H21l-5.5 4.3 2.1 6.9-5.6-4.2-5.6 4.2 2.1-6.9L3 8.8h6.6z"/>',
   _default: '<circle cx="12" cy="12" r="8"/><path d="M12 8v8"/>',
@@ -386,11 +408,12 @@ function toolSVG(name) {
   let key = "_default";
   if (lower.includes("todo") || lower.includes("plan")) key = "TodoWrite";
   else if (lower.includes("glob") || lower.includes("find") || lower === "list_dir" || lower === "ls" || lower === "list") key = "Glob";
-  else if (lower.includes("grep") || lower.includes("search")) key = "Grep";
-  else if (lower.includes("read") || lower === "view" || lower === "view_image") key = "Read";
+  else if (lower.includes("toolsearch") || lower.includes("grep") || lower.includes("search")) key = lower.includes("toolsearch") ? "ToolSearch" : "Grep";
+  else if (lower.includes("present_files") || lower.includes("read") || lower === "view" || lower === "view_image") key = lower.includes("present_files") ? "present_files" : "Read";
   else if (lower.includes("edit") || lower.includes("patch")) key = "Edit";
   else if (lower.includes("write") || lower.includes("create")) key = "Write";
-  else if (lower.includes("bash") || lower.includes("terminal") || lower.includes("shell") || lower === "exec" || lower === "eval" || lower === "run") key = "Bash";
+  else if (lower.includes("deferexecutetool")) key = "DeferExecuteTool";
+  else if (lower.includes("powershell") || lower.includes("cmd") || lower.includes("bash") || lower.includes("terminal") || lower.includes("shell") || lower === "exec" || lower === "eval" || lower === "run") key = lower.includes("powershell") ? "PowerShell" : "Bash";
   else if (lower.includes("task") || lower.includes("subagent") || lower.includes("agent")) key = "Task";
   else if (lower.includes("ask") || lower.includes("question") || lower.includes("user_input")) key = "AskUserQuestion";
   else if (lower.includes("web") || lower.includes("fetch")) key = "WebSearch";
@@ -432,7 +455,7 @@ function transcriptHTML(conv) {
     if (g.role === "user") {
       const userTxt = g.blocks
         .filter((b) => b.type === "text")
-        .map((b) => b.text || "")
+        .map((b) => cleanUserQueryDisplay(b.text || ""))
         .join(" ")
         .trim();
       const snippet = userTxt ? userTxt.slice(0, 80) : "用户输入";
@@ -482,7 +505,10 @@ function transcriptHTML(conv) {
 const CODE_PARAM_KEYS = new Set([
   "path", "file_path", "filepath", "pattern", "command", "cmd", "file",
   "query", "target", "dir", "cwd", "workdir", "symbol", "regex", "selector",
-  "url", "new_name"
+  "url", "new_name", "old_string", "new_string", "content"
+]);
+const PRIORITY_ARG_KEYS = new Set([
+  "path", "file_path", "filepath", "command", "cmd", "pattern", "query", "file", "target"
 ]);
 
 // 工具入参对象 → 紧凑摘要（跳过已呈现在标题的 i/intent；关键路径/命令采用 <code> 格式化）
@@ -500,7 +526,11 @@ function toolArgs(input) {
 
   const entries = Object.entries(obj).filter(([k]) => k !== "i" && k !== "intent");
   if (!entries.length) return "";
-
+  entries.sort(([a], [b]) => {
+    const pa = PRIORITY_ARG_KEYS.has(a.toLowerCase()) ? 0 : 1;
+    const pb = PRIORITY_ARG_KEYS.has(b.toLowerCase()) ? 0 : 1;
+    return pa - pb;
+  });
   return entries.map(([k, v]) => {
     let s = typeof v === "object" ? JSON.stringify(v) : String(v);
     const isCode = CODE_PARAM_KEYS.has(k.toLowerCase());
@@ -667,8 +697,10 @@ function renderTodoBlock(input) {
 }
 
 function blockHTML(b) {
-  if (b.type === "text")
-    return `<div class="blk blk-text">${renderMarkdown(b.text || "")}</div>`;
+  if (b.type === "text") {
+    const txt = b.role === "user" ? cleanUserQueryDisplay(b.text || "") : (b.text || "");
+    return `<div class="blk blk-text">${renderMarkdown(txt)}</div>`;
+  }
   if (b.type === "thinking") {
     const rawTxt = (b.text || "").trim();
     const len = rawTxt.length;

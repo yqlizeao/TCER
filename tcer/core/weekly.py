@@ -25,6 +25,7 @@ from tcer.core import (
     opencode_reader,
     pi_reader,
     reader,
+    workbuddy_reader,
 )
 from tcer.core.models import ProjectRef, SessionReport
 from tcer.core.paths import list_project_refs
@@ -122,6 +123,8 @@ def read_session_user_prompts(rep: SessionReport, source: str) -> list[str]:
             msgs = pi_reader.read_user_messages(p)
         elif source == "antigravity":
             msgs = antigravity_reader.read_user_messages(p)
+        elif source == "workbuddy":
+            msgs = workbuddy_reader.read_user_messages(p)
         else:
             msgs = []
         return [m.strip() for m in msgs if m and m.strip()]

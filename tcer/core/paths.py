@@ -83,7 +83,14 @@ def ref_root(ref) -> Path | None:
 
 
 def _looks_like_claude_config(d: Path) -> bool:
-    """Heuristic: a directory with ``projects/<hash>/*.jsonl`` looks like a Claude config root."""
+    """Heuristic: a directory with ``projects/<hash>/*.jsonl`` looks like a Claude config root.
+
+    Explicitly excludes WorkBuddy / CodeBuddy directories to prevent WorkBuddy session folders
+    from being mistakenly recognized as hollow Claude projects.
+    """
+    name_low = d.name.lower()
+    if "workbuddy" in name_low or "codebuddy" in name_low:
+        return False
     projs = d / "projects"
     if not projs.is_dir():
         return False
@@ -288,6 +295,56 @@ def antigravity_conversations_dir() -> Path:
     return antigravity_dir() / "conversations"
 
 
+def workbuddy_roots() -> list[Path]:
+    """Return all existing WorkBuddy / CodeBuddy config/data roots.
+
+    Honors ``WORKBUDDY_DIR``, ``WORKBUDDY_AI_DIR``, or ``CODEBUDDY_DIR`` exclusively when set.
+    """
+    env_specified = False
+    roots: list[Path] = []
+    for env in ("WORKBUDDY_DIR", "WORKBUDDY_AI_DIR", "CODEBUDDY_DIR"):
+        val = os.environ.get(env)
+        if val:
+            env_specified = True
+            p = Path(val).expanduser()
+            if p.is_dir() and p not in roots:
+                roots.append(p)
+    if env_specified:
+        return roots
+    home = Path.home()
+    for d in (home / ".workbuddy-ai", home / ".workbuddy", home / ".codebuddy"):
+        if d.is_dir() and d not in roots:
+            roots.append(d)
+    return roots
+
+def workbuddy_dir() -> Path:
+    """Return the primary WorkBuddy / CodeBuddy config/data root.
+
+    Prefers roots containing a ``projects/`` directory (e.g. ``~/.workbuddy-ai``).
+    """
+    roots = workbuddy_roots()
+    for r in roots:
+        if (r / "projects").is_dir():
+            return r
+    if roots:
+        return roots[0]
+    home = Path.home()
+    return home / ".workbuddy-ai" if (home / ".workbuddy-ai").is_dir() else (home / ".workbuddy")
+
+
+def workbuddy_sessions_dir() -> Path:
+    """Return the directory containing WorkBuddy session JSONL files."""
+    val = os.environ.get("WORKBUDDY_SESSIONS_DIR")
+    if val:
+        return Path(val).expanduser()
+    wb = workbuddy_dir()
+    if (wb / "projects").is_dir():
+        return wb / "projects"
+    if (wb / "sessions").is_dir():
+        return wb / "sessions"
+    return wb
+
+
 def encode_hash(cwd: str | Path) -> str:
     """Encode a working-directory path into its project-hash folder name.
 
@@ -356,7 +413,7 @@ def project_has_sessions(ref: ProjectRef) -> bool:
         from tcer.core import reader
         root = ref_root(ref)
         return bool(reader.discover_jsonl(ref.key, roots=[root] if root is not None else None))
-    if ref.source in ("codex", "grok", "omp", "pi"):
+    if ref.source in ("codex", "grok", "omp", "pi", "workbuddy"):
         return bool(ref.session_paths)
     if ref.source == "opencode":
         from tcer.core import opencode_reader
@@ -417,7 +474,7 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
         root = ref_root(ref)
         files = reader.discover_jsonl(ref.key, roots=[root] if root is not None else None)
         return _max_mtime_ms(files)
-    if ref.source in ("codex", "grok", "omp", "pi"):
+    if ref.source in ("codex", "grok", "omp", "pi", "workbuddy"):
         return _max_mtime_ms(ref.session_paths)
     if ref.source == "antigravity":
         from tcer.core import antigravity_reader
@@ -438,8 +495,8 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
 def list_project_refs(source: str = "all") -> list[ProjectRef]:
     """Return source-aware project refs for the GUI.
     ``source`` is one of ``"all"``, ``"claude"``, ``"codex"``, ``"opencode"``,
-    ``"grok"``, ``"omp"``, ``"pi"``, or ``"antigravity"``. Claude refs wrap real project
-    directories; Codex/OpenCode/Grok/omp/pi/antigravity refs are grouped by session
+    ``"grok"``, ``"omp"``, ``"pi"``, ``"antigravity"``, or ``"workbuddy"``. Claude refs wrap real project
+    directories; Codex/OpenCode/Grok/omp/pi/antigravity/workbuddy refs are grouped by session
     cwd/project directory.
     """
     refs: list[ProjectRef] = []
@@ -479,6 +536,10 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
         from tcer.core import antigravity_reader
 
         refs.extend(antigravity_reader.list_project_refs())
+    if source in ("all", "workbuddy"):
+        from tcer.core import workbuddy_reader
+
+        refs.extend(workbuddy_reader.list_project_refs())
     return sorted(refs, key=lambda r: (r.source, r.display_name.lower()))
 
 
