@@ -18,7 +18,6 @@ from typing import Callable
 from tcer.core import (
     antigravity_reader,
     codex_reader,
-    grok_reader,
     loc,
     metrics,
     omp_reader,
@@ -164,7 +163,7 @@ class RealProject:
     """跨源聚合后的「真实项目」：同一工作目录（规范化 cwd）下的全部 ref。
 
     用户常在同一目录混用多个 agent——每个 agent 在自己的存储里各产生一张
-    项目卡（如 codex/grok/omp 的 ``C--GitHub-TCER`` + claude 两个配置根的同
+    项目卡（如 codex/omp 的 ``C--GitHub-TCER`` + claude 两个配置根的同
     hash 项目），其实都是同一个工程。``key`` 是规范化 cwd（normcase+normpath，
     Windows 盘符大小写/分隔符差异折叠），``display`` 保留原始大小写供展示；
     无 cwd 的 ref（读不到会话头）各自独立成组（``key="ref:<source>:<key>"``），
@@ -797,12 +796,11 @@ def analyze_project(
 class _SourceAdapter:
     """Per-source hooks for the shared non-Claude analyze pipeline.
 
-    Claude 保持独立路径（子代理折叠 + cwd-keyed 扫描）；Codex / OpenCode / Grok
-    共享同一条「逐会话 → 聚合」流水线，源差异全部收敛到这些钩子。``handle``
-    是源自定义的会话句柄：Codex/Grok 为 updates/rollout 文件 Path，OpenCode 为
-    session id 字符串（legacy 会话为 JSON 路径字符串）。file_cache 的 key 构造
-    在各 usage_of / loc_of 钩子内部（每源的失效语义不同，如 Grok 要并入
-    signals/events 旁路文件签名）。
+    Claude 保持独立路径（子代理折叠 + cwd-keyed 扫描）；Codex / OpenCode / omp
+    等其余源共享同一条「逐会话 → 聚合」流水线，源差异全部收敛到这些钩子。
+    ``handle`` 是源自定义的会话句柄：Codex/omp 为 rollout/会话文件 Path，
+    OpenCode 为 session id 字符串。file_cache 的 key 构造在各 usage_of /
+    loc_of 钩子内部（每源的失效语义不同，如 omp 要并入子代理文件签名）。
     """
 
     source: str
@@ -834,7 +832,7 @@ def _analyze_source_project(
     cancel_check: Callable[[], None] | None = None,
     auto_infer: bool = False,
 ) -> ProjectAnalysis:
-    """Shared per-session pipeline for Codex / OpenCode / Grok / omp projects."""
+    """Shared per-session pipeline for every non-Claude source (Codex / OpenCode / omp / …)."""
     # Def-time defaults would freeze pre-save_baselines() values; resolve lazily
     # so a GUI "保存个人基准" takes effect without restarting (see metrics._refresh_composite_globals).
     # CLI/audit 未显式传基准时走与 GUI reanalyze 同一条解析链（逐项目 > 逐源 > 全局）。
@@ -942,16 +940,28 @@ def _analyze_source_project(
 
 
 # ---- Codex hooks ----------------------------------------------------------- #
+def _codex_subagent_key(f: Path) -> tuple:
+    """Fold sub-agent rollout signatures into the Codex cache key (see omp)."""
+    parts = []
+    for sub in codex_reader._folded_children(f):
+        try:
+            st = sub.stat()
+            parts.append((sub.name, int(st.st_mtime_ns), int(st.st_size)))
+        except OSError:
+            parts.append((sub.name, 0, 0))
+    return tuple(parts)
+
+
 def _codex_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
     from tcer.core import file_cache
     return file_cache.get_or_compute(
-        f, ("codex_usage",), lambda: codex_reader.aggregate_usage(f))
+        f, ("codex_usage", _codex_subagent_key(f)), lambda: codex_reader.aggregate_usage(f))
 
 
 def _codex_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
     from tcer.core import file_cache
     return file_cache.get_or_compute(
-        f, ("codex_loc",), lambda: codex_reader._loc_scan(f))
+        f, ("codex_loc", _codex_subagent_key(f)), lambda: codex_reader._loc_scan(f))
 
 
 _CODEX = _SourceAdapter(
@@ -965,14 +975,15 @@ _CODEX = _SourceAdapter(
     not_found="codex project '{project}' not found under ~/.codex/sessions",
     no_sessions="no Codex session files for '{name}'",
     no_match="no Codex session matches '{session}'",
+    subagents_of=lambda ref, f: len(codex_reader._folded_children(f)),
 )
 
 
 # ---- OpenCode hooks -------------------------------------------------------- #
 def _opencode_cache_file(ref: ProjectRef, sid: str) -> Path:
-    # Legacy sessions live in their own JSON file; key the mtime cache on it.
-    # SQLite sessions key on the db file (coarse: any write invalidates all).
-    return Path(sid) if opencode_reader._is_legacy_session(sid) else ref.path
+    # SQLite sessions key on the db file (coarse: any write invalidates all,
+    # which also covers subagent child sessions living in the same db).
+    return ref.path
 
 
 def _opencode_usage_of(ref: ProjectRef, sid: str) -> TokenUsage:
@@ -996,63 +1007,12 @@ _OPENCODE = _SourceAdapter(
     read_meta=lambda ref, sid: opencode_reader.read_session_meta(ref.path, sid),
     usage_of=_opencode_usage_of,
     loc_of=_opencode_loc_of,
+    subagents_of=lambda ref, sid: len(opencode_reader.subagent_ids(ref.path, sid)),
     session_key=lambda ref, sid: sid,
     not_found="opencode project '{project}' not found under ~/.local/share/opencode",
     no_sessions="no OpenCode sessions for '{name}'",
     no_match="no OpenCode session matches '{session}'",
     requires_path=True,
-)
-
-
-# ---- Grok hooks ------------------------------------------------------------ #
-def _grok_side_files_key(f: Path) -> tuple:
-    """signals.json / events.jsonl 的签名并入缓存 key。
-
-    这两个文件是会话结束后补写/更新的，而 file_cache 的主签名只看
-    updates.jsonl —— 不并入会导致取消数/评价/回退行等信号停留在旧值。
-    """
-    parts = []
-    for name in ("signals.json", "events.jsonl"):
-        try:
-            st = (f.parent / name).stat()
-            parts.append((name, int(st.st_mtime_ns), int(st.st_size)))
-        except OSError:
-            parts.append((name, 0, 0))
-    # 子代理 updates.jsonl 签名（折叠源变更须失效缓存，同 omp _omp_subagent_key）
-    for child in grok_reader.subagent_dirs_of(f):
-        try:
-            st = child.stat()
-            parts.append((child.parent.name, int(st.st_mtime_ns), int(st.st_size)))
-        except OSError:
-            parts.append((child.parent.name, 0, 0))
-    return tuple(parts)
-
-
-def _grok_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
-    from tcer.core import file_cache
-    return file_cache.get_or_compute(
-        f, ("grok_usage", _grok_side_files_key(f)),
-        lambda: grok_reader.aggregate_usage(f))
-
-
-def _grok_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
-    from tcer.core import file_cache
-    return file_cache.get_or_compute(
-        f, ("grok_loc",), lambda: grok_reader._loc_scan(f))
-
-
-_GROK = _SourceAdapter(
-    source="grok", entrypoint="grok",
-    resolve=grok_reader.resolve_project,
-    sessions=grok_reader.sessions_for_project,
-    read_meta=lambda ref, f: grok_reader.read_session_meta(f),
-    usage_of=_grok_usage_of,
-    loc_of=_grok_loc_of,
-    subagents_of=lambda ref, f: len(grok_reader.subagent_dirs_of(f)),
-    session_key=lambda ref, f: (grok_reader.read_session_meta(f).session_id or f.stem),
-    not_found="grok project '{project}' not found under ~/.grok/sessions",
-    no_sessions="no Grok session files for '{name}'",
-    no_match="no Grok session matches '{session}'",
 )
 
 
@@ -1063,8 +1023,7 @@ def _omp_subagent_key(f: Path) -> tuple:
     omp subagent transcripts live under ``<stem>/`` and are merged into the
     parent by ``aggregate_usage`` / ``_loc_scan``. The main file's mtime alone
     does not change when a subagent file is appended/updated, so without these
-    signatures a later subagent write would surface stale merged usage/LOC
-    (same reason Grok folds signals.json/events.jsonl into its key).
+    signatures a later subagent write would surface stale merged usage/LOC.
     """
     parts = []
     for sub in omp_reader._subagent_files(f):
@@ -1263,7 +1222,7 @@ def analyze_workbuddy_project(
         auto_infer=auto_infer,
     )
 
-_ADAPTERS = (_CODEX, _OPENCODE, _GROK, _OMP, _PI, _ANTIGRAVITY, _WORKBUDDY)
+_ADAPTERS = (_CODEX, _OPENCODE, _OMP, _PI, _ANTIGRAVITY, _WORKBUDDY)
 
 
 def _synth_meta(session_id: str, sample: Path) -> SessionMeta:

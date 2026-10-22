@@ -26,7 +26,7 @@ function visTag(v) {
 const SOURCE_INFO = {
   claude: { name: "Claude Code", icon: "assets/claude.png" },
   codex: { name: "Codex", icon: "assets/codex.png" },
-  grok: { name: "Grok", icon: "assets/grok.png" },
+  grok: { name: "Grok", icon: "assets/grok.png" },  // 客户端已移除 Grok 数据源；保留以显示历史上传
   omp: { name: "Oh My Pi", icon: "assets/omp.png" },
   pi: { name: "Pi", icon: "assets/pi.png" },
   opencode: { name: "OpenCode", icon: "assets/opencode.png" },

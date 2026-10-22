@@ -32,7 +32,7 @@ PORTFOLIO = [
     ("PRJ-Zephyr", ["Go", "Kubernetes"],    0.658, 2.9, 0.540, "claude-opus-4-8",  "claude", False),
     ("SVC-Auth",   ["Rust", "gRPC"],        0.780, 3.4, 0.690, "claude-sonnet-5",  "codex",  False),
     ("APP-Mobile", ["Swift", "Kotlin"],     0.712, 2.6, 0.605, "gpt-4o",           "codex",  False),
-    ("PRJ-Legacy", ["Java", "Spring"],      0.801, 0.8, 0.320, "gpt-3.5-turbo",    "grok",   True),
+    ("PRJ-Legacy", ["Java", "Spring"],      0.801, 0.8, 0.320, "gpt-3.5-turbo",    "omp",    True),
 ]
 
 _BASE = getattr(metrics, "TCER_BASELINE", 26.22) or 26.22

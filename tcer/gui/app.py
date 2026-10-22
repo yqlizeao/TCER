@@ -382,7 +382,7 @@ class TcerGui:
         self._selected_project_idx = None
         self._clear_analysis_view()
         self._projects = list_project_refs(source)
-        # 标记无会话项目（Claude / Codex / OpenCode / Grok / Oh My Pi 统一判定）
+        # 标记无会话项目（各数据源经 project_has_sessions 统一判定）
         self._empty_projects = {
             i for i, p in enumerate(self._projects)
             if not project_has_sessions(p)
@@ -696,8 +696,8 @@ class TcerGui:
         from tcer.core import reader
 
         sid = report.meta.session_id or report.meta.path.stem
-        if report.meta.source in ("codex", "opencode", "grok", "omp", "pi"):
-            label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok", "omp": "Oh My Pi", "pi": "Pi"}.get(report.meta.source, report.meta.source)
+        if report.meta.source in ("codex", "opencode", "omp", "pi"):
+            label = {"codex": "Codex", "opencode": "OpenCode", "omp": "Oh My Pi", "pi": "Pi"}.get(report.meta.source, report.meta.source)
             messagebox.showinfo("删除会话", f"{label} 会话当前仅支持只读分析，暂不删除本地会话数据。")
             return
         try:
@@ -1004,9 +1004,6 @@ class TcerGui:
                 from tcer.core import opencode_reader
                 sid = r.meta.session_id
                 return opencode_reader.read_user_messages(r.meta.path, sid) if sid else []
-            if source == "grok":
-                from tcer.core import grok_reader
-                return grok_reader.read_user_messages(r.meta.path)
             if source == "omp":
                 from tcer.core import omp_reader
                 return omp_reader.read_user_messages(r.meta.path)
@@ -1022,7 +1019,7 @@ class TcerGui:
             # Claude
             return TcerGui._claude_user_messages(r)
 
-        label = {"codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
+        label = {"codex": "Codex", "opencode": "OpenCode",
                  "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
                  "workbuddy": "WorkBuddy"}.get(source, "Claude")
 
@@ -1035,7 +1032,7 @@ class TcerGui:
             return groups, label
 
         # Single-session view: Claude legacy cache wins when present.
-        if source not in ("codex", "opencode", "grok", "omp", "pi", "antigravity", "workbuddy") \
+        if source not in ("codex", "opencode", "omp", "pi", "antigravity", "workbuddy") \
                 and report.usage.user_message_texts:
             return list(report.usage.user_message_texts), label
         return _read_one(report), label
@@ -1279,8 +1276,8 @@ class TcerGui:
                     tot["tokens"] += u.total
                     tot["cost"] += agg.cost or 0.0
                     tot["net"] += agg.net_loc or 0
-                    # 请求数口径同指标 SSOT（Grok 按 API 调用数，其余按助手响应数）。
-                    tot["requests"] += (u.api_calls or u.assistant_msgs)
+                    # 请求数口径同指标 SSOT（助手响应数）。
+                    tot["requests"] += u.assistant_msgs
                     tot["user_msgs"] += u.user_msgs
                     sums["cr"] += u.cache_read_input_tokens
                     sums["inp"] += u.input_tokens
@@ -1299,7 +1296,7 @@ class TcerGui:
                         "sub": (ref.config_root.name if ref.source == "claude"
                                 and ref.config_root is not None else ref.key),
                         "n": a.n_sessions,
-                        "requests": (u.api_calls or u.assistant_msgs),
+                        "requests": u.assistant_msgs,
                         "user_msgs": u.user_msgs,
                         "tokens": u.total,
                         "cost": agg.cost,

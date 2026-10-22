@@ -122,7 +122,7 @@ def test_project_html_contains_mini_timeline():
 def test_render_overview_html():
     rows = [{"source": "Claude", "name": "P1", "sessions": 3, "tokens": 1000,
              "cost": 1.5, "net": 200, "tcer": 60.0, "chr": 0.9, "churn": 0.05},
-            {"source": "Grok", "name": "<x>", "sessions": 1, "tokens": 500,
+            {"source": "OpenCode", "name": "<x>", "sessions": 1, "tokens": 500,
              "cost": None, "net": None, "tcer": None, "chr": None, "churn": None}]
     rows[1]["cost"] = 0.0
     out = html_report.render_overview_html(rows)

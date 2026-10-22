@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS uploads (
     -- Configuration dimensions: what the session was *run with*. These are the
     -- knobs a team can actually change, so they are what the Decision Lab
     -- compares cohorts on (model / agent CLI / harness config).
-    source            TEXT,           -- claude | codex | grok | opencode
+    source            TEXT,           -- claude | codex | opencode | omp | pi | antigravity | workbuddy（历史数据可能含 grok）
     task_type         TEXT,
     reasoning_effort  TEXT,
     approval_policy   TEXT,

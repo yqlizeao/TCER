@@ -84,7 +84,7 @@ GROUPS: list[Group] = [
         Metric("active_duration", "计算耗时", "",
                "模型实际生成与运行的累计时间（AI 纯计算耗时），不含用户思考、阅读与等待。\n"
                "与「持续时长」对比可直观展现人机协作中 AI 的真实占用时间。\n"
-               "说明：Codex / Grok / Oh My Pi 提供单次补全精确耗时；Claude 仅记录整轮墙钟，显示「不适用」。", "basic"),
+               "说明：Codex / Oh My Pi 提供单次补全精确耗时；Claude 仅记录整轮墙钟，显示「不适用」。", "basic"),
         Metric("models", "模型", "", "该会话使用的 AI 模型（友好名），同一会话可能混用多个。", "basic"),
         Metric("tools", "工具调用", "",
                "Claude Code 调用的工具及次数，点击查看详细列表。", "basic"),
@@ -92,7 +92,7 @@ GROUPS: list[Group] = [
                "公式：各次 API 请求耗时的平均值（逐请求 duration 求均值）\n"
                "推荐：越低越好（编程模型一次补全含长思考，几十秒属常见）\n"
                "说明：与 cc-switch 的「平均延迟」同口径——模型处理一次请求的完整耗时。"
-               "Codex / Grok / Oh My Pi 提供单次补全精确耗时；Claude 只记录整轮墙钟"
+               "Codex / Oh My Pi 提供单次补全精确耗时；Claude 只记录整轮墙钟"
                "（含工具执行与等待，实测可达十几分钟），无法还原单请求耗时，显示「不适用」。", "basic", "down"),
         Metric("user_gap_median", "用户响应间隔", "分",
                "公式：相邻回合时间戳间隔的中位数（只统计 1–30 分钟的间隔）\n"
@@ -122,9 +122,6 @@ GROUPS: list[Group] = [
         Metric("hook_overhead", "钩子开销", "",
                "stop hook（lint/test 等用户配置的钩子）的累计耗时与失败次数——"
                "「你自己装的钩子拖慢了多少」。", "basic", "down"),
-        Metric("permission_wait", "审批等待", "秒",
-               "工具执行前等待用户审批的累计时长——「人卡住 AI」的时间。\n"
-               "推荐：越低越流畅；括号内为审批请求次数。", "basic", "down"),
         Metric("subagent", "子代理", "",
                "并入该会话的子代理数量。子代理是 Claude Code 为复杂任务自动拆出的并行助手，"
                "其 Token 与代码行合并计入父会话。", "basic"),
@@ -152,8 +149,8 @@ GROUPS: list[Group] = [
                "公式：Σ 输出 Token ÷ Σ 单次补全生成耗时（秒）\n"
                "推荐：越高越快（仅供粗略参考）\n"
                "说明：每秒生成多少输出 Token，取每次 API 补全自报的生成耗时（Codex "
-               "task_complete / Grok turn / omp duration）。\n"
-               "⚠️ 仅 Codex / Grok / Oh My Pi 提供单补全耗时；Claude 的 JSONL 只记录"
+               "task_complete / omp duration）。\n"
+               "⚠️ 仅 Codex / Oh My Pi 提供单补全耗时；Claude 的 JSONL 只记录"
                "轮级墙钟（含工具执行与等待），无法还原纯生成速度，故显示「不适用」。",
                "basic", "up"),
     ]),
@@ -202,9 +199,6 @@ GROUPS: list[Group] = [
                    "文档/策划文本（*.md、*.txt、*.rst、*/docs/ 等）的净增行，反映文档投入。\n"
                    "注：Word/Excel 等二进制文件不计——AI 的编辑是文本行模型，无法对其产出行数；"
                    "策划通常在 .md/.txt 起草后再转成 Office。", "basic"),
-            Metric("git_commits", "落地提交", "",
-                   "会话期间产生的 git 提交数（由本地代理记录，TCER 不调 git）。\n"
-                   "写出来的代码有没有真正落地的直接信号；PR 创建/合并数见导出数据。", "basic", "up"),
         ]),
         Subgroup("行为", [
             Metric("read_write_ratio", "读写比", "",
@@ -250,7 +244,7 @@ GROUPS: list[Group] = [
             Metric("compactions", "上下文压缩", "",
                    "本地代理记录中的上下文压缩次数；数值高表示会话发生过上下文压缩或窗口替换。", "basic"),
             Metric("compaction_cost", "压缩代价", "",
-                   "公式：Σ 压缩丢弃 Token（compactMetadata 的 cumulativeDroppedTokens 或 pre−post）；"
+                   "公式：Σ 压缩丢弃 Token（Claude compactMetadata 的 cumulativeDroppedTokens 或 pre−post；Oh My Pi / Pi 为 compaction 条目的 tokensBefore−tokensAfter）；"
                    "括号内为压缩前上下文峰值与压缩总耗时。\n"
                    "说明：回答「压缩到底丢了多少、值不值」——丢弃量 × 重新读入单价即压缩的隐性成本；"
                    "部分版本只记 preTokens（无丢弃量字段）时显示 0，仅括号信息可用。", "basic", "down"),
@@ -316,12 +310,6 @@ GROUPS: list[Group] = [
                    "Codex 来自 turn_aborted 事件；omp/pi 来自 stopReason=='aborted' 的回合。", "basic", "down"),
             Metric("rate_limit_hits", "限流命中", "",
                    "限流命中次数：Claude 为 429 API 错误行，Codex 为限流快照记录。", "basic", "down"),
-            Metric("cancellations", "用户取消", "",
-                   "用户中途取消回合的次数——对当前输出不满意或方向跑偏的信号。", "basic", "down"),
-            Metric("regenerations", "重新生成", "",
-                   "用户要求重新生成回答的次数——直接的「这次输出不行」信号。", "basic", "down"),
-            Metric("reverted_lines", "回退行", "",
-                   "AI 写入后又被回退（rewind/revert）的代码行数——写了但没被采纳的产出。", "basic", "down"),
             Metric("user_modified", "人工修正", "",
                    "AI 写入文件后被用户手动修改过的工具结果数（toolUseResult.userModified）。\n"
                    "偏高说明 AI 产出常需要人再加工——最直接的产出质量信号之一。", "basic", "down"),
@@ -348,7 +336,8 @@ GROUPS: list[Group] = [
                "说明：单个回合吃掉全会话三成以上成本时值得复盘——常是失控循环、巨型粘贴或一次读爆上下文的文件；「-」表示无逐回合数据。", "basic", "down"),
         Metric("cost_vs_reported", "自报成本偏差", "",
                "公式：价表计价成本 ÷ 源自报成本（1.00 = 口径一致）\n"
-               "说明：交叉验证计价引擎——OpenCode 报会话总额、Oh My Pi / Pi 逐响应累加美元。"
+               "说明：交叉验证计价引擎——Claude 取 cost-state 累计总额、OpenCode 报会话总额、"
+               "Oh My Pi / Pi 逐响应累加美元。"
                "显著偏离 1.0 提示价表错价、漏 1h 缓存档溢价、或未匹配模型走了默认价。", "basic"),
     ]),
     Group("G6", "综合评分", [
@@ -428,8 +417,8 @@ def _tools_summary(report: SessionReport) -> str:
 
 
 def _turns_display(u) -> str:
-    """请求数：与 raw_value 同口径（Grok 按 API 调用数），有跳过追加 (+N 跳过)"""
-    total = u.api_calls or u.assistant_msgs
+    """请求数：与 raw_value 同口径（助手响应数），有跳过追加 (+N 跳过)"""
+    total = u.assistant_msgs
     skipped = u.empty_usage_skipped
     if skipped:
         return f"{fmt.fmt_int(total)}（+{skipped} 跳过）"
@@ -490,10 +479,8 @@ _SESSION_FMT: dict[str, str] = {
     "ttft": "float:0.0", "ttft_p95": "float:0.0", "rate_limit_peak": "pct",
     "patch_success": "pct", "aborted_tasks": "int",
     "rate_limit_hits": "int",
-    "cancellations": "int", "regenerations": "int", "reverted_lines": "int",
-    "git_commits": "int", "user_modified": "int", "revert_events": "int",
+    "user_modified": "int", "revert_events": "int",
     # G1 新增
-    "permission_wait": "text",
     "hook_overhead": "text",
     "slash_commands": "int",
     "plan_modes": "int", "read_truncations": "int", "reasoning_time": "text",
@@ -540,10 +527,6 @@ _USAGE_ATTR = {
     "aborted_tasks": "aborted_task_count",
     "rate_limit_hits": "rate_limit_reached_count",
     "rate_limit_peak": "rate_limit_peak_used",
-    "cancellations": "cancellation_count",
-    "regenerations": "regeneration_count",
-    "reverted_lines": "reverted_lines",
-    "git_commits": "git_commit_count",
     "user_modified": "user_modified_count",
     "revert_events": "revert_events",
     "slash_commands": "slash_command_count",
@@ -655,10 +638,6 @@ _DISPLAY_EXTRACTORS = {
     "memory_files": lambda r: str(len(r.memory_files)) if r.memory_files is not None else "-",
     "image_inputs": lambda r: fmt.fmt_int(r.usage.image_count + r.usage.local_image_count),
     "compaction_cost": _compaction_cost_display,
-    "permission_wait": lambda r: (
-        f"{fmt.fmt_duration_ms(r.usage.permission_wait_ms_total, short=True)}"
-        f"（{r.usage.permission_request_count} 次）"
-        if r.usage.permission_request_count else "-"),
     "reasoning_time": lambda r: (
         fmt.fmt_duration_ms(r.usage.reasoning_ms_total, short=True)
         if r.usage.reasoning_ms_total else "-"),
@@ -725,9 +704,6 @@ def raw_value(report, key: str) -> float | None:
             return float(sum(u.tool_calls.values())) if u.tool_calls else None
         if key == "image_inputs":
             return float(u.image_count + u.local_image_count)
-        if key == "permission_wait":
-            return (u.permission_wait_ms_total / 1000
-                    if u.permission_request_count else None)
         if key == "hook_overhead":
             return (u.hook_duration_ms_total / 1000
                     if u.hook_run_count else None)
@@ -741,9 +717,8 @@ def raw_value(report, key: str) -> float | None:
             v = getattr(u, _USAGE_ATTR[key])
             return float(v) if v is not None else None
         if key == "turns":
-            # Grok：一个回合可含多次 API 调用（modelCalls），有 api_calls 时
-            # 显示真·请求数；其余源 = 助手响应数（一次请求一条响应）。
-            return float(u.api_calls or u.assistant_msgs)
+            # 请求数 = 助手响应数（一次请求一条响应）。
+            return float(u.assistant_msgs)
         if key == "subagent":
             return float(report.subagent_count)
         if key == "code_loc":
@@ -833,69 +808,63 @@ UNSUPPORTED_LABEL = "不适用"
 
 SOURCE_LABELS = {
     "claude": "Claude", "codex": "Codex", "opencode": "OpenCode",
-    "grok": "Grok", "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
+    "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
     "workbuddy": "WorkBuddy",
 }
 
 # key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
 _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Claude 独有
-    "subagent": frozenset({"claude", "grok"}),
+    "subagent": frozenset({"claude", "omp"}),
     "memory_files": frozenset({"claude"}),
     # Claude 的推理输出并入「输出」，不单独上报
-    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "grok", "omp", "pi", "antigravity", "workbuddy"}),
-    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "grok", "omp", "pi", "antigravity", "workbuddy"}),
-    # Codex/Grok 运行时信号（Grok 来自 signals.json）
-    "context_window": frozenset({"codex", "grok"}),
-    "context_window_used": frozenset({"codex", "grok"}),
+    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"}),
+    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"}),
+    # Codex 运行时信号
+    "context_window": frozenset({"codex"}),
+    "context_window_used": frozenset({"codex"}),
     # 输出吞吐需「单次 API 补全」的生成耗时（业界标准：output ÷ 解码时间，排除
-    # TTFT/工具/等待）。Codex/Grok/omp 均有逐补全 duration。Claude 的 JSONL 没有
+    # TTFT/工具/等待）。Codex/omp 均有逐补全 duration。Claude 的 JSONL 没有
     # 单响应耗时——只有轮级 turn_duration（整轮墙钟，含多次 API + 工具执行 + 用户
     # 等待，messageCount 可达 400+），拿它当分母会把吞吐虚低 3–10×，故 Claude 不
     # 支持（其单补全耗时仅存在于 OpenTelemetry 遥测，不落 JSONL）。OpenCode（多步
     # 聚合无 step 级 duration）与 Pi（无 duration 字段）同样不提供。
-    "output_tps": frozenset({"grok", "omp", "pi"}),
-    # 平均延迟需要每请求耗时：Grok 按 modelCalls 均摊（api_calls）、omp 为
-    # 每响应 duration。Claude 整轮墙钟 / Codex 任务级墙钟（实测高一个数量级）
+    "output_tps": frozenset({"omp", "pi"}),
+    # 平均延迟需要每请求耗时：omp 为每响应 duration。Claude 整轮墙钟 / Codex 任务级墙钟（实测高一个数量级）
     # → 不适用；OpenCode 无该字段（pi 有 duration，compute 门控含 pi）。
-    "latency": frozenset({"grok", "omp", "pi"}),
+    "latency": frozenset({"omp", "pi"}),
     # 效率衰减比需要逐回合 LOC 流水（turn_net_locs）——当前仅 Claude reader 填充。
     "efficiency_decay": frozenset({"claude"}),
-    "ttft": frozenset({"codex", "grok", "omp"}),
+    "ttft": frozenset({"codex", "omp"}),
     "ttft_p95": frozenset({"codex", "omp"}),
     "rate_limit_peak": frozenset({"codex"}),
     "patch_success": frozenset({"codex"}),
     "aborted_tasks": frozenset({"codex", "omp", "pi"}),
-    # Grok signals.json / events.jsonl 独有
-    "cancellations": frozenset({"grok"}),
-    "active_duration": frozenset({"codex", "grok", "omp", "pi"}),
-    "regenerations": frozenset({"grok"}),
-    "reverted_lines": frozenset({"grok"}),
+    "active_duration": frozenset({"codex", "omp", "pi"}),
     "user_modified": frozenset({"claude"}),
-    "revert_events": frozenset({"opencode", "grok"}),
+    "revert_events": frozenset({"opencode"}),
     "hook_overhead": frozenset({"claude"}),
     "slash_commands": frozenset({"claude", "omp", "pi", "antigravity"}),
     "plan_modes": frozenset({"claude", "omp"}),
-    # 压缩代价（compactMetadata）与 LOC 可信度（structuredPatch）仅 Claude 暴露。
-    "compaction_cost": frozenset({"claude"}),
+    # 压缩代价：Claude compactMetadata / omp·pi compaction 条目；LOC 可信度（structuredPatch）仅 Claude。
+    "compaction_cost": frozenset({"claude", "omp", "pi"}),
     "loc_confidence": frozenset({"claude"}),
     # 自报成本：OpenCode 会话总额 / omp·pi 逐响应 cost 分量。
-    "cost_vs_reported": frozenset({"opencode", "omp", "pi"}),
+    "cost_vs_reported": frozenset({"claude", "opencode", "omp", "pi"}),
     "read_truncations": frozenset({"claude"}),
     "reasoning_time": frozenset({"opencode"}),
-    "git_commits": frozenset({"grok"}),
-    "permission_wait": frozenset({"grok"}),
     # 部分源组合（Claude 的限流/压缩/网页搜索来自 system 子类型与
     # usage.server_tool_use，reader 已解析）
     "rate_limit_hits": frozenset({"claude", "codex", "omp"}),
-    "task_completion": frozenset({"codex", "grok"}),
-    "compactions": frozenset({"claude", "codex", "opencode", "grok"}),
-    "web_searches": frozenset({"claude", "codex", "grok", "omp", "pi", "antigravity", "workbuddy"}),
+    "task_completion": frozenset({"codex"}),
+    "compactions": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
+    "web_searches": frozenset({"claude", "codex", "omp", "pi", "antigravity", "workbuddy"}),
     "image_inputs": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
-    # Codex 不上报缓存写入 (reader 恒 0)，显示 0 会误导
-    "cache_write": frozenset({"claude", "opencode", "omp", "pi"}),
-    "cache_write_ratio": frozenset({"claude", "opencode", "omp", "pi"}),
-    "cache_efficiency": frozenset({"claude", "opencode", "omp", "pi"}),
+    # Codex 自 cache_write_input_tokens（input 的子集）起上报缓存写入；
+    # 更早的 rollout 无该字段读 0（部分支持，不标注）。
+    "cache_write": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
+    "cache_write_ratio": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
+    "cache_efficiency": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
 }
 
 

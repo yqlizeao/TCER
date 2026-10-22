@@ -1002,8 +1002,8 @@ def test_metric_panel_deck_chips_ssot(root):
     v_lbl, _ = mp._chips["cache_write"]
     assert v_lbl.cget("text") not in ("", "-", UNSUPPORTED_LABEL)
 
-    # Codex 源：cache_write / output_tps 不支持（_SOURCE_SUPPORT）→ 「不适用」置灰
-    rep.meta.source = "codex"
+    # Antigravity 源：cache_write / output_tps 不支持（_SOURCE_SUPPORT）→ 「不适用」置灰
+    rep.meta.source = "antigravity"
     mp.update(rep)
     root.update_idletasks()
     for k in ("cache_write", "output_tps"):
@@ -1985,7 +1985,7 @@ def test_real_projects_view(root):
              "n": 10, "requests": 120, "user_msgs": 30,
              "tokens": 1_500_000_000, "cost": 5.0, "net": 1500,
              "tcer": 1.5, "cpe": 3.3, "chr": 0.95, "score": 54.0, "tier": "中等"},
-            {"label": "Grok", "source": "grok", "icon": "grok", "n": 20,
+            {"label": "OpenCode", "source": "opencode", "icon": "opencode", "n": 20,
              "requests": 210, "user_msgs": 45, "tokens": 500_000_000,
              "cost": 7.5, "net": 2500, "tcer": 2.5,
              "cpe": 3.0, "chr": 0.8, "score": 56.0, "tier": "良好"},

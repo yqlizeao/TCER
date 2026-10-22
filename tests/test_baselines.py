@@ -188,9 +188,9 @@ def test_compute_baselines_per_source_buckets_and_gate():
     for r in codex:
         r.meta.source = "codex"
     for r in few:
-        r.meta.source = "grok"
+        r.meta.source = "omp"
     out = metrics.compute_baselines_per_source(claude + codex + few)
-    assert set(out) == {"claude", "codex", "grok"}
+    assert set(out) == {"claude", "codex", "omp"}
     assert out["claude"] is not None and out["codex"] is not None
-    assert out["grok"] is None  # 样本不足 → None（GUI 标注「跳过」）
+    assert out["omp"] is None  # 样本不足 → None（GUI 标注「跳过」）
     assert out["codex"] == metrics.compute_baselines(codex)

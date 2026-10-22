@@ -13,7 +13,7 @@ class ProjectRef:
     are virtual groups of session JSONL files sharing the same cwd.
     """
 
-    source: str  # "claude" / "codex" / "opencode" / "grok" / "omp" / "pi"
+    source: str  # "claude" / "codex" / "opencode" / "omp" / "pi" / "antigravity" / "workbuddy"
     key: str
     display_name: str
     cwd: str | None
@@ -65,8 +65,8 @@ class TurnStat:
 
     One entry per assistant turn with real usage. ``duration_ms`` comes from
     authoritative per-turn events when the source provides them (Claude
-    ``system/turn_duration``, Codex ``task_complete.duration_ms``, Grok
-    ``turn_completed``); None otherwise.
+    ``system/turn_duration``, Codex ``task_complete.duration_ms``, omp/pi
+    per-response ``duration``); None otherwise.
     """
 
     turn: int
@@ -132,9 +132,6 @@ class TokenUsage:
     task_count: int = 0
     completed_task_count: int = 0
     aborted_task_count: int = 0
-    # 真·API 请求数（Grok turn_completed.usage.modelCalls：一个回合可含多次
-    # 模型调用，中位 3；其余源无该字段时 0，展示层回退 assistant_msgs）。
-    api_calls: int = 0
     compaction_count: int = 0
     compaction_event_count: int = 0
     # 压缩代价（Claude compactMetadata）：累计丢弃 token 与压缩耗时；
@@ -161,19 +158,6 @@ class TokenUsage:
     rate_limit_peak_used: float | None = None  # 配额峰值占用（0..1，Codex used_percent/100）
     ttft_ms_samples: list[int] = field(default_factory=list)  # 逐回合 TTFT（p95 用）
     abort_reasons: dict[str, int] = field(default_factory=dict)  # 中断原因 → 次数
-    # --- Grok signals.json / events.jsonl（会话级聚合信号与事件） ---
-    cancellation_count: int = 0        # 用户取消回合次数
-    regeneration_count: int = 0        # 重新生成次数
-    positive_ratings: int = 0          # 用户显式好评
-    negative_ratings: int = 0          # 用户显式差评
-    git_commit_count: int = 0          # 会话内 git 提交数（工具侧记录，非调 git）
-    pr_created_count: int = 0
-    pr_merged_count: int = 0
-    reverted_lines: int = 0            # AI 写入后被回退的行数（agentLinesAddedReverted）
-    permission_request_count: int = 0  # 工具审批请求次数
-    permission_wait_ms_total: int = 0  # 审批等待总毫秒（人卡住 AI 的时间）
-    itl_p50_ms: int | None = None      # inter-token latency P50
-    itl_p99_ms: int | None = None
     # --- prompt 行为信号（只计数，不存正文） ---
     slash_command_count: int = 0    # 以 / 开头或 <command-name> 的用户消息数
     correction_msg_count: int = 0   # 含纠正措辞（不对/重来/撤销/undo…）的用户消息数
@@ -189,7 +173,7 @@ class TokenUsage:
     reasoning_ms_total: int = 0        # 思考耗时累计毫秒（OpenCode reasoning part）
     # --- 采纳信号 ---
     user_modified_count: int = 0       # AI 写入后被用户手动修改的工具结果数（Claude）
-    revert_events: int = 0             # 会话被回退的事件数（OpenCode revert / Grok hasReverted）
+    revert_events: int = 0             # 会话被回退的事件数（OpenCode revert）
     # --- structuredPatch 独立差分（Claude 自算 diff 的 +/- 行，仅代码后缀文件）。
     # 与回放 LOC 相互独立的第二套估计，用于交叉校验；不参与 TCER 计算。
     patch_diff_added: int = 0
@@ -288,7 +272,6 @@ class TokenUsage:
             task_count=self.task_count + other.task_count,
             completed_task_count=self.completed_task_count + other.completed_task_count,
             aborted_task_count=self.aborted_task_count + other.aborted_task_count,
-            api_calls=self.api_calls + other.api_calls,
             compaction_count=self.compaction_count + other.compaction_count,
             compaction_event_count=self.compaction_event_count + other.compaction_event_count,
             compaction_discarded_tokens=self.compaction_discarded_tokens + other.compaction_discarded_tokens,
@@ -318,21 +301,7 @@ class TokenUsage:
                                           other.rate_limit_peak_used),
             ttft_ms_samples=self.ttft_ms_samples + other.ttft_ms_samples,
             abort_reasons=_merge_dicts(self.abort_reasons, other.abort_reasons),
-            cancellation_count=self.cancellation_count + other.cancellation_count,
-            regeneration_count=self.regeneration_count + other.regeneration_count,
-            positive_ratings=self.positive_ratings + other.positive_ratings,
-            negative_ratings=self.negative_ratings + other.negative_ratings,
-            git_commit_count=self.git_commit_count + other.git_commit_count,
-            pr_created_count=self.pr_created_count + other.pr_created_count,
-            pr_merged_count=self.pr_merged_count + other.pr_merged_count,
-            reverted_lines=self.reverted_lines + other.reverted_lines,
-            permission_request_count=self.permission_request_count
-            + other.permission_request_count,
-            permission_wait_ms_total=self.permission_wait_ms_total
-            + other.permission_wait_ms_total,
             # 分位数不可加，聚合取最差值（max）
-            itl_p50_ms=_max_ms(self.itl_p50_ms, other.itl_p50_ms),
-            itl_p99_ms=_max_ms(self.itl_p99_ms, other.itl_p99_ms),
             slash_command_count=self.slash_command_count + other.slash_command_count,
             correction_msg_count=self.correction_msg_count + other.correction_msg_count,
             # 首条消息长度：主会话优先（merge 左侧），子代理不覆盖
@@ -410,7 +379,7 @@ class SessionMeta:
     path: Path
     is_subagent: bool
     entrypoint: str | None = None  # "claude-vscode" / "claude-cli" / etc.
-    source: str = "claude"  # "claude" / "codex" / "opencode" / "grok" / "omp" / "pi"
+    source: str = "claude"  # "claude" / "codex" / "opencode" / "omp" / "pi" / "antigravity" / "workbuddy"
     cli_version: str | None = None
     model_provider: str | None = None
     thread_source: str | None = None
@@ -520,6 +489,6 @@ class SessionReport:
     # --- 复核批新增（C1-C3）---
     cost_reported_ratio: float | None = None   # 价表计价 ÷ 源自报成本（1.0=一致）
     loc_patch_agreement: float | None = None    # 回放 LOC vs structuredPatch 一致率 0..1
-                                     # 补全生成耗时（秒）。仅 Codex/Grok/omp 提供逐补全
+                                     # 补全生成耗时（秒）。仅 omp 提供逐补全
                                      # duration；Claude 只有轮级墙钟(含工具+等待)不可用，
                                      # OpenCode/Pi 无逐补全耗时——均留 None。见 metrics.output_tps。

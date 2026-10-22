@@ -96,9 +96,9 @@ def _short_name(project_hash: str) -> str:
 def project_label(project) -> str:
     """Display label for a source-aware project ref or legacy Path."""
     source = getattr(project, "source", "claude")
-    if source in ("codex", "opencode", "grok", "omp", "pi", "antigravity", "workbuddy"):
+    if source in ("codex", "opencode", "omp", "pi", "antigravity", "workbuddy"):
         default = {
-            "codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
+            "codex": "Codex", "opencode": "OpenCode",
             "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
             "workbuddy": "WorkBuddy",
         }.get(source, source)
@@ -124,7 +124,7 @@ def project_drive(project) -> str | None:
 
 
 _SOURCE_DISPLAY = {
-    "codex": "Codex", "opencode": "OpenCode", "grok": "Grok",
+    "codex": "Codex", "opencode": "OpenCode",
     "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
     "workbuddy": "WorkBuddy",
 }
@@ -151,7 +151,7 @@ def source_icon(master, icon_key: str):
     """16px 图标（tk.PhotoImage，模块级缓存防 GC）。
 
     *icon_key* 对应 ``assets/<icon_key>.png``（claude / ccswitch / codex /
-    opencode / grok / …）。无对应资源（或 Tk 尚未就绪）返回 None，调用方
+    opencode / omp / …）。无对应资源（或 Tk 尚未就绪）返回 None，调用方
     回退到 ``[源名]`` 文字标注。构建期已用 PIL 把原图预缩到 16×16，运行时零依赖。
     """
     tk_app = getattr(master, "tk", None)
@@ -208,7 +208,7 @@ def project_icon_key(project) -> str:
     """
     source = getattr(project, "source", "claude")
     if source != "claude":
-        return source  # codex / opencode / grok / omp
+        return source  # codex / opencode / omp / pi / …
     from tcer.core.paths import is_custom_claude_root
     if is_custom_claude_root(getattr(project, "path", None)):
         return "ccswitch"
@@ -264,9 +264,6 @@ def project_open_path(project) -> str:
     if source == "codex":
         from tcer.core.paths import codex_sessions_dir
         return str(codex_sessions_dir())
-    if source == "grok":
-        from tcer.core.paths import grok_sessions_dir
-        return str(grok_sessions_dir())
     if source == "omp":
         from tcer.core.paths import omp_sessions_dir
         return str(omp_sessions_dir())
@@ -983,7 +980,6 @@ class FilterBar:
             "claude": "Claude",
             "codex": "Codex",
             "opencode": "OpenCode",
-            "grok": "Grok",
             "omp": "Oh My Pi",
             "pi": "Pi",
             "antigravity": "Antigravity",
@@ -1067,7 +1063,7 @@ class FilterBar:
                                         bg=theme.PANEL)
         self._src_capsule.pack(side="right", padx=(2, 4))
         self._src_lbl = self._src_capsule
-        Tooltip(self._src_capsule, "切换会话数据来源 (全部 / Claude / Codex / OpenCode / Grok / Oh My Pi / Pi)")
+        Tooltip(self._src_capsule, "切换会话数据来源 (全部 / Claude / Codex / OpenCode / Oh My Pi / Pi / Antigravity / WorkBuddy)")
 
         # 2. 紧随来源左侧：时间下拉胶囊
         def _on_time_click(_widget):
@@ -1256,7 +1252,10 @@ class ProjectColumn:
                      "~/.claude（Claude Code）\n"
                      "~/.codex（Codex）\n"
                      "~/.local/share/opencode（OpenCode）\n"
-                     "~/.grok（Grok）\n\n"
+                     "~/.omp（Oh My Pi）\n"
+                     "~/.pi（Pi）\n"
+                     "~/.gemini/antigravity-cli（Antigravity）\n"
+                     "~/.workbuddy-ai（WorkBuddy）\n\n"
                      "或切换顶部「来源」筛选后重试。",
                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
                 justify="left", pady=theme.PAD_L * 2)
@@ -2008,7 +2007,7 @@ class SessionColumn:
         menu.add_separator()
 
         # Destructive action — last item, gated behind a二次确认对话框.
-        readonly = report.meta.source in ("codex", "opencode", "grok", "omp", "pi", "antigravity", "workbuddy")
+        readonly = report.meta.source in ("codex", "opencode", "omp", "pi", "antigravity", "workbuddy")
         delete_state = "disabled" if readonly else "normal"
         delete_label = "删除会话…" if not readonly else f"删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(
@@ -3857,8 +3856,8 @@ class RealProjectsView:
         stat.pack(fill="x", padx=theme.PAD_S,
                   pady=(2, theme.PAD_S if not expanded else 0))
         card.bind_to(stat)
-        Tooltip(stat, "会话数 / 请求数（向模型 API 的请求；Grok 按回合内调用次数，"
-                      "其余源按助手响应数）/ 用户消息数 / 消耗总 Token")
+        Tooltip(stat, "会话数 / 请求数（向模型 API 的请求，按助手响应数计）"
+                      "/ 用户消息数 / 消耗总 Token")
 
         if expanded:
             # 各源明细 = 固定列网格（每指标一列 + 表头），跨行严格对齐——
@@ -3873,7 +3872,7 @@ class RealProjectsView:
                 ("来源", 130, "w", "src", "该工作目录下此 agent 的项目卡"),
                 ("总会话", 50, "e", "n", "跨会话求和"),
                 (self._COL_TURNS, 62, "e", "turns",
-                 "跨会话求和（Grok 按 API 调用数，其余按助手响应数）"),
+                 "跨会话求和（按助手响应数）"),
                 (self._COL_MSGS, 76, "e", "msgs", "跨会话求和"),
                 (self._TOKENS_NAME, 68, "e", "tokens", "跨会话求和"),
                 (self._COST_NAME, 74, "e", "cost", "跨会话求和（价表计价）"),

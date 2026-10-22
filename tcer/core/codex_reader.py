@@ -26,9 +26,31 @@ _EXIT_RES = (
 )
 
 
+def zstd_supported() -> bool:
+    """True when this interpreter can decode ``.jsonl.zst`` (Python >= 3.14)."""
+    try:
+        import compression.zstd  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _open_text(path: Path):
+    """Open a rollout as text; transparently decompress ``.jsonl.zst``.
+
+    Codex (>= ~0.16x) compresses cold rollouts (older than 7 days) in place to
+    ``*.jsonl.zst`` (``codex-rs/rollout/src/compression.rs``). Standard-library
+    zstd only exists on Python 3.14+ (``compression.zstd``).
+    """
+    if path.name.endswith(".zst"):
+        from compression import zstd  # ImportError on < 3.14: callers gate on zstd_supported()
+        return zstd.open(path, "rt", encoding="utf-8", errors="replace")
+    return path.open("r", encoding="utf-8", errors="replace")
+
+
 def iter_events(path: Path):
     """Yield parsed Codex JSONL events, skipping malformed lines."""
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
+    with _open_text(path) as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -107,7 +129,7 @@ def _events_with_user_messages(path: Path):
             (obj.get("type") == "response_item" and pl.get("role") != "developer"
              and pl.get("type") != "message")
             or pl.get("role") == "assistant"
-            or pl.get("type") in ("task_complete", "turn_aborted", "agent_message", "token_count")
+            or pl.get("type") in ("task_complete", "turn_complete", "turn_aborted", "agent_message", "token_count")
         ):
             pending = None
         yield obj, msg
@@ -118,7 +140,13 @@ def discover_sessions() -> list[Path]:
     base = codex_sessions_dir()
     if not base.is_dir():
         return []
-    return sorted(base.rglob("*.jsonl"))
+    found = [p for p in base.rglob("*.jsonl")]
+    if zstd_supported():
+        # Cold rollouts compressed in place; skip when the plain sibling still
+        # exists (mid-transition) so one rollout is never listed twice.
+        found += [p for p in base.rglob("*.jsonl.zst")
+                  if not p.with_name(p.name[:-4]).exists()]
+    return sorted(found)
 
 
 # Process cache for session_index.jsonl, keyed by (path, mtime, size) so a
@@ -170,19 +198,10 @@ def _normalize_cwd(cwd: str | None) -> str | None:
         return cwd
 
 
-def _session_head_meta(
-    path: Path, max_lines: int = 16,
-) -> tuple[str | None, str | None] | None:
-    """Read ``(session_id, cwd)`` from the first ``session_meta`` event only.
-
-    Codex always writes ``session_meta`` as a rollout's first line, so grouping
-    / dedup only needs line 1 — walking a whole (multi-MB) rollout end-to-end
-    just to read it made startup ``O(total rollout bytes)`` for heavy Codex
-    users. Returns None when no ``session_meta`` shows up in the first
-    ``max_lines`` lines (caller falls back to the full scan). cwd is normalized.
-    """
+def _head_payload(path: Path, max_lines: int = 16) -> dict | None:
+    """Return the ``session_meta`` payload from a rollout's first lines (None if absent)."""
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
+        with _open_text(path) as fh:
             for i, line in enumerate(fh):
                 if i >= max_lines:
                     break
@@ -196,12 +215,125 @@ def _session_head_meta(
                 if obj.get("type") == "session_meta":
                     pl = obj.get("payload")
                     if isinstance(pl, dict):
-                        sid = _first_str(pl.get("session_id"), pl.get("id"))
-                        cwd = pl.get("cwd") if isinstance(pl.get("cwd"), str) else None
-                        return sid, _normalize_cwd(cwd)
+                        return pl
     except OSError:
         return None
     return None
+
+
+def _session_head_meta(
+    path: Path, max_lines: int = 16,
+) -> tuple[str | None, str | None] | None:
+    """Read ``(thread id, cwd)`` from the first ``session_meta`` event only.
+
+    Codex always writes ``session_meta`` as a rollout's first line, so grouping
+    / dedup only needs line 1 -- walking a whole (multi-MB) rollout end-to-end
+    just to read it made startup ``O(total rollout bytes)`` for heavy Codex
+    users. Returns None when no ``session_meta`` shows up in the first
+    ``max_lines`` lines (caller falls back to the full scan). cwd is normalized.
+    """
+    pl = _head_payload(path, max_lines)
+    if pl is None:
+        return None
+    sid = _first_str(pl.get("id"), pl.get("session_id"))
+    cwd = pl.get("cwd") if isinstance(pl.get("cwd"), str) else None
+    return sid, _normalize_cwd(cwd)
+
+
+def _parent_thread_id(pl: dict | None) -> str | None:
+    """Parent thread id of a sub-agent thread (``None`` for ordinary threads).
+
+    Upstream ``SessionMeta.parent_thread_id`` or
+    ``source = {"subagent": {"thread_spawn": {"parent_thread_id": ..}}}``.
+    Review/compact/memory sub-agent sources carry no parent -> not foldable.
+    """
+    if not isinstance(pl, dict):
+        return None
+    pid = pl.get("parent_thread_id")
+    if isinstance(pid, str) and pid:
+        return pid
+    src = pl.get("source")
+    sub = src.get("subagent") if isinstance(src, dict) else None
+    spawn = sub.get("thread_spawn") if isinstance(sub, dict) else None
+    pid = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+    return pid if isinstance(pid, str) and pid else None
+
+
+_THREAD_INDEX_CACHE: tuple | None = None
+
+
+def _sessions_dir_signature(base: Path) -> tuple:
+    """Cheap change signature: mtimes of the sessions dir tree (dirs only).
+
+    New rollout files change their day directory's mtime; sub-agent linkage is
+    immutable once written, so appends to existing files never matter here.
+    """
+    sig = []
+    stack = [base]
+    while stack:
+        d = stack.pop()
+        try:
+            sig.append((str(d), int(d.stat().st_mtime_ns)))
+            stack.extend(e for e in d.iterdir() if e.is_dir())
+        except OSError:
+            continue
+    return tuple(sorted(sig))
+
+
+def _thread_index() -> tuple[dict[str, list[Path]], dict[Path, str | None]]:
+    """``(children_by_parent_thread_id, thread_id_by_path)`` over latest snapshots.
+
+    Resume rewrites a thread into a new rollout file (same thread id); only the
+    most complete snapshot per thread id is kept, so a sub-agent's cumulative
+    snapshots are never summed twice.
+    """
+    global _THREAD_INDEX_CACHE
+    base = codex_sessions_dir()
+    sig = (str(base), zstd_supported(), _sessions_dir_signature(base))
+    if _THREAD_INDEX_CACHE is not None and _THREAD_INDEX_CACHE[0] == sig:
+        return _THREAD_INDEX_CACHE[1], _THREAD_INDEX_CACHE[2]
+    paths = discover_sessions()
+    tid_by_path: dict[Path, str | None] = {}
+    parent_by_path: dict[Path, str | None] = {}
+    for p in paths:
+        pl = _head_payload(p)
+        tid_by_path[p] = _first_str(pl.get("id"), pl.get("session_id")) if pl else None
+        parent_by_path[p] = _parent_thread_id(pl)
+    kept = _dedupe_by_session_id(paths, tid_by_path)
+    known = {tid_by_path[p] for p in kept if tid_by_path.get(p)}
+    children: dict[str, list[Path]] = {}
+    for p in sorted(kept):
+        par = parent_by_path.get(p)
+        if par and par in known and par != tid_by_path.get(p):
+            children.setdefault(par, []).append(p)
+    _THREAD_INDEX_CACHE = (sig, children, tid_by_path)
+    return children, tid_by_path
+
+
+def _folded_children(path: Path) -> list[Path]:
+    """Sub-agent rollouts (all depths) folded into the main rollout *path*."""
+    path = Path(path)
+    children, tid_by_path = _thread_index()
+    tid = tid_by_path.get(path)
+    if tid is None:
+        pl = _head_payload(path)
+        tid = _first_str(pl.get("id"), pl.get("session_id")) if pl else None
+    if not tid:
+        return []
+    out: list[Path] = []
+    seen = {tid}
+    queue = [tid]
+    while queue:
+        for c in children.get(queue.pop(0), []):
+            cid = tid_by_path.get(c)
+            if cid and cid in seen:
+                continue
+            if cid:
+                seen.add(cid)
+                queue.append(cid)
+            if c != path:
+                out.append(c)
+    return out
 
 
 def _dedupe_by_session_id(
@@ -257,6 +389,10 @@ def list_project_refs() -> list[ProjectRef]:
             sid_by_path[p], cwd_by_path[p] = head
 
     deduped = _dedupe_by_session_id(paths, sid_by_path)
+    # Sub-agent threads with a known parent fold into the parent (not listed).
+    children, _ = _thread_index()
+    folded = {c for cs in children.values() for c in cs}
+    deduped = [p for p in deduped if p not in folded]
 
     groups: dict[str, list[Path]] = {}
     cwd_by_key: dict[str, str | None] = {}
@@ -323,6 +459,7 @@ def read_session_meta(path: Path) -> SessionMeta:
     reasoning_effort: str | None = None
     fallback_title: str | None = None
     got_meta = got_turn_ctx = got_title = False
+    is_subagent = False
 
     # Codex 把所有会话级元数据写在前几行（session_meta 在第 1 行、turn_context ~5、
     # 首条 user_message ~7）。取齐即停——否则每次重新分析都要为读前 7 行而扫遍
@@ -332,10 +469,21 @@ def read_session_meta(path: Path) -> SessionMeta:
         typ = obj.get("type")
         payload = obj.get("payload")
         if typ == "session_meta" and isinstance(payload, dict):
-            session_id = _first_str(payload.get("session_id"), payload.get("id")) or session_id
+            # ``id`` is the thread id (resume reuses it across rollout files);
+            # newer Codex makes ``session_id`` the *root* thread id, shared by
+            # sub-agent threads — so it must not be the dedup key. Old rollouts
+            # have session_id == id, so preferring ``id`` is backward compatible.
+            session_id = _first_str(payload.get("id"), payload.get("session_id")) or session_id
             cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else cwd
             originator = payload.get("originator") if isinstance(payload.get("originator"), str) else originator
-            source_label = payload.get("source") if isinstance(payload.get("source"), str) else source_label
+            src = payload.get("source")
+            if isinstance(src, str):
+                source_label = src
+            elif isinstance(src, dict) and src:
+                # SessionSource::SubAgent(..) / Custom / Internal serialize as {"subagent": {...}}
+                source_label = str(next(iter(src)))
+            if (isinstance(src, dict) and "subagent" in src) or payload.get("parent_thread_id"):
+                is_subagent = True
             cli_version = payload.get("cli_version") if isinstance(payload.get("cli_version"), str) else cli_version
             model_provider = payload.get("model_provider") if isinstance(payload.get("model_provider"), str) else model_provider
             thread_source = payload.get("thread_source") if isinstance(payload.get("thread_source"), str) else thread_source
@@ -367,7 +515,7 @@ def read_session_meta(path: Path) -> SessionMeta:
         cwd=cwd,
         title=title,
         path=path,
-        is_subagent=False,
+        is_subagent=is_subagent,
         entrypoint=entrypoint,
         source="codex",
         cli_version=cli_version,
@@ -385,7 +533,21 @@ def read_session_meta(path: Path) -> SessionMeta:
 
 
 def aggregate_usage(path: Path) -> TokenUsage:
-    """Aggregate Codex token and tool usage from one session JSONL."""
+    """Aggregate Codex usage from a main rollout, folding its sub-agent threads.
+
+    Sub-agent token/tool/LOC cost is real and kept; their user messages are
+    Task-dispatch prompts (not human input) so message/image counts are zeroed.
+    """
+    u = _aggregate_single(path)
+    for sub in _folded_children(Path(path)):
+        su = _aggregate_single(sub)
+        su.user_msgs = su.image_count = su.local_image_count = 0
+        u = u.merge(su)
+    return u
+
+
+def _aggregate_single(path: Path) -> TokenUsage:
+    """Aggregate Codex token and tool usage from ONE rollout (no sub-agent merge)."""
     u = TokenUsage()
     current_model = ""
     turn_idx = 0
@@ -422,7 +584,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
             ptype = payload.get("type")
             if ptype == "user_message":
                 pass  # Counted by the shared input stream above.
-            elif ptype == "task_started":
+            elif ptype in ("task_started", "turn_started"):
                 # Codex turn lifecycle (agent turn began) — NOT Claude's Task
                 # subagent tool. Track via task_count only; never invent a
                 # tool_calls["Task"] entry (that inflated tool totals and
@@ -435,7 +597,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 started = parse_timestamp_ms(payload.get("started_at"))
                 if started is not None:
                     u.started_at = started if u.started_at is None else min(u.started_at, started)
-            elif ptype == "task_complete":
+            elif ptype in ("task_complete", "turn_complete"):
                 u.completed_task_count += 1
                 completed = parse_timestamp_ms(payload.get("completed_at"))
                 if completed is not None:
@@ -509,8 +671,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
                     call_id_to_name[cid] = tool_name
                 u.tool_ops.append(ToolOp(turn_idx, tool_name, path_hint))
         elif ptype in ("function_call_output", "custom_tool_call_output"):
-            output = payload.get("output")
-            out_s = output if isinstance(output, str) else ""
+            out_s = _output_text(payload.get("output"))
             code = _exit_code(out_s)
             # exit code 权威；无码时按显式失败前缀兜底（见 _output_is_error）。
             is_err = (code != 0) if code is not None else _output_is_error(out_s)
@@ -520,6 +681,17 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 tname = call_id_to_name.get(cid) if isinstance(cid, str) else None
                 if tname:
                     u.tool_errors_by_tool[tname] = u.tool_errors_by_tool.get(tname, 0) + 1
+        elif ptype == "local_shell_call":
+            # Legacy/Responses-API shell item: action.command is an argv list.
+            action = payload.get("action")
+            cmd = action.get("command") if isinstance(action, dict) else None
+            cmd_s = " ".join(str(c) for c in cmd) if isinstance(cmd, list) else ""
+            tool_name, path_hint = _classify_shell_command(cmd_s, {"cmd": cmd_s})
+            u.tool_calls[tool_name] = u.tool_calls.get(tool_name, 0) + 1
+            cid = payload.get("call_id") or payload.get("id")
+            if isinstance(cid, str):
+                call_id_to_name[cid] = tool_name
+            u.tool_ops.append(ToolOp(turn_idx, tool_name, path_hint))
         elif ptype == "reasoning":
             u.thinking_count += 1
         elif ptype == "web_search_call":
@@ -619,7 +791,8 @@ def read_conversation(path: Path) -> list[dict]:
             })
         elif ptype in ("function_call_output", "custom_tool_call_output"):
             output = payload.get("output")
-            text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str)
+            text = _output_text(output) if isinstance(output, list) else (
+                output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str))
             code = _exit_code(text) if isinstance(text, str) else None
             convo.append({
                 "role": "tool", "type": "tool_result",
@@ -683,6 +856,25 @@ def _tool_input(arguments):
 
 
 def _loc_scan(path: Path):
+    """``(SessionLoc, has_signal)`` for a main rollout merged with folded sub-agents."""
+    from tcer.core.loc import SessionLoc, merge_session_locs
+    sloc, has_signal = _loc_scan_single(path)
+    subs = _folded_children(Path(path))
+    if not subs:
+        return sloc, has_signal
+    slocs = [sloc] if has_signal else []
+    any_signal = has_signal
+    for sub in subs:
+        sl, hs = _loc_scan_single(sub)
+        if hs:
+            slocs.append(sl)
+            any_signal = True
+    if not slocs:
+        return SessionLoc(added=0, deleted=0), False
+    return merge_session_locs(slocs), any_signal
+
+
+def _loc_scan_single(path: Path):
     """Single pass over events returning ``(SessionLoc, has_signal)``.
 
     ``has_signal`` is True if any parseable apply_patch exists (independent of
@@ -785,24 +977,27 @@ def has_loc_signal(path: Path) -> bool:
 
 
 # Billing fields shared by ``last_token_usage`` / ``total_token_usage``.
-_TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens",
-                 "reasoning_output_tokens")
+_TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+                 "output_tokens", "reasoning_output_tokens")
 
 
 def _add_token_usage(u: TokenUsage, usage: dict, model: str) -> None:
     cached = _as_int(usage.get("cached_input_tokens"))
     raw_input = _as_int(usage.get("input_tokens"))
-    i = max(0, raw_input - cached)
+    # Newer Codex reports ``cache_write_input_tokens`` as a SUBSET of input_tokens
+    # (upstream test: input 100 = cached 40 + cache_write 60). Absent in old data -> 0.
+    cw = _as_int(usage.get("cache_write_input_tokens"))
+    i = max(0, raw_input - cached - cw)
     cr = cached
-    cw = 0
     o = _as_int(usage.get("output_tokens"))
     reasoning = _as_int(usage.get("reasoning_output_tokens"))
-    if i + cr + o == 0:
+    if i + cr + cw + o == 0:
         u.empty_usage_skipped += 1
         return
     u.assistant_msgs += 1
     u.input_tokens += i
     u.cache_read_input_tokens += cr
+    u.cache_creation_input_tokens += cw
     u.output_tokens += o
     u.reasoning_output_tokens += reasoning
     # Codex input_tokens already includes cache; i+cr restores full turn input.
@@ -1089,6 +1284,16 @@ def _patch_file_deltas(patch: str) -> list[tuple[str, int, int]]:
     return deltas
 
 
+def _output_text(output) -> str:
+    """Tool output as text: plain string, or a list of ``input_text`` content items."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        return "\n".join(str(it.get("text")) for it in output
+                         if isinstance(it, dict) and isinstance(it.get("text"), str))
+    return ""
+
+
 def _exit_code(output: str) -> int | None:
     for rx in _EXIT_RES:
         m = rx.search(output)
@@ -1137,7 +1342,8 @@ def _json_label(v) -> str | None:
 
 
 def _session_id_from_filename(path: Path) -> str | None:
-    m = re.search(r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)\.jsonl$", path.name)
+    # New layout: rollout-<ts>-<thread>_<rollout>.jsonl[.zst] (resume = same thread, new rollout id).
+    m = re.search(r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([^_]+?)(?:_[^.]+)?\.jsonl(?:\.zst)?$", path.name)
     return m.group(1) if m else path.stem
 
 

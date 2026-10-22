@@ -346,3 +346,38 @@ def test_analyze_antigravity_project_integration(tmp_path: Path, monkeypatch):
     assert pa.aggregate.usage.output_tokens == 110
     assert pa.aggregate.cost > 0
     assert pa.aggregate.tier is not None
+
+
+def test_newer_tool_arg_names_and_mcp(tmp_path: Path):
+    """write_file/edit_file 用 Path/Content/Target/Replacement；call_mcp_tool 映射 mcp__srv__tool。"""
+    db_path = tmp_path / "conversations" / "variant.db"
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB)")
+    cur.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)")
+    cur.execute(
+        "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, "
+        "status INTEGER, metadata BLOB, step_payload BLOB)"
+    )
+    calls = [
+        ("write_file", {"Path": r"C:\t\a.py", "Content": "x=1\ny=2\n", "Overwrite": True}),
+        ("edit_file", {"Path": r"C:\t\a.py", "Target": "y=2\n", "Replacement": "y=3\nz=4\n"}),
+        ("read_file", {"Path": r"C:\t\a.py"}),
+        ("call_mcp_tool", {"ServerName": "firecrawl", "ToolName": "scrape", "Arguments": {}}),
+    ]
+    for i, (name, args) in enumerate(calls):
+        cur.execute(
+            "INSERT INTO steps VALUES (?,?,?,?,?)",
+            (i, 15, 3, _make_timestamp_meta(1700000000 + i), _make_tool_call_step_bytes(f"c{i}", name, args)),
+        )
+    conn.commit()
+    conn.close()
+
+    usage = antigravity_reader.aggregate_usage(db_path)
+    assert usage.tool_calls.get("mcp__firecrawl__scrape") == 1
+    assert "call_mcp_tool" not in usage.tool_calls
+    assert [o.path for o in usage.tool_ops[:3]] == [r"C:\t\a.py"] * 3
+    sloc, has_sig = antigravity_reader.session_loc_full(db_path)
+    assert has_sig is True
+    assert sloc.added == 2 + 1  # write 2 lines; edit 1 line -> 2 lines (net +1)

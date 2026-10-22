@@ -288,11 +288,12 @@ def test_real_downloads_files_if_exist(test_db):
 
 def test_real_workbuddy_ai_projects_discovery_and_dialog_grouping():
     roots = workbuddy_reader.workbuddy_roots()
-    assert any(".workbuddy-ai" in str(r) for r in roots)
+    if not any(".workbuddy-ai" in str(r) for r in roots):
+        pytest.skip("本机无 ~/.workbuddy-ai，跳过依赖本机环境的测试")
 
     refs = workbuddy_reader.list_project_refs()
     if not refs:
-        return
+        pytest.skip("~/.workbuddy-ai 下无会话")
 
     # 1. 普通会话合并为 WorkBuddy
     wb_ref = next((r for r in refs if r.display_name == "WorkBuddy"), None)

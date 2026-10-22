@@ -241,8 +241,8 @@ class SessionTimelinePopup:
     收敛诊断（累计净增 × 累计成本剪刀差 + 重试/大户/缓存失效/压缩标记）。
 
     数据来自 TokenUsage.turn_stats（四源统一：Claude 逐响应、Codex 逐 token 步、
-    Grok 逐 turn_completed、OpenCode 逐 step-finish）。耗时仅在源提供权威值时显示
-    （Claude turn_duration / Codex task_complete / Grok apiDurationMs）。
+    omp/pi 逐响应、OpenCode 逐 step-finish）。耗时仅在源提供权威值时显示
+    （Claude turn_duration / Codex task_complete / omp duration）。
     收敛视图定位「会话在哪里发散」：净增走平而成本持续爬升的区段即发散，
     重试循环横带 / 最贵回合▼ / 缓存失效× / 压缩竖线原位标注触发点。
     """
@@ -2009,7 +2009,7 @@ class WeeklyReportPopup:
             "请确认上方时间周期、项目范围与生成引擎，点击右上角 **「立即生成周报」**。\n\n"
             "---\n\n"
             "### 核心特性\n"
-            "- **全源会话事实抽取**：自动扫描 Claude Code, Grok, OMP, Codex, Antigravity 等多代理会话事实；\n"
+            "- **全源会话事实抽取**：自动扫描 Claude Code, Codex, OMP, Antigravity 等多代理会话事实；\n"
             "- **真实工作意图聚类**：聚合真人 Prompt 需求、改动核心文件、净增代码量、算力成本与自返工率；\n"
             "- **智能业务交付提炼**：由大模型或本地规则提炼业务交付成果与技术攻坚亮点，诊断人机协作卡点；\n"
             "- **持久化闭环归档**：周报自动沉淀至主界面「LLM 报告」收信箱，随时回看与跨周期比对。\n"

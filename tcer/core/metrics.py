@@ -71,7 +71,7 @@ def _get_baselines_per_project() -> dict[str, dict]:
 
 
 def _get_baselines_per_source() -> dict[str, dict]:
-    """逐数据源个人基准（可选）。键为 source（claude/codex/grok/opencode/omp/pi），
+    """逐数据源个人基准（可选）。键为 source（claude/codex/opencode/omp/pi/antigravity/workbuddy），
     值 {tcer,cpe}。缺失时返回空 dict——回退到全局 baselines。"""
     return _load_composite_config().get("baselines_per_source", {}) or {}
 
@@ -786,16 +786,12 @@ def cost_usd(u: TokenUsage, model: str | None = None) -> float:
 def avg_request_latency_ms(u: TokenUsage) -> float | None:
     """平均请求延迟（毫秒）——与 cc-switch 的「平均延迟」同口径（每次 API 请求耗时）。
 
-    Grok：Σ(apiDurationMs) ÷ Σ(modelCalls)——apiDurationMs 是回合内多次调用
-    的总和，按调用数均摊才是每请求延迟（此前按回合均值虚高 ~5.7×）。
-    omp：mean(每响应 duration)（每响应即一次补全，精确）。
+    omp/pi：mean(每响应 duration)（每响应即一次补全，精确）。
     Claude（仅整轮墙钟）/ Codex（仅任务级墙钟）→ None，由 compute 按源门控。
     """
     durations = [t.duration_ms for t in u.turn_stats if t.duration_ms]
     if not durations:
         return None
-    if u.api_calls > 0:
-        return sum(durations) / u.api_calls
     return sum(durations) / len(durations)
 
 
@@ -828,7 +824,7 @@ def _leaf_has_keyword(leaf: str, key: str) -> bool:
 
 
 # Canonical TCER / built-in tools — never re-classify via leaf heuristics.
-# Includes Grok-build meta tools so GetTaskOutput/SearchTool never look like
+# Includes agent meta tools so GetTaskOutput/SearchTool never look like
 # Read/Grep via the ``get`` / ``search`` substring trap.
 _CANONICAL_TOOL_NAMES = frozenset({
     "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
@@ -950,9 +946,8 @@ def activity_metrics(u: TokenUsage) -> dict:
     """人机时间结构：AI 活跃占比 + 用户响应间隔中位数。
 
     - ``ai_active_ratio``：Σ 逐回合 duration ÷ 会话墙钟（0..1，封顶 1）。
-      回答「时间花在等 AI 还是 AI 在等我」。Grok 扣除审批等待（人在卡 AI
-      的显式时间）；Claude 的 duration 是整轮墙钟（含工具执行），此值为
-      上界估计（tooltip 注明）。
+      回答「时间花在等 AI 还是 AI 在等我」。Claude 的 duration 是整轮墙钟
+      （含工具执行），此值为上界估计（tooltip 注明）。
     - ``user_gap_median_min``：相邻回合时间戳间隔的中位数（分钟），只统计
       1–30 分钟的间隔（<1 分钟是连发，>30 分钟视作离开，都不算「响应」）。
     """
@@ -960,8 +955,7 @@ def activity_metrics(u: TokenUsage) -> dict:
     total_ms = u.session_duration_ms or 0
     dur = sum(t.duration_ms for t in u.turn_stats if t.duration_ms)
     if dur > 0 and total_ms > 0:
-        wait = getattr(u, "permission_wait_ms_total", 0) or 0
-        out["ai_active_ratio"] = min(1.0, max(0.0, dur - wait) / total_ms)
+        out["ai_active_ratio"] = min(1.0, dur / total_ms)
     gaps: list[float] = []
     ts_prev = None
     for t in u.turn_stats:
@@ -1097,9 +1091,8 @@ def cache_efficiency(u: TokenUsage) -> float | None:
 def output_tps(u: TokenUsage) -> float | None:
     """Output generation throughput (tokens/sec) over timed turns.
 
-    Σ output_tokens ÷ Σ duration_ms (in seconds). Grok ``apiDurationMs`` 是回合内
-    全部调用的 API 总时长、omp/Pi ``duration`` 是每响应时长——分子分母同为回合
-    总量，比值正确。Codex 的 ``task_complete.duration_ms`` 实测是任务级墙钟
+    Σ output_tokens ÷ Σ duration_ms (in seconds). omp/Pi ``duration`` 是每响应
+    时长——分子分母同为回合总量，比值正确。Codex 的 ``task_complete.duration_ms`` 实测是任务级墙钟
     （含工具执行，比单补全高一个数量级）→ Codex 由 compute 门控为 None。
 
     NOTE: Claude is deliberately excluded (see ``metric_defs._SOURCE_SUPPORT``).
@@ -1480,11 +1473,11 @@ def compute(
     ta = normalized_tcer(tcer, task_type)
 
     # --- timing metrics ---
-    # 源门控（与 _SOURCE_SUPPORT 同判定）：latency 需要 Grok(api_calls 均摊)/
-    # omp(每响应 duration)；output_tps 需要 Grok/omp(总 output÷总 API 时长)。
+    # 源门控（与 _SOURCE_SUPPORT 同判定）：latency / output_tps 需要
+    # omp/pi 的每响应 duration。
     # Claude(整轮墙钟)/Codex(任务级墙钟) 的 duration 语义不符，产出会在
     # GUI「不适用」而 CSV/上传照发的口径间分裂——直接置 None 三通道一致。
-    _dur_ok = meta.source in ("grok", "omp", "pi")
+    _dur_ok = meta.source in ("omp", "pi")
     avg_turn_lat = avg_request_latency_ms(u) if _dur_ok else None
     session_dur_min = (u.session_duration_ms / 60000) if u.session_duration_ms else None
     active_dur_min = (u.active_duration_ms / 60000) if (u.active_duration_ms and _dur_ok) else None
@@ -1537,7 +1530,7 @@ def compute(
     # (Grep/Glob and search-like aliases) is excluded: those tools' ``path`` is a
     # search *scope*, frequently a directory (e.g. ``.../tcer/core``), not a file.
     # Counting it inflates the count and pollutes the 涉及文件 popup with dirs.
-    # (Claude records no path for Grep/Glob; Grok/omp do — hence the filter.)
+    # (Claude records no path for Grep/Glob; omp does — hence the filter.)
     # 搜索足迹：搜索工具（Grep/Glob 及别名）扫过的路径 → 次数（含目录；供弹窗
     # 展示 AI 的探索范围）。真实读/写/改的文件另计入 files_touched。
     searched: dict[str, int] = {}

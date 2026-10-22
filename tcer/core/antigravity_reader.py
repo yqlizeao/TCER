@@ -206,6 +206,32 @@ def _decode_gen_metadata(data: bytes) -> tuple[str, int, int, int, int]:
     )
 
 
+def _canon_tool(tool_name: str, tool_args_json: str = "") -> str:
+    """Map an agy tool name to the canonical name.
+
+    ``call_mcp_tool`` is a generic MCP gateway (args ``ServerName``/``ToolName``);
+    expose it as ``mcp__<server>__<tool>`` like the other sources (CLAUDE.md #28).
+    """
+    if tool_name == "call_mcp_tool" and tool_args_json:
+        try:
+            a = json.loads(tool_args_json)
+            srv, tl = a.get("ServerName"), a.get("ToolName")
+            if isinstance(srv, str) and isinstance(tl, str) and srv and tl:
+                return f"mcp__{srv}__{tl}"
+        except Exception:
+            pass
+    return _ANTIGRAVITY_TOOL_MAP.get(tool_name, tool_name)
+
+
+def _arg(args: dict, *keys: str) -> str:
+    """First non-empty string value among ``keys`` (agy arg names differ per tool/version)."""
+    for k in keys:
+        v = args.get(k)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
 def _extract_user_text(payload: bytes | None) -> str:
     """Extract user prompt text from a step_type == 14 step_payload."""
     if not payload:
@@ -579,7 +605,7 @@ def aggregate_usage(
 
             first_ts = None
             last_ts = None
-            # turn 0-based（与 Claude/omp/grok 等源一致；llm_prompts 里程碑提取与
+            # turn 0-based（与其余数据源一致；llm_prompts 里程碑提取与
             # ground_dynamics_user_turns 均按 0-based 键消费 turn_stats）
             current_turn = -1
 
@@ -612,19 +638,16 @@ def aggregate_usage(
                     t_calls = 0
                     if tool_name:
                         t_calls = 1
-                        canon_tool = _ANTIGRAVITY_TOOL_MAP.get(tool_name, tool_name)
+                        canon_tool = _canon_tool(tool_name, tool_args_json)
                         u.tool_calls[canon_tool] = u.tool_calls.get(canon_tool, 0) + 1
                         # Extract file path hint for tool_ops
                         fp_hint = ""
                         if tool_args_json:
                             try:
                                 args = json.loads(tool_args_json)
-                                fp_hint = (
-                                    args.get("TargetFile")
-                                    or args.get("AbsolutePath")
-                                    or args.get("file_path")
-                                    or args.get("path")
-                                    or ""
+                                fp_hint = _arg(
+                                    args, "TargetFile", "AbsolutePath", "Path",
+                                    "file_path", "path",
                                 )
                             except Exception:
                                 pass
@@ -718,17 +741,10 @@ def session_loc_full(
                             args = json.loads(tool_args_json)
                         except Exception:
                             args = {}
-                        target = (
-                            args.get("TargetFile")
-                            or args.get("target_file")
-                            or args.get("file_path")
-                            or ""
-                        )
-                        content = (
-                            args.get("CodeContent")
-                            or args.get("code_content")
-                            or args.get("content")
-                            or ""
+                        # write_to_file: TargetFile/CodeContent; write_file: Path/Content
+                        target = _arg(args, "TargetFile", "target_file", "Path", "file_path")
+                        content = _arg(
+                            args, "CodeContent", "code_content", "Content", "content"
                         )
                         if target:
                             has_signal = True
@@ -743,21 +759,14 @@ def session_loc_full(
                             args = json.loads(tool_args_json)
                         except Exception:
                             args = {}
-                        target = (
-                            args.get("TargetFile")
-                            or args.get("target_file")
-                            or args.get("file_path")
-                            or ""
+                        # replace_file_content: TargetFile/TargetContent/ReplacementContent;
+                        # edit_file: Path/Target/Replacement
+                        target = _arg(args, "TargetFile", "target_file", "Path", "file_path")
+                        old_content = _arg(
+                            args, "TargetContent", "target_content", "Target"
                         )
-                        old_content = (
-                            args.get("TargetContent")
-                            or args.get("target_content")
-                            or ""
-                        )
-                        new_content = (
-                            args.get("ReplacementContent")
-                            or args.get("replacement_content")
-                            or ""
+                        new_content = _arg(
+                            args, "ReplacementContent", "replacement_content", "Replacement"
                         )
                         if target:
                             has_signal = True

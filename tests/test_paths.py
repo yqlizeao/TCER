@@ -37,32 +37,28 @@ def test_encode_hash_idempotent_on_clean_name():
 
 
 def test_list_project_refs_filters_by_source(tmp_path, monkeypatch):
-    """The ``source`` arg selects which readers run; grok honors ``GROK_HOME``."""
-    monkeypatch.setenv("GROK_HOME", str(tmp_path))
-    # Disable the other sources so only grok can contribute.
+    """The ``source`` arg selects which readers run; codex honors ``CODEX_HOME``."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    # Disable the other sources so only codex can contribute.
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-claude"))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex"))
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path / "no-opencode"))
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "no-omp"))
     monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path / "no-antigravity"))
     monkeypatch.setenv("WORKBUDDY_DIR", str(tmp_path / "no-workbuddy"))
 
-    sdir = tmp_path / "sessions" / "C%3A%5Crepo%5Capp" / "uuid-1"
+    sdir = tmp_path / "sessions" / "2026" / "01" / "01"
     sdir.mkdir(parents=True)
-    (sdir / "summary.json").write_text(
-        json.dumps({"info": {"id": "uuid-1", "cwd": r"C:\repo\app"},
-                    "generated_title": "t"}), encoding="utf-8")
-    with (sdir / "updates.jsonl").open("w", encoding="utf-8") as fh:
-        fh.write(json.dumps({"timestamp": 1, "method": "session/update",
-                             "params": {"sessionId": "uuid-1",
-                                        "update": {"sessionUpdate": "user_message_chunk",
-                                                   "content": {"type": "text", "text": "hi"}}}}) + "\n")
+    sid = "019f0000-0000-7000-8000-000000000001"
+    with (sdir / f"rollout-2026-01-01T00-00-00-{sid}.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"timestamp": "2026-01-01T00:00:00.000Z", "type": "session_meta",
+                             "payload": {"id": sid, "session_id": sid,
+                                         "cwd": r"C:\repo\app", "cli_version": "0.163.0"}}) + "\n")
 
-    grok_refs = paths.list_project_refs("grok")
-    assert len(grok_refs) == 1 and grok_refs[0].source == "grok"
+    codex_refs = paths.list_project_refs("codex")
+    assert len(codex_refs) == 1 and codex_refs[0].source == "codex"
 
     all_refs = paths.list_project_refs("all")
-    assert {r.source for r in all_refs} == {"grok"}
+    assert {r.source for r in all_refs} == {"codex"}
 
     assert paths.list_project_refs("claude") == []
 

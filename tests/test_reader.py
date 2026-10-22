@@ -830,3 +830,51 @@ def test_read_dialogue_detail_rich_includes_normal_outputs(tmp_path: Path):
     out_rich2 = reader.read_dialogue(p2, detail="rich")
     bash_ln2 = next(ln for ln in out_rich2 if ln.startswith("[工具反馈:Bash]"))
     assert bash_ln2.endswith("…"), "600 字符在 rich 档（400 上限）应截断"
+
+
+def test_aggregate_ignores_estimated_usage_placeholder(tmp_path):
+    """2.1.3xx: usage.estimated=true 是客户端本地估算占位（流中断），非计费 usage。"""
+    est = _usage(35871, 0, 0, 0)
+    est["estimated"] = True
+    p = write_session(tmp_path, [
+        _assistant(_usage(10, 0, 0, 5), msg_id="msg_a"),
+        _assistant(est, msg_id="msg_b"),
+    ])
+    u = reader.aggregate_usage(p)
+    assert u.assistant_msgs == 1
+    assert u.empty_usage_skipped == 1
+    assert u.input_tokens == 10 and u.output_tokens == 5
+    assert sum(b.input_tokens for b in u.per_model.values()) == 10
+
+
+def _cost_state(total, unknown=False):
+    return {"type": "cost-state", "sessionId": "s", "totalCostUSD": total,
+            "hasUnknownModelCost": unknown, "modelUsage": {}}
+
+
+def test_cost_state_takes_max_not_sum(tmp_path):
+    p = write_session(tmp_path, [
+        _assistant(_usage(10, 0, 0, 5), msg_id="m1"),
+        _cost_state(1.5), _cost_state(4.25), _cost_state(3.0),
+    ])
+    u = reader.aggregate_usage(p)
+    assert u.reported_cost_usd == 4.25
+    assert u.assistant_msgs == 1  # cost-state 行不影响回合
+
+
+def test_cost_state_unknown_model_cost_left_none(tmp_path):
+    p = write_session(tmp_path, [
+        _assistant(_usage(10, 0, 0, 5), msg_id="m1"),
+        _cost_state(2.0, unknown=True),
+    ])
+    assert reader.aggregate_usage(p).reported_cost_usd is None
+
+
+def test_cost_state_absent_is_none_and_subagent_ignored(tmp_path):
+    p = write_session(tmp_path, [_assistant(_usage(10, 0, 0, 5), msg_id="m1")])
+    assert reader.aggregate_usage(p).reported_cost_usd is None
+    sub = tmp_path / "sid" / "subagents"
+    sub.mkdir(parents=True)
+    sp = sub / "agent-1.jsonl"
+    sp.write_text(json.dumps(_cost_state(9.0)) + chr(10), encoding="utf-8")
+    assert reader.aggregate_usage(sp).reported_cost_usd is None

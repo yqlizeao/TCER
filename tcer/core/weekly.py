@@ -20,7 +20,6 @@ from tcer.core import (
     analyze,
     antigravity_reader,
     codex_reader,
-    grok_reader,
     omp_reader,
     opencode_reader,
     pi_reader,
@@ -115,8 +114,6 @@ def read_session_user_prompts(rep: SessionReport, source: str) -> list[str]:
         elif source == "opencode":
             # opencode takes (db_path, session_id)
             msgs = opencode_reader.read_user_messages(p, rep.meta.session_id or "")
-        elif source == "grok":
-            msgs = grok_reader.read_user_messages(p)
         elif source == "omp":
             msgs = omp_reader.read_user_messages(p)
         elif source == "pi":

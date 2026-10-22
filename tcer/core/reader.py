@@ -554,6 +554,8 @@ def _scan_session_uncached(
     # token / LOC / tool_errors 等真实成本照常累计（子代理成本并入父会话）。
     is_sub = is_subagent(path)
     current_turn = 0  # turn number of the response whose lines we are currently reading
+    reported_max = 0.0
+    reported_unknown = False
     for obj in iter_messages(path):
         if cancel_check is not None:
             cancel_check()
@@ -563,6 +565,17 @@ def _scan_session_uncached(
         if loc_acc is not None and orig_fp is not None:
             loc_acc.note_write_original(orig_fp, orig_txt)
             orig_fp = orig_txt = None
+
+        # cost-state（2.1.3xx）：Claude 自报的会话累计成本（含子代理开销；
+        # 实测只写在主会话文件、子代理文件没有，故父子 merge 求和不双计）。
+        # 累计值 → 取最大、不求和；hasUnknownModelCost 为真时不可靠，不填。
+        if obj.get("type") == "cost-state":
+            if not is_sub:
+                tc = obj.get("totalCostUSD")
+                if isinstance(tc, (int, float)) and not isinstance(tc, bool):
+                    reported_max = max(reported_max, float(tc))
+                reported_unknown = bool(obj.get("hasUnknownModelCost"))
+            continue
 
         # 用户在 AI 运行时排队输入（打断/并行输入信号）。
         if obj.get("type") == "queue-operation":
@@ -785,6 +798,12 @@ def _scan_session_uncached(
                 # separately in empty_usage_skipped and do not inflate assistant_msgs.
                 # This ensures consistent turn counts across models: one API response
                 # = one turn, regardless of how many JSONL lines it spans.
+                # usage.estimated=true（2.1.3xx）：流中断/报错时客户端本地估算的
+                # 占位 usage（output=0、后接 api_error 合成行），并非 API 计费
+                # 返回，不计 token/回合，按空 usage 桩处理。
+                if usage.get("estimated") is True:
+                    # 清零：下方 per_model bucket 同样取 i/cw/cr/o，不能带入估算值。
+                    i = cw = cr = o = cw1h = 0
                 if i + cw + cr + o == 0:
                     u.empty_usage_skipped += 1
                     # Release the id lock so a later line with the same message.id
@@ -896,6 +915,9 @@ def _scan_session_uncached(
             loc_acc.on_tool_use(ename, einp, eturn)
         # 逐回合 LOC 流水交由 usage 携带（SessionLoc 保持两条路径逐字节一致）。
         u.turn_net_locs = loc_acc.turn_records
+
+    if reported_max > 0 and not reported_unknown:
+        u.reported_cost_usd = reported_max
 
     # Compute session_duration_ms from the time window
     if u.started_at and u.ended_at:

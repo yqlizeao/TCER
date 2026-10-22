@@ -109,7 +109,6 @@ def list_project_refs() -> list[ProjectRef]:
                 cwd=cwd,
                 path=db,
             ))
-    refs.extend(_legacy_project_refs())
     return refs
 
 
@@ -128,12 +127,17 @@ def resolve_project(project: str) -> ProjectRef | None:
     return matches[0] if len(matches) == 1 else None
 
 
+# Child (subagent) sessions are folded into their parent by aggregate_usage /
+# _loc_scan, so project listings only expose top-level sessions.  A child whose
+# parent row is gone (deleted) is promoted to top-level rather than dropped.
+_TOP_LEVEL = "(parent_id is null or parent_id not in (select id from session))"
+
+
 def sessions_for_project(project: str | ProjectRef) -> list[str]:
+    """Top-level session ids of the project (subagent child sessions folded)."""
     ref = project if isinstance(project, ProjectRef) else resolve_project(project)
     if ref is None or ref.path is None:
         return []
-    if ref.session_paths:
-        return [str(p) for p in ref.session_paths]
     project_id, key_cwd = _parse_project_key(ref.key)
     cwd = ref.cwd or key_cwd
     with _connect(ref.path) as con:
@@ -141,21 +145,20 @@ def sessions_for_project(project: str | ProjectRef) -> list[str]:
         # Prefer directory filter so global/project_id buckets don't mix trees.
         if cwd and not _is_useless_worktree(cwd):
             rows = con.execute(
-                """
-                select id from session
-                where directory = ?
-                order by time_created, id
-                """,
+                (
+                    "select id from session where directory = ? and "
+                    + _TOP_LEVEL + " order by time_created, id"
+                ),
                 (cwd,),
             ).fetchall()
         if not rows and project_id and project_id != _NO_PROJECT_KEY:
             rows = con.execute(
-                "select id from session where project_id = ? order by time_created, id",
+                "select id from session where project_id = ? and " + _TOP_LEVEL + " order by time_created, id",
                 (project_id,),
             ).fetchall()
         if not rows and project_id == _NO_PROJECT_KEY:
             rows = con.execute(
-                "select id from session where project_id is null order by time_created, id"
+                "select id from session where project_id is null and " + _TOP_LEVEL + " order by time_created, id"
             ).fetchall()
     return [str(r["id"]) for r in rows]
 
@@ -165,22 +168,11 @@ def latest_activity_ms(project: str | ProjectRef) -> int | None:
 
     ``time_created`` is an integer ms column → value is already epoch ms.
     Scoping mirrors ``sessions_for_project`` (directory → project_id → null);
-    legacy ``session_paths`` refs (JSON files) fall back to max file mtime.
     Returns None if no DB / no matching rows / NULL max.
     """
     ref = project if isinstance(project, ProjectRef) else resolve_project(project)
     if ref is None or ref.path is None:
         return None
-    if ref.session_paths:
-        latest = None
-        for p in ref.session_paths:
-            try:
-                m = p.stat().st_mtime_ns // 1_000_000
-            except OSError:
-                continue
-            if latest is None or m > latest:
-                latest = m
-        return latest
     project_id, key_cwd = _parse_project_key(ref.key)
     cwd = ref.cwd or key_cwd
     val = None
@@ -206,8 +198,6 @@ def latest_activity_ms(project: str | ProjectRef) -> int | None:
 
 
 def read_session_meta(db_path: Path, session_id: str) -> SessionMeta:
-    if _is_legacy_session(session_id):
-        return _legacy_session_meta(Path(session_id))
     with _connect(db_path) as con:
         if _has_table(con, "project"):
             row = con.execute(
@@ -253,10 +243,46 @@ def read_session_meta(db_path: Path, session_id: str) -> SessionMeta:
     )
 
 
+def subagent_ids(db_path: Path, session_id: str) -> list[str]:
+    """All descendant (``task`` tool child) session ids of *session_id*, oldest first."""
+    with _connect(db_path) as con:
+        return _descendant_ids(con, session_id)
+
+
+def _descendant_ids(con: sqlite3.Connection, session_id: str) -> list[str]:
+    try:
+        rows = con.execute(
+            """
+            with recursive d(id) as (
+              select id from session where parent_id = ?
+              union
+              select s.id from session s join d on s.parent_id = d.id
+            )
+            select s.id from session s join d on s.id = d.id
+            order by s.time_created, s.id
+            """,
+            (session_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [str(r["id"]) for r in rows if str(r["id"]) != session_id]
+
+
 def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
-    """Aggregate one OpenCode session from SQLite rows."""
-    if _is_legacy_session(session_id):
-        return _legacy_usage(Path(session_id))
+    """Aggregate one OpenCode session, folding its subagent child sessions.
+
+    ``task`` tool calls spawn child sessions (``session.parent_id``).  Their
+    tokens are real cost, so they merge into the parent instead of counting as
+    separate sessions (same policy as Claude / omp subagents).
+    """
+    u = _aggregate_single(db_path, session_id)
+    for child in subagent_ids(db_path, session_id):
+        u = u.merge(_aggregate_single(db_path, child, is_subagent=True))
+    return u
+
+
+def _aggregate_single(db_path: Path, session_id: str, *, is_subagent: bool = False) -> TokenUsage:
+    """Aggregate ONE OpenCode session from SQLite rows (no subagent merge)."""
     u = TokenUsage()
     with _connect(db_path) as con:
         session = con.execute("select * from session where id = ?", (session_id,)).fetchone()
@@ -277,7 +303,6 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
         u.session_duration_ms = max(0, u.ended_at - u.started_at)
 
     model_key = _session_model_key(session)
-    _add_session_tokens(u, session, model_key)
     if model_key:
         u.models.add(model_key)
 
@@ -297,12 +322,15 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
             u.reported_cost_usd = reported
 
     turn_by_message: dict[str, int] = {}
+    msg_buckets: dict[str, list[int]] = {}  # model -> [input, cache_write, cache_read, output]
     assistant_seen = 0
     for msg in messages:
         data = _json_obj(msg["data"])
         role = _first_str(data.get("role"), msg["data"] if msg["data"] in ("user", "assistant") else None)
         if role == "user":
-            u.user_msgs += 1
+            # A subagent's user message is the Task dispatch prompt, not a human turn.
+            if not is_subagent:
+                u.user_msgs += 1
         elif role == "assistant":
             assistant_seen += 1
             mid = str(msg["id"])
@@ -316,9 +344,19 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
                 cache = tok.get("cache")
                 cr = _as_int(cache.get("read")) if isinstance(cache, dict) else 0
                 cw = _as_int(cache.get("write")) if isinstance(cache, dict) else 0
-                step_in = _as_int(tok.get("input")) + cr + cw
+                inp = _as_int(tok.get("input"))
+                step_in = inp + cr + cw
                 if step_in > 0:
                     u.peak_input_tokens = max(u.peak_input_tokens, step_in)
+                # 逐消息按模型累计（与 _add_session_tokens 同口径：reasoning 折入 output）。
+                out = _as_int(tok.get("output")) + _as_int(tok.get("reasoning"))
+                if inp + cr + cw + out > 0 and mkey:
+                    b = msg_buckets.setdefault(mkey, [0, 0, 0, 0])
+                    b[0] += inp
+                    b[1] += cw
+                    b[2] += cr
+                    b[3] += out
+    _add_session_tokens(u, session, model_key, msg_buckets)
     if assistant_seen:
         u.assistant_msgs = max(u.assistant_msgs, assistant_seen)
 
@@ -362,7 +400,7 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
         elif ptype == "compaction":
             u.compaction_count += 1
 
-    # No step-finish parts (legacy / sparse sessions): the session total is a
+    # No step-finish parts (sparse sessions): the session total is a
     # multi-step sum, so it only approximates a single-turn peak when the
     # session has at most one assistant turn. Multi-turn sessions without
     # step snapshots keep peak at 0 → context_window_used_ratio stays None
@@ -374,13 +412,6 @@ def aggregate_usage(db_path: Path, session_id: str) -> TokenUsage:
 
 
 def read_user_messages(db_path: Path, session_id: str) -> list[str]:
-    if _is_legacy_session(session_id):
-        obj = _read_json(Path(session_id))
-        return [
-            truncate_summary(t.strip(), 500)
-            for t in _legacy_texts_for_path(Path(session_id), obj)
-            if t.strip()
-        ]
     messages: list[str] = []
     with _connect(db_path) as con:
         if not _has_table(con, "message"):
@@ -424,14 +455,7 @@ def read_conversation(db_path: Path, session_id: str) -> list[dict]:
       * ``part.type == 'reasoning'``               -> assistant thinking
       * ``part.type in ('tool','tool-invocation','tool-call')`` -> tool_use
       * ``part.type in ('tool-result','tool-output')``          -> tool_result
-
-    Legacy on-disk (pre-SQLite) sessions expose only user text, so those return
-    a user-only conversation via :func:`read_user_messages`.
     """
-    if _is_legacy_session(session_id):
-        return [{"role": "user", "type": "text", "text": t, "ts": None}
-                for t in read_user_messages(db_path, session_id)]
-
     with _connect(db_path) as con:
         if not _has_table(con, "message") or not _has_table(con, "part"):
             return []
@@ -488,6 +512,17 @@ def read_conversation(db_path: Path, session_id: str) -> list[dict]:
                 "input": tool_input if isinstance(tool_input, dict) else {},
                 "ts": ts,
             })
+            # Live parts carry the result inside state (output / error).
+            st = data.get("state")
+            if isinstance(st, dict) and st.get("status") in ("completed", "error"):
+                res = st.get("output") if st.get("status") == "completed" else st.get("error")
+                convo.append({
+                    "role": "tool", "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "is_error": st.get("status") == "error",
+                    "text": res if isinstance(res, str) else json.dumps(res, ensure_ascii=False, default=str),
+                    "ts": ts,
+                })
         elif ptype in ("tool-result", "tool-output"):
             call_id = _first_str(data.get("callID"), data.get("call_id"),
                                  data.get("toolCallId"))
@@ -509,23 +544,37 @@ _EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 
 def _loc_scan(db_path: Path, session_id: str):
-    """Single pass: ``(SessionLoc, has_signal)`` for one OpenCode session.
+    """Single pass: ``(SessionLoc, has_signal)`` for one session + its subagents.
 
-    Prefer persisted ``summary_*`` counters when present; else replay edit/write
-    tool parts. ``has_signal`` is True if summary counters or any parseable edit
-    tool exists (mirrors Codex/Grok ``_loc_scan`` so analyze can avoid a second
-    DB walk via separate ``has_loc_signal`` + ``session_loc_full``).
+    Child (``task`` subagent) sessions are folded via ``merge_session_locs`` so
+    their output counts for the parent.  ``has_signal`` is True if summary
+    counters or any parseable edit tool exists (mirrors Codex/Grok ``_loc_scan``
+    so analyze can avoid a second DB walk).
+    """
+    from tcer.core.loc import merge_session_locs
+
+    own, signal = _loc_scan_single(db_path, session_id)
+    children = subagent_ids(db_path, session_id)
+    if not children:
+        return own, signal
+    slocs = [own]
+    for child in children:
+        try:
+            sl, sig = _loc_scan_single(db_path, child)
+        except FileNotFoundError:
+            continue
+        slocs.append(sl)
+        signal = signal or sig
+    return merge_session_locs(slocs), signal
+
+
+def _loc_scan_single(db_path: Path, session_id: str):
+    """``(SessionLoc, has_signal)`` for ONE session (no subagent merge).
+
+    Prefer persisted ``summary_*`` counters when present; else replay the
+    *successful* edit/write/apply_patch tool parts.
     """
     from tcer.core.loc import SessionLoc, _LocAccumulator
-
-    if _is_legacy_session(session_id):
-        obj = _read_json(Path(session_id))
-        added = _as_int(_dig(obj, "summary", "additions") or obj.get("summary_additions"))
-        deleted = _as_int(_dig(obj, "summary", "deletions") or obj.get("summary_deletions"))
-        files = _as_int(_dig(obj, "summary", "files") or obj.get("summary_files"))
-        if added or deleted or files:
-            return SessionLoc(added=added, deleted=deleted), True
-        return _legacy_tool_loc(Path(session_id), obj)
 
     with _connect(db_path) as con:
         row = con.execute(
@@ -579,8 +628,103 @@ def _loc_scan(db_path: Path, session_id: str):
         if tool not in _EDIT_TOOLS:
             continue
         saw_edit = True
-        acc.on_tool_use(tool, _normalize_tool_input(data))
+        # 按结果裁决：失败 / 被拒 / 中断（pending、running）的调用不产生行增量。
+        if _tool_status(data) not in ("", "completed"):
+            continue
+        for call_name, inp, is_new in _edit_calls(name, tool, data):
+            acc.on_tool_use(call_name, inp)
+            if is_new and call_name == "Write":
+                # 确认是新文件（apply_patch Add / write metadata.exists=false）：
+                # old=0 假定成立，撤销 unseen 暴露。
+                acc.note_write_original(inp.get("file_path", ""), "")
     return acc.finish(), saw_edit
+
+
+def _tool_status(data: dict) -> str:
+    """Lower-cased ``state.status`` ("" when the part carries no state)."""
+    state = data.get("state")
+    if isinstance(state, dict):
+        return str(state.get("status") or "").lower()
+    return ""
+
+
+def _synthetic_lines(n: int) -> str:
+    return "x\n" * max(0, n)
+
+
+def _edit_calls(raw_name: str, tool: str, data: dict):
+    """Yield ``(accumulator_tool, input, is_new_file)`` for one successful edit part.
+
+    * ``apply_patch`` has no oldString/newString: its input is a single
+      ``patchText``; per-file ``additions/deletions`` come from
+      ``state.metadata.files`` (fallback: parse the patch text).
+    * ``edit`` prefers ``state.metadata.filediff`` (authoritative diff counts,
+      also right for ``replaceAll``), falling back to oldString/newString.
+    * ``write`` replays ``content``; ``metadata.exists is False`` marks a new file.
+    """
+    state = data.get("state") if isinstance(data.get("state"), dict) else {}
+    meta = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+    lower = raw_name.lower().strip()
+
+    if lower in ("apply_patch", "patch"):
+        files = meta.get("files")
+        entries: list[tuple[str, str, int, int]] = []  # (path, type, adds, dels)
+        if isinstance(files, list) and files:
+            for f in files:
+                if not isinstance(f, dict):
+                    continue
+                fp = _first_str(f.get("movePath"), f.get("filePath"), f.get("relativePath"))
+                if fp:
+                    entries.append((fp, str(f.get("type") or "update"),
+                                    _as_int(f.get("additions")), _as_int(f.get("deletions"))))
+        else:
+            inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+            entries = _parse_patch_text(inp.get("patchText"))
+        for fp, ftype, adds, dels in entries:
+            if ftype == "add":
+                yield "Write", {"file_path": fp, "content": _synthetic_lines(adds)}, True
+            else:
+                yield "Edit", {"file_path": fp, "new_string": _synthetic_lines(adds),
+                               "old_string": _synthetic_lines(dels)}, False
+        return
+
+    inp = _normalize_tool_input(data)
+    fd = meta.get("filediff")
+    if tool == "Edit" and isinstance(fd, dict) and ("additions" in fd or "deletions" in fd):
+        fp = _first_str(fd.get("file"), inp.get("file_path"))
+        if fp:
+            yield "Edit", {"file_path": fp,
+                           "new_string": _synthetic_lines(_as_int(fd.get("additions"))),
+                           "old_string": _synthetic_lines(_as_int(fd.get("deletions")))}, False
+            return
+    yield tool, inp, (tool == "Write" and meta.get("exists") is False)
+
+
+_PATCH_FILE_RE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+?)\s*$")
+_PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to: (.+?)\s*$")
+
+
+def _parse_patch_text(text) -> list[tuple[str, str, int, int]]:
+    """Fallback ``apply_patch`` envelope parser -> ``[(path, type, adds, dels)]``."""
+    if not isinstance(text, str):
+        return []
+    out: list[list] = []
+    for line in text.splitlines():
+        m = _PATCH_FILE_RE.match(line)
+        if m:
+            out.append([m.group(2), m.group(1).lower(), 0, 0])
+            continue
+        if not out:
+            continue
+        mv = _PATCH_MOVE_RE.match(line)
+        if mv:
+            out[-1][0] = mv.group(1)
+        elif line.startswith("+"):
+            out[-1][2] += 1
+        elif line.startswith("-"):
+            out[-1][3] += 1
+    # Delete File blocks carry no -lines in the envelope; size is unknown -> 0.
+    return [(p, t, a, d) for p, t, a, d in out]
 
 
 def session_loc_full(db_path: Path, session_id: str):
@@ -594,41 +738,6 @@ def has_loc_signal(db_path: Path, session_id: str) -> bool:
         return _loc_scan(db_path, session_id)[1]
     except FileNotFoundError:
         return False
-
-
-def _legacy_tool_loc(session_path: Path, obj: dict):
-    """Best-effort ``(SessionLoc, saw_edit)`` from legacy JSON tool parts."""
-    from tcer.core.loc import _LocAccumulator
-
-    acc = _LocAccumulator()
-    saw_edit = False
-    for data in _legacy_iter_tool_parts(session_path, obj):
-        name = _first_str(data.get("tool"), data.get("toolName"), data.get("name"))
-        if not name:
-            continue
-        tool, _ = _classify_tool(name, data)
-        if tool in _EDIT_TOOLS:
-            saw_edit = True
-            acc.on_tool_use(tool, _normalize_tool_input(data))
-    return acc.finish(), saw_edit
-
-
-def _legacy_iter_tool_parts(session_path: Path, obj: dict):
-    """Yield tool-part dicts from a legacy OpenCode session JSON (best-effort)."""
-    # Common shapes: messages[].parts[], or sibling part files (handled elsewhere).
-    messages = obj.get("messages")
-    if isinstance(messages, list):
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            parts = msg.get("parts") or msg.get("content") or []
-            if not isinstance(parts, list):
-                continue
-            for part in parts:
-                if isinstance(part, dict) and _first_str(part.get("type"), part.get("kind")) in (
-                    "tool", "tool-invocation", "tool-call",
-                ):
-                    yield part
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -759,201 +868,6 @@ def _wsl_data_dirs() -> list[Path]:
     return dirs
 
 
-def _legacy_project_refs() -> list[ProjectRef]:
-    roots: list[Path] = []
-    for base in _data_dirs():
-        roots.append(base / "storage" / "session")
-        roots.append(base / "session")
-        project_root = base / "project"
-        if project_root.is_dir():
-            for p in project_root.glob("*"):
-                if p.is_dir():
-                    roots.append(p / "storage" / "session")
-    groups: dict[str, list[Path]] = {}
-    cwd_by_key: dict[str, str | None] = {}
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for path in root.glob("*/*.json"):
-            obj = _read_json(path)
-            project_id = _first_str(obj.get("projectID"), obj.get("project_id"), path.parent.name) or _NO_PROJECT_KEY
-            groups.setdefault(project_id, []).append(path)
-            cwd = _first_str(obj.get("directory"), obj.get("cwd"), obj.get("worktree"))
-            if cwd:
-                cwd_by_key[project_id] = cwd
-
-    refs: list[ProjectRef] = []
-    for project_id, paths in groups.items():
-        cwd = cwd_by_key.get(project_id)
-        refs.append(ProjectRef(
-            source="opencode",
-            key=f"legacy:{project_id}",
-            display_name=_display_name(project_id, cwd),
-            cwd=cwd,
-            path=paths[0].parent,
-            session_paths=tuple(sorted(paths)),
-        ))
-    return refs
-
-
-def _is_legacy_session(session_id: str) -> bool:
-    return session_id.endswith(".json") or Path(session_id).suffix == ".json"
-
-
-def _read_json(path: Path) -> dict:
-    try:
-        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _legacy_session_meta(path: Path) -> SessionMeta:
-    obj = _read_json(path)
-    sid = _first_str(obj.get("id"), obj.get("sessionID"), obj.get("session_id"), path.stem)
-    model = _json_obj(obj.get("model"))
-    provider = _first_str(
-        model.get("providerID") if isinstance(model, dict) else None,
-        model.get("provider_id") if isinstance(model, dict) else None,
-        obj.get("providerID"),
-        obj.get("provider_id"),
-    )
-    return SessionMeta(
-        session_id=sid,
-        cwd=_first_str(obj.get("directory"), obj.get("cwd"), obj.get("worktree")),
-        title=_first_str(obj.get("title"), obj.get("name")),
-        path=path,
-        is_subagent=False,
-        entrypoint="opencode",
-        source="opencode",
-        model_provider=provider,
-    )
-
-
-def _legacy_usage(path: Path) -> TokenUsage:
-    obj = _read_json(path)
-    u = TokenUsage()
-    u.started_at = parse_timestamp_ms(_first_str(obj.get("timeCreated"), obj.get("time_created"), obj.get("created")))
-    u.ended_at = parse_timestamp_ms(_first_str(obj.get("timeUpdated"), obj.get("time_updated"), obj.get("updated"))) or u.started_at
-    if u.started_at and u.ended_at:
-        u.session_duration_ms = max(0, u.ended_at - u.started_at)
-    tokens = _json_obj(obj.get("tokens")) or obj
-    i = _as_int(tokens.get("input") or tokens.get("tokens_input"))
-    o = _as_int(tokens.get("output") or tokens.get("tokens_output"))
-    cr = _as_int(tokens.get("cache_read") or tokens.get("tokens_cache_read"))
-    cw = _as_int(tokens.get("cache_write") or tokens.get("tokens_cache_write"))
-    reasoning = _as_int(tokens.get("reasoning") or tokens.get("tokens_reasoning"))
-    model = _legacy_model_key(obj)
-    # reasoning 折入 output（与 SQLite 路径 _add_session_tokens 同口径）：
-    # OpenCode 的 reasoning 存于 output 之外，不折入会低估成本、且
-    # reasoning_output_ratio 可 >1（护栏测试只覆盖了 SQLite 路径）。
-    o = o + reasoning
-    u.input_tokens = i
-    u.output_tokens = o
-    u.cache_read_input_tokens = cr
-    u.cache_creation_input_tokens = cw
-    u.reasoning_output_tokens = reasoning
-    if model:
-        u.models.add(model)
-    if i + o + cr + cw:
-        u.assistant_msgs = 1
-        u.bucket(model or "").add(i, cw, cr, o)
-    texts = list(_legacy_texts_for_path(path, obj))
-    u.user_msgs = len(texts)
-    return u
-
-
-def _legacy_texts_for_path(path: Path, obj: dict):
-    yielded = False
-    for text in _legacy_texts(obj):
-        yielded = True
-        yield text
-    if yielded:
-        return
-
-    sid = _first_str(obj.get("id"), obj.get("sessionID"), obj.get("session_id"), path.stem)
-    for msg_path in _legacy_message_paths(path, sid):
-        msg_obj = _read_json(msg_path)
-        for text in _legacy_texts(msg_obj):
-            yield text
-        role = _first_str(msg_obj.get("role"), _dig(msg_obj, "data", "role"))
-        if role != "user":
-            continue
-        text = _first_str(msg_obj.get("text"), msg_obj.get("content"), _dig(msg_obj, "data", "text"))
-        if text:
-            yield text
-            continue
-        mid = _first_str(msg_obj.get("id"), msg_obj.get("messageID"), msg_obj.get("message_id"), msg_path.stem)
-        for part_path in _legacy_part_paths(path, mid):
-            part_obj = _read_json(part_path)
-            text = _first_str(part_obj.get("text"), part_obj.get("content"), _dig(part_obj, "data", "text"))
-            if text:
-                yield text
-
-
-def _legacy_message_paths(session_path: Path, sid: str | None) -> list[Path]:
-    if not sid:
-        return []
-    parts = list(session_path.parts)
-    for i, part in enumerate(parts):
-        if part == "storage" and i + 1 < len(parts) and parts[i + 1] == "session":
-            base = Path(*parts[:i + 1]) / "message"
-            candidates = [
-                base / f"{sid}.json",
-                base / session_path.parent.name / f"{sid}.json",
-            ]
-            session_dir = base / sid
-            if session_dir.is_dir():
-                candidates.extend(sorted(session_dir.glob("*.json")))
-            return [p for p in candidates if p.is_file()]
-    return []
-
-
-def _legacy_part_paths(session_path: Path, mid: str | None) -> list[Path]:
-    if not mid:
-        return []
-    parts = list(session_path.parts)
-    for i, part in enumerate(parts):
-        if part == "storage" and i + 1 < len(parts) and parts[i + 1] == "session":
-            part_dir = Path(*parts[:i + 1]) / "part" / mid
-            if part_dir.is_dir():
-                return sorted(part_dir.glob("*.json"))
-    return []
-
-
-def _legacy_texts(obj: dict):
-    for msg in obj.get("messages") or []:
-        if not isinstance(msg, dict):
-            continue
-        role = _first_str(msg.get("role"), _dig(msg, "data", "role"))
-        if role != "user":
-            continue
-        text = _first_str(msg.get("text"), msg.get("content"), _dig(msg, "data", "text"))
-        if text:
-            yield text
-
-
-def _legacy_model_key(obj: dict) -> str:
-    model = _json_obj(obj.get("model"))
-    if isinstance(model, dict):
-        provider = _first_str(model.get("providerID"), model.get("provider_id"))
-        mid = _first_str(model.get("id"), model.get("modelID"), model.get("model_id"))
-        if provider and mid:
-            return pricing.normalize(f"{provider}/{mid}")
-        if mid:
-            return pricing.normalize(mid)
-    mid = _first_str(obj.get("modelID"), obj.get("model_id"), obj.get("model"))
-    return pricing.normalize(mid) if mid else ""
-
-
-def _dig(obj, *keys):
-    cur = obj
-    for key in keys:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur
-
-
 def _has_tables(path: Path, names: set[str]) -> bool:
     try:
         with _connect(path) as con:
@@ -1006,7 +920,7 @@ def _parse_project_key(key: str) -> tuple[str, str | None]:
             return parts[1] or _NO_PROJECT_KEY, (parts[2] or None)
         if len(parts) == 2:
             return parts[1] or _NO_PROJECT_KEY, None
-    # Legacy ``dbname:project_id`` keys
+    # Old TCER ``dbname:project_id`` key format (pre-``::``; not an OpenCode format)
     if ":" in key:
         return key.split(":", 1)[1] or _NO_PROJECT_KEY, None
     return key, None
@@ -1036,7 +950,8 @@ def _message_model_key(data: dict) -> str:
     return pricing.normalize(mid) if mid else ""
 
 
-def _add_session_tokens(u: TokenUsage, row: sqlite3.Row, model: str) -> None:
+def _add_session_tokens(u: TokenUsage, row: sqlite3.Row, model: str,
+                        msg_buckets: dict[str, list[int]] | None = None) -> None:
     i = _as_int(row["tokens_input"])
     o_visible = _as_int(row["tokens_output"])
     cr = _as_int(row["tokens_cache_read"])
@@ -1055,7 +970,19 @@ def _add_session_tokens(u: TokenUsage, row: sqlite3.Row, model: str) -> None:
     u.reasoning_output_tokens += reasoning
     if i + o + cr + cw:
         u.assistant_msgs = max(u.assistant_msgs, 1)
-        u.bucket(model or "").add(i, cw, cr, o)
+        if msg_buckets and len(msg_buckets) > 1:
+            # Mixed-model session: price each model's own message tokens; the
+            # residual of the session counters (rounding / unattributed steps)
+            # stays on the session model so totals still match the row.
+            res = [i, cw, cr, o]
+            for mk, b in msg_buckets.items():
+                u.bucket(mk).add(*b)
+                res = [r - x for r, x in zip(res, b)]
+            res = [max(0, r) for r in res]
+            if any(res):
+                u.bucket(model or next(iter(msg_buckets))).add(*res)
+        else:
+            u.bucket(model or "").add(i, cw, cr, o)
     # peak_input_tokens: prefer step-finish snapshots (set while scanning parts);
     # session totals are multi-step sums and must not be treated as a single peak.
 
@@ -1123,6 +1050,10 @@ _OPENCODE_TOOL_MAP = {
     "ls": "Glob",
     "bash": "Bash",
     "terminal": "Bash",
+    "shell": "Bash",       # v2 rename of bash (dev branch)
+    "pwsh": "Bash",
+    "powershell": "Bash",
+    "cmd": "Bash",
     "run": "Bash",
     "execute": "Bash",
     "todowrite": "TodoWrite",
@@ -1136,6 +1067,8 @@ _OPENCODE_TOOL_MAP = {
     "question": "AskUserQuestion",
     "askuserquestion": "AskUserQuestion",
     "task": "Task",
+    "subagent": "Task",    # v2 rename of task (dev branch)
+    "skill": "Skill",
 }
 
 

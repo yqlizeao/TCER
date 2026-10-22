@@ -213,7 +213,7 @@ class Dimension:
 DIMENSIONS: dict[str, Dimension] = {d.key: d for d in (
     Dimension("model", "模型", _single("c_model"), hint="按归一后的模型 id 分组"),
     Dimension("source", "Agent 工具", _single("source"),
-              hint="Claude Code / Codex / Grok / OpenCode / omp / Pi"),
+              hint="Claude Code / Codex / OpenCode / omp / Pi / Antigravity / WorkBuddy"),
     Dimension("reasoning_effort", "推理档位", _single("reasoning_effort")),
     Dimension("permission_profile", "权限档", _single("permission_profile")),
     Dimension("approval_policy", "审批策略", _single("approval_policy")),

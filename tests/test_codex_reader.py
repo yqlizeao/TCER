@@ -830,3 +830,157 @@ def test_user_input_image_only_message_counts(tmp_path):
     u = codex_reader.aggregate_usage(p)
     assert u.user_msgs == 1
     assert u.image_count == 1
+
+
+# ---- upstream drift (codex-rs rust-v0.163.0) ------------------------------
+
+def _meta(sid, tid, **extra):
+    pl = {"session_id": sid, "id": tid, "cwd": r"C:\repo\app", "source": "cli",
+          "originator": "codex_cli_rs", "cli_version": "0.163.0"}
+    pl.update(extra)
+    return {"timestamp": "2026-10-01T01:00:00Z", "type": "session_meta", "payload": pl}
+
+
+def _tc(total, last):
+    return {"timestamp": "2026-10-01T01:00:05Z", "type": "event_msg",
+            "payload": {"type": "token_count",
+                        "info": {"total_token_usage": total, "last_token_usage": last},
+                        "rate_limits": None}}
+
+
+def test_cache_write_input_tokens_is_subset_of_input(tmp_path):
+    # Upstream: input 100 = cached 40 + cache_write 60 (responses.rs test).
+    u = {"input_tokens": 100, "cached_input_tokens": 40, "cache_write_input_tokens": 60,
+         "output_tokens": 10, "reasoning_output_tokens": 0, "total_tokens": 110}
+    p = _write_jsonl(tmp_path / "rollout-2026-10-01T01-00-00-t1.jsonl",
+                     [_meta("t1", "t1"), _tc(u, u)])
+    got = codex_reader.aggregate_usage(p)
+    assert got.input_tokens == 0
+    assert got.cache_read_input_tokens == 40
+    assert got.cache_creation_input_tokens == 60
+    assert got.output_tokens == 10
+
+
+def test_old_usage_without_cache_write_unchanged(tmp_path):
+    u = {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 10,
+         "reasoning_output_tokens": 0, "total_tokens": 110}
+    p = _write_jsonl(tmp_path / "rollout-2026-10-01T01-00-00-t1.jsonl",
+                     [_meta("t1", "t1"), _tc(u, u)])
+    got = codex_reader.aggregate_usage(p)
+    assert (got.input_tokens, got.cache_read_input_tokens, got.cache_creation_input_tokens) == (60, 40, 0)
+
+
+NL = chr(10)
+
+
+def _sub_meta(root, child):
+    return _meta(root, child, parent_thread_id=root,
+                 source={"subagent": {"thread_spawn": {"parent_thread_id": root, "depth": 1}}})
+
+
+def _patch_call(path_name, text):
+    return {"type": "response_item", "payload": {
+        "type": "custom_tool_call", "name": "apply_patch", "call_id": "p-" + path_name,
+        "input": ("*** Begin Patch"+NL+f"*** Add File: {path_name}"+NL+f"+{text}"+NL+"*** End Patch"+NL)}}
+
+
+def test_dedupe_and_subagent_fold(tmp_path, monkeypatch):
+    # New Codex: session_id = ROOT thread id shared by sub-agent threads; resume
+    # reuses the thread id with a new rollout id (<thread>_<rollout> file name).
+    import os
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    d = tmp_path / "sessions" / "2026" / "10" / "01"
+    root = "019a0000-0000-7000-8000-000000000001"
+    child = "019a0000-0000-7000-8000-000000000002"
+    r1 = "019a0000-0000-7000-8000-0000000000aa"
+    u = {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5,
+         "reasoning_output_tokens": 0, "total_tokens": 15}
+    old = _write_jsonl(d / f"rollout-2026-10-01T01-00-00-{root}.jsonl", [_meta(root, root), _tc(u, u)])
+    new = _write_jsonl(d / f"rollout-2026-10-02T01-00-00-{root}_{r1}.jsonl", [_meta(root, root), _tc(u, u)])
+    sub = _write_jsonl(d / f"rollout-2026-10-01T02-00-00-{child}.jsonl", [
+        _sub_meta(root, child), _tc(u, u), _patch_call("a.py", "x = 1")])
+    sub_user = {"type": "event_msg", "payload": {"type": "user_message", "message": "dispatch prompt"}}
+    with sub.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(sub_user) + NL)
+    os.utime(old, (1, 1))
+    os.utime(new, (2_000_000_000, 2_000_000_000))
+    paths = [p for r in codex_reader.list_project_refs() for p in r.session_paths]
+    assert paths == [new]  # resume collapsed; sub-agent folded, not listed
+    assert codex_reader._folded_children(new) == [sub]
+    usage = codex_reader.aggregate_usage(new)
+    assert usage.output_tokens == 10  # parent 5 + sub-agent 5 (real cost kept), no double count
+    assert usage.user_msgs == 0       # dispatch prompt is not a human message
+    sloc, has_signal = codex_reader._loc_scan(new)
+    assert has_signal and sloc.added == 1
+    assert codex_reader.read_user_messages(new) == []
+    meta = codex_reader.read_session_meta(sub)
+    assert meta.is_subagent is True
+    assert codex_reader._session_id_from_filename(new) == root
+
+
+def test_orphan_subagent_stays_standalone(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    d = tmp_path / "sessions" / "2026" / "10" / "01"
+    root = "019a0000-0000-7000-8000-000000000001"
+    child = "019a0000-0000-7000-8000-000000000002"
+    sub = _write_jsonl(d / f"rollout-2026-10-01T02-00-00-{child}.jsonl", [_sub_meta(root, child)])
+    paths = [p for r in codex_reader.list_project_refs() for p in r.session_paths]
+    assert paths == [sub]
+
+
+def test_analyze_codex_counts_subagents(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    from tcer.core import file_cache
+    file_cache.clear()
+    d = tmp_path / "sessions" / "2026" / "10" / "01"
+    root = "019a0000-0000-7000-8000-000000000001"
+    child = "019a0000-0000-7000-8000-000000000002"
+    u = {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5,
+         "reasoning_output_tokens": 0, "total_tokens": 15}
+    _write_jsonl(d / f"rollout-2026-10-01T01-00-00-{root}.jsonl", [_meta(root, root), _tc(u, u)])
+    _write_jsonl(d / f"rollout-2026-10-01T02-00-00-{child}.jsonl", [_sub_meta(root, child), _tc(u, u)])
+    ref = codex_reader.list_project_refs()[0]
+    result = analyze.analyze_project(ref.key, source="codex", project_ref=ref, no_loc=True)
+    assert result.n_sessions == 1
+    assert result.n_subagents == 1
+    assert result.reports[0].usage.output_tokens == 10
+
+
+def test_function_call_output_content_items_exit_code(tmp_path):
+    p = _write_jsonl(tmp_path / "rollout-2026-10-01T01-00-00-t1.jsonl", [
+        _meta("t1", "t1"),
+        {"type": "response_item", "payload": {"type": "local_shell_call", "call_id": "c1",
+         "status": "completed", "action": {"type": "exec", "command": ["bash", "-lc", "false"]}}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1",
+         "output": [{"type": "input_text", "text": "Process exited with code 1\nOutput:\n"}]}},
+    ])
+    got = codex_reader.aggregate_usage(p)
+    assert got.tool_calls.get("Bash") == 1
+    assert got.tool_errors == 1
+
+
+def test_turn_started_complete_aliases(tmp_path):
+    p = _write_jsonl(tmp_path / "rollout-2026-10-01T01-00-00-t1.jsonl", [
+        _meta("t1", "t1"),
+        {"type": "event_msg", "payload": {"type": "turn_started", "model_context_window": 10}},
+        {"type": "event_msg", "payload": {"type": "turn_complete", "duration_ms": 5}},
+    ])
+    got = codex_reader.aggregate_usage(p)
+    assert (got.task_count, got.completed_task_count) == (1, 1)
+
+
+def test_zst_rollout_discovered_and_read(tmp_path, monkeypatch):
+    import pytest
+    if not codex_reader.zstd_supported():
+        pytest.skip("compression.zstd needs Python 3.14+")
+    from compression import zstd
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    d = tmp_path / "sessions" / "2026" / "10" / "01"
+    d.mkdir(parents=True)
+    u = {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5,
+         "reasoning_output_tokens": 0, "total_tokens": 15}
+    body = "".join(json.dumps(o) + "\n" for o in [_meta("t1", "t1"), _tc(u, u)])
+    z = d / "rollout-2026-10-01T01-00-00-t1.jsonl.zst"
+    z.write_bytes(zstd.compress(body.encode()))
+    assert z in codex_reader.discover_sessions()
+    assert codex_reader.aggregate_usage(z).output_tokens == 5

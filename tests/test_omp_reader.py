@@ -584,3 +584,103 @@ def test_omp_sessions_dir_env(tmp_path, monkeypatch):
 
 
 
+
+
+# -- 漂移修复（omp 18.10.x / Pi 上游 1.4）------------------------------------
+
+def test_edit_loc_from_diff_when_snapshots_pruned(tmp_path):
+    """omp 实测约一半 edit 结果 snapshotsPruned：无 oldText/newText，只剩 diff。"""
+    diff = " 10|keep\n-11|old line\n+11|new line a\n+12|new line b\n 13|keep2"
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(), _user("x"),
+        _assistant([_tool_call("edit", "e1", {"i": "x"})], _usage(10, 5)),
+        _tool_result("e1", "edit", details={
+            "diff": diff, "firstChangedLine": 11, "op": "update",
+            "path": "src/a.py", "snapshotsPruned": True}),
+    ])
+    sloc, has = omp_reader._loc_scan(p)
+    assert has is True
+    assert sloc.added == 1          # +2 行 -1 行 = 净增 1（context 行不计）
+
+
+def test_edit_loc_prefers_old_new_text_over_diff(tmp_path):
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(), _user("x"),
+        _assistant([_tool_call("edit", "e1", {})], _usage(10, 5)),
+        _tool_result("e1", "edit", details={
+            "diff": "+1|zzz\n+2|zzz\n+3|zzz", "path": "a.py",
+            "oldText": "a", "newText": "a\nb"}),
+    ])
+    sloc, _ = omp_reader._loc_scan(p)
+    assert sloc.added == 1          # newText 比 oldText 多 1 行，不是 diff 的 3 行
+
+
+def test_edit_loc_per_file_results(tmp_path):
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(), _user("x"),
+        _assistant([_tool_call("edit", "e1", {})], _usage(10, 5)),
+        _tool_result("e1", "edit", details={"perFileResults": [
+            {"path": "a.py", "diff": "-1|x\n+1|y\n+2|z"},
+            {"path": "b.py", "diff": "+1|q"}]}),
+    ])
+    sloc, has = omp_reader._loc_scan(p)
+    assert has is True
+    assert sloc.added == 2          # a.py 净增 1 + b.py 净增 1
+    assert set(sloc.file_edit_counts) == {"a.py", "b.py"}
+
+
+def test_model_change_modelid_and_aux_usage_ignored(tmp_path):
+    """Pi 的 model_change 用 provider+modelId；辅助 usage 条目不得破坏 token 桶不变量。"""
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        {"type": "model_change", "id": "m", "parentId": None, "timestamp": _ISO,
+         "provider": "anthropic", "modelId": "claude-opus-4-8"},
+        {"type": "model_usage", "id": "mu", "parentId": None, "timestamp": _ISO,
+         "model": "jev-latest", "usage": _usage(5000, 1000)},
+        _user("x"),
+        _assistant([_text("ok")], _usage(10, 5), model=""),
+    ])
+    u = omp_reader.aggregate_usage(p)
+    assert "claude-opus-4-8" in u.models
+    assert u.input_tokens == 10 and u.output_tokens == 5      # model_usage 不并入
+    assert sum(t.input_tokens + t.output_tokens for t in u.turn_stats) == 15
+
+
+def test_rate_limit_by_429_text(tmp_path):
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(), _user("x"),
+        _assistant([], _usage(0, 0), stop="error",
+                   err="Google API error (429): Resource has been exhausted"),
+        _assistant([], _usage(0, 0), stop="error", err="Anthropic: Too many requests"),
+        _assistant([], _usage(0, 0), stop="error", err="Google API error (502): bad"),
+    ])
+    u = omp_reader.aggregate_usage(p)
+    assert u.rate_limit_reached_count == 2
+
+
+def test_compaction_entries_counted(tmp_path):
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(), _user("x"),
+        _assistant([_text("a")], _usage(10, 5)),
+        {"type": "compaction", "id": "c", "parentId": None, "timestamp": _ISO,
+         "summary": "s", "firstKeptEntryId": "x", "tokensBefore": 500000,
+         "tokensAfter": 20000},
+        _assistant([_text("b")], _usage(10, 5)),
+    ])
+    u = omp_reader.aggregate_usage(p)
+    assert u.compaction_count == 1
+    assert u.compaction_turns == [1]
+    assert u.compaction_pre_tokens_max == 500000
+    assert u.compaction_discarded_tokens == 480000
+
+
+def test_reasoning_tokens_is_subset_of_output(tmp_path):
+    """omp 18.x ``reasoningTokens``：实测 input+output+cacheRead+cacheWrite==totalTokens，
+    即 reasoning 已含在 output，不得再加。"""
+    usage = _usage(100, 50)
+    usage["reasoningTokens"] = 30
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(), _user("x"), _assistant([_text("a")], usage)])
+    u = omp_reader.aggregate_usage(p)
+    assert u.output_tokens == 50
+    assert u.reasoning_output_tokens == 30

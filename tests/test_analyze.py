@@ -518,7 +518,7 @@ def test_cross_source_models_groups_and_gates():
     m = analyze.CROSS_SOURCE_MIN_CELL
     rs = ([_rep("claude", "zz-unlisted-model", 10.0 + i) for i in range(m)]
           + [_rep("omp", "zz-unlisted-model", 20.0 + i) for i in range(m)]
-          + [_rep("grok", "zz-unlisted-model", 30.0 + i) for i in range(m - 1)]  # 不足
+          + [_rep("pi", "zz-unlisted-model", 30.0 + i) for i in range(m - 1)]    # 不足
           + [_rep("claude", "zz-other-model", 5.0)])                             # 单源
     out = analyze.cross_source_models(rs)
     assert len(out) == 1
@@ -546,8 +546,8 @@ def test_real_projects_grouping(monkeypatch):
 
     codex = ProjectRef(source="codex", key="C--GitHub-TCER",
                        display_name="TCER", cwd="C:\GitHub\TCER")
-    grok = ProjectRef(source="grok", key="C--github-tcer",
-                      display_name="TCER", cwd="c:/github/TCER")   # 大小写+斜杠差异
+    pi = ProjectRef(source="pi", key="C--github-tcer",
+                    display_name="TCER", cwd="c:/github/TCER")   # 大小写+斜杠差异
     omp = ProjectRef(source="omp", key="C--GitHub-TCER",
                      display_name="TCER", cwd="C:\GitHub\TCER\\")  # 尾斜杠
     child = ProjectRef(source="codex", key="C--GitHub-TCER-sub",
@@ -560,11 +560,11 @@ def test_real_projects_grouping(monkeypatch):
     monkeypatch.setattr(analyze, "_claude_ref_cwd",
                         lambda ref: "C:\GitHub\TCER" if "tcer" in ref.key.lower() else None)
 
-    out = analyze.real_projects([codex, grok, omp, child, nocwd, claude])
+    out = analyze.real_projects([codex, pi, omp, child, nocwd, claude])
     by_n_refs = sorted(out, key=lambda g: len(g.refs))
     main = by_n_refs[-1]
-    assert len(main.refs) == 4            # codex + grok + omp + claude 聚成一组
-    assert {r.source for r in main.refs} == {"codex", "grok", "omp", "claude"}
+    assert len(main.refs) == 4            # codex + pi + omp + claude 聚成一组
+    assert {r.source for r in main.refs} == {"codex", "pi", "omp", "claude"}
     others = by_n_refs[:-1]
     assert len(others) == 2               # 子路径 + 无 cwd 各自独立
     assert all(len(g.refs) == 1 for g in others)

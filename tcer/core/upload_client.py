@@ -182,7 +182,6 @@ def _lazy_user_messages(report: SessionReport) -> list[str]:
     from tcer.core import (
         antigravity_reader,
         codex_reader,
-        grok_reader,
         omp_reader,
         opencode_reader,
         pi_reader,
@@ -199,8 +198,6 @@ def _lazy_user_messages(report: SessionReport) -> list[str]:
             return codex_reader.read_user_messages(path)
         if source == "opencode" and report.meta.session_id:
             return opencode_reader.read_user_messages(path, report.meta.session_id)
-        if source == "grok":
-            return grok_reader.read_user_messages(path)
         if source == "omp":
             return omp_reader.read_user_messages(path)
         if source == "pi":
@@ -228,8 +225,8 @@ def _read_conversation(report: SessionReport) -> list[dict]:
 
     Dispatches to the reader matching the session's ``source`` — each agent
     stores its turn stream in a different on-disk shape (Claude JSONL, Codex
-    event JSONL, Grok ACP updates, OpenCode SQLite, omp SessionEntry JSONL), so a
-    single parser can't handle all five. Every reader's ``read_conversation``
+    event JSONL, OpenCode SQLite, omp/pi SessionEntry JSONL, …), so a
+    single parser can't handle them all. Every reader's ``read_conversation``
     returns the same block
     shape (see :func:`tcer.core.reader.read_conversation`) so the server session
     view renders every source uniformly.
@@ -242,7 +239,6 @@ def _read_conversation(report: SessionReport) -> list[dict]:
     from tcer.core import (
         antigravity_reader,
         codex_reader,
-        grok_reader,
         omp_reader,
         opencode_reader,
         pi_reader,
@@ -265,7 +261,6 @@ def _read_conversation(report: SessionReport) -> list[dict]:
 
     read_fn = {
         "codex": codex_reader.read_conversation,
-        "grok": grok_reader.read_conversation,
         "omp": omp_reader.read_conversation,
         "pi": pi_reader.read_conversation,
         "antigravity": antigravity_reader.read_conversation,

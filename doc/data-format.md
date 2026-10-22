@@ -57,6 +57,7 @@ JSONL 格式，每行一个 JSON 对象。实测（cc 2.1.x）顶层 `type` 全�
 | `turn_duration` | `durationMs`, `messageCount` | ✅ **真实回合耗时**（不含用户暂停）→ 回填 `turn_stats`（稀疏，非每回合都有） |
 | `api_error` | `error.status`(429=限流), `retryAttempt` | ✅ 429 → 限流命中 |
 | `compact_boundary` | `compactMetadata.{trigger,preTokens}` | ✅ 压缩次数 |
+| cost-state 行 | `totalCostUSD`（自报会话累计成本，含子代理；取会话内最大值，勿取末条、勿求和；`hasUnknownModelCost=true` 或 0 时留空） | ✅ → `reported_cost_usd` / `cost_vs_reported` |
 | `stop_hook_summary` / `model_refusal_fallback` / `away_summary` / `local_command` / `informational` | hook 耗时/模型降级/… | ❌ 未解析 |
 
 ### 工具结果行的 `toolUseResult`（user 行的顶层兄弟字段）
@@ -138,11 +139,11 @@ Codex 把会话持久化在 `~/.codex/sessions/`（`CODEX_HOME` 可覆盖），�
 
 ### resume 去重
 
-Codex `resume` 复用同一 `session_id` 写**新 rollout 文件并重放整段历史**（`rollout-<新ts>-<同uuid>.jsonl`）——一个逻辑会话 = 多个累积快照，最新为超集。`list_project_refs` 按 `session_id` 折叠，每组只留 `mtime+size` 最大者（`_dedupe_by_session_id`）。**只去重不求和**（累积快照求和会重复计 token）。项目列表只读第 1 行 `session_meta` 头取 `cwd`/`session_id`（`_session_head_meta`，不扫全文件）。
+Codex `resume` 复用同一 `session_id` 写**新 rollout 文件并重放整段历史**（`rollout-<新ts>-<同uuid>.jsonl`）——一个逻辑会话 = 多个累积快照，最新为超集。`list_project_refs` 按 `session_id` 折叠，每组只留 `mtime+size` 最大者（`_dedupe_by_session_id`）。**去重键用 `payload.id`（线程 id）而非 `session_id`**：新版 `session_id` 是根线程 id，子代理线程与父共享它；新版文件名为 `rollout-<ts>-<thread>_<rollout>.jsonl`，仅取线程段。7 天以上的冷 rollout 会被原地压成 `*.jsonl.zst`，reader 同时发现并经标准库 `compression.zstd` 读取（该模块 Python 3.14+ 才有，3.11–3.13 静默跳过压缩会话）。**子代理折叠**：子代理线程是独立 rollout，`session_meta` 带 `parent_thread_id` 或 `source={"subagent":{...}}`，父文件存在时折叠进最顶层父会话（子代理 user_msgs/图片清零），父文件缺失的孤儿仍独立。**只去重不求和**（累积快照求和会重复计 token）。项目列表只读第 1 行 `session_meta` 头取 `cwd`/`session_id`（`_session_head_meta`，不扫全文件）。
 
 ### Token 用量（`event_msg` / `token_count`）
 
-`payload.info` 内含 `last_token_usage` 与 `total_token_usage`（`input_tokens`/`cached_input_tokens`/`output_tokens`/`reasoning_output_tokens`）。Codex 会**重复投递相同的 `last_token_usage`**（实测虚增 1.5–2.5%），故对单调递增的 `total_token_usage` **做差分**累加，`last` 仅作无 total 时回退；差分为负（total 重置）时退 `last` 并重新基准。非缓存输入 = `input_tokens − cached_input_tokens`。`rate_limits.{primary,secondary}.used_percent` → 配额峰值；`task_complete.{duration_ms,time_to_first_token_ms}` → 会话时长 / TTFT。
+`payload.info` 内含 `last_token_usage` 与 `total_token_usage`（`input_tokens`/`cached_input_tokens`/`output_tokens`/`reasoning_output_tokens`）。Codex 会**重复投递相同的 `last_token_usage`**（实测虚增 1.5–2.5%），故对单调递增的 `total_token_usage` **做差分**累加，`last` 仅作无 total 时回退；差分为负（total 重置）时退 `last` 并重新基准。新版另有 `cache_write_input_tokens`，与 `cached_input_tokens` 一样是 `input_tokens` 的**子集**，故非缓存输入 = `input_tokens − cached_input_tokens − cache_write_input_tokens`（旧数据无该字段读 0）。`rate_limits.{primary,secondary}.used_percent` → 配额峰值；`task_complete.{duration_ms,time_to_first_token_ms}` → 会话时长 / TTFT。
 
 ### 工具映射与错误归因
 
@@ -180,72 +181,17 @@ Codex `resume` 复用同一 `session_id` 写**新 rollout 文件并重放整段�
 
 ---
 
-## Grok 数据格式（grok build CLI）
+## OpenCode 数据格式
 
-x.ai 的 grok build CLI 把会话持久化在 `~/.grok/sessions/`（`GROK_HOME` 可覆盖），按 **URL 编码的工作目录**分目录：
+OpenCode 把会话持久化在 `~/.local/share/opencode/opencode.db`（SQLite，TCER 以只读 URI 打开），读 `project` / `session` / `message` / `part` 表；**仅支持 SQLite**。
 
-```
-~/.grok/sessions/<URL编码cwd>/<UUIDv7>/
-  summary.json     # 元数据：info.id / info.cwd / generated_title / current_model_id
-                   #          / created_at / agent_name / reasoning_effort / sandbox_profile
-  updates.jsonl    # ★权威 ACP 对话流（JSON-RPC 通知），token 用量与工具调用都在此
-  chat_history.jsonl  # 原始发给模型的消息
-  events.jsonl     # 轻量事件：TCER 解析 permission_resolved（decision/wait_ms → 审批等待）
-  signals.json     # 聚合信号（≈68 字段）。TCER 解析：contextWindowTokens（窗口）、
-                   #   contextTokensUsed（覆盖 peak_input——turn 累计 peak 虚高 10×+）、
-                   #   minTimeToFirstTokenMs / itlP50Ms / itlP99Ms、cancellation/regenerationCount、
-                   #   positive/negativeRatings、gitCommit/prCreated/prMergedCount、
-                   #   agentLines*Reverted（回退行）、hasReverted（revert_events）、compactionCount（上下文压缩数）
-  rewind_points.jsonl / terminal/*.log / subagents/   # 未解析
-```
+- **子会话折叠**：task 工具派生的子会话带 `session.parent_id`，`sessions_for_project` 只返回顶层，`aggregate_usage`/`_loc_scan` 递归折叠子会话（真实成本保留，不单独计 session），`subagent_ids` 供 `n_subagents`。
+- **Token**：按逐 assistant 消息 `modelID` 的 `tokens` 分桶，余量记会话主模型；`tokens_reasoning` 折入输出。峰值输入只取 `step-finish` 快照，多回合无快照时留 0。
+- **LOC**：只回放 `state.status == "completed"` 的工具（无 `state` 的旧形状放行）。`edit` 优先用 `state.metadata.filediff.{additions,deletions}`（消除 replaceAll 少计）；`apply_patch` 读 `metadata.files[{filePath,type,additions,deletions}]`，缺失时回退解析 `patchText`（`type=add` 视为确认新文件）；`write` 的 `metadata.exists === false` 撤销 `unseen_writes`。
 
-`<URL编码cwd>` 例：`C:\playground\langfuse` → `C%3A%5Cplayground%5Clangfuse`（`%3A`=`:`、`%5C`=`\`）。
+## Antigravity 数据格式（agy CLI）
 
-### updates.jsonl
-
-每行一条 JSON-RPC 通知：`{"timestamp": <epoch秒>, "method": "session/update", "params": {"sessionId", "update": {...}, "_meta": {...}}}`。`params.update.sessionUpdate` 决定记录类型：
-
-| sessionUpdate | 说明 | 关键字段 |
-|---|---|---|
-| `user_message_chunk` | 用户消息 | `content.text`、`_meta.modelId` |
-| `agent_thought_chunk` | 推理流 | 计入 `thinking_count` |
-| `agent_message_chunk` | 助手回复文本 | — |
-| `turn_completed` | ★唯一 token 用量来源 | `usage`（见下） |
-| `tool_call` | 工具发起 | `title`、`rawInput`、`_meta["x.ai/tool"]` |
-| `tool_call_update` | 工具流式结果 | `rawOutput.exit_code`（错误归因）、`status` |
-
-### Token 用量（`turn_completed.usage`）
-
-每个 turn 恰好一条 `turn_completed`（无 Claude 式多行重复携带 usage 的去重问题），直接累加：
-
-```json
-"usage": {
-  "inputTokens": 30305, "outputTokens": 116, "cachedReadTokens": 26368,
-  "reasoningTokens": 73, "modelCalls": 1, "apiDurationMs": 3322,
-  "modelUsage": { "grok-4.5": { ...同字段... } }
-}
-```
-
-- 非缓存输入 = `inputTokens - cachedReadTokens`；缓存命中 = `cachedReadTokens`；缓存创建记 0（Grok 无独立写缓存计价）。
-- `reasoningTokens` 单独展示，按输出价计费。
-- `modelUsage` 提供按模型分桶（混用多模型会话精确）；`apiDurationMs` 累加为会话活动时长。
-- **边界**：错误回合的 `turn_completed` 可能带空 usage（字段为 `null`）→ 计入 `empty_usage_skipped`，不虚增回合数。
-
-### 工具映射
-
-`_meta["x.ai/tool"].name`（规范名）映射到 TCER 通用工具分类：
-
-| Grok 工具 | TCER 分类 |
-|---|---|
-| `read_file` / `search_replace` / `write` | Read / Edit / Write |
-| `grep_search` / `list_dir` / `bash`·`run_terminal_command` | Grep / Glob / Bash |
-| `task` / `web_search` / `web_fetch` | Task / WebSearch / WebFetch |
-| `search_tool`·`use_tool`（MCP）等 | 取原始工具名 |
-
-### LOC
-
-`search_replace` / `write` 经与 Claude 相同的 `_LocAccumulator` 回放：`search_replace`→Edit（净增行差 + 自返工）、`write`→Write（`unseen_writes` / F1 同 Claude）。无编辑工具的会话 `net_loc=0`（已知零）。
-
+会话存于 `~/.gemini/antigravity-cli`。工具参数名新旧两套都认：新版 `write_file{Path,Content}` / `edit_file{Path,Target,Replacement}` / `read_file{Path}`，旧版 `TargetFile` / `CodeContent`（只认旧名会让 LOC 全丢）；`call_mcp_tool{ServerName,ToolName}` 记为 `mcp__<server>__<tool>`。摘要库的 `parent_conversation_id` / `nesting_depth` / `agent_name` 疑似子代理字段，实测全空，暂未做折叠。回合键（turn_stats / tool_ops / turn_net_locs）与其余各源一致从 0 起。
 
 ## omp 数据格式（Oh My Pi / omp）
 
@@ -270,7 +216,9 @@ omp（[oh-my-pi](https://omp.sh)）把会话持久化在 `~/.omp/agent/sessions/
 | `model_change` | 活动模型 | `model`（`"provider/modelId"`，计价剥前缀） |
 | `thinking_level_change` | 推理强度 | `thinkingLevel`（如 `high`）→ `reasoning_effort`；末个非空值胜出 |
 | `message` | 回合流 | `message.role` ∈ `user`/`assistant`/`toolResult` |
-| `custom` / `custom_message` / `compaction` / `mode_change` 等 | 忽略 | — |
+| `compaction` | 上下文压缩 | → `compaction_count` / `compaction_turns` |
+| `mode_change` | 模式切换 | `plan` → 计划模式 |
+| `custom` / `custom_message` 等 | 忽略 | — |
 
 ### Token 用量（`message.usage`，仅 assistant）
 
@@ -286,6 +234,7 @@ omp（[oh-my-pi](https://omp.sh)）把会话持久化在 `~/.omp/agent/sessions/
 - 语义同 Anthropic：`input` 不含缓存，`cacheRead`/`cacheWrite` 分列上报；无独立 reasoning token（并入输出）。
 - 全零 usage 的 assistant 计入 `empty_usage_skipped`，不虚增回合数。
 - `cost.total` 累加为 `reported_cost_usd`。
+- `stopReason == "error"` 且 `errorMessage` 含 429 / too many requests → 限流命中。
 - `stopReason == "aborted"`（用户中断 / 运行中止）计入 `aborted_task_count`，`errorMessage`（如「Interrupted by user」）作 `abort_reasons` 键——语义同 Codex 的 `turn_aborted`。
 
 ### 内容块与工具结果
@@ -304,7 +253,7 @@ user `content` 里的 `{type:"image", mimeType, data}`（内联 base64 图片）
 
 ### LOC
 
-`write` 取 `arguments.content` + `details.resolvedPath`（unseen_writes 同 Grok）；`edit`/`ast_edit` 取 `details.{oldText,newText,path}` 经同一 `_LocAccumulator`（净增行差 + 自返工）。`details.snapshotsPruned`（无 oldText/newText）的 edit 跳过。无编辑工具的会话 `net_loc=0`。
+`write` 取 `arguments.content` + `details.resolvedPath`（首写 `unseen_writes++`）；`edit`/`ast_edit` 优先取 `details.{oldText,newText,path}`，缺失时依次回退 `arguments.edits[{oldText,newText}]`、`perFileResults[*].diff`、`details.diff`（`+N|text` / `-N|text` 行号前缀 diff）重建新旧文本，经同一 `_LocAccumulator`（净增行差 + 自返工）。`details.snapshotsPruned`（无 oldText/newText）的 edit 跳过。无编辑工具的会话 `net_loc=0`。
 
 ### 子代理折叠
 
@@ -316,8 +265,9 @@ omp 子代理会话存于主文件同名的 `<stem>/` 子目录，`_is_subagent_
 Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-agent`，bin 名 `pi`）是 omp 的**上游原生**（omp 是其 fork）。会话格式与 omp 同族，TCER 的 `pi_reader` 直接复用 `omp_reader` 的全部解析逻辑，仅以下差异：
 
 - **目录**：`~/.pi/agent/sessions/`（仅 `PI_CODING_AGENT_DIR` 重定位 agent 基目录；**无 `PI_CONFIG_DIR`**，默认根固定 `~/.pi`）。
+- `model_change` 用 `provider` + `modelId` 两个字段（omp 为单个 `model`），reader 两种都读。
 - **无定宽 `type:"title"` 标题槽** —— 首行直接是 `type:"session"` 头。
-- assistant 消息**无** omp-fork 加的 `contextSnapshot` / `duration` / `ttft` → `peak_input` 留 0、TTFT 不可用。
+- assistant 消息**无** omp-fork 加的 `contextSnapshot` / `ttft` → `peak_input` 留 0、TTFT 不可用；逐响应耗时字段为 `durationMs`（omp 为 `duration`），因此 Pi 支持 latency / `output_tps`。
 - usage 多两个字段：
 
 ```json
@@ -326,6 +276,6 @@ Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-ag
            "totalTokens": 170, "cost": { "total": 0.01 } }
 ```
 
-  `cacheWrite1h`（1h 缓存写子集，按 `CACHE_1H_PREMIUM` 溢价计价）+ `reasoning`（推理 token，填 `reasoning_output_tokens`）。
+  `cacheWrite1h`（1h 缓存写子集，按 `CACHE_1H_PREMIUM` 溢价计价）+ `reasoning`（推理 token，填 `reasoning_output_tokens`）。按上游 `types.ts`，`output` 已含 `reasoning`，reader 只填比率字段、不再加进 `output_tokens`（已闭环）。
 
 `SessionEntry` 行类型、工具映射、LOC 回放、子代理折叠均与 omp 一致（同 schema），详见上节。能力映射（`metric_defs._SOURCE_SUPPORT`）：pi 支持 reasoning / cache / web_search，**不支持** ttft / ttft_p95（数据无此字段）。

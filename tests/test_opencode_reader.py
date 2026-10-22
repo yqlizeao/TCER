@@ -543,76 +543,6 @@ def test_opencode_env_override_accepts_comma_separated_dirs(tmp_path, monkeypatc
     assert [ref.path for ref in refs] == [db]
 
 
-def test_opencode_legacy_storage_reads_split_message_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
-    session_dir = tmp_path / "storage" / "session" / "proj-legacy"
-    message_dir = tmp_path / "storage" / "message"
-    session_dir.mkdir(parents=True)
-    message_dir.mkdir(parents=True)
-    session_file = session_dir / "ses-legacy.json"
-    session_file.write_text(
-        _j({
-            "id": "ses-legacy",
-            "projectID": "proj-legacy",
-            "title": "legacy",
-            "tokens": {"input": 10, "output": 2},
-        }),
-        encoding="utf-8",
-    )
-    (message_dir / "ses-legacy.json").write_text(
-        _j({
-            "messages": [
-                {"role": "user", "text": "旧版消息"},
-                {"role": "assistant", "text": "ok"},
-            ]
-        }),
-        encoding="utf-8",
-    )
-
-    refs = opencode_reader.list_project_refs()
-    assert len(refs) == 1
-    assert refs[0].session_paths == (session_file,)
-
-    usage = opencode_reader.aggregate_usage(session_file.parent, str(session_file))
-    assert usage.user_msgs == 1
-    assert opencode_reader.read_user_messages(session_file.parent, str(session_file)) == ["旧版消息"]
-
-
-def test_opencode_legacy_storage_reads_message_part_files(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
-    session_dir = tmp_path / "storage" / "session" / "proj-legacy"
-    message_dir = tmp_path / "storage" / "message" / "ses-legacy"
-    part_dir = tmp_path / "storage" / "part" / "msg-user"
-    session_dir.mkdir(parents=True)
-    message_dir.mkdir(parents=True)
-    part_dir.mkdir(parents=True)
-    session_file = session_dir / "ses-legacy.json"
-    session_file.write_text(
-        _j({
-            "id": "ses-legacy",
-            "projectID": "proj-legacy",
-            "title": "legacy",
-            "tokens": {"input": 10, "output": 2},
-        }),
-        encoding="utf-8",
-    )
-    (message_dir / "msg-user.json").write_text(
-        _j({"id": "msg-user", "role": "user"}),
-        encoding="utf-8",
-    )
-    (part_dir / "part-text.json").write_text(
-        _j({"type": "text", "text": "拆分 part 消息"}),
-        encoding="utf-8",
-    )
-
-    refs = opencode_reader.list_project_refs()
-    assert len(refs) == 1
-
-    usage = opencode_reader.aggregate_usage(session_file.parent, str(session_file))
-    assert usage.user_msgs == 1
-    assert opencode_reader.read_user_messages(session_file.parent, str(session_file)) == ["拆分 part 消息"]
-
-
 def test_opencode_discovers_wsl_data_dir(tmp_path, monkeypatch):
     """_wsl_data_dirs() should find OpenCode dirs under simulated WSL trees."""
     # Build a fake WSL tree: <root>/Ubuntu/home/user/.local/share/opencode/
@@ -657,30 +587,148 @@ def test_opencode_wsl_no_opencode_dir_returns_empty(tmp_path, monkeypatch):
     assert opencode_reader._wsl_data_dirs() == []
 
 
-def test_opencode_legacy_reasoning_folded_into_output(tmp_path, monkeypatch):
-    """legacy 路径 tokens.reasoning 折入 output（与 SQLite 口径一致，
-    成本不低估、reasoning_output_ratio ≤ 1）。"""
+
+
+# ── v1.19-shape drift coverage (tool state / apply_patch / subagent folding) ──
+
+def _zero_summary(db: Path) -> None:
+    con = sqlite3.connect(db)
+    con.execute("update session set summary_additions=0, summary_deletions=0, "
+                "summary_files=0, summary_diffs=null")
+    con.execute("delete from part where session_id='ses-1' and id='part-edit'")
+    con.commit()
+    con.close()
+
+
+def _add_parts(db: Path, session_id: str, parts: list[tuple[str, dict]], message_id="msg-assistant"):
+    con = sqlite3.connect(db)
+    t = 1782720100000
+    for pid, payload in parts:
+        t += 1
+        con.execute("insert into part values (?, ?, ?, ?, ?)",
+                    (pid, session_id, message_id, t, _j(payload)))
+    con.commit()
+    con.close()
+
+
+def _tool(name: str, status: str, inp: dict, metadata: dict | None = None) -> dict:
+    state = {"status": status, "input": inp}
+    if metadata is not None:
+        state["metadata"] = metadata
+    return {"type": "tool", "tool": name, "callID": "c-" + name, "state": state}
+
+
+def test_opencode_loc_skips_failed_and_interrupted_edits(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
-    session_dir = tmp_path / "storage" / "session" / "proj-legacy"
-    message_dir = tmp_path / "storage" / "message"
-    session_dir.mkdir(parents=True)
-    message_dir.mkdir(parents=True)
-    session_file = session_dir / "ses-legacy.json"
-    session_file.write_text(
-        _j({
-            "id": "ses-legacy",
-            "projectID": "proj-legacy",
-            "title": "legacy",
-            "tokens": {"input": 1000, "output": 200, "reasoning": 300},
-        }),
-        encoding="utf-8",
+    db = _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
+    _zero_summary(db)
+    inp = {"filePath": "a.py", "oldString": "", "newString": "1\n2\n3\n"}
+    _add_parts(db, "ses-1", [
+        ("p-err", _tool("edit", "error", inp)),
+        ("p-run", _tool("edit", "running", inp)),
+        ("p-ok", _tool("edit", "completed", {"filePath": "b.py", "oldString": "", "newString": "1\n"})),
+    ])
+    sloc = opencode_reader.session_loc_full(db, "ses-1")
+    assert sloc.added == 1
+    assert "a.py" not in sloc.file_edit_counts
+
+
+def test_opencode_loc_edit_prefers_filediff_for_replace_all(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    db = _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
+    _zero_summary(db)
+    # replaceAll hit 3 places: oldString/newString alone would count one hit.
+    _add_parts(db, "ses-1", [("p-ed", _tool(
+        "edit", "completed",
+        {"filePath": "a.py", "oldString": "a", "newString": "a\nb", "replaceAll": True},
+        {"filediff": {"file": "a.py", "additions": 6, "deletions": 3}},
+    ))])
+    sloc = opencode_reader.session_loc_full(db, "ses-1")
+    assert (sloc.added, sloc.deleted) == (3, 0)
+
+
+def test_opencode_loc_apply_patch_metadata_and_patchtext_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    db = _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
+    _zero_summary(db)
+    files = [
+        {"filePath": "/r/new.py", "relativePath": "new.py", "type": "add", "additions": 5, "deletions": 0},
+        {"filePath": "/r/old.py", "relativePath": "old.py", "type": "update", "additions": 4, "deletions": 1},
+    ]
+    patch_text = "\n".join([
+        "*** Begin Patch", "*** Update File: c.py", "@@", " ctx", "-gone", "+n1", "+n2", "+n3",
+        "*** End Patch",
+    ])
+    _add_parts(db, "ses-1", [
+        ("p-ap1", _tool("apply_patch", "completed", {"patchText": "x"}, {"files": files})),
+        ("p-ap2", _tool("apply_patch", "completed", {"patchText": patch_text}, {})),
+        ("p-ap3", _tool("apply_patch", "error", {"patchText": patch_text})),
+    ])
+    sloc = opencode_reader.session_loc_full(db, "ses-1")
+    assert sloc.added == 5 + 3 + 2          # add 5; old.py net +3; c.py net +2
+    assert sloc.unseen_writes == 0           # Add File is a confirmed new file
+    assert set(sloc.file_edit_counts) == {"/r/new.py", "/r/old.py", "c.py"}
+    u = opencode_reader.aggregate_usage(db, "ses-1")
+    assert u.tool_calls.get("Edit") == 3     # apply_patch counted as Edit
+
+
+def test_opencode_subagent_sessions_fold_into_parent(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    cwd = str(tmp_path / "repo")
+    db = _make_db(tmp_path / "opencode.db", cwd)
+    _zero_summary(db)
+    con = sqlite3.connect(db)
+    con.execute(
+        "insert into session (id, parent_id, project_id, directory, title, time_created, time_updated,"
+        " model, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write,"
+        " cost, summary_additions, summary_deletions, summary_files) values "
+        "('ses-child','ses-1','proj-1',?, 'sub', 1782720010000, 1782720020000, ?, 500,100,0,0,0,0,0,0,0)",
+        (cwd, _j({"id": "gpt-5.2", "providerID": "openai"})),
     )
-    (message_dir / "ses-legacy.json").write_text(
-        _j({"messages": [{"role": "user", "text": "旧版消息"}]}),
-        encoding="utf-8",
-    )
-    usage = opencode_reader.aggregate_usage(session_file.parent, str(session_file))
-    assert usage.output_tokens == 500          # 200 可见 + 300 reasoning
-    assert usage.reasoning_output_tokens == 300
-    ratio = usage.reasoning_output_tokens / usage.output_tokens
-    assert ratio <= 1.0
+    con.execute("insert into message values ('m-cu','ses-child',1782720010001,?)", (_j({"role": "user"}),))
+    con.commit()
+    con.close()
+    _add_parts(db, "ses-child", [("pc-w", _tool("write", "completed",
+               {"filePath": "sub.py", "content": "a\nb\n"}, {"exists": False}))], message_id="m-cu")
+
+    ref = opencode_reader.list_project_refs()[0]
+    assert opencode_reader.sessions_for_project(ref) == ["ses-1"]      # child hidden
+    assert opencode_reader.subagent_ids(db, "ses-1") == ["ses-child"]
+
+    base = opencode_reader._aggregate_single(db, "ses-1")
+    u = opencode_reader.aggregate_usage(db, "ses-1")
+    assert u.input_tokens == base.input_tokens + 500
+    assert u.user_msgs == base.user_msgs                               # dispatch prompt != human turn
+    sloc, sig = opencode_reader._loc_scan(db, "ses-1")
+    assert sig and sloc.added == 2 and sloc.unseen_writes == 0
+
+
+def test_opencode_orphan_child_session_is_promoted(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    db = _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
+    con = sqlite3.connect(db)
+    con.execute("update session set parent_id='ses-gone' where id='ses-1'")
+    con.commit()
+    con.close()
+    ref = opencode_reader.list_project_refs()[0]
+    assert opencode_reader.sessions_for_project(ref) == ["ses-1"]
+
+
+def test_opencode_mixed_model_session_buckets_per_message_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    db = _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
+    con = sqlite3.connect(db)
+    con.execute("update session set tokens_input=1000, tokens_output=200, tokens_reasoning=0, "
+                "tokens_cache_read=0, tokens_cache_write=0")
+    tok = lambda i, o: {"input": i, "output": o, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+    con.execute("update message set data=? where id='msg-assistant'",
+                (_j({"role": "assistant", "providerID": "openai", "modelID": "gpt-5.2", "tokens": tok(600, 120)}),))
+    con.execute("insert into message values ('msg-a2','ses-1',1782720003000,?)",
+                (_j({"role": "assistant", "providerID": "anthropic", "modelID": "claude-sonnet-4-5",
+                     "tokens": tok(400, 80)}),))
+    con.commit()
+    con.close()
+    u = opencode_reader.aggregate_usage(db, "ses-1")
+    assert u.input_tokens == 1000 and u.output_tokens == 200
+    assert len(u.per_model) == 2
+    assert sum(b.input_tokens for b in u.per_model.values()) == 1000

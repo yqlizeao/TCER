@@ -252,3 +252,90 @@ def test_analyze_project_pi(tmp_path, monkeypatch):
     assert a.aggregate.usage.cache_write_1h_tokens == 5
     assert a.aggregate.usage.reasoning_output_tokens == 6
     file_cache.clear()
+
+
+# -- 上游 earendil-works/pi 1.4 漂移修复 ---------------------------------------
+
+def test_model_change_provider_modelid(tmp_path):
+    p = _write_pi(tmp_path / "s.jsonl", [
+        _session(),
+        {"type": "model_change", "id": "m", "parentId": None, "timestamp": _ISO,
+         "provider": "anthropic", "modelId": "claude-opus-4-8"},
+        _user("hi"),
+        _assistant([_text("ok")], _usage(10, 5), model=""),
+    ])
+    u = pi_reader.aggregate_usage(p)
+    assert "claude-opus-4-8" in u.models
+
+
+def test_duration_ms_on_assistant(tmp_path):
+    """Pi 上游 AssistantMessage.durationMs（omp 为 duration）。"""
+    e = _assistant([_text("ok")], _usage(10, 5))
+    e["message"]["durationMs"] = 1500
+    p = _write_pi(tmp_path / "s.jsonl", [_session(), _user("hi"), e])
+    u = pi_reader.aggregate_usage(p)
+    assert u.turn_stats[0].duration_ms == 1500
+
+
+def test_reasoning_is_subset_of_output(tmp_path):
+    """上游 ai/types.ts：reasoning 是 output 的子集，output 已含，不得再加。"""
+    p = _write_pi(tmp_path / "s.jsonl", [
+        _session(), _user("hi"),
+        _assistant([_text("ok")], _usage(10, 50, reasoning=30))])
+    u = pi_reader.aggregate_usage(p)
+    assert u.output_tokens == 50
+    assert u.reasoning_output_tokens == 30
+
+
+def test_pi_edit_loc_from_arguments_edits(tmp_path):
+    """Pi edit 参数是 edits[{oldText,newText}]，details 只有 diff/patch（无 oldText）。"""
+    e = _tool_call("edit", "e1", {"path": "a.py", "edits": [
+        {"oldText": "x = 1", "newText": "x = 1\ny = 2\nz = 3"},
+        {"oldText": "q", "newText": "r"}]})
+    p = _write_pi(tmp_path / "s.jsonl", [
+        _session(), _user("hi"), _assistant([e], _usage(10, 5)),
+        _tool_result("e1", "edit", details={"diff": "+ 1 y", "patch": "...",
+                                            "firstChangedLine": 1}),
+    ])
+    sloc, has = pi_reader._loc_scan(p)
+    assert has is True
+    assert sloc.added == 2          # (+2 行) + (0 净增)
+
+
+def test_pi_edit_args_json_string_and_legacy(tmp_path):
+    e1 = _tool_call("edit", "e1", {"path": "a.py", "edits": json.dumps(
+        [{"oldText": "a", "newText": "a\nb"}])})
+    e2 = _tool_call("edit", "e2", {"path": "b.py", "oldText": "a", "newText": "a\nb\nc"})
+    p = _write_pi(tmp_path / "s.jsonl", [
+        _session(), _user("hi"), _assistant([e1, e2], _usage(10, 5)),
+        _tool_result("e1", "edit", details={"diff": ""}),
+        _tool_result("e2", "edit", details={"diff": ""}),
+    ])
+    sloc, _ = pi_reader._loc_scan(p)
+    assert sloc.added == 3          # 1 + 2
+
+
+def test_pi_edit_falls_back_to_display_diff(tmp_path):
+    """args 缺失时退回 Pi 展示 diff（``+10 text``，行号 padStart）。"""
+    p = _write_pi(tmp_path / "s.jsonl", [
+        _session(), _user("hi"),
+        _assistant([_tool_call("edit", "e1", {"path": "a.py"})], _usage(10, 5)),
+        _tool_result("e1", "edit", details={
+            "diff": "  9 ctx\n-10 old\n+10 new1\n+11 new2", "patch": "p"}),
+    ])
+    sloc, has = pi_reader._loc_scan(p)
+    assert has is True
+    assert sloc.added == 1          # 2 行新增 - 1 行删除 = 净增 1
+
+
+def test_pi_usage_entry_not_folded(tmp_path):
+    """Pi ``usage`` 条目（cache_warm 等）为辅助用量，不并入主 token 桶（已知边界）。"""
+    p = _write_pi(tmp_path / "s.jsonl", [
+        _session(), _user("hi"),
+        {"type": "usage", "id": "u", "parentId": None, "timestamp": _ISO,
+         "kind": "cache_warm", "provider": "anthropic", "model": "claude-sonnet-4-5",
+         "usage": _usage(0, 0, cr=50000)},
+        _assistant([_text("ok")], _usage(10, 5)),
+    ])
+    u = pi_reader.aggregate_usage(p)
+    assert u.cache_read_input_tokens == 0

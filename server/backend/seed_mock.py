@@ -54,7 +54,7 @@ MODEL_PROFILE = {
     "GLM-4.6": dict(tcer_x=(0.5, 1.0), cpe_x=(1.0, 1.8), chr=(0.60, 0.85)),
 }
 
-SOURCES = ["claude", "codex", "grok"]
+SOURCES = ["claude", "codex", "omp"]
 TASK_TYPES = ["code_creation", "code_maintenance", "non_coding"]
 # TCER multiplier by task type — the confounder. Creation produces far more net
 # LOC per token than debugging does, regardless of which model is driving.

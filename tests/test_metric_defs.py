@@ -285,14 +285,15 @@ def test_unsupported_metric_shows_label():
     # Claude 不单独上报推理输出 → 不适用；Codex 支持 → 正常数值
     assert metric_defs.display(claude, "reasoning_tokens") == "200"
     assert metric_defs.display(codex, "reasoning_tokens") == "200"
-    # Codex 不上报缓存写入 → 不适用；Claude 支持
-    assert metric_defs.display(codex, "cache_write") == metric_defs.UNSUPPORTED_LABEL
+    # Codex 新版上报缓存写入（cache_write_input_tokens）；Antigravity 不上报 → 不适用
+    assert metric_defs.display(codex, "cache_write") != metric_defs.UNSUPPORTED_LABEL
+    assert metric_defs.display(_report_for("antigravity"), "cache_write") == metric_defs.UNSUPPORTED_LABEL
     assert metric_defs.display(claude, "cache_write") == "1,000"
-    # Codex/Grok 运行时信号在 Claude 不适用；patch_success 仍为 Codex 独有
+    # Codex 运行时信号在 Claude 不适用；patch_success 为 Codex 独有
     for key in ("context_window", "ttft", "patch_success"):
         assert metric_defs.display(claude, key) == metric_defs.UNSUPPORTED_LABEL
-    assert metric_defs.display(_report_for("grok"), "patch_success") == metric_defs.UNSUPPORTED_LABEL
-    assert metric_defs.display(_report_for("grok"), "context_window") != metric_defs.UNSUPPORTED_LABEL
+    assert metric_defs.display(_report_for("omp"), "patch_success") == metric_defs.UNSUPPORTED_LABEL
+    assert metric_defs.display(codex, "context_window") != metric_defs.UNSUPPORTED_LABEL
     # Claude 深度解析后翻转支持：限流/压缩/网页搜索
     for key in ("rate_limit_hits", "compactions", "web_searches"):
         assert metric_defs.display(claude, key) != metric_defs.UNSUPPORTED_LABEL
@@ -303,7 +304,7 @@ def test_unsupported_metric_raw_value_is_none():
     assert metric_defs.raw_value(claude, "reasoning_tokens") is not None
     codex = _report_for("codex")
     assert metric_defs.raw_value(codex, "reasoning_tokens") == 200.0
-    assert metric_defs.raw_value(codex, "cache_write") is None
+    assert metric_defs.raw_value(_report_for("antigravity"), "cache_write") is None
 
 
 def test_supported_keys_all_exist():

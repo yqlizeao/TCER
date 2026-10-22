@@ -328,7 +328,7 @@ def test_expanded_models_and_consistent_notes():
     assert pricing.normalize("claude-opus-5-5") == "claude-opus-5-5"
     assert pricing.resolve("claude-opus-5-5") != pricing.resolve("claude-opus-5")
     assert pricing.is_table_priced("claude-sonnet-5-5")
-    assert pricing.resolve("claude-sonnet-5-5") == {"input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 1.875}
+    assert pricing.resolve("claude-sonnet-5-5") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5}
     assert pricing.is_table_priced("claude-haiku-5-5")
 
     # 2. OpenAI GPT-6 Cutting-Edge Series
@@ -532,3 +532,25 @@ def test_upstream_synced_models_2026_10():
     assert pricing.resolve("longcat-2.0") == {"input": 0.75, "output": 2.95, "cache_read": 0.015, "cache_write": 0.0}
     assert pricing.vendor("longcat-2.0") == "Meituan"
     assert pricing.resolve("qwen3.8-omni-flash") == {"input": 0.15, "output": 0.47, "cache_read": 0.016, "cache_write": 0.0}
+
+
+def test_2026_10_22_sync_new_entries():
+    """2026-10-22 official-page sync: new IDs must resolve to their own key,
+    never a shorter/older neighbour."""
+    # Sonnet 5.5 official: $2/$10, cache read 0.05x ($0.10), 5m write $2.50
+    assert pricing.resolve("claude-sonnet-5-5") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5}
+    assert pricing.resolve("claude-sonnet-5-5") != pricing.resolve("claude-sonnet-5")
+    assert pricing.table_key("claude-sonnet-5-5[1m]") == "claude-sonnet-5-5"
+    # Gemini 4 Argon must not fall to default or a gemini-3.x key
+    assert pricing.table_key("gemini-4-argon") == "gemini-4-argon"
+    assert pricing.resolve("gemini-4-argon") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 0.0}
+    assert pricing.table_key("gemini-4-argon-preview") == "gemini-4-argon"
+    # MiniMax M3.1 Flash must not forward-prefix onto minimax-m3
+    assert pricing.table_key("MiniMax-M3.1-Flash") == "minimax-m3.1-flash"
+    assert pricing.resolve("MiniMax-M3.1-Flash") == {"input": 0.15, "output": 0.6, "cache_read": 0.015, "cache_write": 0.0}
+    # DeepSeek V4.1 Flash shares deepseek-flash pricing
+    assert pricing.table_key("deepseek-v4.1-flash") == "deepseek-v4.1-flash"
+    assert pricing.resolve("deepseek-v4.1-flash") == pricing.resolve("deepseek-flash")
+    # Mistral Large 4 must not bind to mistral-large-3-2512 / latest
+    assert pricing.table_key("mistral-large-4") == "mistral-large-4"
+    assert pricing.table_key("mistral-large-4-2610") == "mistral-large-4"

@@ -43,7 +43,6 @@ from tcer.core import (
     analyze,
     antigravity_reader,
     codex_reader,
-    grok_reader,
     loc,
     metrics,
     omp_reader,
@@ -363,7 +362,7 @@ def _append_metric_bound_checks(sa: SessionAudit, report) -> None:
     if report.context_window_used_ratio is not None:
         # Peak-turn / window; slight >1 is real, multi-turn cumulative was 50–200×.
         # 折叠加会话（子代理并入）豁免：merge 取 max(父,子) 峰值而窗口取父模型，
-        # 子代理的回合峰值不与父窗口同域，比值会越界（grok 实测 6.4）。
+        # 子代理的回合峰值不与父窗口同域，比值会越界（实测可达 6.4）。
         folded = getattr(report, "subagent_count", 0) > 0
         sa.checks.append(_truth(
             "context_window_used_sane",
@@ -381,13 +380,13 @@ def _append_metric_bound_checks(sa: SessionAudit, report) -> None:
         u.cache_write_1h_tokens <= u.cache_creation_input_tokens,
         detail=f"1h={u.cache_write_1h_tokens} cw={u.cache_creation_input_tokens}",
     ))
-    # 逐回合时间线与会话总量一致：Claude/Codex/Grok 的 turn_stats 与总量同源
-    # （逐响应/差分/逐 turn），求和必须相等；OpenCode 来自 step-finish 快照，
+    # 逐回合时间线与会话总量一致：Claude/Codex/omp/pi 的 turn_stats 与总量同源
+    # （逐响应/差分），求和必须相等；OpenCode 来自 step-finish 快照，
     # 与 session 列独立，只作信息记录不判失败。
     if u.turn_stats:
         ts_total = sum(t.input_tokens + t.cache_write + t.cache_read
                        + t.output_tokens for t in u.turn_stats)
-        strict = sa.source in ("claude", "codex", "grok", "omp", "pi")
+        strict = sa.source in ("claude", "codex", "omp", "pi")
         sa.checks.append(_truth(
             "turn_stats_match_total",
             (ts_total == u.total) if strict else True,
@@ -424,7 +423,7 @@ def _audit_file_session(
     source: str,
     aggregate_fn,
 ) -> SessionAudit:
-    """Codex / Grok: compare report.usage to a fresh aggregate_usage(path)."""
+    """File-backed sources (Codex / omp / pi …): compare report.usage to a fresh aggregate_usage(path)."""
     sid = report.meta.session_id or report.meta.path.stem
     sa = SessionAudit(session_id=sid, source=source, path=str(report.meta.path))
     try:
@@ -439,14 +438,6 @@ def _audit_file_session(
         sum(u.tool_calls.values()),
         sum(report.usage.tool_calls.values()),
     ))
-    # Canonical tool names for Grok search
-    if source == "grok":
-        bad = [k for k in report.usage.tool_calls if k in ("grep", "Tool")]
-        sa.checks.append(_truth(
-            "no_raw_or_opaque_tool_names",
-            not bad,
-            detail=f"unexpected: {bad} — map via _resolve_grok_tool_name",
-        ))
     if source == "codex":
         bad = [k for k in report.usage.tool_calls if k == "apply_patch"]
         sa.checks.append(_truth(
@@ -506,7 +497,6 @@ def _audit_file_session(
         try:
             _loc_fn = {
                 "codex": codex_reader.session_loc_full,
-                "grok": grok_reader.session_loc_full,
                 "omp": omp_reader.session_loc_full,
                 "pi": pi_reader.session_loc_full,
                 "antigravity": lambda p: antigravity_reader.session_loc_full(p)[0],
@@ -764,8 +754,6 @@ def audit_ref(
             sa = _audit_claude_session(rep, project_hash=ref.key)
         elif ref.source == "codex":
             sa = _audit_file_session(rep, source="codex", aggregate_fn=codex_reader.aggregate_usage)
-        elif ref.source == "grok":
-            sa = _audit_file_session(rep, source="grok", aggregate_fn=grok_reader.aggregate_usage)
         elif ref.source == "opencode":
             sa = _audit_opencode_session(rep, no_loc=no_loc)
         elif ref.source == "omp":
@@ -845,7 +833,7 @@ def audit_many(
         # Prefer exact source when user said all + project name
         if source == "all":
             results = []
-            for s in ("claude", "codex", "grok", "opencode", "omp", "pi"):
+            for s in ("claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"):
                 pa = audit_project(project, source=s, top=top, task_type=task_type, no_loc=no_loc)
                 if pa.error and "not found" in (pa.error or ""):
                     continue
@@ -994,7 +982,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Closed-loop audit: analyze real local sessions and re-verify against raw files.",
     )
     p.add_argument("--source", default="all",
-                   choices=["all", "claude", "codex", "grok", "opencode", "omp", "pi", "antigravity", "workbuddy"],
+                   choices=["all", "claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"],
                    help="Data source (default: all when --project set, else all)")
     p.add_argument("--project", default=None,
                    help="Project key or substring (e.g. TCER, c--GitHub-TCER)")

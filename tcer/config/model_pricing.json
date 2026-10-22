@@ -16,7 +16,7 @@
       "_note": "（可选）模型定位描述与计费特性注解，GUI 悬浮展示",
       "vendor": "模型所属厂商（如 Anthropic、OpenAI、Google、xAI、DeepSeek、Alibaba 等）"
     },
-    "model_count": 340,
+    "model_count": 347,
     "note": "可自由增删 models 条目；未匹配到的模型回退到 default（Anthropic 通用 list 价）。"
   },
   "default": {
@@ -27,6 +27,24 @@
     "cache_write": 3.75
   },
   "models": {
+    "gemini-4-argon": {
+      "display_name": "Gemini 4 Argon",
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1,
+      "cache_write": 0.0,
+      "_note": "Google DeepMind Gemini 4 代首发模型（2026-10-13）；介绍价至 2026-11-30（当前生效，官方定价页 2026-10-22 核对）；2026-12-01 起涨至 4/20/0.2；缓存仅隐式（无显式缓存写入计价）；无付费分段；不提供免费档",
+      "vendor": "Google"
+    },
+    "pg-gemini-4-argon": {
+      "display_name": "Gemini 4 Argon",
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1,
+      "cache_write": 0.0,
+      "_note": "别名跟随：代理网关加 pg- 前缀的 gemini-4-argon（本机会话实测出现）；计价同 gemini-4-argon",
+      "vendor": "Google"
+    },
     "gemini-3.8-flash": {
       "display_name": "Gemini 3.8 Flash",
       "input": 0.75,
@@ -128,6 +146,15 @@
       "cache_read": 0.2,
       "cache_write": 2.5,
       "_note": "Anthropic 5 代中坚基座模型；上市介绍价转为永久标准价；1h 缓存写 $4（2×）；Batch 优惠：1/5",
+      "vendor": "Anthropic"
+    },
+    "claude-5-sonnet": {
+      "display_name": "Claude Sonnet 5",
+      "input": 2,
+      "output": 10,
+      "cache_read": 0.2,
+      "cache_write": 2.5,
+      "_note": "别名跟随：网关把 claude-sonnet-5 写成 claude-5-sonnet（本机会话实测出现，推定指 Sonnet 5）；计价同 claude-sonnet-5",
       "vendor": "Anthropic"
     },
     "claude-opus-4-7": {
@@ -357,7 +384,7 @@
       "output": 30,
       "cache_read": 0.5,
       "cache_write": 0,
-      "_note": "分段计费：上下文 >200k 时单价翻倍（输入 10 / 输出 45 / 缓存读 1）",
+      "_note": "分段计费：上下文 >272k 时输入/缓存读单价翻倍、输出 1.5×（输入 10 / 输出 45 / 缓存读 1；官方定价页 2026-10-22 核对）",
       "vendor": "OpenAI"
     },
     "gpt-5.5-low": {
@@ -415,7 +442,7 @@
       "output": 15,
       "cache_read": 0.25,
       "cache_write": 0,
-      "_note": "分段计费：上下文 >200k 时单价翻倍（输入 5 / 输出 22.5 / 缓存读 0.5）",
+      "_note": "分段计费：上下文 >272k 时输入/缓存读单价翻倍、输出 1.5×（输入 5 / 输出 22.5 / 缓存读 0.5；官方定价页 2026-10-22 核对）",
       "vendor": "OpenAI"
     },
     "gpt-5.4-mini": {
@@ -1067,7 +1094,16 @@
       "output": 1.2,
       "cache_read": 0.006,
       "cache_write": 0.0,
-      "_note": "深度求索 V4.1 Flash 官方标准计价模型；具备高通量与毫秒级首字延迟；承接原退役之 V4 Flash 与 V4 Pro 请求",
+      "_note": "深度求索 V4.1 Flash 官方标准计价模型；具备高通量与毫秒级首字延迟；承接原退役之 V4 Flash 与 V4 Pro 请求；官方定价页（2026-10-22 核对）峰谷分时：高峰档（工作日 UTC 01:00–04:00、06:00–10:00，中国法定假日除外）为本表价；其余时段（含周末）半价（0.15/0.6/0.003）",
+      "vendor": "DeepSeek"
+    },
+    "deepseek-v4.1-flash": {
+      "display_name": "DeepSeek V4.1 Flash",
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.006,
+      "cache_write": 0.0,
+      "_note": "DeepSeek-V4.1-Flash-1017，官方 API 名 deepseek-flash；计价同 deepseek-flash；官方定价页（2026-10-22 核对）峰谷分时：高峰档（工作日 UTC 01:00–04:00、06:00–10:00，中国法定假日除外）为本表价；其余时段（含周末）半价（0.15/0.6/0.003）；支持视觉与思考/非思考模式；1M 上下文",
       "vendor": "DeepSeek"
     },
     "deepseek-v4-flash": {
@@ -1076,7 +1112,7 @@
       "output": 1.2,
       "cache_read": 0.006,
       "cache_write": 0.0,
-      "_note": "下线路由：2026-09-11 起 V4 Flash 退役，由 V4.1 Flash 承接并按 Flash 价计费（当前生效）；旧峰谷分时已作废",
+      "_note": "下线路由：2026-09-11 起 V4 Flash 退役，由 V4.1 Flash 承接并按 Flash 价计费（当前生效）；旧峰谷分时已作废；官方定价页（2026-10-22 核对）峰谷分时：高峰档（工作日 UTC 01:00–04:00、06:00–10:00，中国法定假日除外）为本表价；其余时段（含周末）半价（0.15/0.6/0.003）",
       "vendor": "DeepSeek"
     },
     "deepseek-v4-flash-0731": {
@@ -1094,7 +1130,7 @@
       "output": 3.96,
       "cache_read": 0.044,
       "cache_write": 0.0,
-      "_note": "DeepSeek 官方撤回路由降价公告；定价页确认继续提供 V4 Pro API 且计费方式保持不变；当前按高峰档标准价 1.32/3.96/0.044（CNY 9/27/0.3）执行；无独立缓存写入计价",
+      "_note": "DeepSeek 官方撤回路由降价公告；定价页确认继续提供 V4 Pro API 且计费方式保持不变；当前按高峰档标准价 1.32/3.96/0.044（CNY 9/27/0.3）执行；无独立缓存写入计价；官方定价页（2026-10-22 核对）峰谷分时：高峰档（工作日 UTC 01:00–04:00、06:00–10:00，中国法定假日除外）为本表价；其余时段（含周末）半价（0.66/1.98/0.022）",
       "vendor": "DeepSeek"
     },
     "deepseek-v4-flash-vision-exp": {
@@ -1112,7 +1148,8 @@
       "output": 15,
       "cache_read": 0.3,
       "cache_write": 0,
-      "vendor": "Moonshot AI"
+      "vendor": "Moonshot AI",
+      "_note": "输入/缓存命中/输出价（3/0.3/15）来自 Kimi 官方资源页转述与第三方站点，Moonshot 官方定价表未能直接核实；K3 缓存写按 TTL（5min/1h）分档计费，具体价未核实，本表缓存写记 0（cc-switch 记 3.0）"
     },
     "k3": {
       "display_name": "Kimi K3",
@@ -1120,7 +1157,8 @@
       "output": 15,
       "cache_read": 0.3,
       "cache_write": 0,
-      "vendor": "Moonshot AI"
+      "vendor": "Moonshot AI",
+      "_note": "输入/缓存命中/输出价（3/0.3/15）来自 Kimi 官方资源页转述与第三方站点，Moonshot 官方定价表未能直接核实；K3 缓存写按 TTL（5min/1h）分档计费，具体价未核实，本表缓存写记 0（cc-switch 记 3.0）"
     },
     "kimi-k2-thinking": {
       "display_name": "Kimi K2 Thinking",
@@ -1264,7 +1302,16 @@
       "output": 1.2,
       "cache_read": 0.06,
       "cache_write": 0,
-      "_note": "MiniMax 3 代基座模型；分段计费：上下文 >512k 时单价翻倍（输入 0.6 / 输出 2.4 / 缓存读 0.12）",
+      "_note": "MiniMax 3 代基座模型；分段计费：上下文 >512k 时单价翻倍（输入 0.6 / 输出 2.4 / 缓存读 0.12）；官方永久五折后标准价（2026-10-22 核对）；Priority 档 1.5×（≤512k：0.45/1.8/0.09）",
+      "vendor": "MiniMax"
+    },
+    "minimax-m3.1-flash": {
+      "display_name": "MiniMax M3.1 Flash",
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.015,
+      "cache_write": 0,
+      "_note": "MiniMax 3.1 代极速轻量模型（2026-10-19）；官方定价页（2026-10-22 核对）；无独立缓存写入计价",
       "vendor": "MiniMax"
     },
     "glm-4.7": {
@@ -1750,6 +1797,15 @@
       "output": 1.5,
       "cache_read": 0.05,
       "cache_write": 0,
+      "vendor": "Mistral AI"
+    },
+    "mistral-large-4": {
+      "display_name": "Mistral Large 4",
+      "input": 1.36,
+      "output": 4.18,
+      "cache_read": 0,
+      "cache_write": 0,
+      "_note": "Mistral 2026-10 开放权重多模态旗舰（v26.10）；价取自 Mistral 官方 docs.mistral.ai/inference/pricing（2026-10-22）；注意 models.dev 记 0.68/2.09/0.07（恰为一半），两源冲突、未获第二官方来源印证；缓存读价官方未列",
       "vendor": "Mistral AI"
     },
     "mistral-medium-3.1": {
@@ -2552,11 +2608,20 @@
     },
     "claude-sonnet-5-5": {
       "display_name": "Claude Sonnet 5.5",
-      "input": 1.5,
-      "output": 7.5,
-      "cache_read": 0.15,
-      "cache_write": 1.875,
-      "_note": "Anthropic 2026 前沿中坚主力模型；兼顾强悍的代码执行力、高吞吐与成本效益；专为日常高频多回合编码与文档分析设计；1h 缓存写 $3（2×）；Batch 优惠：0.75/3.75",
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1,
+      "cache_write": 2.5,
+      "_note": "Anthropic 2026 前沿中坚主力模型；兼顾强悍的代码执行力、高吞吐与成本效益；专为日常高频多回合编码与文档分析设计；官方定价页（2026-10-22 核对）：$2/$10，缓存读 0.05×输入价（$0.10，非 Sonnet 5 的 $0.20）；1h 缓存写 $4（2×，5m 写 2.5 为本表 cache_write）；Batch 优惠：半价（1/5）",
+      "vendor": "Anthropic"
+    },
+    "claude-5-5-sonnet": {
+      "display_name": "Claude Sonnet 5.5",
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1,
+      "cache_write": 2.5,
+      "_note": "别名跟随：中转/网关把 claude-sonnet-5-5 写成 claude-5-5-sonnet（本机会话实测出现）；计价同 claude-sonnet-5-5",
       "vendor": "Anthropic"
     },
     "claude-haiku-5-5": {
@@ -2565,7 +2630,7 @@
       "output": 0.5,
       "cache_read": 0.01,
       "cache_write": 0.125,
-      "_note": "Anthropic 2026 极速轻量模型；2026-10-07 官方降价至 $0.1/$0.5（当前生效）；专为低延迟检索、日常补全与高通量流水线打造；缓存读取 0.1×、缓存写入 1.25× 输入价",
+      "_note": "Anthropic 2026 极速轻量模型；2026-10-07 官方降价至 $0.1/$0.5（当前生效）；专为低延迟检索、日常补全与高通量流水线打造；缓存读取 0.1×、缓存写入 1.25× 输入价；分段计费：prompt >100k tokens 时单价 0.5/2.5/0.05/0.625（输入/输出/缓存读/缓存写，官方定价页），本表取 ≤100k 档",
       "vendor": "Anthropic"
     },
     "gpt-6-sol": {

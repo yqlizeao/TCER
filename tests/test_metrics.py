@@ -292,7 +292,7 @@ def test_tool_usage_metrics_no_midword_false_aliases():
     u.tool_calls = {
         "Read": 2,
         "Edit": 2,
-        "GetTaskOutput": 19,  # live Grok — must not inflate read
+        "GetTaskOutput": 19,  # agent meta tool — must not inflate read
         "ReportFindings": 10,  # live Claude skill — must not inflate explore
         "Grep": 1,
     }
@@ -509,7 +509,7 @@ def test_files_touched_count():
 def test_files_touched_excludes_search_only_paths():
     """涉及文件 = 真正读/写/改过的文件；只被 Grep/Glob 搜过的路径不计入。
 
-    Grok/omp 的 Grep 会带 path，常为目录（如 .../tcer/core），把它计成「文件」会
+    omp 的 Grep 会带 path，常为目录（如 .../tcer/core），把它计成「文件」会
     虚高「独立文件数」并污染涉及文件弹窗。Claude 的 Grep 无 path，天然不受影响。
     只被搜索工具碰过的路径排除；若同一路径也被 Read/Write/Edit 碰过则保留。
     """
@@ -823,12 +823,11 @@ def test_activity_metrics_ratio_and_gap():
     u3.turn_stats = [TurnStat(0, ts=T), TurnStat(1, ts=T + 30_000),
                      TurnStat(2, ts=T + 31 * 60_000)]
     assert activity_metrics(u3)["user_gap_median_min"] is None
-    # Grok 审批等待从活跃时间中扣除
+    # 活跃占比封顶 1.0
     u4 = TokenUsage()
     u4.session_duration_ms = 10 * 60_000
-    u4.permission_wait_ms_total = 5 * 60_000
-    u4.turn_stats = [TurnStat(0, ts=T, duration_ms=8 * 60_000)]
-    assert activity_metrics(u4)["ai_active_ratio"] == 0.3
+    u4.turn_stats = [TurnStat(0, ts=T, duration_ms=12 * 60_000)]
+    assert activity_metrics(u4)["ai_active_ratio"] == 1.0
 
 
 def test_segment_metrics_decay_and_compaction():

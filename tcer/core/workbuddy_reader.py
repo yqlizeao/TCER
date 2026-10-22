@@ -202,7 +202,7 @@ def _collect_known_cwds() -> dict[str, str]:
     known: dict[str, str] = {}
     try:
         from tcer.core import paths
-        for src in ("claude", "codex", "grok", "omp", "pi", "antigravity"):
+        for src in ("claude", "codex", "omp", "pi", "antigravity"):
             for r in paths.list_project_refs(src):
                 if r.cwd and Path(r.cwd).is_dir():
                     dname = Path(r.cwd).name.lower()
@@ -222,7 +222,7 @@ def resolve_actual_project_cwd(
     if known_cwds is None:
         known_cwds = _collect_known_cwds()
 
-    # 1. Align with known real project directories across other sources (Claude/omp/Grok)
+    # 1. Align with known real project directories across other sources (Claude/omp/Codex)
     if pname_low in known_cwds:
         return known_cwds[pname_low]
 

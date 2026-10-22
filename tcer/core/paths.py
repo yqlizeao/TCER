@@ -189,22 +189,6 @@ def opencode_dir() -> Path:
     return Path.home() / ".local" / "share" / "opencode"
 
 
-def grok_dir() -> Path:
-    """Return the grok build CLI config directory (``~/.grok`` by default).
-
-    Honors ``GROK_HOME`` when set, matching grok build's data-root convention.
-    """
-    override = os.environ.get("GROK_HOME")
-    if override:
-        return Path(override)
-    return Path.home() / ".grok"
-
-
-def grok_sessions_dir() -> Path:
-    """Return the root directory containing Grok session directories."""
-    return grok_dir() / "sessions"
-
-
 def omp_dir() -> Path:
     """Return the Oh My Pi (omp) config root (``~/.omp`` by default).
 
@@ -298,11 +282,14 @@ def antigravity_conversations_dir() -> Path:
 def workbuddy_roots() -> list[Path]:
     """Return all existing WorkBuddy / CodeBuddy config/data roots.
 
-    Honors ``WORKBUDDY_DIR``, ``WORKBUDDY_AI_DIR``, or ``CODEBUDDY_DIR`` exclusively when set.
+    Honors ``WORKBUDDY_CONFIG_DIR`` / ``CODEBUDDY_CONFIG_DIR`` (the products' own
+    config-root variables; transcripts live under ``<root>/projects``) and the
+    legacy ``WORKBUDDY_DIR`` / ``WORKBUDDY_AI_DIR`` / ``CODEBUDDY_DIR`` exclusively when set.
     """
     env_specified = False
     roots: list[Path] = []
-    for env in ("WORKBUDDY_DIR", "WORKBUDDY_AI_DIR", "CODEBUDDY_DIR"):
+    for env in ("WORKBUDDY_CONFIG_DIR", "CODEBUDDY_CONFIG_DIR",
+                "WORKBUDDY_DIR", "WORKBUDDY_AI_DIR", "CODEBUDDY_DIR"):
         val = os.environ.get(env)
         if val:
             env_specified = True
@@ -413,7 +400,7 @@ def project_has_sessions(ref: ProjectRef) -> bool:
         from tcer.core import reader
         root = ref_root(ref)
         return bool(reader.discover_jsonl(ref.key, roots=[root] if root is not None else None))
-    if ref.source in ("codex", "grok", "omp", "pi", "workbuddy"):
+    if ref.source in ("codex", "omp", "pi", "workbuddy"):
         return bool(ref.session_paths)
     if ref.source == "opencode":
         from tcer.core import opencode_reader
@@ -464,7 +451,7 @@ def _max_mtime_ms(paths) -> int | None:
 def project_latest_activity_ms(ref: ProjectRef) -> int | None:
     """Epoch ms of *ref*'s most-recent session activity (approx ≈ last write).
 
-    Claude/codex/grok/omp/antigravity: max session-file mtime. OpenCode: max(session.time_created)
+    Claude/codex/omp/pi/antigravity/workbuddy: max session-file mtime. OpenCode: max(session.time_created)
     from SQLite (== authoritative started_at). Returns None when there are no
     scannable files / the project is empty / all stats failed. Lazy-imports
     readers like ``project_has_sessions`` to avoid import cycles with ``paths``.
@@ -474,7 +461,7 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
         root = ref_root(ref)
         files = reader.discover_jsonl(ref.key, roots=[root] if root is not None else None)
         return _max_mtime_ms(files)
-    if ref.source in ("codex", "grok", "omp", "pi", "workbuddy"):
+    if ref.source in ("codex", "omp", "pi", "workbuddy"):
         return _max_mtime_ms(ref.session_paths)
     if ref.source == "antigravity":
         from tcer.core import antigravity_reader
@@ -495,8 +482,8 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
 def list_project_refs(source: str = "all") -> list[ProjectRef]:
     """Return source-aware project refs for the GUI.
     ``source`` is one of ``"all"``, ``"claude"``, ``"codex"``, ``"opencode"``,
-    ``"grok"``, ``"omp"``, ``"pi"``, ``"antigravity"``, or ``"workbuddy"``. Claude refs wrap real project
-    directories; Codex/OpenCode/Grok/omp/pi/antigravity/workbuddy refs are grouped by session
+    ``"omp"``, ``"pi"``, ``"antigravity"``, or ``"workbuddy"``. Claude refs wrap real project
+    directories; Codex/OpenCode/omp/pi/antigravity/workbuddy refs are grouped by session
     cwd/project directory.
     """
     refs: list[ProjectRef] = []
@@ -520,10 +507,6 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
         from tcer.core import opencode_reader
 
         refs.extend(opencode_reader.list_project_refs())
-    if source in ("all", "grok"):
-        from tcer.core import grok_reader
-
-        refs.extend(grok_reader.list_project_refs())
     if source in ("all", "omp"):
         from tcer.core import omp_reader
 

@@ -18,10 +18,14 @@ Differences from omp absorbed without code here:
 
   * Pi has no 256-byte ``type:"title"`` slot — the first line is the
     ``type:"session"`` header directly; ``_session_line`` finds it regardless.
-  * Pi assistant messages carry no ``contextSnapshot`` / ``duration`` / ``ttft``
-    (those are omp-fork additions), so ``peak_input_tokens`` stays 0 and TTFT is
-    unavailable — mirrored in ``metric_defs._SOURCE_SUPPORT`` where ``pi`` is
-    deliberately absent from ``ttft`` / ``ttft_p95``.
+  * Pi assistant messages carry no ``contextSnapshot`` / ``ttft`` (omp-fork
+    additions), so ``peak_input_tokens`` stays 0 and TTFT is unavailable.
+    Upstream 1.x does record ``durationMs`` (per-response wall time), read by the
+    shared parser alongside omp's ``duration``.
+  * Pi ``model_change`` carries ``provider`` + ``modelId`` (omp: ``model``);
+    ``edit`` takes ``arguments.edits[{oldText,newText}]`` and its result details
+    hold only ``diff``/``patch`` -- LOC is rebuilt from the arguments.
+  * ``usage.reasoning`` is a subset of ``output`` (upstream ai/types.ts).
 
 Subagent folding assumes Pi nests transcripts under ``<stem>/`` like omp; if
 Pi's layout differs, ``_is_subagent_file`` simply returns False and subagents

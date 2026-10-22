@@ -29,6 +29,7 @@ without touching omp's SQLite state (``agent.db`` etc.). Read-only.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from tcer.core import pricing
@@ -312,10 +313,20 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
             u.ended_at = ts if u.ended_at is None else max(u.ended_at, ts)
 
         if typ == "model_change":
-            model = obj.get("model")
+            # omp: ``model`` = "provider/id"; Pi 上游: ``provider`` + ``modelId``。
+            model = obj.get("model") or obj.get("modelId")
             if isinstance(model, str) and model:
                 current_model = pricing.normalize(model)
             continue
+
+        if typ == "compaction":
+            _note_compaction(u, obj, turn_idx)
+            continue
+
+        # 注意：omp ``model_usage`` / Pi ``usage`` / compaction.usage / toolResult.usage
+        # 是非主上下文的辅助模型用量，刻意不并入 token 桶——audit 的
+        # turn_stats_match_total 不变量要求桶总量 == Σ逐回合，且辅助模型
+        # （如 jev-latest）无价表条目；需共享层支持后再接入（见报告建议）。
 
         if typ == "mode_change":
             # 计划模式生命周期（mode=plan 进入；plan_paused/none 退出不计）。
@@ -383,7 +394,8 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
             # 429 限流（errorMessage 含 'Too many requests'）——对齐 Claude
             # api_error(429) 的 rate_limit_hits 口径；其余错误不计。
             err_msg = mm.get("errorMessage")
-            if isinstance(err_msg, str) and "too many requests" in err_msg.lower():
+            if (mm.get("errorStatus") == 429
+                    or (isinstance(err_msg, str) and _RATE_LIMIT_RE.search(err_msg))):
                 u.rate_limit_reached_count += 1
                 u.rate_limit_names.add("429")
 
@@ -420,7 +432,8 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
             if prompt > u.peak_input_tokens:
                 u.peak_input_tokens = prompt
 
-        dur = _as_int(mm.get("duration"))
+        # omp: ``duration``；Pi 上游: ``durationMs``（响应开始→结束，单调时钟）。
+        dur = _as_int(mm.get("duration") or mm.get("durationMs"))
         if dur > 0:
             active_duration_ms += dur
             # 仅当本响应已建 TurnStat（有真实 usage）才回填——零 usage 响应
@@ -621,20 +634,19 @@ def _loc_scan_single(path: Path):
                 "file_path": fp,
                 "content": content if isinstance(content, str) else "",
             })
-        else:  # edit / ast_edit → authoritative before/after from details
-            fp = _first_str(details.get("path"), details.get("resolvedPath"))
-            old_text = details.get("oldText")
-            new_text = details.get("newText")
-            if not fp or not (isinstance(old_text, str) or isinstance(new_text, str)):
+        else:  # edit / ast_edit
+            changes = _edit_changes(args, details)
+            if not changes:
                 continue
             has_signal = True
-            if not _is_code(fp):
-                continue
-            acc.on_tool_use("Edit", {
-                "file_path": fp,
-                "old_string": old_text if isinstance(old_text, str) else "",
-                "new_string": new_text if isinstance(new_text, str) else "",
-            })
+            for fp, old_text, new_text in changes:
+                if not fp or not _is_code(fp):
+                    continue
+                acc.on_tool_use("Edit", {
+                    "file_path": fp,
+                    "old_string": old_text,
+                    "new_string": new_text,
+                })
 
     sloc = acc.finish() if has_signal else SessionLoc(added=0, deleted=0)
     return sloc, has_signal
@@ -651,6 +663,95 @@ def has_loc_signal(path: Path) -> bool:
 
 
 # --------------------------------------------------------------------------- helpers
+
+_RATE_LIMIT_RE = re.compile(r"too many requests|\b429\b", re.IGNORECASE)
+# omp diff: ``+12|text`` / ``-12|text``；Pi diff: ``+ 12 text``（行号 padStart）。
+_DIFF_LINE_RE = re.compile(r"^([+-])\s*\d+(?:\||\s)(.*)$")
+
+
+def _note_compaction(u: TokenUsage, obj: dict, turn_idx: int) -> None:
+    """Record a ``compaction`` entry (omp + Pi share ``tokensBefore``; omp adds ``tokensAfter``)."""
+    u.compaction_count += 1
+    u.compaction_turns.append(turn_idx)
+    pre = _as_int(obj.get("tokensBefore"))
+    post = _as_int(obj.get("tokensAfter"))
+    if pre:
+        u.compaction_pre_tokens_max = max(u.compaction_pre_tokens_max, pre)
+        if post and pre > post:
+            u.compaction_discarded_tokens += pre - post
+
+
+def _diff_to_texts(diff) -> tuple[str, str] | None:
+    """Rebuild (old, new) text from a display diff's +/- lines (context ignored)."""
+    if not isinstance(diff, str):
+        return None
+    removed: list[str] = []
+    added: list[str] = []
+    for line in diff.split("\n"):
+        m = _DIFF_LINE_RE.match(line)
+        if not m:
+            continue
+        (added if m.group(1) == "+" else removed).append(m.group(2))
+    if not removed and not added:
+        return None
+    return "\n".join(removed), "\n".join(added)
+
+
+def _arg_edit_pairs(args: dict) -> list[tuple[str, str]]:
+    """Pi edit args: ``edits[{oldText,newText}]`` (array / JSON string / single
+    object) or the legacy top-level ``oldText``/``newText``."""
+    edits = args.get("edits")
+    if isinstance(edits, str):
+        try:
+            edits = json.loads(edits)
+        except ValueError:
+            edits = None
+    if isinstance(edits, dict):
+        edits = [edits]
+    out: list[tuple[str, str]] = []
+    if isinstance(edits, list):
+        for e in edits:
+            if (isinstance(e, dict) and isinstance(e.get("oldText"), str)
+                    and isinstance(e.get("newText"), str)):
+                out.append((e["oldText"], e["newText"]))
+    if not out and isinstance(args.get("oldText"), str) and isinstance(args.get("newText"), str):
+        out.append((args["oldText"], args["newText"]))
+    return out
+
+
+def _edit_changes(args: dict, details: dict) -> list[tuple[str, str, str]]:
+    """Resolve an edit/ast_edit call to ``[(path, old_text, new_text), ...]``.
+
+    Priority: omp ``details.oldText/newText`` -> Pi ``arguments.edits`` ->
+    omp multi-file ``details.perFileResults[*].diff`` -> display ``details.diff``
+    (omp ``snapshotsPruned`` results keep only the diff).
+    """
+    fp = _first_str(details.get("path"), details.get("resolvedPath"), args.get("path"))
+    old_text = details.get("oldText")
+    new_text = details.get("newText")
+    if isinstance(old_text, str) or isinstance(new_text, str):
+        return [(fp or "", old_text if isinstance(old_text, str) else "",
+                 new_text if isinstance(new_text, str) else "")]
+    pairs = _arg_edit_pairs(args)
+    if pairs and fp:
+        return [(fp, o, n) for o, n in pairs]
+    per_file = details.get("perFileResults")
+    if isinstance(per_file, list):
+        out: list[tuple[str, str, str]] = []
+        for item in per_file:
+            if not isinstance(item, dict):
+                continue
+            t = _diff_to_texts(item.get("diff"))
+            ipath = _first_str(item.get("path"))
+            if t and ipath:
+                out.append((ipath, t[0], t[1]))
+        if out:
+            return out
+    t = _diff_to_texts(details.get("diff"))
+    if t and fp:
+        return [(fp, t[0], t[1])]
+    return []
+
 
 def _add_turn_usage(u: TokenUsage, usage: dict, model: str, turn: int, ts: int | None) -> None:
     """Fold one assistant ``usage`` block into ``u`` (+ a TurnStat step).

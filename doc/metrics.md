@@ -52,18 +52,13 @@ cost = (input × r["input"] + cache_write × r["cache_write"] + cache_read × r[
 | **改后验证率** | Write/Edit 后 3 回合内出现 Bash 的占比 | 全部 |
 | **一次写对率** | 只编辑 1 次的文件 ÷ 被编辑文件总数 | 全部 |
 | **人工修正** | `toolUseResult.userModified=true` 计数 | Claude |
-| **回退事件 / 回退行** | OpenCode `revert` / Grok `hasReverted`、`agentLines*Reverted` | OpenCode/Grok |
-| **落地提交** | Grok `signals.gitCommitCount`（PR 数在导出里） | Grok |
-| **用户取消 / 重新生成** | Grok `cancellationCount` / `regenerationCount` | Grok |
-| **用户评价** | Grok `positiveRatings` / `negativeRatings` | Grok |
-| **审批等待** | Σ `permission_resolved.wait_ms`（括号内为请求次数） | Grok |
-| **输出间隔 P50/P99** | Grok `itlP50Ms` / `itlP99Ms`（inter-token latency） | Grok |
+| **回退事件** | OpenCode `session.revert` | OpenCode |
 | **首字延迟 P95** | 逐回合 TTFT 样本的 P95 | Codex |
 | **配额峰值** | max(primary/secondary `used_percent`)/100 | Codex |
 | **钩子开销** | Σ `stop_hook_summary.hookInfos[].durationMs`（次数/失败数） | Claude |
 | **排队输入** | `queue-operation` 行计数 | Claude |
 | **限流命中** | Claude 429 `api_error` 行 / Codex 限流快照 | Claude/Codex |
-| **网页搜索** | Claude `server_tool_use` / Codex·Grok 事件 | Claude/Codex/Grok |
+| **网页搜索** | Claude `server_tool_use` / Codex 事件 | Claude/Codex |
 
 导出独有（不进指标网格）：`patch_diff_added/deleted`（structuredPatch 独立差分，交叉校验回放 LOC）、`source_reported_cost_usd`（OpenCode 自报成本，交叉校验计价）、`mcp_calls_by_attr`（MCP 精确归因）、`abort_reasons`。
 
