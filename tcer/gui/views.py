@@ -261,6 +261,9 @@ def project_open_path(project) -> str:
         return target_dir
 
     source = getattr(project, "source", "claude")
+    if source == "opencode":
+        from tcer.core.paths import opencode_dir
+        return str(opencode_dir())
     if source == "codex":
         from tcer.core.paths import codex_sessions_dir
         return str(codex_sessions_dir())
@@ -622,7 +625,7 @@ _NavStack = EditorWorkbench
 
 
 class StatusIconBtn(tk.Frame):
-    """状态栏纯图标小按钮：16x16 极简 Codicon，悬停微圆角底，带 Tooltip 与点击下钻。"""
+    """状态栏纯图标小按钮：16x16 线性图标，悬停微圆角底，带 Tooltip 与点击下钻。"""
 
     def __init__(self, parent, icon_name: str, *, command=None, tip: str = "") -> None:
         super().__init__(parent, bg=theme.STATUS_BG, cursor=CLICK_CURSOR if command else "arrow")
@@ -1020,7 +1023,7 @@ class FilterBar:
                 self.controller.set_view_mode(v)
 
             pill = RoundedPill(seg_bg, text=label, icon=_seg_icons.get(val),
-                               command=_click, width=58, height=22, radius=5,
+                               command=_click, width=58, height=22, radius=theme.RADIUS_M,
                                bg=theme.PANEL)
             pill.pack(side="left", padx=1)
             self._view_pills[val] = pill
@@ -1059,7 +1062,7 @@ class FilterBar:
                        self._src_capsule.winfo_rooty() + self._src_capsule.winfo_height())
 
         self._src_capsule = RoundedPill(parent_frame, text=f"{self.source_var.get()} ▾",
-                                        command=_on_src_click, width=58, height=22, radius=5,
+                                        command=_on_src_click, width=58, height=22, radius=theme.RADIUS_M,
                                         bg=theme.PANEL)
         self._src_capsule.pack(side="right", padx=(2, 4))
         self._src_lbl = self._src_capsule
@@ -1079,7 +1082,7 @@ class FilterBar:
         _disp_names = {"today": "今天", "week": "本周", "month": "本月", "all": "全部"}
         cur_disp = _disp_names.get(self._current_preset, "今天")
         self._time_capsule = RoundedPill(parent_frame, text=f"{cur_disp} ▾",
-                                         command=_on_time_click, width=58, height=22, radius=5,
+                                         command=_on_time_click, width=58, height=22, radius=theme.RADIUS_M,
                                          bg=theme.PANEL)
         self._time_capsule.pack(side="right", padx=(2, 4))
         self._time_lbl = self._time_capsule
@@ -1204,7 +1207,7 @@ class ProjectColumn:
                                     font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         self.title_label.pack(side="left", padx=(theme.PAD_XS, 0))
         self._count_badge = RoundedPill(
-            header, text="0", width=28, height=18, radius=4,
+            header, text="0", width=28, height=18, radius=theme.RADIUS_S,
             fill=theme.CONTROL_BG, bg=theme.SECTION_HEADER_BG, fg=theme.MUTED,
             command=None)
         self._count_badge.pack(side="left", padx=(4, 0))
@@ -1214,7 +1217,7 @@ class ProjectColumn:
         self._filter_var = tk.StringVar(value="")
         self._search_box = RoundedSearchBox(
             header, textvariable=self._filter_var, icon=ui_icon(header, "search"),
-            width=110, height=22, radius=5, bg=theme.SECTION_HEADER_BG)
+            width=110, height=22, radius=theme.RADIUS_M, bg=theme.SECTION_HEADER_BG)
         self._search_box.pack(side="right", padx=(2, 4))
         self.search_entry = self._search_box.entry
         Tooltip(self._search_box.entry, "按项目名称 / 路径 / 来源过滤 · Esc 清空")
@@ -1487,7 +1490,7 @@ class SessionColumn:
                                     font=theme.FONT_UI_SMALL_BOLD, anchor="w")
         self.title_label.pack(side="left", padx=(theme.PAD_XS, 0))
         self._count_badge = RoundedPill(
-            header, text="0", width=28, height=18, radius=4,
+            header, text="0", width=28, height=18, radius=theme.RADIUS_S,
             fill=theme.CONTROL_BG, bg=theme.SECTION_HEADER_BG, fg=theme.MUTED,
             command=None)
         self._count_badge.pack(side="left", padx=(4, 0))
@@ -1498,7 +1501,7 @@ class SessionColumn:
         self._filter_var = tk.StringVar(value="")
         _search_box = RoundedSearchBox(header, textvariable=self._filter_var,
                                        icon=ui_icon(header, "search"),
-                                       width=110, height=22, radius=5,
+                                       width=110, height=22, radius=theme.RADIUS_M,
                                        bg=theme.SECTION_HEADER_BG)
         _search_box.pack(side="right", padx=(2, 4))
         self.search_entry = _search_box.entry  # Ctrl+F 全局聚焦入口
@@ -1889,6 +1892,11 @@ class SessionColumn:
 
         # Session info sub-items
         menu.add_command(
+            label="查看会话记录",
+            command=lambda: self.controller.show_transcript(report, self._reports),
+            image=ui_icon(self.container, "outline"), compound="left",
+        )
+        menu.add_command(
             label=f"查看详情 · {sid[:20]}…",
             command=lambda: self.controller.show_session_detail(sid),
             image=ui_icon(self.container, "session"), compound="left",
@@ -2175,7 +2183,7 @@ class MetricPanel:
         # 右侧：会话/项目上下文与环境信息记录徽标（非点击按钮，专注记录关键信息）
         # 模式切换胶囊：简要版（默认，隐藏空/不适用项）⟷ 完整版（展示全量槽位）
         self._mode_btn = RoundedPill(
-            h, text="简要版", width=68, height=22, radius=4,
+            h, text="简要版", width=68, height=22, radius=theme.RADIUS_S,
             fill=theme.CONTROL_BG, hover_fill=theme.HOVER_BG,
             bg=theme.BG, fg=theme.ACCENT, font=theme.FONT_UI_SMALL_BOLD,
             command=self._toggle_view_density)
@@ -2183,21 +2191,21 @@ class MetricPanel:
         Tooltip(self._mode_btn, "点击切换：【简要版】仅展示有数据的指标；【完整版】展开全量指标槽位。")
 
         self._tag_time = RoundedPill(
-            h, text="-", width=120, height=22, radius=4,
+            h, text="-", width=120, height=22, radius=theme.RADIUS_S,
             fill=theme.CONTROL_BG, hover_fill=None, bg=theme.BG, fg=theme.MUTED,
             font=theme.FONT_MONO, command=None)
         self._tag_time.pack(side="right", padx=(3, 4))
         Tooltip(self._tag_time, "会话启动/完成时间")
 
         self._tag_task = RoundedPill(
-            h, text="任务: -", width=95, height=22, radius=4,
+            h, text="任务: -", width=95, height=22, radius=theme.RADIUS_S,
             fill=theme.CONTROL_BG, hover_fill=None, bg=theme.BG, fg=theme.FG,
             command=None)
         self._tag_task.pack(side="right", padx=3)
         Tooltip(self._tag_task, "任务类型（TTAF 归一化基准类别）")
 
         self._tag_meta = RoundedPill(
-            h, text="", width=105, height=22, radius=4,
+            h, text="", width=105, height=22, radius=theme.RADIUS_S,
             fill=theme.CONTROL_BG, hover_fill=None, bg=theme.BG, fg=theme.MUTED,
             command=None)
         self._tag_meta.pack(side="right", padx=3)
@@ -4038,7 +4046,7 @@ class PhasePortraitWidget:
         self._view_mode = "manifold"
         self._mode_btns = {}
         for m_key, m_name in (("manifold", "时序流形"), ("phase_plane", "相速度极限环")):
-            btn = RoundedPill(self.mode_frame, text=m_name, radius=4, height=22,
+            btn = RoundedPill(self.mode_frame, text=m_name, radius=theme.RADIUS_S, height=22,
                               fill=theme.PANEL_2, hover_fill=theme.HOVER_BG,
                               bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_SMALL,
                               command=lambda _p=None, m=m_key: self._set_mode(m))
@@ -4065,7 +4073,7 @@ class PhasePortraitWidget:
         self.zoom_frame = tk.Frame(left_top, bg=theme.CARD_HEADER_BG)
         self.zoom_frame.pack(side="left", padx=(12, 0))
 
-        btn_out = RoundedPill(self.zoom_frame, text="－", width=22, height=20, radius=4,
+        btn_out = RoundedPill(self.zoom_frame, text="－", width=22, height=20, radius=theme.RADIUS_S,
                               fill=theme.PANEL_2, hover_fill=theme.HOVER_BG,
                               bg=theme.CARD_HEADER_BG, fg=theme.FG,
                               command=lambda: self._zoom(0.85))
@@ -4075,13 +4083,13 @@ class PhasePortraitWidget:
                                  fg=theme.MUTED, font=theme.FONT_UI_SMALL, padx=4)
         self.zoom_lbl.pack(side="left", padx=1)
 
-        btn_in = RoundedPill(self.zoom_frame, text="＋", width=22, height=20, radius=4,
+        btn_in = RoundedPill(self.zoom_frame, text="＋", width=22, height=20, radius=theme.RADIUS_S,
                              fill=theme.PANEL_2, hover_fill=theme.HOVER_BG,
                              bg=theme.CARD_HEADER_BG, fg=theme.FG,
                              command=lambda: self._zoom(1.18))
         btn_in.pack(side="left", padx=1)
 
-        btn_rst = RoundedPill(self.zoom_frame, text="复位", width=36, height=20, radius=4,
+        btn_rst = RoundedPill(self.zoom_frame, text="复位", width=36, height=20, radius=theme.RADIUS_S,
                               fill=theme.PANEL_2, hover_fill=theme.HOVER_BG,
                               bg=theme.CARD_HEADER_BG, fg=theme.FG,
                               command=lambda: self._reset_zoom())
@@ -6133,7 +6141,7 @@ class LlmReportsView:
                 "TypeSafe Jev 引擎累计计费口径：仅真实网络调用（判定缓存命中不计），"
                 "按官方输入单价 $0.042/百万 token 折算，输出 token 免费")
 
-        # 右侧操作图标组：清空与取消任务（纯 Codicon 图标化，沉浸底色，悬停高亮，永不截断）
+        # 右侧操作图标组：清空与取消任务（纯图标化，沉浸底色，悬停高亮，永不截断）
         _trash_icon = ui_icon(bar, "trash")
         clear_btn = flat_button(bar, "清空", self._clear_all,
                                 image=_trash_icon, bg=theme.BG,
@@ -6169,7 +6177,7 @@ class LlmReportsView:
             ("other", "其他", 42),
         ]
         for k, lbl, w in pills:
-            btn = RoundedPill(pill_box, text=lbl, width=w, height=22, radius=5,
+            btn = RoundedPill(pill_box, text=lbl, width=w, height=22, radius=theme.RADIUS_M,
                               fill=theme.CONTROL_BG, hover_fill=theme.HOVER_BG,
                               bg=theme.BG, fg=theme.FG, font=theme.FONT_UI_SMALL,
                               command=lambda _p=None, kind=k: self._set_kind_filter(kind))
@@ -6182,7 +6190,7 @@ class LlmReportsView:
         self._search_box = RoundedSearchBox(
             filter_box, textvariable=self._search_var,
             icon=ui_icon(filter_box, "search"),
-            width=240, height=22, radius=5,
+            width=240, height=22, radius=theme.RADIUS_M,
             fill=theme.CONTROL_BG, bg=theme.BG, fg=theme.FG)
         self._search_box.pack(fill="x", pady=(2, 4))
         self.search_entry = self._search_entry = self._search_box.entry
@@ -6224,7 +6232,7 @@ class LlmReportsView:
             font=(theme.FONT_CJK, 12, "bold"), anchor="w", justify="left")
         self._title_lbl.pack(side="left", fill="x", expand=True)
 
-        # 右侧操作区：复制与删除按钮（Codicon 图标化，沉浸于 PANEL_2，悬浮高亮）
+        # 右侧操作区：复制与删除按钮（图标化，沉浸于 PANEL_2，悬浮高亮）
         _copy_icon = ui_icon(top_row, "copy")
         self._copy_btn = flat_button(
             top_row, "复制全文", self._copy_markdown,
@@ -6246,7 +6254,7 @@ class LlmReportsView:
         self._badge_row.pack(fill="x", padx=10, pady=(0, 8))
 
         self._kind_badge = RoundedPill(
-            self._badge_row, text="", width=95, height=22, radius=4,
+            self._badge_row, text="", width=95, height=22, radius=theme.RADIUS_S,
             fill=theme.PANEL, hover_fill=None, bg=theme.PANEL_2, fg=theme.ACCENT,
             command=None)
         self._kind_badge.pack(side="left", padx=(0, 6))
@@ -7539,7 +7547,7 @@ class TermbaseView:
                 text=lbl,
                 width=w,
                 height=22,
-                radius=5,
+                radius=theme.RADIUS_M,
                 fill=theme.CONTROL_BG,
                 hover_fill=theme.HOVER_BG,
                 bg=theme.BG,
@@ -7557,7 +7565,7 @@ class TermbaseView:
             icon=ui_icon(filter_box, "search"),
             width=240,
             height=22,
-            radius=5,
+            radius=theme.RADIUS_M,
             fill=theme.CONTROL_BG,
             bg=theme.BG,
             fg=theme.FG,

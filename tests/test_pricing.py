@@ -554,3 +554,40 @@ def test_2026_10_22_sync_new_entries():
     # Mistral Large 4 must not bind to mistral-large-3-2512 / latest
     assert pricing.table_key("mistral-large-4") == "mistral-large-4"
     assert pricing.table_key("mistral-large-4-2610") == "mistral-large-4"
+
+
+@pytest.mark.parametrize("model", [
+    "gpt-5.8", "gpt-6.5", "glm-5.9", "grok-4.9", "grok-4-9", "kimi-k2.9",
+    "claude-haiku-5",
+])
+def test_prefix_match_rejects_version_continuation(model):
+    """新型号不得静默套用旧型号价格（gpt-5.8≠gpt-5）：未知型号走 default 并上报。"""
+    assert pricing.table_key(model) is None
+
+
+@pytest.mark.parametrize("model,key", [
+    ("claude-opus-4-8[1m]", "claude-opus-4-8"),
+    ("claude-opus-4-5-thinking", "claude-opus-4-5"),
+    ("glm-5p2", "glm-5.2"),
+])
+def test_prefix_match_keeps_real_suffixes(model, key):
+    assert pricing.table_key(model) == key
+
+
+def test_prefix_boundary_rules():
+    ok = pricing._prefix_boundary_ok
+    assert ok("claude-opus-4-6", "-20260206")      # 8 位日期快照
+    assert ok("deepseek-r1", "-0528")              # 4 位日期快照
+    assert ok("x-4", "[1m]") and ok("x-4", ":free") and ok("x-4", "@2025")
+    assert not ok("gpt-5", ".8") and not ok("gpt-4", "o")
+    assert not ok("grok-4", "-9") and not ok("claude-haiku-5", "-5")
+
+
+@pytest.mark.parametrize("model,key", [
+    ("us.anthropic.claude-opus-4-8-v1:0", "claude-opus-4-8"),
+    ("anthropic.claude-opus-4-8", "claude-opus-4-8"),
+    ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+])
+def test_cloud_namespace_prefix_stripped(model, key):
+    """Bedrock 等云厂商点号命名空间剥离（cc-switch 同规则）。"""
+    assert pricing.table_key(model) == key

@@ -53,7 +53,7 @@ async function paintAliasBody() {
       api(`/api/aliases?kind=${kind}`),
     ]);
   } catch (e) {
-    body.innerHTML = `<div class="empty">加载失败：${e.message}</div>`;
+    body.innerHTML = `<div class="empty">加载失败：${escapeHTML(e.message)}</div>`;
     return;
   }
 

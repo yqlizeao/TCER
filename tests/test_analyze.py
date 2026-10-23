@@ -545,20 +545,20 @@ def test_real_projects_grouping(monkeypatch):
     from tcer.core.models import ProjectRef
 
     codex = ProjectRef(source="codex", key="C--GitHub-TCER",
-                       display_name="TCER", cwd="C:\GitHub\TCER")
+                       display_name="TCER", cwd="C:\\GitHub\\TCER")
     pi = ProjectRef(source="pi", key="C--github-tcer",
                     display_name="TCER", cwd="c:/github/TCER")   # 大小写+斜杠差异
     omp = ProjectRef(source="omp", key="C--GitHub-TCER",
-                     display_name="TCER", cwd="C:\GitHub\TCER\\")  # 尾斜杠
+                     display_name="TCER", cwd="C:\\GitHub\\TCER\\")  # 尾斜杠
     child = ProjectRef(source="codex", key="C--GitHub-TCER-sub",
-                       display_name="sub", cwd="C:\GitHub\TCER\sub")  # 子路径
+                       display_name="sub", cwd="C:\\GitHub\\TCER\\sub")  # 子路径
     nocwd = ProjectRef(source="opencode", key="X", display_name="X", cwd=None)
     claude = ProjectRef(source="claude", key="c--GitHub-TCER",
                         display_name="c--GitHub-TCER", cwd=None,
                         config_root=Path("C:/Users/u/.claude"))
     # Claude 的 cwd 来自首会话 meta——桩掉 IO，验证聚合层确实消费它。
     monkeypatch.setattr(analyze, "_claude_ref_cwd",
-                        lambda ref: "C:\GitHub\TCER" if "tcer" in ref.key.lower() else None)
+                        lambda ref: "C:\\GitHub\\TCER" if "tcer" in ref.key.lower() else None)
 
     out = analyze.real_projects([codex, pi, omp, child, nocwd, claude])
     by_n_refs = sorted(out, key=lambda g: len(g.refs))

@@ -7,8 +7,8 @@ conversations and never reads ``message.usage``).
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 from tcer.core.models import SessionMeta, ToolOp, TokenUsage
@@ -19,51 +19,16 @@ from tcer.core.parse_util import (
 )
 from tcer.core.paths import claude_config_dirs
 from tcer.core import pricing
+from tcer.core.user_input import (
+    SLASH as _UI_SLASH,
+    classify_claude_record as _classify_user,
+    clip as _clip_user,
+)
 
-# User-role texts that Claude Code injects (not real human input). These
-# ``<…>`` tags / markers are matched on the RAW text BEFORE :func:`_strip_tags`
-# removes the tags — matching after stripping erases the tags and lets them
-# through (observed ~17% of popup rows were injections before this fix).
-_TITLE_NOISE_PREFIXES = (
-    "<local-command-caveat", "<local-command-stdout", "<local-command-stderr",
-    "<command-name>", "<command-message>",
-    "<ide_opened_file>", "<ide_selection>",
-    "<task-notification>", "<system-reminder>",
-    "/clear",
-    "[Request interrupted",
-)
-# After tag removal, skip these system-generated phrases (covers bodies whose
-# opening tag was consumed elsewhere, plus plain-text injections such as the
-# compact-continuation preamble).
-_TITLE_NOISE_AFTER_CLEAN = (
-    "The user opened the file", "The user selected the lines",
-    "This session is being continued from a previous conversation",
-    "You are an expert",
-)
 TITLE_MAX_CHARS = 80
 
-_TAG_RE = re.compile(r'<[^>]+>')
-
-# 纠正措辞正则与 slash/纠正判定移至 parse_util（跨源 SSOT，Claude/omp/pi 共用）。
-
-
-def _strip_tags(txt: str) -> str:
-    """Remove XML/HTML-like tags (e.g. ``<ide_opened_file>…</ide_opened_file>``)."""
-    return _TAG_RE.sub('', txt).strip()
-
-
-def _is_user_noise(txt: str) -> bool:
-    """Whether a user-role text is Claude-Code-injected, not real human input.
-
-    Two-stage check mirroring title extraction: ``<…>`` noise prefixes are
-    matched on the RAW text *before* tag stripping — the prefixes ARE tags, so
-    stripping first would delete them and always miss (the pre-fix bug).
-    Then the cleaned text is checked against post-strip phrases.
-    """
-    if txt.startswith(_TITLE_NOISE_PREFIXES):
-        return True
-    cleaned = _strip_tags(txt)
-    return cleaned.startswith(_TITLE_NOISE_AFTER_CLEAN)
+# 「用户提问」判定（注入/斜杠/中断/IDE 上下文）的 SSOT 在 user_input；
+# 纠正措辞正则与 slash/纠正判定在 parse_util（跨源 SSOT）。
 
 
 def discover_jsonl(project_hash: str | None = None, *,
@@ -203,8 +168,17 @@ def delete_session(any_path: Path) -> list[Path]:
     return removed
 
 
-def iter_messages(path: Path):
-    """Yield each parsed JSON object in a session jsonl, skipping meta/garbage lines."""
+# 不是会话事件的记录类型（存档/索引类），所有 Claude 读取路径一律跳过。
+_NON_EVENT_TYPES = frozenset({"api-request-blob"})
+
+
+def iter_messages(path: Path, *, keep_meta: bool = False):
+    """Yield each parsed JSON object in a session jsonl, skipping meta/garbage lines.
+
+    ``keep_meta=True`` also yields ``isMeta`` lines (caller must skip them itself);
+    only ``scan_session`` uses it, to keep the parentUuid chain intact for
+    request-start resolution.
+    """
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
@@ -214,7 +188,14 @@ def iter_messages(path: Path):
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if obj.get("isMeta") is True:
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("isMeta") is True and not keep_meta:
+                continue
+            # api-request-blob：新版 Claude Code 按 hash 存档的「发往 API 的请求消息」
+            # 副本（system/assistant/user 角色皆有、无 usage/id），不是会话事件——
+            # 不跳过会把历史消息再算一遍（实测 66 会话多出 175 条假提问）。
+            if obj.get("type") in _NON_EVENT_TYPES:
                 continue
             yield obj
 
@@ -269,28 +250,19 @@ def read_user_messages(path: Path) -> list[str]:
 
     Mirrors Codex privacy boundary: analysis keeps only ``user_msgs`` counts;
     full bodies are read when the user opens the popup.
+
+    Classification is the shared SSOT :mod:`tcer.core.user_input` (cc-switch
+    rules: injected context / slash commands / interrupts / ``!cmd`` are not
+    questions; ``<system-reminder>`` and IDE context blocks are stripped).
+    Callers wanting "the session's user messages" should go through
+    :func:`tcer.core.user_input.read_user_messages`, which reads the main
+    session only.
     """
     messages: list[str] = []
     for obj in iter_messages(path):
-        msg = obj.get("message")
-        if not isinstance(msg, dict) or msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        is_real_user = False
-        if isinstance(content, str) and content.strip():
-            is_real_user = True
-        elif isinstance(content, list):
-            is_real_user = any(
-                isinstance(it, dict) and it.get("type") == "text" for it in content
-            )
-        if not is_real_user:
-            continue
-        txt = extract_text(content).strip()
-        if not txt or _is_user_noise(txt):
-            continue
-        txt = _strip_tags(txt)
-        if txt:
-            messages.append(txt[:500])
+        ui = _classify_user(obj)
+        if ui is not None and ui.is_question:
+            messages.append(_clip_user(ui.text))
     return messages
 
 
@@ -324,17 +296,9 @@ def read_dialogue(path: Path, detail: str = "standard") -> list[str]:
         role = msg.get("role")
         content = msg.get("content")
         if role == "user":
-            if isinstance(content, str) and content.strip():
-                is_real_user = True
-            else:
-                is_real_user = isinstance(content, list) and any(
-                    isinstance(it, dict) and it.get("type") == "text"
-                    for it in content
-                )
-            if is_real_user:
-                txt = _strip_tags(extract_text(content).strip())
-                if txt and not _is_user_noise(txt):
-                    lines.append(f"[用户] {txt}")
+            ui = _classify_user(obj)
+            if ui is not None and ui.is_question:
+                lines.append(f"[用户] {ui.text}")
             elif isinstance(content, list):
                 # 捕获工具执行反馈：报错必录（环境因果证据）；rich/full 档连
                 # 正常输出也带摘要——AI 的观察面（搜到什么/读到什么/测试输出）
@@ -521,6 +485,68 @@ def scan_session(
     return _compute()
 
 
+
+def _add_usage_delta(u: TokenUsage, rec: dict, usage: dict) -> None:
+    """Book the growth of a later snapshot line of an already-counted response.
+
+    *rec* holds what was booked for the message.id so far (updated in place).
+    Estimated placeholders never contribute; each field only moves upward.
+    """
+    if not isinstance(usage, dict) or usage.get("estimated") is True:
+        return
+    cw_new = _as_int(usage.get("cache_creation_input_tokens"))
+    cc = usage.get("cache_creation")
+    det = usage.get("output_tokens_details")
+    new = {
+        "i": _as_int(usage.get("input_tokens")),
+        "cw": cw_new,
+        "cr": _as_int(usage.get("cache_read_input_tokens")),
+        "o": _as_int(usage.get("output_tokens")),
+        "cw1h": (min(_as_int(cc.get("ephemeral_1h_input_tokens")), cw_new)
+                 if isinstance(cc, dict) else 0),
+        "think": _as_int(det.get("thinking_tokens")) if isinstance(det, dict) else 0,
+    }
+    d = {k: max(0, new[k] - rec[k]) for k in new}
+    if not any(d.values()):
+        return
+    for k in d:
+        rec[k] += d[k]
+    u.input_tokens += d["i"]
+    u.cache_creation_input_tokens += d["cw"]
+    u.cache_read_input_tokens += d["cr"]
+    u.output_tokens += d["o"]
+    u.cache_write_1h_tokens += d["cw1h"]
+    u.reasoning_output_tokens += d["think"]
+    u.bucket(rec["bucket"]).add(d["i"], d["cw"], d["cr"], d["o"], d["cw1h"])
+    stat = rec.get("stat")
+    if stat is not None:
+        stat.input_tokens += d["i"]
+        stat.cache_write += d["cw"]
+        stat.cache_read += d["cr"]
+        stat.output_tokens += d["o"]
+    u.peak_input_tokens = max(u.peak_input_tokens, rec["i"] + rec["cw"] + rec["cr"])
+
+
+_MAX_CHAIN_HOPS = 32
+
+
+def _resolve_request_start_ms(chain: dict, first_parent) -> int | None:
+    """请求起点：沿 parentUuid 自回复首块的父行往上，跳过 attachment 行
+    （其时间戳不可靠，有的是回复开始后才补记），取第一个别的行的时间戳。
+    链断/超过 32 跳/无时间戳 → None（宁可不估）。"""
+    cursor = first_parent
+    for _ in range(_MAX_CHAIN_HOPS):
+        if not isinstance(cursor, str):
+            return None
+        node = chain.get(cursor)
+        if node is None:
+            return None
+        if not node[2]:
+            return parse_timestamp_ms(node[1])
+        cursor = node[0]
+    return None
+
+
 def _scan_session_uncached(
     path: Path,
     *,
@@ -535,6 +561,8 @@ def _scan_session_uncached(
     u = TokenUsage()
     loc_acc = _LocAccumulator() if with_loc else None
     seen: set[str] = set()
+    # message.id → 已入账的 usage（流式快照补差用，见 assistant 分支注释）。
+    booked: dict[str, dict] = {}
     seen_tool_uses: set[str] = set()  # tool_use id 去重（重发防护，见 tool_use 分支注释）
     seen_tool_results: set[str] = set()  # 同族：重发的 tool_result 不重复计错  # tool_use id 去重（重发防护，见 tool_use 分支注释）
     call_id_to_name: dict[str, str] = {}  # tool_use_id → tool_name for error attribution
@@ -556,9 +584,22 @@ def _scan_session_uncached(
     current_turn = 0  # turn number of the response whose lines we are currently reading
     reported_max = 0.0
     reported_unknown = False
-    for obj in iter_messages(path):
+    # 估算输出速度（est_output_tps）计时线索，见 _est_speed_samples。
+    # chain：uuid → (parentUuid, 原始时间戳, 是否 attachment)，含 isMeta 行
+    # （它们可能是回复的父行，缺了会让起点无法解析）；时间戳延迟到需要时再解析。
+    chain: dict[str, tuple] = {}
+    # message.id → [首行 parentUuid, 首块是否 apiBlockIndex==0, 各块最晚时间戳ms, 见过 stop_reason]
+    timings: dict[str, list] = {}
+    for obj in iter_messages(path, keep_meta=True):
         if cancel_check is not None:
             cancel_check()
+
+        _uid = obj.get("uuid")
+        if isinstance(_uid, str) and _uid:
+            chain[_uid] = (obj.get("parentUuid"), obj.get("timestamp"),
+                           obj.get("type") == "attachment")
+        if obj.get("isMeta") is True:
+            continue  # 与历史行为一致：isMeta 行只进 chain，不参与任何统计
 
         # 上一行的 originalFile 修正：上一行的 tool_result（含缓冲 Write 回放）
         # 已处理完，现在 pending_f1 已建立，可以安全修正。
@@ -698,36 +739,30 @@ def _scan_session_uncached(
             # Only count real user messages (with text), not tool_result returns.
             # In JSONL, tool results are sent as role="user" but contain only
             # tool_result blocks — real user input has text blocks.
-            is_real_user = False
-            if isinstance(content, str) and content.strip():
-                is_real_user = True
-            elif isinstance(content, list):
+            if isinstance(content, list):
                 for it in content:
                     if isinstance(it, dict) and it.get("type") == "image":
                         # 内联图片输入（base64 块），与 codex/omp 的
                         # image_count 同口径。
                         u.image_count += 1
-                is_real_user = any(
-                    isinstance(it, dict) and it.get("type") == "text"
-                    for it in content
-                )
-            if is_real_user and not is_sub:
-                # prompt 行为信号：只计数，不存正文（隐私边界与懒加载一致）。
-                txt = extract_text(content).strip()
-                if _is_slash_command(txt):
+            if not is_sub:
+                # 「用户提问」口径 SSOT（user_input）：注入/斜杠/中断/!cmd 不是
+                # 提问；<system-reminder> 与 IDE 上下文块剥除后剩余文字才是。
+                # prompt 行为信号只计数，不存正文（隐私边界与懒加载一致）。
+                ui = _classify_user(obj)
+                if ui is not None and ui.kind == _UI_SLASH:
                     u.slash_command_count += 1
-                elif _is_correction(txt):
-                    u.correction_msg_count += 1
-                # user_msgs 只计真实用户消息：排除 Claude Code 注入（task-
-                # notification / 命令输出 / IDE 选区等有 text 块但非真人输入）。
-                if txt and not _is_user_noise(txt):
+                elif ui is not None and ui.is_question:
+                    txt = ui.text
+                    if _is_slash_command(txt):
+                        u.slash_command_count += 1
+                    elif _is_correction(txt):
+                        u.correction_msg_count += 1
                     u.user_msgs += 1
                     if u.first_prompt_chars == 0:
                         u.first_prompt_chars = len(txt)
                     if include_user_texts:
-                        cleaned = _strip_tags(txt)
-                        if cleaned:
-                            u.user_message_texts.append(cleaned[:500])
+                        u.user_message_texts.append(_clip_user(txt))
             # Count tool_result errors (from ALL user-role messages)
             if isinstance(content, list):
                 for item in content:
@@ -766,6 +801,20 @@ def _scan_session_uncached(
         # analysis compares turns across responses, not within one).
         if role == "assistant":
             mid = msg.get("id")
+            if isinstance(mid, str) and mid:
+                _tm = timings.get(mid)
+                _ets = parse_timestamp_ms(obj.get("timestamp"))
+                if _tm is None:
+                    _abi = obj.get("apiBlockIndex")
+                    # 旧版日志没有 apiBlockIndex，按「是首块」处理（同 cc-switch）。
+                    timings[mid] = [obj.get("parentUuid"),
+                                    _abi is None or _abi == 0,
+                                    _ets, bool(msg.get("stop_reason"))]
+                else:
+                    if _ets is not None and (_tm[2] is None or _ets > _tm[2]):
+                        _tm[2] = _ets
+                    if not _tm[3] and msg.get("stop_reason"):
+                        _tm[3] = True
             is_dup = isinstance(mid, str) and mid and mid in seen
             if not is_dup:
                 current_turn = turn_idx  # freeze turn for this whole response
@@ -789,6 +838,7 @@ def _scan_session_uncached(
                 # 推理 token（新版 usage.output_tokens_details.thinking_tokens）：
                 # 按 Anthropic 语义已含在 output 里，这里只作占比分析不加价。
                 det = usage.get("output_tokens_details")
+                think = 0
                 if isinstance(det, dict):
                     think = _as_int(det.get("thinking_tokens"))
                     if think:
@@ -801,6 +851,7 @@ def _scan_session_uncached(
                 # usage.estimated=true（2.1.3xx）：流中断/报错时客户端本地估算的
                 # 占位 usage（output=0、后接 api_error 合成行），并非 API 计费
                 # 返回，不计 token/回合，按空 usage 桩处理。
+                stat = None
                 if usage.get("estimated") is True:
                     # 清零：下方 per_model bucket 同样取 i/cw/cr/o，不能带入估算值。
                     i = cw = cr = o = cw1h = 0
@@ -821,7 +872,7 @@ def _scan_session_uncached(
                     u.cache_write_1h_tokens += cw1h
                     u.peak_input_tokens = max(u.peak_input_tokens, i + cw + cr)
                     model_raw = msg.get("model")
-                    u.turn_stats.append(TurnStat(
+                    stat = TurnStat(
                         turn=current_turn, ts=ts,
                         input_tokens=i, cache_write=cw, cache_read=cr,
                         output_tokens=o,
@@ -829,7 +880,8 @@ def _scan_session_uncached(
                         model=(pricing.normalize(model_raw)
                                if isinstance(model_raw, str) and model_raw
                                and model_raw != "<synthetic>" else ""),
-                    ))
+                    )
+                    u.turn_stats.append(stat)
                 # Claude 的网页搜索/抓取计数在 usage.server_tool_use 里（每响应一次）。
                 stu = usage.get("server_tool_use")
                 if isinstance(stu, dict):
@@ -843,7 +895,20 @@ def _scan_session_uncached(
                     bucket_key = pricing.normalize(model)
                 else:
                     bucket_key = ""
-                u.bucket(bucket_key).add(i, cw, cr, o, cw1h)
+                # 无模型的零用量行（<synthetic> 占位等）不建空桶：per_model 只收
+                # 真实模型（不变量 #4），否则模型列表/未定价提示里会多出空名条目。
+                if bucket_key or i or cw or cr or o:
+                    u.bucket(bucket_key).add(i, cw, cr, o, cw1h)
+                if i + cw + cr + o and isinstance(mid, str) and mid:
+                    booked[mid] = {"i": i, "cw": cw, "cr": cr, "o": o, "cw1h": cw1h,
+                                   "think": think,
+                                   "bucket": bucket_key, "stat": stat}
+            elif mid in booked:
+                # 流式快照补差：同一 message.id 的后续行是同一响应的累计快照——
+                # 输入/缓存不变，output_tokens 逐行增长（实测 6→393→6268）。只取
+                # 首行会系统性低估输出（本机 3254 个响应、输出少计 14%）。按字段
+                # 取最大值补差额；rewind 重发的完全相同行差额为 0，不会双计。
+                _add_usage_delta(u, booked[mid], msg.get("usage") or {})
 
             # Extract tool_use / thinking from content on EVERY line of the
             # response — continuation lines (dedup duplicates) carry the tool_use
@@ -919,6 +984,16 @@ def _scan_session_uncached(
     if reported_max > 0 and not reported_unknown:
         u.reported_cost_usd = reported_max
 
+    # 估算输出速度：逐响应（message.id）一个样本，扫描结束后按最终输出/最晚时间戳结算。
+    for mid, rec in booked.items():
+        tm = timings.get(mid)
+        if tm is None or not tm[3] or not tm[1]:
+            continue  # 要求写完整（有 stop_reason）且见到首块（apiBlockIndex==0）
+        start = _resolve_request_start_ms(chain, tm[0])
+        if start is None or tm[2] is None:
+            continue
+        u.add_est_gen_sample(rec["o"], tm[2] - start)
+
     # Compute session_duration_ms from the time window
     if u.started_at and u.ended_at:
         u.session_duration_ms = u.ended_at - u.started_at
@@ -933,7 +1008,8 @@ def read_conversation(path: Path) -> list[dict]:
     Returns a flat list of message blocks in file order, capturing everything a
     reviewer would want to see — not just user text:
 
-      * ``{"role": "user", "type": "text", "text": ...}``            — real user input
+      * ``{"role": "user", "type": "text", "text": ...}``            — real user
+        questions (:mod:`tcer.core.user_input`; injected context stripped)
       * ``{"role": "assistant", "type": "text", "text": ...}``       — model replies
       * ``{"role": "assistant", "type": "thinking", "text": ...}``   — reasoning blocks
       * ``{"role": "assistant", "type": "tool_use", "name": ...,
@@ -956,21 +1032,16 @@ def read_conversation(path: Path) -> list[dict]:
         content = msg.get("content")
 
         if role == "user":
-            if isinstance(content, str):
-                txt = content.strip()
-                if txt:
-                    convo.append({"role": "user", "type": "text", "text": txt, "ts": ts})
-            elif isinstance(content, list):
+            # 用户文字只发真人提问（口径 SSOT user_input：注入/斜杠/中断等不是）。
+            ui = _classify_user(obj)
+            if ui is not None and ui.is_question:
+                convo.append({"role": "user", "type": "text", "text": ui.text, "ts": ts})
+            if isinstance(content, list):
                 for item in content:
                     if not isinstance(item, dict):
                         continue
                     it = item.get("type")
-                    if it == "text":
-                        txt = (item.get("text") or "").strip()
-                        if txt:
-                            convo.append({"role": "user", "type": "text",
-                                          "text": txt, "ts": ts})
-                    elif it == "tool_result":
+                    if it == "tool_result":
                         convo.append({
                             "role": "tool", "type": "tool_result",
                             "tool_use_id": item.get("tool_use_id"),
@@ -1053,7 +1124,7 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if obj.get("type") == "ai-title":
+        if isinstance(obj, dict) and obj.get("type") == "ai-title":
             t = obj.get("aiTitle")
             if isinstance(t, str) and t.strip():
                 tail_title = t.strip()
@@ -1064,6 +1135,9 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        # 非对象行（损坏/截断）与存档类记录不参与元数据推断。
+        if not isinstance(obj, dict) or obj.get("type") in _NON_EVENT_TYPES:
             continue
         if obj.get("type") == "ai-title":
             t = obj.get("aiTitle")
@@ -1092,14 +1166,9 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
             permission_mode = obj["permissionMode"] or None
         # First real user message — only used when no ai-title exists at all.
         if fallback_title is None:
-            msg = obj.get("message")
-            if isinstance(msg, dict) and msg.get("role") == "user":
-                txt = extract_text(msg.get("content")).strip()
-                if txt and not _is_user_noise(txt):
-                    # Remove all XML-like tags (e.g. <ide_opened_file>...</ide_opened_file>)
-                    txt = _strip_tags(txt)
-                    if txt:
-                        fallback_title = txt
+            ui = _classify_user(obj)
+            if ui is not None and ui.is_question:
+                fallback_title = ui.text
 
     # Priority: newest tail ai-title > head ai-title > first user message.
     title = tail_title or head_title or fallback_title
@@ -1164,7 +1233,20 @@ def parse_timestamp_ms(value) -> int | None:
     if isinstance(value, (int, float)):
         return _ms_from_number(int(value))
     if isinstance(value, str):
-        s = value.strip()
+        return _parse_ts_str(value)
+    return None
+
+
+@lru_cache(maxsize=1 << 17)
+def _parse_ts_str(value: str) -> int | None:
+    """字符串时间戳解析（纯函数，lru_cache：同一时间戳常被 meta/usage 两遍解析）。
+
+    快路径：``int()`` / ``float()`` 都不接受 ``':'``，含冒号的字符串必为 RFC3339，
+    直接跳过两次必败的数值尝试（异常开销是冷态 28 万次调用的主因）。输出与原实现
+    逐值一致；OverflowError 等未捕获异常照常上抛（lru_cache 不缓存异常）。
+    """
+    s = value.strip()
+    if ":" not in s:
         # numeric string?
         try:
             return _ms_from_number(int(s))
@@ -1174,13 +1256,12 @@ def parse_timestamp_ms(value) -> int | None:
             return _ms_from_number(int(float(s)))
         except ValueError:
             pass
-        # RFC3339
-        try:
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            return int(dt.timestamp() * 1000)
-        except (ValueError, OSError, OverflowError):
-            return None
-    return None
+    # RFC3339
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except (ValueError, OSError, OverflowError):
+        return None
 
 
 def _ms_from_number(n: int) -> int:

@@ -105,3 +105,15 @@ def test_font_value_discipline():
     assert theme.FONT_VALUE[2] == "bold"
     assert len(theme.FONT_UI) == 2  # 正文 regular（无 weight 项）
 
+
+
+def test_no_hardcoded_radius():
+    """圆角走 theme.RADIUS_*（借鉴 cc-switch 分档 token），禁写死 radius=数字。"""
+    bad = []
+    for f, src in _gui_sources():
+        if f.name == "theme.py":
+            continue
+        for i, line in enumerate(src.splitlines(), 1):
+            if re.search(r"\bradius=\d", line):
+                bad.append(f"{f.name}:{i}")
+    assert not bad, "圆角请用 theme.RADIUS_S/RADIUS_M：\n" + "\n".join(bad)

@@ -1035,16 +1035,21 @@ def _omp_subagent_key(f: Path) -> tuple:
     return tuple(parts)
 
 
-def _omp_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
+def _omp_folded(f: Path):
+    """``(usage, (sloc, has_signal))`` 单遍扫描结果（子代理已折叠），按主文件 + 子代理签名缓存。"""
     from tcer.core import file_cache
     return file_cache.get_or_compute(
-        f, ("omp_usage", _omp_subagent_key(f)), lambda: omp_reader.aggregate_usage(f))
+        f, ("omp_folded", _omp_subagent_key(f)), lambda: omp_reader.scan_folded(f))
+
+
+def _omp_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
+    from tcer.core import file_cache
+    return _omp_folded(f)[0]
 
 
 def _omp_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
     from tcer.core import file_cache
-    return file_cache.get_or_compute(
-        f, ("omp_loc", _omp_subagent_key(f)), lambda: omp_reader._loc_scan(f))
+    return _omp_folded(f)[1]
 
 
 _OMP = _SourceAdapter(
@@ -1077,16 +1082,21 @@ def _pi_subagent_key(f: Path) -> tuple:
     return tuple(parts)
 
 
-def _pi_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
+def _pi_folded(f: Path):
+    """``(usage, (sloc, has_signal))`` 单遍扫描结果（子代理已折叠），按主文件 + 子代理签名缓存。"""
     from tcer.core import file_cache
     return file_cache.get_or_compute(
-        f, ("pi_usage", _pi_subagent_key(f)), lambda: pi_reader.aggregate_usage(f))
+        f, ("pi_folded", _pi_subagent_key(f)), lambda: omp_reader.scan_folded(f))
+
+
+def _pi_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
+    from tcer.core import file_cache
+    return _pi_folded(f)[0]
 
 
 def _pi_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
     from tcer.core import file_cache
-    return file_cache.get_or_compute(
-        f, ("pi_loc", _pi_subagent_key(f)), lambda: pi_reader._loc_scan(f))
+    return _pi_folded(f)[1]
 
 
 _PI = _SourceAdapter(

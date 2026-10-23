@@ -218,11 +218,14 @@ def read_session_meta(path: Path) -> SessionMeta:
     """
     from tcer.core import file_cache
 
-    return file_cache.get_or_compute(
-        path, ("omp_meta",), lambda: _read_session_meta_uncached(path))
+    return scan_file(path)[0]
 
 
 def _read_session_meta_uncached(path: Path) -> SessionMeta:
+    return _meta_from_events(path, iter_events(path))
+
+
+def _meta_from_events(path: Path, events) -> SessionMeta:
     session_id: str | None = None
     cwd: str | None = None
     title: str | None = None
@@ -232,7 +235,7 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
     started_at: int | None = None
     fallback_title: str | None = None
 
-    for obj in iter_events(path):
+    for obj in events:
         typ = obj.get("type")
         ts = parse_timestamp_ms(obj.get("timestamp"))
         if ts is not None:
@@ -277,6 +280,55 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
     )
 
 
+def scan_file(path: Path, *, is_subagent: bool = False):
+    """One-pass scan of ONE session file -> ``(meta, usage, (sloc, has_signal))``.
+
+    JSONL 只解码一次，再分别喂给 meta / usage / LOC 三个解析器（逻辑与
+    :func:`read_session_meta` / :func:`_aggregate_single` / :func:`_loc_scan_single`
+    逐字相同，只是共享事件列表）。走 file_cache（key 含 is_subagent：子代理的
+    usage 跳过 prompt 行为信号）。返回对象为共享引用，调用方勿原地修改。
+    audit 仍用未缓存的 ``aggregate_usage`` / ``session_loc_full`` 独立重算交叉验证。
+    """
+    from tcer.core import file_cache
+
+    path = Path(path)
+
+    def _compute():
+        events = list(iter_events(path))
+        return (
+            _meta_from_events(path, events),
+            _usage_from_events(events, is_subagent=is_subagent),
+            _loc_from_events(events),
+        )
+
+    return file_cache.get_or_compute(path, ("omp_scan", bool(is_subagent)), _compute)
+
+
+def scan_folded(path: Path):
+    """``(usage, (sloc, has_signal))`` for a main session with subagents folded.
+
+    等价于 ``(aggregate_usage(path), _loc_scan(path))``，但每个文件只解码一次。
+    """
+    from tcer.core.loc import SessionLoc, merge_session_locs
+
+    path = Path(path)
+    _meta, u, (sloc, has_signal) = scan_file(path)
+    subs = _subagent_files(path)
+    if not subs:
+        return u, (sloc, has_signal)
+    slocs = [sloc] if has_signal else []
+    any_signal = has_signal
+    for sub in subs:
+        _m, su, (sl, hs) = scan_file(sub, is_subagent=True)
+        u = u.merge(su)
+        if hs:
+            slocs.append(sl)
+            any_signal = True
+    if not slocs:
+        return u, (SessionLoc(added=0, deleted=0), False)
+    return u, (merge_session_locs(slocs), any_signal)
+
+
 def aggregate_usage(path: Path) -> TokenUsage:
     """Aggregate omp token/tool usage from a main session, folding its subagents.
 
@@ -297,6 +349,10 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
     first_prompt_chars): a subagent's user messages are Task-dispatch prompts,
     not real human input — mirrors the Claude reader's ``is_sub`` guard.
     """
+    return _usage_from_events(iter_events(path), is_subagent=is_subagent)
+
+
+def _usage_from_events(events, *, is_subagent: bool = False) -> TokenUsage:
     u = TokenUsage()
     current_model = ""
     turn_idx = 0
@@ -305,7 +361,7 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
     total_cost = 0.0
     saw_cost = False
 
-    for obj in iter_events(path):
+    for obj in events:
         typ = obj.get("type")
         ts = parse_timestamp_ms(obj.get("timestamp"))
         if ts is not None:
@@ -419,6 +475,7 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
                 u.tool_ops.append(ToolOp(turn_idx, tool_name, _path_hint(block.get("arguments"))))
 
         usage = mm.get("usage")
+        out_before = u.output_tokens
         if isinstance(usage, dict):
             _add_turn_usage(u, usage, current_model, turn_idx, ts)
             cost = usage.get("cost")
@@ -436,6 +493,8 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
         dur = _as_int(mm.get("duration") or mm.get("durationMs"))
         if dur > 0:
             active_duration_ms += dur
+            # 估算输出速度样本：单响应 duration（开始→结束，含首字等待）+ 该响应输出。
+            u.add_est_gen_sample(u.output_tokens - out_before, dur)
             # 仅当本响应已建 TurnStat（有真实 usage）才回填——零 usage 响应
             # 不建 stat，dur 落到上一响应会把别人的延迟写在上一条上。
             if (u.turn_stats and u.turn_stats[-1].duration_ms is None
@@ -464,11 +523,13 @@ def _aggregate_single(path: Path, *, is_subagent: bool = False) -> TokenUsage:
 
 
 def read_user_messages(path: Path) -> list[str]:
-    """Extract omp user-message text on demand (main session + folded subagents)."""
-    messages = _read_user_messages_single(Path(path))
-    for sub in _subagent_files(Path(path)):
-        messages.extend(_read_user_messages_single(sub))
-    return messages
+    """Extract omp user-message text on demand — main session only.
+
+    Folded subagent files are NOT read: their user messages are the parent's
+    dispatch prompts (AI → AI), never human input (口径 SSOT
+    :mod:`tcer.core.user_input`). Usage/LOC folding is unaffected.
+    """
+    return _read_user_messages_single(Path(path))
 
 
 def _read_user_messages_single(path: Path) -> list[str]:
@@ -588,6 +649,11 @@ def _loc_scan_single(path: Path):
         ``details.newText`` (authoritative before/after), joined by
         ``toolCallId``. No hashline-patch parsing needed.
     """
+    return _loc_from_events(iter_events(path))
+
+
+def _loc_from_events(events):
+    """:func:`_loc_scan_single` 的事件流版本（供单遍扫描复用已解析事件）。"""
     from tcer.core.loc import SessionLoc, _LocAccumulator, _is_code
 
     acc = _LocAccumulator()
@@ -595,7 +661,7 @@ def _loc_scan_single(path: Path):
     # toolCallId -> (omp tool name, arguments) captured from assistant toolCalls.
     pending: dict[str, tuple[str, dict]] = {}
 
-    for obj in iter_events(path):
+    for obj in events:
         if obj.get("type") != "message":
             continue
         mm = obj.get("message")
@@ -781,7 +847,10 @@ def _add_turn_usage(u: TokenUsage, usage: dict, model: str, turn: int, ts: int |
     u.cache_creation_input_tokens += cw
     u.cache_write_1h_tokens += cw1h
     u.output_tokens += o
-    u.reasoning_output_tokens += reasoning
+    # reasoning ⊆ output（上游约定）。个别代理路由（实测 VexelRouter gemini-3.7-flash，
+    # 233 条）的 output 只含可见文本、reasoning 另报且 totalTokens 也不含它——无法判定
+    # 是否另计费，计价维持 output 原值，仅把占比分子封顶，避免推理占比 >1。
+    u.reasoning_output_tokens += min(reasoning, o)
     key = model or ""
     if key:
         u.models.add(key)

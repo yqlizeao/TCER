@@ -15,6 +15,7 @@ cancellable factories and still get caching for completed scans.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Callable, Hashable, TypeVar
 
@@ -25,7 +26,10 @@ _CACHE: dict[tuple, Any] = {}
 # 上限须容下「全部项目总览」的工作集：44 项目 × 数百会话文件 × 每文件
 # usage/loc/meta 多变体 ≈ 2000 条。512 时全项目热态总览发生 LRU 轮换
 # （实测 4.3s ≈ 冷态，单项目热态被挤回 464ms），2048 覆盖后回到毫秒级。
-_MAX_ENTRIES = 2048
+# 2026-10 体检：53 项目 / 934 会话文件工作集已达 1779 条（87%），平均 ≈27KB/条；
+# 顺序全扫是 LRU 最坏情形，一旦超限几乎全 miss（总览退回冷态 10s+）。升到 4096
+#（最坏 ≈110MB）给重度用户留出余量。
+_MAX_ENTRIES = 4096
 
 
 def clear() -> None:
@@ -42,10 +46,11 @@ def _sig(path: Path) -> tuple[str, int, int] | None:
         st = path.stat()
     except OSError:
         return None
-    try:
-        resolved = str(path.resolve())
-    except OSError:
-        resolved = str(path)
+    # 键只需「同一文件 → 同一字符串」：abspath+normcase（纯字符串运算，Windows 下
+    # 折叠盘符/大小写与斜杠）。原先的 Path.resolve() 在 Windows 上每次要开句柄
+    # （nt._getfinalpathname，5000 次 ≈ 0.14s/轮）；符号链接别名最多多缓存一份，
+    # 不影响正确性（mtime/size 仍在键内）。
+    resolved = os.path.normcase(os.path.abspath(path))
     return resolved, int(st.st_mtime_ns), int(st.st_size)
 
 

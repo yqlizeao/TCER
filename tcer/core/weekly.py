@@ -16,16 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from tcer.core import (
-    analyze,
-    antigravity_reader,
-    codex_reader,
-    omp_reader,
-    opencode_reader,
-    pi_reader,
-    reader,
-    workbuddy_reader,
-)
+from tcer.core import analyze, user_input
 from tcer.core.models import ProjectRef, SessionReport
 from tcer.core.paths import list_project_refs
 
@@ -106,24 +97,8 @@ def format_date_span(since_str: str, until_str: str) -> str:
 def read_session_user_prompts(rep: SessionReport, source: str) -> list[str]:
     """Safely extract real user prompt strings from a session report."""
     try:
-        p = rep.meta.path
-        if source == "claude":
-            msgs = reader.read_user_messages(p)
-        elif source == "codex":
-            msgs = codex_reader.read_user_messages(p)
-        elif source == "opencode":
-            # opencode takes (db_path, session_id)
-            msgs = opencode_reader.read_user_messages(p, rep.meta.session_id or "")
-        elif source == "omp":
-            msgs = omp_reader.read_user_messages(p)
-        elif source == "pi":
-            msgs = pi_reader.read_user_messages(p)
-        elif source == "antigravity":
-            msgs = antigravity_reader.read_user_messages(p)
-        elif source == "workbuddy":
-            msgs = workbuddy_reader.read_user_messages(p)
-        else:
-            msgs = []
+        msgs = user_input.read_user_messages(source, rep.meta.path,
+                                             rep.meta.session_id)
         return [m.strip() for m in msgs if m and m.strip()]
     except Exception:
         return []

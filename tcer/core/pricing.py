@@ -94,6 +94,12 @@ def _strip_mode_suffix(model: str) -> str | None:
     return None
 
 
+_NAMESPACE_RE = re.compile(
+    r"^(?:(?:us|eu|apac|global|jp|au|ca|us-gov)\.)?"
+    r"(?:anthropic|amazon|meta|mistral|cohere|ai21|deepseek|qwen|openai|google|bedrock|vertex)\.",
+    re.I)
+
+
 def _match_candidates(model: str) -> list[str]:
     """Ordered ids to try: raw → vendor path tail → mode-suffix stripped forms."""
     out: list[str] = []
@@ -107,6 +113,13 @@ def _match_candidates(model: str) -> list[str]:
     _add(model)
     if "/" in model:
         _add(model.rsplit("/", 1)[-1])
+    # 云厂商点号命名空间（Bedrock ``us.anthropic.claude-…`` / ``anthropic.claude-…``）：
+    # 剥到最后一个「供应商.」之后（cc-switch usage_stats.rs 同规则）。只认已知
+    # 命名空间词，避免把 ``gpt-5.5`` 这类版本点号当分隔符。
+    for base in list(out):
+        m = _NAMESPACE_RE.match(base)
+        if m:
+            _add(base[m.end():])
     # Suffix-stripped variants of every candidate so far (not recursive).
     for base in list(out):
         stripped = _strip_mode_suffix(base)
@@ -132,6 +145,10 @@ def _match_id(model: str) -> str | None:
        ``glm-5``, or ``gpt-5-6-sol`` onto ``gpt-5``).
     3. Forward prefix: ``cand.startswith(mid)`` — handles date/``[1m]`` suffixes
        appended by Claude Code (e.g. ``claude-opus-4-8[1m]`` → ``claude-opus-4-8``).
+       Steps 3/4 require a suffix boundary (:func:`_prefix_boundary_ok`): a
+       version continuation (``gpt-5.8`` vs ``gpt-5``, ``grok-4-9`` vs ``grok-4``)
+       is NOT a match — an unknown model falls back to default and is reported,
+       instead of being silently priced as an older one.
     4. Reverse prefix: ``mid.startswith(cand)`` — handles shortened ids written
        by JSONL (e.g. ``claude-opus-4-6`` → ``claude-opus-4-6-20260206``).
        When multiple table keys share the same prefix, the **shortest** match wins
@@ -169,7 +186,8 @@ def _match_id(model: str) -> str | None:
     for cand in cands:
         best_fwd: str | None = None
         for mid in models:
-            if cand.startswith(mid) and (best_fwd is None or len(mid) > len(best_fwd)):
+            if (cand.startswith(mid) and _prefix_boundary_ok(mid, cand[len(mid):])
+                    and (best_fwd is None or len(mid) > len(best_fwd))):
                 best_fwd = mid
         if best_fwd is not None:
             return best_fwd
@@ -177,11 +195,30 @@ def _match_id(model: str) -> str | None:
     for cand in cands:
         best_rev: str | None = None
         for mid in models:
-            if mid.startswith(cand) and (best_rev is None or len(mid) < len(best_rev)):
+            if (mid.startswith(cand) and _prefix_boundary_ok(cand, mid[len(cand):])
+                    and (best_rev is None or len(mid) < len(best_rev))):
                 best_rev = mid
         if best_rev is not None:
             return best_rev
     return None
+
+
+# 前缀匹配的边界：长串在短串之后的「余部」必须是附加后缀（日期、[1m]、:tag、@ver、
+# -thinking 等），不能是版本的延续——否则新型号会静默套用旧型号的价格
+# （gpt-5.8→gpt-5、grok-4-9→grok-4、claude-haiku-5→claude-haiku-5-5，审计也不报警）。
+_SUFFIX_START = frozenset("-[:@_ /")
+_VERSION_CONT = re.compile(r"[-_]\d{1,2}(?!\d)")
+
+
+def _prefix_boundary_ok(prefix: str, rest: str) -> bool:
+    """``prefix + rest`` 中 ``rest`` 是否为附加后缀（而非版本号延续）。"""
+    if not rest:
+        return True
+    if rest[0] not in _SUFFIX_START:
+        return False  # ".8" / "9" / "o" / "p2"：同一版本号或型号名的延续
+    if prefix[-1:].isdigit() and _VERSION_CONT.match(rest):
+        return False  # "-9" / "-5"：短横线写法的次版本号；4/8 位日期快照放行
+    return True
 
 
 def table_key(model: str | None) -> str | None:

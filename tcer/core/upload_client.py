@@ -51,6 +51,9 @@ def _post_json(url: str, payload: dict, token: str | None = None,
         raise UploadError(f"HTTP {e.code}{f': {detail}' if detail else ''}") from e
     except urllib.error.URLError as e:
         raise UploadError(f"无法连接服务器：{e.reason}") from e
+    except (TimeoutError, OSError) as e:
+        # 连接建立后读取阶段的超时/重置不会包成 URLError——统一转译，GUI 只需接 UploadError。
+        raise UploadError(f"与服务器通信中断：{e}") from e
     try:
         return json.loads(raw) if raw else {}
     except ValueError as e:
@@ -178,44 +181,16 @@ def build_payload(
 
 
 def _lazy_user_messages(report: SessionReport) -> list[str]:
-    """Load user message bodies when analysis omitted them (Claude lazy path)."""
-    from tcer.core import (
-        antigravity_reader,
-        codex_reader,
-        omp_reader,
-        opencode_reader,
-        pi_reader,
-        reader,
-        workbuddy_reader,
-    )
+    """Load user message bodies when analysis omitted them (lazy path).
 
-    source = report.meta.source or "claude"
-    path = report.meta.path
-    if path is None:
-        return []
+    Main session only (口径 SSOT :mod:`tcer.core.user_input`): subagent files'
+    user messages are dispatch prompts, not the uploader's words.
+    """
+    from tcer.core import user_input
+
     try:
-        if source == "codex":
-            return codex_reader.read_user_messages(path)
-        if source == "opencode" and report.meta.session_id:
-            return opencode_reader.read_user_messages(path, report.meta.session_id)
-        if source == "omp":
-            return omp_reader.read_user_messages(path)
-        if source == "pi":
-            return pi_reader.read_user_messages(path)
-        if source == "antigravity":
-            return antigravity_reader.read_user_messages(path)
-        if source in ("workbuddy", "codebuddy"):
-            return workbuddy_reader.read_user_messages(path)
-        # Claude: main + subagents under session dir
-        _, main, session_dir = reader.session_artifacts(path)
-        msgs: list[str] = []
-        if main.is_file():
-            msgs.extend(reader.read_user_messages(main))
-        sub = session_dir / "subagents"
-        if sub.is_dir():
-            for f in sorted(sub.glob("*.jsonl")):
-                msgs.extend(reader.read_user_messages(f))
-        return msgs
+        return user_input.read_user_messages(
+            report.meta.source, report.meta.path, report.meta.session_id)
     except Exception:  # noqa: BLE001
         return []
 
@@ -294,12 +269,17 @@ def _scrub_identifying(row: dict, project: str) -> None:
     """Redact local-identifying fields from a report row for anonymous uploads.
 
     Replaces ``title`` with a neutral ``项目-会话ID`` placeholder and clears the
-    on-disk ``path`` / ``cwd``. Mutates ``row`` in place.
+    on-disk ``path`` / ``cwd`` plus the git remote / branch (a remote URL often
+    embeds the user or org name; branch names often carry the author). Mutates
+    ``row`` in place.
     """
     sid = row.get("session_id") or "session"
     row["title"] = f"{project}-{sid}"
     row["path"] = ""
     row["cwd"] = ""
+    for key in ("git_repository", "git_branch"):
+        if row.get(key):
+            row[key] = ""
 
 
 def upload(server_url: str, token: str, payload: dict,

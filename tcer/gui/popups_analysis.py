@@ -2040,6 +2040,37 @@ class WeeklyReportPopup:
         use_llm = (self.engine_var.get() == "llm")
         if use_llm and not llm_prefs.enabled():
             use_llm = False
+        if use_llm:
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                    "周报 LLM 提炼确认",
+                    "将把所选周期的会话事实（含用户需求原文摘录、改动文件、产出与成本统计）发送到\n"
+                    f"{llm_prefs.model()} @ {llm_prefs.base_url()}\n\n"
+                    "出境后不可撤销；结果只进「LLM 报告」收信箱，不参与任何指标计算。\n\n"
+                    "选「否」可改用本地离线规则生成。",
+                    parent=self.win):
+                return
+
+        # 工作线程只往队列投递 UI 回调，由主线程轮询执行（跨线程直接 after 在
+        # Windows 会丢回调、无 mainloop 时抛 RuntimeError，见 CLAUDE.md #38）。
+        import queue as _queue
+        import traceback as _tb
+        ui_q: _queue.Queue = _queue.Queue()
+
+        def _pump() -> None:
+            if not self.win.winfo_exists():
+                return
+            while True:
+                try:
+                    fn = ui_q.get_nowait()
+                except _queue.Empty:
+                    break
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001 — 回调失败不能让轮询停摆
+                    _tb.print_exc()
+            if self._generating or not ui_q.empty():
+                self.win.after(60, _pump)
 
         self._generating = True
         self.gen_btn.config(state="disabled")
@@ -2053,7 +2084,7 @@ class WeeklyReportPopup:
                     def _ui():
                         if self.win.winfo_exists():
                             self.status_lbl.config(text=f"● 正在扫描会话 [{curr}/{tot}] {name}…")
-                    self.win.after(0, _ui)
+                    ui_q.put(_ui)
 
                 agg = weekly.collect_weekly_data(
                     since, until, project_refs=project_refs, progress_callback=_on_prog
@@ -2065,7 +2096,7 @@ class WeeklyReportPopup:
                     def _ui_llm():
                         if self.win.winfo_exists():
                             self.status_lbl.config(text=f"● 数据汇总完毕，正在由 LLM ({llm_prefs.model()}) 润色提炼…")
-                    self.win.after(0, _ui_llm)
+                    ui_q.put(_ui_llm)
 
                     sys_p, user_p = weekly.build_weekly_prompt_payload(agg)
                     try:
@@ -2126,18 +2157,22 @@ class WeeklyReportPopup:
                         except Exception:
                             pass
 
-                self.win.after(0, _finish)
+                ui_q.put(_finish)
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
+                # 先取出文本：except 结束后 Python 会删除 e，延迟闭包引用会 NameError。
+                err_text = str(e)
+
                 def _err():
                     if not self.win.winfo_exists():
                         return
                     self._generating = False
                     self.gen_btn.config(state="normal")
-                    self.status_lbl.config(text=f"● 生成失败：{e}", fg=theme.ERROR)
-                self.win.after(0, _err)
+                    self.status_lbl.config(text=f"● 生成失败：{err_text}", fg=theme.ERROR)
+                ui_q.put(_err)
 
         threading.Thread(target=_worker, daemon=True).start()
+        self.win.after(60, _pump)
 
     def _copy_content(self) -> None:
         content = self.text_widget.get("1.0", "end-1c")

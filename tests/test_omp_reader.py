@@ -684,3 +684,15 @@ def test_reasoning_tokens_is_subset_of_output(tmp_path):
     u = omp_reader.aggregate_usage(p)
     assert u.output_tokens == 50
     assert u.reasoning_output_tokens == 30
+
+
+def test_reasoning_above_output_is_clamped(tmp_path):
+    """个别代理路由 output 只含可见文本、reasoning 另报（reasoning > output）：
+    推理占比分子封顶在 output，计价仍按 output 原值。"""
+    usage = _usage(100, 4)
+    usage["reasoningTokens"] = 115
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(), _user("x"), _assistant([_text("a")], usage)])
+    u = omp_reader.aggregate_usage(p)
+    assert u.output_tokens == 4
+    assert u.reasoning_output_tokens == 4

@@ -350,6 +350,16 @@ def _aggregate_single(db_path: Path, session_id: str, *, is_subagent: bool = Fal
                     u.peak_input_tokens = max(u.peak_input_tokens, step_in)
                 # 逐消息按模型累计（与 _add_session_tokens 同口径：reasoning 折入 output）。
                 out = _as_int(tok.get("output")) + _as_int(tok.get("reasoning"))
+                # 估算输出速度样本：耗时 = time.streamed（流式结束，不含工具执行；
+                # 缺失或不晚于 created 时退回 time.completed）− time.created。
+                # 没有 completed（未完成消息）/ created 缺失 / 时钟倒挂 → 不收样本。
+                mt = data.get("time")
+                if isinstance(mt, dict) and _as_int(mt.get("completed")) > 0:
+                    created = _as_int(mt.get("created"))
+                    streamed = _as_int(mt.get("streamed"))
+                    end = streamed if streamed > created else _as_int(mt.get("completed"))
+                    if created > 0 and end > created:
+                        u.add_est_gen_sample(out, end - created)
                 if inp + cr + cw + out > 0 and mkey:
                     b = msg_buckets.setdefault(mkey, [0, 0, 0, 0])
                     b[0] += inp
@@ -436,7 +446,11 @@ def read_user_messages(db_path: Path, session_id: str) -> list[str]:
         if role != "user":
             continue
         data = _json_obj(row["part_data"])
-        if data.get("type") == "text":
+        # synthetic=True：客户端注入的上下文（如 editor_context「用户打开了文件…」
+        # system-reminder），不是真人输入。
+        # ignored=True：被客户端标记忽略的片段（cc-switch 同口径丢弃）。
+        if (data.get("type") == "text" and not data.get("synthetic")
+                and not data.get("ignored")):
             text = data.get("text")
             if isinstance(text, str) and text.strip():
                 messages.append(truncate_summary(text.strip(), 500))
@@ -485,6 +499,8 @@ def read_conversation(db_path: Path, session_id: str) -> list[dict]:
 
         if ptype == "text":
             text = data.get("text")
+            if (data.get("synthetic") or data.get("ignored")) and role == "user":
+                continue  # 注入的编辑器上下文（含本地文件路径），非真人输入、不外发
             if isinstance(text, str) and text.strip():
                 convo.append({"role": role, "type": "text",
                               "text": text.strip(), "ts": ts})

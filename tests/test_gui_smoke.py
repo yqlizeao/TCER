@@ -661,9 +661,14 @@ def test_claude_user_messages_excludes_subagent_prompts(tmp_path):
             "content": [{"type": "text", "text": "You are researching the local repo…"}]}}) + "\n",
         encoding="utf-8")
 
-    report = types.SimpleNamespace(meta=types.SimpleNamespace(path=main))
-    msgs = TcerGui._claude_user_messages(report)
+    report = types.SimpleNamespace(meta=types.SimpleNamespace(
+        path=main, source="claude", session_id=sid))
+    msgs, _ = TcerGui._load_user_messages(report, [])
     assert msgs == ["我的真实消息"]
+    # 从子代理路径进入也只读主会话
+    sub_report = types.SimpleNamespace(meta=types.SimpleNamespace(
+        path=sub_dir / "agent-x.jsonl", source="claude", session_id=sid))
+    assert TcerGui._load_user_messages(sub_report, [])[0] == ["我的真实消息"]
     assert not any(m.startswith("You are ") for m in msgs)
 
 
@@ -1849,6 +1854,22 @@ def test_dashboard_custom_metric_persists(root, reports, tmp_path, monkeypatch):
     file_cache.clear()
 
 
+
+
+def test_dashboard_draws_sparklines_on_real_canvas(root, reports):
+    """真实尺寸画布上走完整绘制（无头测试画布 0×0 时 _draw 提前返回，曾掩盖
+    折线配色处未定义变量 gid 的 NameError——仪表盘一有数据就崩）。"""
+    from tcer.gui import charts
+
+    frame = tk.Frame(root)
+    frame.pack()
+    tc = charts.DashboardChart(frame)
+    # 测试根窗口隐藏、画布不映射：桩出真实尺寸，强制走完整绘制分支。
+    tc.canvas.winfo_width = lambda: 900
+    tc.canvas.winfo_height = lambda: 600
+    tc.update(reports)
+    assert tc.canvas.find_all()  # 实际画出了图元
+    frame.destroy()
 
 
 def test_session_column_batched_build_and_pending_select(root):

@@ -145,13 +145,26 @@ GROUPS: list[Group] = [
                "公式：峰值输入 ÷ 上下文窗口\n"
                "说明：衡量「最挤的一轮」相对模型窗口的压力；≈1 表示顶满窗口，>1 偶见（上报窗口偏小或含系统开销）。"
                "不用会话累计总输入，避免多轮会话虚高到几十倍。", "basic", "down"),
-        Metric("output_tps", "输出吞吐", "字/秒",
-               "公式：Σ 输出 Token ÷ Σ 单次补全生成耗时（秒）\n"
+        Metric("est_output_tps", "估算输出速度", "token/秒",
+               "公式：Σ 合格响应的输出 Token ÷ Σ 合格响应的估算耗时（秒）\n"
                "推荐：越高越快（仅供粗略参考）\n"
-               "说明：每秒生成多少输出 Token，取每次 API 补全自报的生成耗时（Codex "
-               "task_complete / omp duration）。\n"
-               "⚠️ 仅 Codex / Oh My Pi 提供单补全耗时；Claude 的 JSONL 只记录"
-               "轮级墙钟（含工具执行与等待），无法还原纯生成速度，故显示「不适用」。",
+               "说明：≈ 估算值。耗时由日志时间戳推算，含首字等待（等模型开始吐字的时间），"
+               "所以比代理实测的生成速度低，两者不可直接比较。\n"
+               "门槛：单个响应输出 ≥ 200 Token 且耗时 ≥ 1 秒（耗时只收 0.1 秒–1 小时）才计入；"
+               "汇总用「总输出 ÷ 总耗时」，不做逐条平均，避免被短响应带歪。\n"
+               "耗时来源：Claude = 该响应首块沿 parentUuid 向上第一个非附件行的时间戳 → 同 message.id "
+               "各块最晚时间戳（要求有 stop_reason 且见到首块）；Codex = 按事件顺序推算"
+               "（请求起点行 → token_count / token_usage_record）；OpenCode = time.streamed"
+               "（缺则 completed）− created；Oh My Pi / Pi = 每响应自报 duration。"
+               "Antigravity / WorkBuddy 无此数据，显示「不适用」。",
+               "basic", "up"),
+        Metric("output_tps", "输出吞吐", "token/秒",
+               "公式：Σ 输出 Token ÷ Σ 单次补全自报耗时（秒），不设输出/耗时门槛\n"
+               "推荐：越高越快（仅供粗略参考）\n"
+               "说明：每秒生成多少输出 Token，取每次 API 补全自报的 duration（仅 Oh My Pi / Pi 提供，"
+               "含首字等待）。Codex 的 task_complete 耗时是整任务墙钟（含工具执行）、"
+               "Claude 只有整轮墙钟，均不能当单次生成耗时，故这两者显示「不适用」"
+               "——想跨源比较请看「估算输出速度」。",
                "basic", "up"),
     ]),
     Group("G3", "缓存效率", [
@@ -295,7 +308,8 @@ GROUPS: list[Group] = [
                    "公式：task_complete ÷ task_started\n"
                    "说明：本地代理任务开始 / 完成 / 中断事件给出的任务完成情况。", "basic", "up"),
             Metric("ttft", "首字延迟", "秒",
-                   "本地代理记录的首字延迟，表示任务从开始到首个模型输出的耗时（会话最小值）。", "basic", "down"),
+                   "本地代理记录的首字延迟，表示任务从开始到首个模型输出的耗时；"
+                   "取逐回合首字延迟的中位数（比最小值更能代表平时的等待，无逐回合样本时回退会话最小值）。", "basic", "down"),
             Metric("ttft_p95", "首字延迟P95", "秒",
                    "逐回合首字延迟样本的 P95 尾部值——「最卡的那些回合有多慢」，"
                    "比最小值更能反映真实等待体验。", "basic", "down"),
@@ -458,7 +472,7 @@ _SESSION_FMT: dict[str, str] = {
     "total_tokens": "int", "input": "int", "output": "int",
     "cache_write": "int", "cache_read": "int", "reasoning_tokens": "int",
     "context_window": "int", "context_window_used": "pct",
-    "output_tps": "float:0.0",
+    "output_tps": "float:0.0", "est_output_tps": "float:0.0",
     # G3
     "chr": "pct4", "io_ratio": "float:0.1", "caf": "float:0.00",
     "cache_efficiency": "float:0.00", "cache_write_ratio": "pct",
@@ -815,7 +829,7 @@ SOURCE_LABELS = {
 # key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
 _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Claude 独有
-    "subagent": frozenset({"claude", "omp"}),
+    "subagent": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
     "memory_files": frozenset({"claude"}),
     # Claude 的推理输出并入「输出」，不单独上报
     "reasoning_tokens": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"}),
@@ -823,13 +837,16 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Codex 运行时信号
     "context_window": frozenset({"codex"}),
     "context_window_used": frozenset({"codex"}),
-    # 输出吞吐需「单次 API 补全」的生成耗时（业界标准：output ÷ 解码时间，排除
-    # TTFT/工具/等待）。Codex/omp 均有逐补全 duration。Claude 的 JSONL 没有
-    # 单响应耗时——只有轮级 turn_duration（整轮墙钟，含多次 API + 工具执行 + 用户
-    # 等待，messageCount 可达 400+），拿它当分母会把吞吐虚低 3–10×，故 Claude 不
-    # 支持（其单补全耗时仅存在于 OpenTelemetry 遥测，不落 JSONL）。OpenCode（多步
-    # 聚合无 step 级 duration）与 Pi（无 duration 字段）同样不提供。
+    # 输出吞吐 output_tps 需「单次 API 补全」的自报耗时：当前仅 omp（duration）与
+    # Pi（durationMs）逐响应都有。Codex 的 task_complete.duration_ms 是任务级墙钟（含工具
+    # 执行，比单补全高一个数量级），Claude 只有轮级 turn_duration（整轮墙钟，messageCount
+    # 可达 400+），拿来当分母会把吞吐虚低 3–10×，故二者不支持（compute 同判定置 None）；
+    # OpenCode 多步聚合无 step 级 duration。
     "output_tps": frozenset({"omp", "pi"}),
+    # 估算输出速度：逐响应「估算耗时」（含首字等待）过门槛后 Σ输出÷Σ耗时。Claude=日志时间戳
+    # 链、Codex=事件顺序状态机、OpenCode=time.streamed/completed−created、omp/Pi=自报
+    # duration；Antigravity / WorkBuddy 无逐响应时间 → 不适用。
+    "est_output_tps": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
     # 平均延迟需要每请求耗时：omp 为每响应 duration。Claude 整轮墙钟 / Codex 任务级墙钟（实测高一个数量级）
     # → 不适用；OpenCode 无该字段（pi 有 duration，compute 门控含 pi）。
     "latency": frozenset({"omp", "pi"}),

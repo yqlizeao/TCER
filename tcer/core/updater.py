@@ -56,7 +56,14 @@ def asset_for_current_platform(release):
 
 
 def download(url, dest, progress_cb=None, chunk=1 << 15):
-    """流式下载 url 到 dest;progress_cb(done_bytes, total_bytes|None) 可选。"""
+    """流式下载 url 到 dest;progress_cb(done_bytes, total_bytes|None) 可选。
+
+    先写 ``dest.part``，字节数与 Content-Length 一致才原子替换到 dest：截断/中断
+    的下载绝不落成 dest——下一步 apply_and_restart 会拿它替换 exe 并重启，残包
+    会让应用再也打不开。失败时清理 .part 并抛出。
+    """
+    dest = Path(dest)
+    part = dest.with_name(dest.name + ".part")
     # GitHub release asset 经 objects CDN 分发,默认/短 UA 易被 403;
     # 用浏览器样 UA + Accept 是官方推荐的 asset 下载方式。
     req = urllib.request.Request(url, headers={
@@ -67,15 +74,27 @@ def download(url, dest, progress_cb=None, chunk=1 << 15):
         total = resp.headers.get("Content-Length")
         total = int(total) if total else None
         done = 0
-        with open(dest, "wb") as fh:
-            while True:
-                buf = resp.read(chunk)
-                if not buf:
-                    break
-                fh.write(buf)
-                done += len(buf)
-                if progress_cb:
-                    progress_cb(done, total)
+        try:
+            with open(part, "wb") as fh:
+                while True:
+                    buf = resp.read(chunk)
+                    if not buf:
+                        break
+                    fh.write(buf)
+                    done += len(buf)
+                    if progress_cb:
+                        progress_cb(done, total)
+            if total is not None and done != total:
+                raise OSError(f"下载不完整：{done}/{total} 字节")
+            if done == 0:
+                raise OSError("下载内容为空")
+            os.replace(part, dest)
+        except BaseException:
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            raise
 
 
 def _clean_launch_env():
@@ -96,6 +115,9 @@ def apply_and_restart(new_binary):
     调用方在本函数返回后应**立即退出主程序**(root.destroy + sys.exit),让旧 exe
     释放句柄(Windows)或让新进程接管。
     """
+    if not getattr(sys, "frozen", False):
+        # 源码运行时 current_exe() 是 python.exe——绝不能拿它当替换目标。
+        raise RuntimeError("auto-update is only available in the packaged release")
     exe = current_exe()
     new_binary = Path(new_binary)
     if os.name == "nt":
@@ -108,12 +130,15 @@ def apply_and_restart(new_binary):
 
 def _windows_replace(exe, new_binary):
     bat = exe.parent / "_tcer_updater.bat"
+    # 批处理里 ``%`` 会被展开(如路径含 ``%PATH%``),写入前须转成 ``%%``。
+    exe_s = str(exe).replace("%", "%%")
+    new_s = str(new_binary).replace("%", "%%")
     # mbcs = Windows ANSI 代码页(中文系统为 GBK),兼容含中文/空格的路径。
     bat.write_text(
         "@echo off\r\n"
         "setlocal\r\n"
-        f'set "EXE={exe}"\r\n'
-        f'set "NEW={new_binary}"\r\n'
+        f'set "EXE={exe_s}"\r\n'
+        f'set "NEW={new_s}"\r\n'
         ":wait\r\n"
         'del "%EXE%" >nul 2>nul\r\n'
         'if exist "%EXE%" (\r\n'

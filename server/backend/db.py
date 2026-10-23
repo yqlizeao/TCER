@@ -528,7 +528,8 @@ def insert_records(
     try:
         # Map existing session rows for this (person, project) so re-uploads
         # update rather than duplicate. Scoped to person+project so two people
-        # sharing a session_id (across machines) don't clobber each other.
+        # sharing a session_id (across machines) don't clobber each other, and to
+        # the same uploader so nobody can overwrite rows another account wrote.
         existing_ids: dict[str, int] = {}
         if sessions:
             sids = [str(s.get("session_id")) for s in sessions if s.get("session_id")]
@@ -537,17 +538,18 @@ def insert_records(
                 q = (
                     f"SELECT id, session_id FROM uploads "
                     f"WHERE kind='session' AND session_id IN ({placeholders}) "
-                    f"AND person IS ? AND project IS ?"
+                    f"AND person IS ? AND project IS ? AND uploaded_by IS ?"
                 )
-                for r in conn.execute(q, (*sids, person, project)):
+                for r in conn.execute(q, (*sids, person, project, uploaded_by)):
                     existing_ids[r["session_id"]] = r["id"]
 
         # 当有 session 明细上传时，旧的同项目 aggregate 记录已彻底被真实明细取代，
         # 必须清理掉，避免历史残留产生「仅聚合」假会话并在聚合时双重计数。
         if sessions:
             conn.execute(
-                "DELETE FROM uploads WHERE kind='aggregate' AND person IS ? AND project IS ?",
-                (person, project),
+                "DELETE FROM uploads WHERE kind='aggregate' AND person IS ? AND project IS ? "
+                "AND uploaded_by IS ?",
+                (person, project, uploaded_by),
             )
         n_changed = 0
         consent_flag = 1 if semantic_consent else 0

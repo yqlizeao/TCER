@@ -72,6 +72,8 @@ def latest_release():
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None
+    if not isinstance(data, dict):
+        return None
     tag = (data.get("tag_name") or "").strip()
     if not tag:
         return None

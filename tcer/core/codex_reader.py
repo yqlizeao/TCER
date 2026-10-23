@@ -546,6 +546,128 @@ def aggregate_usage(path: Path) -> TokenUsage:
     return u
 
 
+# 估算输出速度的同批写出容差：两行时间戳相差不超过此毫秒数即视为同一批写出
+# （实测 0–1ms，一次真实请求不可能这么快）。同 cc-switch SAME_FLUSH_SLACK_MS。
+_SAME_FLUSH_SLACK_MS = 100
+
+
+class _RequestTimer:
+    """按事件顺序估每次 Codex 请求的耗时（日志无请求级计时；含首字等待）。
+
+    移植自 cc-switch ``RequestTimer``（不含首字推算）：
+    - 起点：本次请求第一个输出项出现时，其之前最近的「起点行」（上次 token_count、
+      工具结果、用户/developer 消息、turn_context）；
+    - 终点：优先同一请求的 ``token_usage_record``（新版）；旧版用 token_count 时刻，
+      若 token_count 紧跟在工具结果之后（等工具跑完才写）则改用最后一个输出项时刻；
+    - 旧布局把上一响应的输出项补写在其 token_count 之后（同批时间戳）→ 忽略；
+    - ``task_started`` / ``turn_aborted`` 清掉未结算请求的起点。
+    返回的耗时再交 ``TokenUsage.add_est_gen_sample`` 套门槛。
+    """
+
+    def __init__(self) -> None:
+        self.last_boundary: int | None = None
+        self.last_token_count: int | None = None
+        self.request_start: int | None = None
+        self.last_model_output: int | None = None
+        self.tool_output_after_model_output: int | None = None
+        self.usage_record: tuple | None = None  # (ts, input, cached, output)
+
+    def observe(self, obj: dict, ts: int | None) -> None:
+        if ts is None:
+            return
+        typ = obj.get("type")
+        payload = obj.get("payload")
+        pt = payload.get("type") if isinstance(payload, dict) else None
+        if typ == "turn_context":
+            self._boundary(ts)
+        elif typ == "response_item" and isinstance(payload, dict):
+            if pt == "message":
+                if payload.get("role") == "assistant":
+                    self._model_output(ts)
+                else:
+                    self._boundary(ts)
+            elif pt == "reasoning":
+                self._model_output(ts)
+            elif isinstance(pt, str) and pt.endswith("_output"):
+                self._boundary(ts)
+                if self.last_model_output is not None:
+                    self.tool_output_after_model_output = ts
+            elif isinstance(pt, str) and pt.endswith("_call"):
+                self._model_output(ts)
+        elif typ == "token_usage_record" and isinstance(payload, dict):
+            usage = payload.get("usage")
+            if isinstance(usage, dict):
+                self.usage_record = (
+                    ts, _as_int(usage.get("input_tokens")),
+                    _as_int(usage.get("cached_input_tokens",
+                                      usage.get("cache_read_input_tokens"))),
+                    _as_int(usage.get("output_tokens")))
+            else:
+                self.usage_record = None
+        elif typ == "event_msg" and pt in ("task_started", "turn_started", "turn_aborted"):
+            self.reset(ts)
+
+    def _boundary(self, ts: int) -> None:
+        self.last_boundary = ts if self.last_boundary is None else max(self.last_boundary, ts)
+
+    def _model_output(self, ts: int) -> None:
+        if (self.request_start is None and self.last_token_count is not None
+                and ts - self.last_token_count <= _SAME_FLUSH_SLACK_MS):
+            return  # 旧布局：上一响应的输出项补写在其 token_count 之后
+        if self.request_start is None:
+            self.request_start = self.last_boundary
+        self.last_model_output = ts
+        self.tool_output_after_model_output = None
+
+    def reset(self, ts: int) -> None:
+        """一轮开始/被中断：没等到 token_count 的请求作废。"""
+        self._boundary(ts)
+        self.request_start = None
+        self.last_model_output = None
+        self.tool_output_after_model_output = None
+        self.usage_record = None
+
+    def finish(self, token_count_ms: int | None, last: dict | None) -> int | None:
+        """结算一次有用量的 token_count，返回估算耗时 ms（范围校验交给门槛）。"""
+        start = self.request_start if self.request_start is not None else self.last_boundary
+        record_end = None
+        if self.usage_record is not None:
+            rts, ri, rc, ro = self.usage_record
+            if (last is None or (ri == _as_int(last.get("input_tokens"))
+                                 and rc == _as_int(last.get("cached_input_tokens"))
+                                 and ro == _as_int(last.get("output_tokens")))):
+                record_end = rts
+        waited_for_tools = False
+        if self.tool_output_after_model_output is not None:
+            waited_for_tools = (token_count_ms is None
+                                or token_count_ms - self.tool_output_after_model_output
+                                <= _SAME_FLUSH_SLACK_MS)
+        if record_end is not None:
+            end = record_end
+        elif waited_for_tools:
+            end = self.last_model_output
+        else:
+            end = token_count_ms
+        if token_count_ms is not None:
+            self._boundary(token_count_ms)
+        self.last_token_count = token_count_ms
+        self.request_start = None
+        self.last_model_output = None
+        self.tool_output_after_model_output = None
+        self.usage_record = None
+        if start is None or end is None:
+            return None
+        return end - start
+
+
+def _book_est_speed(u: TokenUsage, timer: _RequestTimer, ts: int | None,
+                    last, out_before: int) -> None:
+    """结算一次有真实增量的 token_count：本次输出增量 + 估算耗时 → 估速样本。"""
+    dur = timer.finish(ts, last if isinstance(last, dict) else None)
+    if dur is not None:
+        u.add_est_gen_sample(u.output_tokens - out_before, dur)
+
+
 def _aggregate_single(path: Path) -> TokenUsage:
     """Aggregate Codex token and tool usage from ONE rollout (no sub-agent merge)."""
     u = TokenUsage()
@@ -558,6 +680,7 @@ def _aggregate_single(path: Path) -> TokenUsage:
     # turn_idx 由回合边界驱动（该回合内的工具调用与 token 差分步共享同一回合号）；
     # 旧格式（无 task_started）回退为每个 token 差分步 +1 的人造计数。
     saw_task_started = False
+    timer = _RequestTimer()  # 估算输出速度（est_output_tps）
 
     for obj, user_msg in _events_with_user_messages(path):
         if user_msg is not None:
@@ -572,6 +695,7 @@ def _aggregate_single(path: Path) -> TokenUsage:
 
         typ = obj.get("type")
         payload = obj.get("payload")
+        timer.observe(obj, ts)
         if typ == "turn_context" and isinstance(payload, dict):
             model = payload.get("model")
             if isinstance(model, str) and model:
@@ -643,15 +767,19 @@ def _aggregate_single(path: Path) -> TokenUsage:
                     if all(v >= 0 for v in delta.values()):
                         prev_total = {k: _as_int(total.get(k)) for k in _TOKEN_FIELDS}
                         if any(delta.values()):
+                            out_before = u.output_tokens
                             _add_token_usage_with_stat(u, delta, current_model,
                                                        turn_idx, ts)
+                            _book_est_speed(u, timer, ts, usage, out_before)
                             if not saw_task_started:
                                 turn_idx += 1
                         continue
                     prev_total = {k: _as_int(total.get(k)) for k in _TOKEN_FIELDS}
                 if isinstance(usage, dict):
+                    out_before = u.output_tokens
                     _add_token_usage_with_stat(u, usage, current_model,
                                                turn_idx, ts)
+                    _book_est_speed(u, timer, ts, usage, out_before)
                     if not saw_task_started:
                         turn_idx += 1
             continue

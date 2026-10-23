@@ -15,6 +15,11 @@ PAD_S = 4
 PAD_M = 8
 PAD_L = 12
 
+# 圆角 SSOT（借鉴 cc-switch control/panel 分档）：S=徽标/小控件，M=胶囊/分段按钮。
+# 勿在组件里写死 radius=数字（tests/test_style_contract 守卫）。
+RADIUS_S = 4
+RADIUS_M = 5
+
 # --- Monokai Dimmed 工作台表面明度标尺 (Surface Elevation) ---
 # 纪律：95% 面积收敛为 BG → PANEL → PANEL_2 → CONTROL 四级灰；强调色只给焦点/选中/状态。
 BG = "#1e1e1e"              # 主工作区/编辑器底色（活动栏同为全窗最暗列）
@@ -43,6 +48,8 @@ RAIL_W_NAV = 2
 
 WARN_TINT_BG = "#3a2a1a"    # 警示提示条暗橙底 (配 WARNING 前景字)
 ERROR_TINT_BG = "#3a1a1a"   # 错误/吸引子警示卡片暗红底 (配 ERROR 前景字)
+SUCCESS_TINT_BG = "#14291c"  # 成功/通过提示暗绿底 (配 SUCCESS 前景字)
+INFO_TINT_BG = "#172338"     # 信息/说明提示暗蓝底 (配 ACCENT 前景字)
 
 # 滚动条极简细条
 SCROLL_THUMB = "#3a3a3c"
@@ -148,9 +155,9 @@ def setup_style(ttk) -> None:
     except ttk.TclError:
         pass
     style.configure("Treeview", background=PANEL, fieldbackground=PANEL,
-                    foreground=FG, rowheight=24,
+                    foreground=FG, rowheight=26,
                     bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
-    style.configure("Treeview.Heading", background=PANEL_2, foreground=FG,
+    style.configure("Treeview.Heading", background=PANEL_2, foreground=MUTED,
                     relief="flat", borderwidth=1)
     # clam draws a raised (white-ish) border on heading hover/press — keep it dark & flat.
     style.map("Treeview", background=[("selected", SEL_ROW_ACTIVE)])

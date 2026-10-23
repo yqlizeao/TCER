@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import statistics
 import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
@@ -1101,8 +1102,8 @@ def output_tps(u: TokenUsage) -> float | None:
     and approval waits (messageCount up to 400+). Using it as the denominator
     understates throughput 3–10×, so the reader does not backfill Claude
     ``turn_stats.duration_ms`` for this metric's purpose and Claude reports
-    「不适用」. Sources without per-completion timing (OpenCode multi-turn) yield
-    None rather than a wall-clock figure.
+    「不适用」. OpenCode (no step-level duration) and other sources yield None rather
+    than a wall-clock figure. Cross-source comparable estimate: ``est_output_tps``.
     """
     out = 0
     ms = 0
@@ -1115,6 +1116,31 @@ def output_tps(u: TokenUsage) -> float | None:
     return out / (ms / 1000.0)
 
 
+def est_output_tps(u: TokenUsage) -> float | None:
+    """估算输出速度（token/秒）= Σ 合格响应输出 ÷ Σ 合格响应估算耗时。
+
+    逐响应样本已在 reader 层按门槛筛过（输出 >= 200、耗时 1s–1h，见
+    ``models.EST_*``）；这里只做 Σ/Σ（不做逐条平均，否则被短响应带歪）。耗时取自
+    日志时间戳（Claude/Codex）、``time`` 字段（OpenCode）或 ``duration``（omp/Pi），
+    含首字等待——是「≈ 估算」，与代理实测速度不同；没有合格样本 → None。
+    """
+    if u.est_gen_duration_ms <= 0 or u.est_gen_output_tokens <= 0:
+        return None
+    return u.est_gen_output_tokens / (u.est_gen_duration_ms / 1000.0)
+
+
+def ttft_primary_sec(u: TokenUsage) -> float | None:
+    """首字延迟主值（秒）：有逐回合样本取中位数，否则回退会话最小值。
+
+    ``time_to_first_token_ms`` 字段语义仍是 min（merge 取 min），仅显示口径改中位数
+    ——最小值只反映最好的一次，对「平时有多慢」没有代表性。
+    """
+    if u.ttft_ms_samples:
+        return statistics.median(u.ttft_ms_samples) / 1000
+    return (u.time_to_first_token_ms / 1000) if u.time_to_first_token_ms else None
+
+
+@lru_cache(maxsize=4096)
 def _is_code_search_tool(name: str) -> bool:
     """True if *name* is a code/repo search tool for search_edit_ratio.
 
@@ -1498,7 +1524,7 @@ def compute(
     # --- new quality metrics ---
     total_tools = sum(u.tool_calls.values())
     tool_err_rate = u.tool_errors / total_tools if total_tools else None
-    ttft_sec = (u.time_to_first_token_ms / 1000) if u.time_to_first_token_ms else None
+    ttft_sec = ttft_primary_sec(u)
     if u.ttft_ms_samples:
         ordered = sorted(u.ttft_ms_samples)
         p95_idx = min(len(ordered) - 1, int(0.95 * (len(ordered) - 1) + 0.5))
@@ -1650,6 +1676,7 @@ def compute(
         context_window_used_ratio=context_window_ratio,
         reasoning_output_ratio=reasoning_ratio,
         output_tps=output_tps(u) if _dur_ok else None,
+        est_output_tps=est_output_tps(u),
         cost_reported_ratio=cost_reported_ratio,
         loc_patch_agreement=loc_patch_agreement,
     )

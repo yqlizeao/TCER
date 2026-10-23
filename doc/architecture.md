@@ -13,17 +13,17 @@
 | `tcer/core/workbuddy_reader.py` | WorkBuddy / CodeBuddy 会话发现/解析与按目录项目聚合 |
 | `tcer/core/paths.py` | 定位 `~/.claude`（含 `.zclaude` 等自定义 `CLAUDE_CONFIG_DIR` 兄弟目录自动识别）/ `~/.codex` / `~/.local/share/opencode` / `~/.omp` / `~/.pi` / `~/.gemini/antigravity-cli` / WorkBuddy 根、项目哈希编解码、统一项目引用 |
 | `tcer/core/loc.py` | git-free 代码量统计：session_loc（会话内工具调用回放，含 originalFile F1 修正；不读磁盘） |
-| `tcer/core/metrics.py` | 全部公式：TCER/CHR/CPE/CAF/TTAF/TA-TCER/churn/CTEI(三因子) + 评级 + 逐模型成本 |
-| `tcer/core/pricing.py` | 逐模型计价：从 `tcer/config/model_pricing.json`（≈162 模型）解析 $/MTok |
+| `tcer/core/metrics.py` | 全部公式：TCER/CHR/CPE/CAF/TTAF/NTCER/churn + 综合效率分 v2（`score_axes`/`efficiency_score`）+ 评级 + 逐模型成本 |
+| `tcer/core/pricing.py` | 逐模型计价：从 `tcer/config/model_pricing.json`（≈350 模型，当前 347 条）解析 $/MTok |
 | `tcer/core/models.py` | 数据类：TokenUsage / ModelUsage / TurnStat / ToolOp / SessionMeta / SessionReport |
 | `tcer/core/analyze.py` | 编排层：Claude 独立路径（子代理折叠）+ 非 Claude 各源共享骨架 `_analyze_source_project` + `_SourceAdapter` 钩子（见下） |
 | `tcer/core/parse_util.py` | 跨 reader 共享解析小工具（as_int / first_str） |
 | `tcer/core/file_cache.py` | 进程级 mtime/size LRU 缓存（scan/usage/loc） |
 | `tcer/core/format.py` | 纯值格式化器（千分位/百分比/时间戳/模型名） |
-| `tcer/core/export.py` | JSON/CSV/Markdown 序列化 + CTEI 排名数据 + 文本条形图（`_CSV_FIELDS`/`_CSV_EXCLUDED` 有漂移护栏测试） |
+| `tcer/core/export.py` | JSON/CSV/Markdown 序列化 + 综合效率分排名数据 + 文本条形图（`_CSV_FIELDS`/`_CSV_EXCLUDED` 有漂移护栏测试） |
 | `tcer/core/audit.py` | 闭环审计：`analyze` 结果对照原始会话文件重算（`python -m tcer.audit`） |
 | `tcer/core/upload_client.py` / `upload_prefs.py` | 显式 opt-in 的上传（纯离线原则的例外之一，另有负责人） |
-| `tcer/core/llm_client.py` / `llm_prefs.py` / `llm_prompts.py` | 显式 opt-in 的 LLM 语义解读（纯 urllib 调 OpenAI-compatible 端点；数据出境三档 metrics/dialog/full；结果仅展示不参与指标计算；未配置零联网零入口） |
+| `tcer/core/llm_client.py` / `llm_prefs.py` / `llm_prompts.py` | 显式 opt-in 的 LLM 语义解读（纯 urllib 调 OpenAI-compatible 端点；数据出境范围多选 metrics/dialog/tools；结果仅展示不参与指标计算；未配置零联网零入口） |
 | `tcer/gui/` | Tkinter 图形界面（MVC 架构） |
 
 ### 非 Claude 源的 SourceAdapter
@@ -71,7 +71,7 @@ tcer/gui/
 ## 工程规范
 
 1. **禁止新增中间产物**：截图、临时脚本、草稿 md 等用完即删，不提交。必要的经验/理解写入 CLAUDE.md。
-2. **GUI 全中文、代码用缩写**：界面显示完整中文（如「缓存命中率」而非「CHR」），仅 TCER 保留英文缩写。代码标识符可用缩写（chr/ctei/ncpi…）。
+2. **GUI 全中文、代码用缩写**：界面显示完整中文（如「缓存命中率」而非「CHR」），仅 TCER 保留英文缩写。代码标识符可用缩写（chr/cpe/ntcer…）。
 3. **运行方式**：`python -m tcer`（从仓库根目录，绿色免安装）。
 4. **库层不动**：tcer/core/ 下模块有完整测试覆盖，改动需谨慎。GUI 改动集中在 tcer/gui/。
 5. **纯离线**：不依赖任何版本管理工具（git 等）、不做任何联网操作。所有数据来自本地 `~/.claude/`、`~/.codex/`、`~/.local/share/opencode/`、`~/.omp/`、`~/.pi/`、`~/.gemini/antigravity-cli/` 与 WorkBuddy 目录。
@@ -92,7 +92,7 @@ OpenCode 当前本地数据目录按官方文档位于 `~/.local/share/opencode/
 
 OpenCode 会话**优先按 `session.directory` 分组**（`project.worktree` 常为 `/` 的 global 项目会误合并无关目录）；展示路径取有效 cwd。Token 使用 `session.tokens_*` 汇总：OpenCode 把 `tokens_reasoning` 存在输出之外，reader **折入 `output_tokens`**（仍单独记 `reasoning_output_tokens`），使成本按输出价计推理、且 `reasoning_output_ratio` ∈ [0,1]。峰值输入来自 `part` 的 `step-finish.tokens`（input+cache），禁止用会话累计当峰值。模型使用 `session.model` 与 assistant message 中的 provider/model；用户消息正文从 user text part 按需读取。工具行为来自 `part`（live 嵌套 `state.input` + camelCase `filePath`/`oldString`/`newString`），映射到 TCER 通用工具名。
 
-OpenCode LOC：有 `summary_additions/deletions/files` 时用 summary；**live 数据 summary 常为 0** 时回放 edit/write tool part（与 Claude Edit 同构）。仅无 summary 且无编辑工具的会话将 TCER / CPE / CTEI 显示为 `-`。OpenCode 与 Codex 一样只读分析，不删除会话。
+OpenCode LOC：有 `summary_additions/deletions/files` 时用 summary；**live 数据 summary 常为 0** 时回放 edit/write tool part（与 Claude Edit 同构）。仅无 summary 且无编辑工具的会话将 TCER / CPE / 综合效率分 显示为 `-`。OpenCode 与 Codex 一样只读分析，不删除会话。
 
 ## 关键设计决策
 
@@ -117,3 +117,64 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 ## 测试覆盖
 
 测试覆盖 reader / codex_reader / opencode_reader / paths / metrics / pricing / loc / export / baselines / metric_defs / audit / analyze / html_report，另有三道护栏：`test_models_merge.py`（反射断言 `TokenUsage.merge` 覆盖全部字段）、`test_gui_smoke.py`（无头构建全部图表模式与弹窗，无显示环境自动 skip）、`test_export.py` 的 CSV 字段漂移断言。Codex fixture 覆盖 cwd 分组、标题读取、token 去重、缓存映射、工具失败、apply_patch（含 custom_tool_call）LOC 与 ToolOp 路径、运行环境、上下文窗口峰值、首字延迟、限流、Web 搜索、图片输入和补丁成功率；OpenCode fixture 覆盖 SQLite 项目发现（含 directory 分组）、session 元数据、Token/缓存/推理折入输出、step-finish 峰值、工具错误、用户消息、图片输入、summary 为空时 tool 回放 LOC 与 analyze 聚合。闭环审计见 `python -m tcer.audit`（`tcer/core/audit.py`）。
+
+## 实现不变量详述（自 CLAUDE.md 迁移）
+
+> 本节自 CLAUDE.md 迁移而来（2026-10 瘦身）：CLAUDE.md 只保留一行硬规则，完整细节、实测数据与历史缘由在此。条目前缀「原 #N」= 瘦身前 CLAUDE.md 的「关键注意事项」编号，可据此追溯。
+
+<a id="single-scan"></a>
+### 原 #12 Claude 单次扫描
+
+- `reader.scan_session` 一趟 JSONL 同时产出 TokenUsage + SessionLoc；`analyze` 进程内按 path 缓存，避免 usage 与 LOC 双读。GUI `reanalyze` 用 `cancel_event` 协作取消上一次分析。
+
+<a id="file-cache"></a>
+### 原 #14 mtime 缓存
+
+- `tcer.core.file_cache` 按 `(path, mtime_ns, size, variant)` 缓存 scan/usage/meta（LRU，上限 4096——512 时「全部项目总览」工作集（44 项目 ≈675 条）发生轮换，热态总览退化到近冷态 4.3s；2048 后 0.25s；2026-10 体检时 53 项目工作集已达 1779 条（87%），升到 4096。claude `read_session_meta` 与 omp 同样入缓存，返回共享引用勿改）。取消靠 `cancel_check` 在 factory 内抛异常实现，部分扫描天然不入缓存——因此 GUI 的可取消分析**同样走缓存**（勿再用 `cancel_check is None` 做缓存开关）。各源均已接入：Claude `scan_session`、Codex/omp/pi usage+loc、OpenCode usage+loc（SQLite 会话 key 到 db 文件，粗粒度）。Claude 日期过滤复用 cwd-keyed 扫描，同文件不再双扫。测试可用 `file_cache.clear()`。
+
+
+<a id="perf-acceptance"></a>
+### 性能优化记录与验收口径（2026-10）
+
+- **验收口径**：数据真实第一、性能第二。改读取/聚合层前，对 `paths.list_project_refs("all")` 全部有会话项目跑 `analyze_project`，把每个 SessionReport 与 TokenUsage 全字段（含 per_model / turn_stats / tool_ops）递归序列化为黄金快照（浮点按 `repr`），含 LOC 与 no_loc 两种模式；改后逐字段 diff 必须完全一致。正在写入的活跃会话所在项目无法冻结（基线自跑两次也不同），从比对中排除，改用单测与对拍覆盖。
+- **omp/pi 单遍解析**：`omp_reader.scan_file` 一次解码出 meta、usage、loc（file_cache key `("omp_scan", is_subagent)`），`scan_folded` 折叠子代理；analyze 的 omp/pi usage 与 loc 钩子共用 `("omp_folded"/"pi_folded", 子代理签名)` 一条缓存。实测 omp 冷态 6.0s → 3.8s。
+- **`TokenUsage.merge`**：最大回合号用 `max(map(attrgetter))`；对方无 `tool_ops`/`turn_stats` 时跳过整段重基准。热态 merge 0.655s → 0.259s（cProfile 口径）。
+- **`parse_timestamp_ms`**：字符串分支抽为 `lru_cache(131072)` 的 `_parse_ts_str`；含 `:` 的串直接走 RFC3339 路径（`int()`/`float()` 都不接受冒号，输出不变）。新旧实现对本机 386,274 个不同时间戳取值对拍 0 差异（`tests/test_perf_equivalence.py`）。
+- **`file_cache._sig`**：`Path.resolve()` → `normcase(abspath())`，省掉 Windows 每次开句柄（≈28µs × 5000 次）；代价是符号链接别名最多多缓存一份，正确性不受影响。
+- **`metrics._is_code_search_tool`**：纯函数加 `lru_cache`（≈29 万次调用）。
+- **刻意不做**：项目级 ProjectAnalysis 缓存（热态全量仅 0.64s，而键需覆盖全部参数、每个会话及子代理/旁路文件签名、价表与 composite_baselines 配置版本，漏项即错数）；Claude 解码层替换（`scan_once` 仅省 ≈5% 且要重现 Extra data 判定；字节流会改变 `errors="replace"` 语义）。
+- **实测（53 项目 / 934 会话文件）**：冷态 11.38s → 9.2s，热态 0.79s → 0.64s；Claude 冷态的 json 解码与逐行解析是当前下限。
+
+<a id="source-adapter"></a>
+### 原 #21 SourceAdapter
+
+- 非 Claude 各源（Codex/OpenCode/omp/pi/antigravity/workbuddy）共用 `analyze._analyze_source_project` 骨架 + `_SourceAdapter` 钩子（resolve/sessions/read_meta/usage_of/loc_of/session_key），file_cache key 构造在钩子内（omp/Codex 必须并入子代理文件签名，否则子代理追写后折叠结果不失效）。新增数据源 = 写一个 adapter。共享小工具在 `core/parse_util`（as_int/first_str）。
+
+<a id="guard-tests"></a>
+### 原 #22 护栏测试
+
+- `tests/test_models_merge.py` 反射断言 `TokenUsage.merge` 覆盖全部字段（新增字段忘改 merge 会当场失败，容器/极值字段进 `_SPECIAL` 表）；`tests/test_gui_smoke.py` 无头构建全部图表模式与弹窗（无显示环境自动 skip）；`tests/test_export.py` 断言 `report_row_dict` 每个键必须归入 `_CSV_FIELDS` 或 `_CSV_EXCLUDED`。
+
+## metric_defs SSOT 详述（原 CLAUDE.md「指标唯一真理源」节）
+
+<a id="metric-defs-ssot"></a>
+
+- `tcer/gui/metric_defs.py` 是**所有指标展示的唯一真理源**——名称 / 提示 / 单位 / 格式 / 好坏方向 / 取值，4 个页签（指标分类 / 排名 / 趋势 / 模型对比）与全部 popups（雷达等）都从这里取，禁止各处再自管：
+- **会话/项目级**：`raw_value(report, key)`（图表用数值）、`format_value(key, native)`（显示串）、`display(report, key)`、`report_values(report)`。每个 `Metric` 带 `fmt` 规格（`int`/`pct`/`float:N`/`money`/`text`）。
+- **逐模型**：`MODEL_GROUPS` + `model_raw` / `model_display` / `model_tip`，同义指标转调 `format_value` 与会话级逐字节一致；
+  - **例外**：模型对比是 N 列并排，Token 数等大数量级用 K/M 紧凑显示（布局需要），比率/百分比仍与网格一致。
+- **综合效率分构成**：`SCORE_AXES`（三正交轴名称/说明，排名页得分构成面板消费）。
+- **评级体系**：`core/metrics.SCORE_TIER_BANDS`（名称+阈值，best→worst，来自 config `score_tiers`）是评级的唯一源；`tier()`、排名分布条、趋势评分带都从它派生。
+- **源能力感知**：`metric_defs._SOURCE_SUPPORT` 标注「数据源根本不产生该字段」的指标（如 Claude 无独立推理 token、Codex 无缓存写入、上下文窗口/TTFT/限流为 Codex 独有）。`display()` 返回「不适用」、`raw_value()` 返回 None，网格/图表/HTML 报告自动继承；「不适用」与「-」一样参与空单元格折叠，但颜色置灰。部分支持（如 OpenCode 多回合 peak 留 0）**不**标注，仍显示 "-"。
+- **HTML 报告**：`gui/html_report.py`（无 Tk 依赖，可无头测试）渲染项目级/会话级自包含单文件 HTML，数值全部走 `metric_defs.display`，与网格逐字节一致；GUI 导出菜单含项目/会话两组入口。图表组件在 `gui/charts.py`（趋势/散点/仪表板/时段热力图，从 views 拆出，views re-export 保持旧 import 路径）。
+- **综合效率分轴分解**（旧 AGENTS）：`SCORE_AXES`（产出效率/成本/质量三正交轴，名称/公式/白话 tip），键与 `export.score_decompose` 对齐。
+- **计价匹配示例补充**（旧 AGENTS）：mode 后缀剥离如 `claude-opus-4-6-thinking`→`claude-opus-4-6-20260206`。
+
+## 历史与教训（工程）
+
+- **缓存上限要按工作集定**：file_cache 先后从 512 升到 2048 再到 4096——全部项目总览的工作集（44 项目≈675 条 → 53 项目≈1779 条）超限后 LRU 顺序全扫是最坏情形，几乎全 miss（热态 0.25s 退化到 4.3s）。改动前先实测工作集条数。
+- **取消靠异常、缓存要照常走**：`cancel_check` 在 factory 内抛异常，部分扫描天然不入缓存；不要再用 `cancel_check is None` 做缓存开关。
+- **file_cache key 必须并入旁路文件签名**：子代理文件等被折叠的文件追写后，父会话结果必须失效。
+- **新增字段忘改 merge 会静默丢数**：`TokenUsage.merge` 反射护栏测试、`report_row_dict` ↔ `_CSV_FIELDS/_CSV_EXCLUDED` 护栏、GUI 无头冒烟三道护栏是用事故换来的，别绕过。
+- **性能次于数据真实**：任何缓存、头读、降采样优化都不得改变数值结果；用 `python -m tcer.audit` 逐字节对账验证。
+

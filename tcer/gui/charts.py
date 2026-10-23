@@ -2042,7 +2042,7 @@ class DashboardChart:
             # 折线用分类色的提亮版（_DASHBOARD_LINE_COLORS）：原 GROUP_COLORS 偏暗，
             # 作细折线会灰蒙蒙；提亮后与表头同色相、按色识组，且在深色格上清晰。
             pts = [(xv(i), yv(v)) for i, v in valid]
-            color = _DASHBOARD_LINE_COLORS.get(gid, group_color)
+            color = _DASHBOARD_LINE_COLORS.get(self._KEY_GROUP.get(key, "G1"), group_color)
             if len(pts) >= 2:
                 c.create_line(pts, fill=color, width=2, smooth=True)
             for px, py in pts:

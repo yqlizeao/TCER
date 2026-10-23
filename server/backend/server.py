@@ -341,7 +341,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         # A short-lived signed token doubles as the OAuth ``state`` (CSRF guard):
         # the callback re-verifies it, so no server-side state store is needed.
-        state = auth.issue_token("feishu-oauth-state", ttl=600)
+        state = auth.issue_token("feishu-oauth-state", ttl=600, purpose=auth.OAUTH_STATE)
         redirect = feishu.redirect_uri(self.headers.get("Host"))
         self._redirect(feishu.authorize_url(state, redirect))
 
@@ -352,7 +352,7 @@ class Handler(BaseHTTPRequestHandler):
         code = self._one(qs, "code")
         state = self._one(qs, "state")
         # Verify the state we signed in _h_feishu_start (CSRF / replay guard).
-        if not state or auth.verify_token(state) != "feishu-oauth-state":
+        if not state or auth.verify_token(state, purpose=auth.OAUTH_STATE) != "feishu-oauth-state":
             self._redirect("/?feishu_error=" + quote("登录校验失败，请重试"))
             return
         if not code:
@@ -392,6 +392,10 @@ class Handler(BaseHTTPRequestHandler):
         # single person instead of collapsing into 未标注. Honor whatever the
         # client sent; fall back to the login name for non-anonymous uploads.
         person = data.get("user") or (None if anonymous else user)
+        # 未登录的匿名上传只能写「匿名-」假名，不能冒用实名 person 覆盖他人数据。
+        if not user and not (isinstance(person, str) and person.startswith("匿名-")):
+            self._send_json({"error": "anonymous uploads must use an 匿名- pseudonym"}, 400)
+            return
         project = data.get("project")
         aggregate = data.get("aggregate")
         # Per-session rows are always stored when present so each session lands as
@@ -399,19 +403,10 @@ class Handler(BaseHTTPRequestHandler):
         # each session row additionally carries the turn-by-turn conversation; it
         # no longer decides whether sessions are stored at all.
         sessions = data.get("sessions")
-        if not sessions:
-            fp = data.get("filePath") or data.get("file_path")
-            if fp and Path(fp).is_file():
-                try:
-                    import workbuddy_reader
-                except ImportError:
-                    from . import workbuddy_reader
-                row = workbuddy_reader.parse_session_file(Path(fp), user=person, project=project)
-                sessions = [row]
-                if not project:
-                    project = row.get("project")
-            elif isinstance(data.get("session"), dict):
-                sessions = [data["session"]]
+        # 不接受请求体里的服务器本地路径（曾有 filePath 分支：匿名请求即可让服务端
+        # 读取任意文件入库）。本地文件导入只走 CLI：``manage.py``。
+        if not sessions and isinstance(data.get("session"), dict):
+            sessions = [data["session"]]
         generated_at = data.get("generated_at")
         # 语义分析授权：匿名上传一律不进入团队概念分析（无法关联职能与本人视图，E5）。
         consent = bool(data.get("semantic_consent")) and bool(user) and not anonymous
@@ -663,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, route: str) -> None:
         rel = route.lstrip("/") or "index.html"
         target = (_FRONTEND_DIR / rel).resolve()
-        if not str(target).startswith(str(_FRONTEND_DIR)) or not target.is_file():
+        if not target.is_relative_to(_FRONTEND_DIR) or not target.is_file():
             # SPA-ish fallback to index.html
             target = _FRONTEND_DIR / "index.html"
             if not target.is_file():

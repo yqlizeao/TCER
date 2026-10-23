@@ -31,15 +31,25 @@ def _b64d(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + pad)
 
 
-def issue_token(username: str, ttl: int = _TTL_SECONDS) -> str:
-    payload = json.dumps({"u": username, "exp": int(time.time()) + ttl}).encode()
+LOGIN = "login"
+OAUTH_STATE = "oauth-state"
+
+
+def issue_token(username: str, ttl: int = _TTL_SECONDS, purpose: str = LOGIN) -> str:
+    # ``p`` binds the token to its purpose: an OAuth ``state`` minted by the
+    # unauthenticated /api/auth/feishu/start must never verify as a login token.
+    payload = json.dumps({"u": username, "exp": int(time.time()) + ttl,
+                          "p": purpose}).encode()
     p = _b64e(payload)
     sig = _b64e(hmac.new(_SECRET, p.encode(), hashlib.sha256).digest())
     return f"{p}.{sig}"
 
 
-def verify_token(token: str) -> str | None:
-    """Return the username if the token is valid and unexpired, else None."""
+def verify_token(token: str, purpose: str = LOGIN) -> str | None:
+    """Return the username if the token is valid, unexpired and minted for *purpose*.
+
+    Tokens issued before purpose binding carry no ``p`` and count as login tokens.
+    """
     try:
         p, sig = token.split(".", 1)
     except ValueError:
@@ -52,6 +62,8 @@ def verify_token(token: str) -> str | None:
     except (ValueError, json.JSONDecodeError):
         return None
     if int(payload.get("exp", 0)) < int(time.time()):
+        return None
+    if payload.get("p", LOGIN) != purpose:
         return None
     return payload.get("u")
 

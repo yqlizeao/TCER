@@ -284,7 +284,7 @@ function paintSessionDetail() {
         ${kv("先读后写", fmt.pct(raw.read_before_write))}
       </div>
       <div class="sd-col"><div class="sd-col-h">成本</div>
-        ${kv("模型", `<span class="model-pill">${d.model || "—"}</span>`)}
+        ${kv("模型", `<span class="model-pill">${escapeHTML(d.model || "—")}</span>`)}
         ${kv("成本", fmt.money(raw.cost_usd))}
         ${kv("Token", fmt.tokens(raw.total_tokens))}
       </div>

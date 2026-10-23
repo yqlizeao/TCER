@@ -732,3 +732,17 @@ def test_opencode_mixed_model_session_buckets_per_message_model(tmp_path, monkey
     assert u.input_tokens == 1000 and u.output_tokens == 200
     assert len(u.per_model) == 2
     assert sum(b.input_tokens for b in u.per_model.values()) == 1000
+
+
+def test_synthetic_user_parts_are_not_user_messages(tmp_path):
+    """synthetic=True 的 user text part 是客户端注入的编辑器上下文，不是真人输入。"""
+    db = _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
+    _add_parts(db, "ses-1", [("part-syn", {
+        "type": "text", "synthetic": True,
+        "text": "<system-reminder>Note: The user opened the file x</system-reminder>",
+        "metadata": {"kind": "editor_context", "filePath": "c:/secret/x.json"}})],
+        message_id="msg-user")
+    msgs = opencode_reader.read_user_messages(db, "ses-1")
+    assert msgs and not any("system-reminder" in m for m in msgs)
+    convo = opencode_reader.read_conversation(db, "ses-1")
+    assert not any("secret" in (b.get("text") or "") for b in convo)

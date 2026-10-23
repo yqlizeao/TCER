@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from operator import attrgetter
 from pathlib import Path
 
 
@@ -80,6 +81,15 @@ class TurnStat:
     errors: int = 0
     model: str = ""                  # 该回合的模型（归一化 id；混用/未知为 ""）
     user_turn: int | None = None     # 此响应发生前的真实用户消息累计数；None=未记录
+
+
+# 估算输出速度门槛（借鉴 cc-switch 的「估算速度」口径，纯日志时间戳推算）：
+# 耗时含首字等待，输出越少首字占比越大、越偏低，故要求输出 >= 200 token；
+# 输出 200+ 却不到 1 秒多半是起点取晚了；耗时只收 100ms–1h（再长多半夹了休眠/重试）。
+EST_SPEED_MIN_OUTPUT_TOKENS = 200
+EST_SPEED_MIN_DURATION_MS = 1000
+EST_LATENCY_MIN_MS = 100
+EST_LATENCY_MAX_MS = 60 * 60 * 1000
 
 
 @dataclass
@@ -181,6 +191,24 @@ class TokenUsage:
     # 数据源自报成本（OpenCode session.cost）——与 TCER 价表计价交叉校验；
     # 0/缺失视为未知（None）。不参与任何指标计算。
     reported_cost_usd: float | None = None
+    # 估算输出速度（est_output_tps）的分子/分母：只收「逐响应样本」通过门槛
+    # （输出 >= EST_SPEED_MIN_OUTPUT_TOKENS 且耗时 >= EST_SPEED_MIN_DURATION_MS，
+    # 耗时本身须落在 EST_LATENCY_MIN/MAX_MS 内）的响应。耗时含首字等待、取自日志时间戳，
+    # 不是代理实测。聚合一律 Σ输出 ÷ Σ耗时（可加，merge 直接求和）。
+    est_gen_output_tokens: int = 0
+    est_gen_duration_ms: int = 0
+
+    def add_est_gen_sample(self, output_tokens: int, duration_ms: int | None) -> bool:
+        """Book one per-response speed sample if it passes the estimate gates."""
+        if duration_ms is None:
+            return False
+        if not (EST_LATENCY_MIN_MS <= duration_ms <= EST_LATENCY_MAX_MS):
+            return False
+        if output_tokens < EST_SPEED_MIN_OUTPUT_TOKENS or duration_ms < EST_SPEED_MIN_DURATION_MS:
+            return False
+        self.est_gen_output_tokens += output_tokens
+        self.est_gen_duration_ms += duration_ms
+        return True
 
     @property
     def total_input(self) -> int:
@@ -216,9 +244,7 @@ class TokenUsage:
     def merge(self, other: TokenUsage) -> TokenUsage:
         """Return a new TokenUsage that is the sum of self and other (for aggregation)."""
         # Merge tool_calls dicts
-        merged_tools: dict[str, int] = {}
-        for tool, count in self.tool_calls.items():
-            merged_tools[tool] = count
+        merged_tools: dict[str, int] = dict(self.tool_calls)
         for tool, count in other.tool_calls.items():
             merged_tools[tool] = merged_tools.get(tool, 0) + count
 
@@ -226,21 +252,29 @@ class TokenUsage:
         merged_end = _max_ms(self.ended_at, other.ended_at)
         merged_duration = (merged_end - merged_start) if (merged_start and merged_end) else None
 
-        # Rebase other's tool_ops turns so they continue after self's last turn
-        self_max_turn = max((op.turn for op in self.tool_ops), default=-1)
-        rebased_other_ops = [
-            ToolOp(op.turn + self_max_turn + 1, op.tool, op.path)
-            for op in other.tool_ops
-        ]
-        # turn_stats 同步 rebase（拼接时间线；聚合对象的时间线是串接而非并发）
-        self_max_ts_turn = max((t.turn for t in self.turn_stats), default=-1)
-        rebased_other_stats = [
-            TurnStat(t.turn + self_max_ts_turn + 1, t.ts, t.input_tokens,
-                     t.cache_write, t.cache_read, t.output_tokens,
-                     t.duration_ms, t.tool_calls, t.errors, t.model,
-                     t.user_turn + self.user_msgs if t.user_turn is not None else None)
-            for t in other.turn_stats
-        ]
+        # Rebase other's tool_ops turns so they continue after self's last turn.
+        # （max 用 C 级 map(attrgetter)；other 无 ops 时整段跳过——聚合里大量会话无工具回合。）
+        if other.tool_ops:
+            self_max_turn = max(map(_TURN_OF, self.tool_ops), default=-1)
+            rebased_other_ops = [
+                ToolOp(op.turn + self_max_turn + 1, op.tool, op.path)
+                for op in other.tool_ops
+            ]
+        else:
+            rebased_other_ops = []
+        # turn_stats 同步 rebase（拼接时间线；聚合对象的时间线是串接而非并发）。
+        # self_max_ts_turn 还供 compaction_turns / turn_net_locs 使用，始终需要。
+        self_max_ts_turn = max(map(_TURN_OF, self.turn_stats), default=-1)
+        if other.turn_stats:
+            rebased_other_stats = [
+                TurnStat(t.turn + self_max_ts_turn + 1, t.ts, t.input_tokens,
+                         t.cache_write, t.cache_read, t.output_tokens,
+                         t.duration_ms, t.tool_calls, t.errors, t.model,
+                         t.user_turn + self.user_msgs if t.user_turn is not None else None)
+                for t in other.turn_stats
+            ]
+        else:
+            rebased_other_stats = []
 
         return TokenUsage(
             input_tokens=self.input_tokens + other.input_tokens,
@@ -319,6 +353,8 @@ class TokenUsage:
             patch_diff_added=self.patch_diff_added + other.patch_diff_added,
             patch_diff_deleted=self.patch_diff_deleted + other.patch_diff_deleted,
             reported_cost_usd=_sum_opt(self.reported_cost_usd, other.reported_cost_usd),
+            est_gen_output_tokens=self.est_gen_output_tokens + other.est_gen_output_tokens,
+            est_gen_duration_ms=self.est_gen_duration_ms + other.est_gen_duration_ms,
         )
 
 
@@ -357,6 +393,9 @@ def _sum_opt(a: float | None, b: float | None) -> float | None:
     if a is None and b is None:
         return None
     return (a or 0.0) + (b or 0.0)
+
+
+_TURN_OF = attrgetter("turn")
 
 
 def _min_ms(a: int | None, b: int | None) -> int | None:
@@ -485,10 +524,11 @@ class SessionReport:
     patch_apply_success_rate: float | None = None
     context_window_used_ratio: float | None = None
     reasoning_output_ratio: float | None = None
-    output_tps: float | None = None  # 输出吞吐（tokens/sec）= Σ output_tokens ÷ Σ 单次
+    est_output_tps: float | None = None  # 估算输出速度（token/秒）= Σ est_gen_output ÷ Σ est_gen_duration（含首字等待）
+    output_tps: float | None = None  # 输出吞吐（token/秒）= Σ output_tokens ÷ Σ 单次补全自报耗时
+                                     # 仅 omp / Pi 逐响应自报 duration/durationMs；Claude 只有轮级墙钟、
+                                     # Codex 只有任务级墙钟（不能当单次生成耗时）、OpenCode 多步聚合无
+                                     # step 级耗时——均留 None。见 metrics.output_tps；跨源可比看 est_output_tps。
     # --- 复核批新增（C1-C3）---
     cost_reported_ratio: float | None = None   # 价表计价 ÷ 源自报成本（1.0=一致）
     loc_patch_agreement: float | None = None    # 回放 LOC vs structuredPatch 一致率 0..1
-                                     # 补全生成耗时（秒）。仅 omp 提供逐补全
-                                     # duration；Claude 只有轮级墙钟(含工具+等待)不可用，
-                                     # OpenCode/Pi 无逐补全耗时——均留 None。见 metrics.output_tps。

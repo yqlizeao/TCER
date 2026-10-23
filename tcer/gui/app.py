@@ -211,9 +211,14 @@ class TcerGui:
                 self.root.after(0, lambda: popup.set_progress("下载完成,即将重启以完成更新…"))
                 updater.apply_and_restart(dest)
                 self.root.after(800, self._quit_for_update)
-            except Exception as e:
-                self.root.after(0, lambda: popup.set_progress(f"更新失败:{e}"))
-                self.root.after(0, lambda: popup.offer_manual_download(release.get("url", "")))
+            except Exception as e:  # noqa: BLE001
+                # 先取文本：except 结束后 e 被删除，延迟 lambda 引用会 NameError 被吞。
+                err_text = str(e)
+                try:
+                    self.root.after(0, lambda: popup.set_progress(f"更新失败:{err_text}"))
+                    self.root.after(0, lambda: popup.offer_manual_download(release.get("url", "")))
+                except (tk.TclError, RuntimeError):
+                    pass
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -224,6 +229,21 @@ class TcerGui:
         except tk.TclError:
             pass
         raise SystemExit(0)
+
+    def _spawn_bg(self, work, label: str, *, reset: str | None = None) -> None:
+        """后台线程跑 *work*；未捕获异常经 UI 队列报到状态栏（并复位 *reset* 标志）。
+
+        各汇总任务的单项目失败已在循环内计数，这里兜住循环外的异常（聚合/分组
+        计算本身抛错）——否则线程静默死亡，状态栏永停「计算中…」、标志位挡住重试。
+        """
+        def _run() -> None:
+            try:
+                work()
+            except Exception as e:  # noqa: BLE001
+                traceback.print_exc()
+                self._q.put(("bg_fail", label, f"{type(e).__name__}: {e}", reset))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_close(self) -> None:
         """关闭时保存界面偏好（几何/分栏/筛选/项目），失败不拦退出。
@@ -258,6 +278,9 @@ class TcerGui:
             ui_prefs.save(self._ui_prefs)
         except Exception:
             pass
+        if self._llm_executor is not None:
+            # 线程池工作线程非 daemon：不关会让进程在窗口消失后挂到在途请求超时（300s）。
+            self._llm_executor.shutdown(wait=False, cancel_futures=True)
         try:
             self.root.destroy()
         except Exception:
@@ -546,6 +569,11 @@ class TcerGui:
                     self.filter.set_status(
                         f"项目聚合完成 · {len(rows)} 个真实项目{note}")
                     self.real_projects_view.set_rows(rows)
+                elif kind == "bg_fail":
+                    _, label, err_text, reset = item
+                    if reset:
+                        setattr(self, reset, False)
+                    self.filter.set_status(f"{label}失败：{err_text}")
                 elif kind == "baselines":
                     _, mode, min_loc, method, per_project, errors, callback = item
                     self._on_baselines_computed(mode, min_loc, method, per_project, errors, callback)
@@ -696,8 +724,9 @@ class TcerGui:
         from tcer.core import reader
 
         sid = report.meta.session_id or report.meta.path.stem
-        if report.meta.source in ("codex", "opencode", "omp", "pi"):
-            label = {"codex": "Codex", "opencode": "OpenCode", "omp": "Oh My Pi", "pi": "Pi"}.get(report.meta.source, report.meta.source)
+        if (report.meta.source or "claude") != "claude":
+            from tcer.gui.metric_defs import SOURCE_LABELS
+            label = SOURCE_LABELS.get(report.meta.source, report.meta.source)
             messagebox.showinfo("删除会话", f"{label} 会话当前仅支持只读分析，暂不删除本地会话数据。")
             return
         try:
@@ -898,6 +927,20 @@ class TcerGui:
         if report:
             popups.SessionDetailPopup(self.root, report)
 
+    def show_transcript(self, report, siblings=None) -> None:
+        """会话记录阅读器：已开则复用窗口，序列取自会话列表当前的过滤 / 排序结果。"""
+        from .transcript_view import TranscriptWindow, refs_from_reports
+        reports = list(siblings) if siblings else []
+        idx = next((i for i, r in enumerate(reports) if r is report), None)
+        if idx is None:
+            reports, idx = [report], 0
+        refs = refs_from_reports(reports)
+        win = getattr(self, "_transcript_win", None)
+        if win is not None and win.alive():
+            win.open(refs, idx)
+        else:
+            self._transcript_win = TranscriptWindow(self.root, self, refs, idx)
+
     def show_tool_calls(self) -> None:
         if not self._current:
             return
@@ -997,27 +1040,10 @@ class TcerGui:
         is_agg = report.meta.session_id == "(aggregate)"
 
         def _read_one(r) -> list[str]:
-            if source == "codex":
-                from tcer.core import codex_reader
-                return codex_reader.read_user_messages(r.meta.path)
-            if source == "opencode":
-                from tcer.core import opencode_reader
-                sid = r.meta.session_id
-                return opencode_reader.read_user_messages(r.meta.path, sid) if sid else []
-            if source == "omp":
-                from tcer.core import omp_reader
-                return omp_reader.read_user_messages(r.meta.path)
-            if source == "pi":
-                from tcer.core import pi_reader
-                return pi_reader.read_user_messages(r.meta.path)
-            if source == "antigravity":
-                from tcer.core import antigravity_reader
-                return antigravity_reader.read_user_messages(r.meta.path)
-            if source == "workbuddy":
-                from tcer.core import workbuddy_reader
-                return workbuddy_reader.read_user_messages(r.meta.path)
-            # Claude
-            return TcerGui._claude_user_messages(r)
+            # 口径 SSOT：只读主会话，子代理派发 prompt 不是用户消息。
+            from tcer.core import user_input
+            return user_input.read_user_messages(source, r.meta.path,
+                                                 r.meta.session_id)
 
         label = {"codex": "Codex", "opencode": "OpenCode",
                  "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
@@ -1031,31 +1057,7 @@ class TcerGui:
                     groups.append((TcerGui._session_label(r), msgs))
             return groups, label
 
-        # Single-session view: Claude legacy cache wins when present.
-        if source not in ("codex", "opencode", "omp", "pi", "antigravity", "workbuddy") \
-                and report.usage.user_message_texts:
-            return list(report.usage.user_message_texts), label
         return _read_one(report), label
-
-    @staticmethod
-    def _claude_user_messages(report) -> list[str]:
-        """Lazy-load Claude user texts for one session (main jsonl only).
-
-        Subagent files are skipped on purpose: their only user-role messages
-        are the Task tool's dispatch prompt (e.g. "You are researching…"),
-        never real human input — including them leaked subagent prompts into
-        the popup as fake "user messages".
-        """
-        from tcer.core import reader
-        path = report.meta.path
-        if path is None:
-            return []
-        try:
-            _, main, _ = reader.session_artifacts(path)
-        except (OSError, ValueError, IndexError):
-            # 路径形态异常（非标准会话布局）→ 退回按单文件读取。
-            return reader.read_user_messages(path) if path.is_file() else []
-        return reader.read_user_messages(main) if main.is_file() else []
 
     def show_files_touched(self) -> None:
         report = self._rendered_report
@@ -1120,7 +1122,7 @@ class TcerGui:
                 per_project.append((views.ref_uid(p), views.project_label(p), a.reports))
             self._q.put(("baselines", mode, min_loc, method, per_project, errors, callback))
 
-        threading.Thread(target=_work, daemon=True).start()
+        self._spawn_bg(_work, "个人基准校准")
 
     def _on_baselines_computed(self, mode, min_loc, method, per_project, errors, callback) -> None:
         """主线程：后台汇总的会话按模式算成基准结结果，回调给弹窗渲染。"""
@@ -1222,7 +1224,7 @@ class TcerGui:
             models = analyze.cross_source_models(reports)
             self._q.put(("cross_source", models, errors))
 
-        threading.Thread(target=_work, daemon=True).start()
+        self._spawn_bg(_work, "跨源对照")
 
     def real_projects_scan(self, *, force: bool = False) -> None:
         """项目聚合页签数据：后台扫全部项目 → 按真实工作目录分组 + 逐 ref 聚合。
@@ -1332,7 +1334,7 @@ class TcerGui:
                              "refs": ref_rows, "totals": tot})
             self._q.put(("realproj", rows, errors))
 
-        threading.Thread(target=_work, daemon=True).start()
+        self._spawn_bg(_work, "项目聚合", reset="_realproj_scanning")
 
     def show_project_profile(self) -> None:
         """项目画像：跨会话热点文件 / 模型混用策略 / 技能·MCP 复用。"""
@@ -1369,7 +1371,7 @@ class TcerGui:
                     rows.append((p, a))
             self._q.put(("overview", rows, errors))
 
-        threading.Thread(target=_work, daemon=True).start()
+        self._spawn_bg(_work, "项目总览")
 
     def show_session_timeline(self) -> None:
         if not self._current:
@@ -2366,6 +2368,7 @@ class TcerGui:
         server_url = cfg["server_url"]
         auth_token = cfg.get("auth_token")
         detail = bool(cfg.get("detail"))
+        run_started_ms = int(time.time() * 1000)
 
         total_inserted = 0
         ok_projects = 0
@@ -2398,9 +2401,9 @@ class TcerGui:
                 errors.append(f"{label}: {e}")
 
         ok = ok_projects > 0 or (not errors and not refs)
-        if ok_projects > 0:
+        if ok_projects > 0 and not errors:  # 同自动上传：部分失败不推进水位线
             from tcer.core import upload_config
-            upload_config.set_last_upload_ts(int(time.time() * 1000))
+            upload_config.set_last_upload_ts(run_started_ms)
         parts = [f"上传完成 · {ok_projects}/{len(refs)} 个项目 · 写入 {total_inserted} 条记录"]
         if skipped_empty:
             parts.append(f"（{len(skipped_empty)} 项无会话，已跳过）")
@@ -2528,6 +2531,7 @@ class TcerGui:
             server_url = cfg["server_url"]
             auth_token = cfg.get("auth_token")
             detail = bool(cfg.get("detail"))
+            run_started_ms = int(time.time() * 1000)
 
             total_inserted = 0
             ok_projects = 0
@@ -2561,8 +2565,13 @@ class TcerGui:
                 except Exception as e:  # noqa: BLE001
                     errors.append(f"{label}: {e}")
 
+            # 有项目失败时不推进水位线：否则失败项目里早于新水位的会话以后会被
+            # 「activity > last_ts」过滤掉、永不再传。成功项目下次重传是幂等的
+            # （server 按 person+project+session_id 更新）。水位取本轮开始时刻，
+            # 上传期间新产生活动的会话留给下一轮。
+            if ok_projects > 0 and not errors:
+                upload_config.set_last_upload_ts(run_started_ms)
             if ok_projects > 0:
-                upload_config.set_last_upload_ts(int(time.time() * 1000))
                 msg = f"自动上传完成 · {ok_projects} 个项目 · 写入 {total_inserted} 条新记录"
                 self._q.put(("auto_upload", True, ok_projects, total_inserted, msg))
             elif errors:

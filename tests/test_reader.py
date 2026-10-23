@@ -878,3 +878,70 @@ def test_cost_state_absent_is_none_and_subagent_ignored(tmp_path):
     sp = sub / "agent-1.jsonl"
     sp.write_text(json.dumps(_cost_state(9.0)) + chr(10), encoding="utf-8")
     assert reader.aggregate_usage(sp).reported_cost_usd is None
+
+
+def test_streaming_snapshot_lines_book_output_growth(tmp_path):
+    """同一 message.id 的后续行是累计快照：output 逐行增长（实测 6→393→6268），
+    只取首行会少计输出——按字段取最大值补差，且只算一个回合。"""
+    p = write_session(tmp_path, [
+        _assistant(_usage(100, 50, 1000, 6), msg_id="msg_s", model="claude-opus-4-8"),
+        _assistant(_usage(100, 50, 1000, 393), msg_id="msg_s", model="claude-opus-4-8"),
+        _assistant(_usage(100, 50, 1000, 6268), msg_id="msg_s", model="claude-opus-4-8"),
+    ])
+    u = reader.aggregate_usage(p)
+    assert u.assistant_msgs == 1
+    assert u.input_tokens == 100 and u.cache_creation_input_tokens == 50
+    assert u.cache_read_input_tokens == 1000
+    assert u.output_tokens == 6268
+    assert sum(b.output_tokens for b in u.per_model.values()) == 6268
+    assert len(u.turn_stats) == 1 and u.turn_stats[0].output_tokens == 6268
+
+
+def test_resent_identical_lines_do_not_double_count(tmp_path):
+    """rewind 重发同 id、同 usage 的行：补差为 0。"""
+    p = write_session(tmp_path, [
+        _assistant(_usage(10, 0, 0, 5), msg_id="msg_r"),
+        _assistant(_usage(10, 0, 0, 5), msg_id="msg_r"),
+        _assistant(_usage(10, 0, 0, 5), msg_id="msg_r"),
+    ])
+    u = reader.aggregate_usage(p)
+    assert (u.assistant_msgs, u.input_tokens, u.output_tokens) == (1, 10, 5)
+
+
+def test_synthetic_zero_usage_line_creates_no_per_model_bucket(tmp_path):
+    """<synthetic> 占位（零用量、无真实模型）不进 per_model（不变量 #4）。"""
+    import json as _json
+    lines = [
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant", "model": "<synthetic>",
+                                          "content": [{"type": "text", "text": "No response requested."}],
+                                          "usage": {"input_tokens": 0, "output_tokens": 0}}},
+        {"type": "assistant", "message": {"id": "m2", "role": "assistant", "model": "claude-opus-4-8",
+                                          "content": [{"type": "text", "text": "ok"}],
+                                          "usage": {"input_tokens": 10, "output_tokens": 5}}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert set(u.per_model) == {"claude-opus-4-8"}
+
+
+def test_api_request_blob_records_are_not_session_events(tmp_path):
+    """api-request-blob 是请求消息存档副本：不得再计提问/图片/思考（实测 66 会话虚增）。"""
+    import json as _json
+    blob_user = {"type": "api-request-blob", "sessionId": "s", "hash": "h1",
+                 "message": {"role": "user", "content": [{"type": "text", "text": "旧问题"}]}}
+    blob_asst = {"type": "api-request-blob", "sessionId": "s", "hash": "h2",
+                 "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "x"}]}}
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "真问题"}},
+        blob_user, blob_asst, [1, 2], "garbage",
+        {"type": "assistant", "message": {"id": "m1", "role": "assistant", "model": "claude-opus-4-8",
+                                          "content": [{"type": "text", "text": "ok"}],
+                                          "usage": {"input_tokens": 1, "output_tokens": 1}}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x, ensure_ascii=False) for x in lines) + "\n", encoding="utf-8")
+    u = reader.aggregate_usage(p)
+    assert u.user_msgs == 1 and u.thinking_count == 0
+    assert reader.read_user_messages(p) == ["真问题"]
+    assert reader.read_session_meta(p).title == "真问题"
