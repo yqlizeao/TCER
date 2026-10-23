@@ -272,6 +272,90 @@ def test_flow_row_wraps_when_narrow(root):
     top.destroy()
 
 
+class _FakeTclObj:
+    """复现 CI 打包版（GitHub Actions Python 3.11 冻结）下 cget() 的返回形态：
+    Tcl_Obj 包装，无 __int__，只有 str() 能取到值（源码 3.14 运行不复现）。"""
+
+    def __init__(self, v):
+        self._v = v
+
+    def __str__(self):
+        return str(self._v)
+
+
+def test_to_int_accepts_tcl_obj_wrappers():
+    """回归 v2.0.0 Windows exe 启动即崩：to_int 在 int/str/Tcl_Obj 形态下一致。"""
+    from tcer.gui.widgets import to_int
+
+    assert to_int(2) == 2
+    assert to_int("2") == 2
+    assert to_int(_FakeTclObj(2)) == 2
+    assert to_int(_FakeTclObj("0")) == 0
+
+
+def test_fit_label_survives_tcl_obj_cget(root):
+    """回归 v2.0.0 exe 启动即崩：cget('padx') 为 Tcl_Obj 时 fit_label 的
+    int() 抛 TypeError；修后应照常按像素截断加省略号。"""
+    from tcer.gui.widgets import fit_label
+
+    class _TclObjLabel(tk.Label):
+        def cget(self, key):
+            return _FakeTclObj(super().cget(key))
+
+    top = tk.Toplevel(root)
+    lbl = _TclObjLabel(top, text="placeholder", padx=2)
+    lbl.pack(fill="x")
+    top.geometry("120x40")
+    root.update()
+    long_text = "标题很长很长很长很长很长需要截断加省略号"
+    fit_label(lbl, long_text)
+    root.update()
+    txt = str(lbl.cget("text"))
+    assert txt != long_text and txt.endswith("…"), txt
+    top.destroy()
+
+
+def test_flow_row_survives_tcl_obj_cget(root):
+    """回归：cget('height') 为 Tcl_Obj 时 FlowRow.relayout 的 int() 抛
+    TypeError；修后应照常折行、照常撑高。"""
+    from tcer.gui.widgets import FlowRow
+
+    class _TclObjFlow(FlowRow):
+        def cget(self, key):
+            return _FakeTclObj(super().cget(key))
+
+    top = tk.Toplevel(root)
+    flow = _TclObjFlow(top, width=100)
+    flow.pack(fill="x")
+    items = [flow.add(tk.Frame(flow, width=40, height=20)) for _ in range(5)]
+    top.geometry("100x200")
+    root.update()
+    ys = [w.winfo_y() for w in items]
+    assert ys[0] == ys[1] and ys[2] > ys[1], ys
+    assert flow.winfo_height() >= ys[-1] + 20
+    top.destroy()
+
+
+def test_metric_cell_fit_wrap_survives_tcl_obj_cget(root):
+    """回归：cget('wraplength') 为 Tcl_Obj 时 _fit_wrap 的 int() 抛
+    TypeError；修后应照常把格宽写回 wraplength。"""
+    from tcer.gui.widgets import MetricCell
+
+    top = tk.Toplevel(root)
+
+    class _TclObjValue(tk.Label):
+        def cget(self, key):
+            return _FakeTclObj(super().cget(key))
+
+    class _Cell:
+        value = _TclObjValue(top, text="x")
+
+    _Cell.value.config(wraplength=999)
+    MetricCell._fit_wrap(_Cell(), type("E", (), {"width": 200})())
+    assert str(_Cell.value.cget("wraplength")) == "184"  # max(60, 200-16)
+    top.destroy()  # 勿泄漏到共享 root（后续测试会扫描 root 的全部子 Label）
+
+
 def test_mac_button_command_compat(root):
     """_MacButton：command 兼容 tk.Button 的构造传入与 .config(command=) 重设。
 

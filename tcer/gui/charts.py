@@ -564,7 +564,7 @@ class TrendChart:
             for w in getattr(pill, "_members", ()):
                 try:
                     w.config(bg=bg)
-                    if isinstance(w, tk.Label) and w.cget("text"):
+                    if isinstance(w, tk.Label) and str(w.cget("text")):
                         w.config(fg=fg)
                 except tk.TclError:
                     pass

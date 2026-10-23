@@ -405,7 +405,7 @@ class ScrollFrame:
             c_h = self.canvas.winfo_height()
             if c_h <= 1:
                 return
-            sr = self.canvas.cget("scrollregion").split()
+            sr = str(self.canvas.cget("scrollregion")).split()
             if len(sr) < 4:
                 return
             total_h = float(sr[3])
@@ -434,7 +434,7 @@ class Card:
     def __init__(self, parent, on_click, on_right_click=None,
                  bg: str = theme.PANEL_2, padx: int = 4, pady: int = 2, radius: int = 5) -> None:
         self._bg = bg
-        self._parent_bg = parent.cget("bg") if hasattr(parent, "cget") else theme.PANEL
+        self._parent_bg = str(parent.cget("bg")) if hasattr(parent, "cget") else theme.PANEL
         self._on_click = on_click
         self._on_right_click = on_right_click
         self._selected = False
@@ -529,7 +529,7 @@ class Card:
                 continue
             if type(w) in (tk.Frame, tk.Label):
                 try:
-                    if w.cget("bg") == old_bg:
+                    if str(w.cget("bg")) == old_bg:
                         w.configure(bg=new_bg)
                 except tk.TclError:
                     pass
@@ -540,7 +540,7 @@ class Card:
         self._registered_widgets.append(widget)
         if isinstance(widget, tk.Label):
             try:
-                self._label_fgs[widget] = widget.cget("fg")
+                self._label_fgs[widget] = str(widget.cget("fg"))
             except tk.TclError:
                 pass
         curr_bg = theme.SEL_ROW_ACTIVE if self._selected else (theme.HOVER_BG if self._hovered else self._bg)
@@ -667,7 +667,7 @@ class MetricCell:
 
     def _fit_wrap(self, e) -> None:
         wl = max(60, e.width - 16)
-        if int(self.value.cget("wraplength") or 0) != wl:
+        if to_int(self.value.cget("wraplength") or 0) != wl:
             self.value.config(wraplength=wl, justify="left")
 
     @property
@@ -1389,6 +1389,14 @@ def entry_box(parent, *, font=theme.FONT_UI, width: int | None = None,
     return ent
 
 
+def to_int(v) -> int:
+    """Tcl 返回值转 int。CI 打包版（GitHub Actions Python 3.11 冻结）里
+    ``cget()`` 部分选项返回 ``Tcl_Obj`` 包装而非 int/str，直接 ``int()`` 抛
+    TypeError（v2.0.0 Windows exe 启动即崩，源码 3.14 运行不复现）；经
+    ``str()`` 取字符串表示后转换，源码 / 打包两种环境结果一致。"""
+    return int(str(v))
+
+
 def fit_text(font, text: str, width: int) -> str:
     """把 text 按像素宽截到 ``width`` 内，超出则末尾加「…」（二分查找）。"""
     if width <= 0 or font.measure(text) <= width:
@@ -1414,14 +1422,14 @@ def fit_label(label: tk.Label, text: str) -> tk.Label:
     spec = str(label.cget("font"))
     font = _FIT_FONTS.get(spec)
     if font is None:
-        font = _FIT_FONTS[spec] = tkfont.Font(font=label.cget("font"))
+        font = _FIT_FONTS[spec] = tkfont.Font(font=spec)
     label._fit_full = text  # type: ignore[attr-defined]
 
     def refit(_e=None) -> None:
-        w = label.winfo_width() - 2 * int(label.cget("padx")) - 4
+        w = label.winfo_width() - 2 * to_int(label.cget("padx")) - 4
         full = label._fit_full  # type: ignore[attr-defined]
         txt = full if w <= 8 else fit_text(font, full, w)
-        if label.cget("text") != txt:
+        if str(label.cget("text")) != txt:
             label.configure(text=txt)
 
     if not getattr(label, "_fit_bound", False):
@@ -1475,7 +1483,7 @@ class FlowRow(tk.Frame):
             x += ww + self._gap_x
             row_h = max(row_h, wh)
         height = max(y + row_h, 1)
-        if int(self.cget("height")) != height:
+        if to_int(self.cget("height")) != height:
             self.configure(height=height)
 
 

@@ -887,7 +887,7 @@ class TranscriptWindow:
         if w <= 1:
             return
         txt = _fit_text(self._title_font, self._title_full, w - 8, 1)
-        if txt != self._title_lbl.cget("text"):
+        if txt != str(self._title_lbl.cget("text")):
             self._title_lbl.configure(text=txt)
 
     # ------------------------------------------------------------------ 加载

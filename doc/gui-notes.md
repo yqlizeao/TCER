@@ -131,4 +131,5 @@
 - **组件级测试全绿 ≠ 入口级可用**：新增 GUI 功能验收必须构建完整 `TcerGui` 走真实入口（见 llm-layer.md#delivery-lessons）。
 - **`selection_set` 的 `<<TreeviewSelect>>` 依赖事件循环**，程序化选择后须显式调 `_on_select()`。
 - **抗锯齿 `_aa_layer` 的 16 档 alpha 量化勿删**（107ms → 23ms/层）；相图缩放用 `_aa_layer_flat` 矢量绘制 + 16ms 节流。
+- **`cget()` 返回值进算术/比较前必须经 `str()` / `to_int()`（`widgets.to_int`）归一**：CI 打包版（GitHub Actions 的 Python 3.11 冻结 tkinter）下部分选项返回 `Tcl_Obj` 包装而非 int/str，`int()` 直接 TypeError、`.split()`/`in`/`==` 静默失配——v2.0.0 exe 因此启动即崩（11 处调用点，2026-10-23）。源码 3.14 运行不复现，`winfo_*` 系列两环境均为 int 无需包装（1.9.9 同源 CI 构建大量 winfo 算术未炸可证）。回归测试用 `_FakeTclObj`（无 `__int__`、仅 `__str__`）模拟该形态，无需装 3.11。**发版前务必本机跑一次 CI 产出的 exe**——源码 launch.bat 冒烟覆盖不了冻结 Tcl/Tk 的行为差异。
 

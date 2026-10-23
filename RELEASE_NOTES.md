@@ -1,3 +1,31 @@
+# TCER v2.0.1 更新说明
+
+**紧急修复：Windows 打包版（exe）启动即崩溃的问题**
+
+---
+
+## 一句话总结
+
+修复 v2.0.0 Windows 打包版启动时闪退报错 `int() argument must be a string, a bytes-like object or a real number, not 'tkinter.Tcl_Obj'` 的问题。源码运行（`python -m tcer`）不受影响，仅影响 PyInstaller 打包版。
+
+---
+
+## 问题与修复
+
+- **现象**：打开 v2.0.0 的 Windows exe 弹出「Failed to execute script '__main__' due to unhandled exception」错误框，界面无法启动。源码方式运行一切正常。
+- **原因**：v2.0.0 新增的「按像素截断省略号」「流式折行」「格宽折行」等界面功能首次把 `cget()` 的返回值直接传给 `int()` / 字符串运算。CI 打包环境（GitHub Actions 的 Python 3.11 冻结版）里 `cget()` 部分选项返回 `Tcl_Obj` 包装对象而非 int/str，`int()` 直接抛 TypeError。本地源码运行的 Python 3.14 行为不同，因此开发时未发现。
+- **修复**：所有 `cget()` 返回值进入运算 / 比较前统一经 `str()` / `to_int()` 归一（`tcer/gui/widgets.py`、`charts.py`、`transcript_view.py`，共 12 处），源码与打包两种环境行为一致。附带消除了几处同类隐患：悬停换色兜底在打包版下会失效、胶囊文字着色判断会误判等。
+- 已补 5 项回归测试模拟打包版 `Tcl_Obj` 返回形态（对修复前代码验证过会失败），全量 1162 项测试通过。
+
+---
+
+## 升级建议
+
+Windows 打包版用户请直接下载 `TCER-windows-x64-v2.0.1.exe` 覆盖使用；macOS 包不受影响但也一并发布。
+**
+
+---
+
 # TCER v2.0.0 更新说明
 
 **Antigravity 输入 Token 口径修正（缓存不再双计），会话记录阅读器增强，界面细节全面打磨**
