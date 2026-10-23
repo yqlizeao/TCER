@@ -57,7 +57,7 @@ def format_card_title(title: str, max_len: int = 38) -> str:
 _SCORE_NAME = metric_name("score")        # 综合效率分
 _SCORE_SHORT = "效率分"                    # 窄列/徽标用简称
 _SCORE_TIP = metric_tip("score")          # 悬停完整解释
-from .widgets import (Card, CollapsibleSection, FlatMenu,
+from .widgets import (Card, CollapsibleSection, FlatMenu, FlowRow, entry_box, fit_label,
                       MetricCell, ScrollFrame, SelectableLabel, Tooltip, flat_button, WorkbenchTab,
                       RoundedPill, RoundedSearchBox, RoundedKpiChip, get_rounded_rect_img, draw_rounded_rect_bg)
 from .platform import CLICK_CURSOR
@@ -1308,9 +1308,7 @@ class ProjectColumn:
             Tooltip(img_lbl, label)
             bindees.append(img_lbl)
 
-        name_lbl = tk.Label(row, text=name, bg=theme.PANEL, fg=fg,
-                            font=theme.FONT_UI, anchor="w")
-        name_lbl.pack(side="left", fill="x", expand=True)
+        name_lbl = tk.Label(row, bg=theme.PANEL, fg=fg, font=theme.FONT_UI, anchor="w")
         bindees.append(name_lbl)
 
         drive = project_drive(project_dir)
@@ -1319,6 +1317,9 @@ class ProjectColumn:
                                  fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
             drive_lbl.pack(side="right", padx=(4, 0))
             bindees.append(drive_lbl)
+        # 名称后 pack（盘符先占右侧），按像素宽截断加省略号
+        name_lbl.pack(side="left", fill="x", expand=True)
+        fit_label(name_lbl, name)
 
         for w in bindees:
             card.bind_to(w)
@@ -1760,10 +1761,10 @@ class SessionColumn:
         row2 = tk.Frame(card.frame, bg=card._bg)
         row2.pack(fill="x", padx=6, pady=(1, 2))
         card.track_bg(row2)
-        title_disp = format_card_title(title, 38)
-        ti_lbl = tk.Label(row2, text=title_disp, bg=card._bg, fg=theme.FG,
+        ti_lbl = tk.Label(row2, bg=card._bg, fg=theme.FG,
                           font=theme.FONT_UI_SMALL, anchor="w")
         ti_lbl.pack(side="left", fill="x", expand=True)
+        fit_label(ti_lbl, format_card_title(title, 200))   # 按像素宽截断加省略号
 
         # Row 3: 摘要行——左「模型短名 · 时长」，右成本金额
         from tcer.core.format import fmt_duration_ms
@@ -1783,10 +1784,10 @@ class SessionColumn:
                             font=theme.FONT_VALUE, anchor="e")
         cost_lbl.pack(side="right", padx=(4, 0))
 
-        sum_lbl = tk.Label(sum_row, text=" · ".join(sum_parts) or "-",
-                           bg=card._bg, fg=theme.MUTED,
+        sum_lbl = tk.Label(sum_row, bg=card._bg, fg=theme.MUTED,
                            font=theme.FONT_UI_SMALL, anchor="w")
         sum_lbl.pack(side="left", fill="x", expand=True)
+        fit_label(sum_lbl, " · ".join(sum_parts) or "-")
         # Tooltip：完整标题 + ID + 详细摘要（回合/LOC/返工在此悬浮可见）
         turns = r.usage.assistant_msgs
         net_loc = r.net_loc or 0
@@ -2180,6 +2181,14 @@ class MetricPanel:
                                font=theme.FONT_UI)
         self._h_dur.pack(side="left", padx=theme.PAD_M)
 
+        # 会话视角专属：打开会话记录阅读器（项目汇总视角无单一会话，隐藏）
+        self._transcript_btn = RoundedPill(
+            h, text="会话记录", icon=ui_icon(h, "outline"), width=88, height=22,
+            radius=theme.RADIUS_S, fill=theme.CONTROL_BG, hover_fill=theme.HOVER_BG,
+            bg=theme.BG, fg=theme.FG, font=theme.FONT_UI_SMALL,
+            command=lambda _p=None: self.controller.show_transcript_for_rendered())
+        Tooltip(self._transcript_btn, "打开本会话的完整对话记录（提问 / 执行过程 / 回复）")
+
         # 右侧：会话/项目上下文与环境信息记录徽标（非点击按钮，专注记录关键信息）
         # 模式切换胶囊：简要版（默认，隐藏空/不适用项）⟷ 完整版（展示全量槽位）
         self._mode_btn = RoundedPill(
@@ -2307,8 +2316,10 @@ class MetricPanel:
             self._chips[metric.key] = (cell.value, cell.approx_lbl or cell.value)
             cells.append(cell)
 
+        # 等宽列（uniform）：各分组网格同宽，列线跨组对齐；超长值（模型列表等）由
+        # MetricCell 按格宽自动折行，不撑宽本列。
         for c in range(_PER_ROW):
-            grid.grid_columnconfigure(c, weight=1)
+            grid.grid_columnconfigure(c, weight=1, uniform="metric")
 
         exp_row = len(metrics)
         expander = tk.Label(grid, text="", bg=theme.PANEL, fg=theme.MUTED,
@@ -2350,16 +2361,21 @@ class MetricPanel:
         score = getattr(report, "score", None)
         self._h_score_val.config(text=f"{score:.1f}" if score is not None else "-")
 
+        if is_agg or self.controller is None:
+            self._transcript_btn.pack_forget()
+        elif not self._transcript_btn.winfo_manager():
+            self._transcript_btn.pack(side="left", padx=(0, theme.PAD_M), after=self._h_dur)
+
         # 刷新右侧上下文元数据记录胶囊
         if is_agg:
             n_sess = len(getattr(self.controller, "_current", None).reports) if getattr(self.controller, "_current", None) else 0
-            self._tag_time.set_text(f"共 {n_sess} 个会话")
+            self._set_time_tag(f"共 {n_sess} 个会话")
             self._tag_task.set_text("全量聚合")
             self._tag_meta.set_text(f"来源: {report.meta.source}")
         else:
             time_ms = u.started_at or u.ended_at
             time_str = fmt_dt(time_ms, "%Y-%m-%d %H:%M") if time_ms else "-"
-            self._tag_time.set_text(time_str)
+            self._set_time_tag(time_str)
 
             task_name = metrics.TASK_CATEGORIES.get(report.task_type, {}).get("name", report.task_type or "自动")
             self._tag_task.set_text(f"任务: {task_name}")
@@ -2375,7 +2391,14 @@ class MetricPanel:
                 meta_parts.append(f"来源: {report.meta.source}")
             self._tag_meta.set_text(" · ".join(meta_parts))
 
+    def _set_time_tag(self, text: str) -> None:
+        """时间胶囊：时间戳用等宽，「共 N 个会话」这类中文文案用 UI 字体（等宽缺 CJK 字形）。"""
+        self._tag_time.config(font=theme.value_font(text, mono=theme.FONT_MONO,
+                                                    cjk=theme.FONT_UI_SMALL))
+        self._tag_time.set_text(text)
+
     def clear(self) -> None:
+        self._transcript_btn.pack_forget()
         self._h_title.config(text="待选会话")
         self._h_dur.config(text="耗时 -")
         self._h_cost.config(text="$0.00")
@@ -3413,7 +3436,8 @@ class ModelCompareView:
         if total_cost > 0 and len(self._models) >= 2:
             bar = tk.Frame(self._container, bg=theme.PANEL, padx=6, pady=4)
             bar.pack(fill="x")
-            canvas = tk.Canvas(bar, bg=theme.PANEL, height=18, highlightthickness=0)
+            # 细条 + 段间 2px 缝，不在色块上压字（窄段字会糊）；段色与下方模型卡圆点一致
+            canvas = tk.Canvas(bar, bg=theme.PANEL, height=8, highlightthickness=0)
             canvas.pack(fill="x")
 
             def draw_bar(_e=None):
@@ -3425,20 +3449,10 @@ class ModelCompareView:
                 for i, mc in enumerate(self._models):
                     rw = mc.cost / total_cost
                     color = theme.CHART_PALETTE[i % len(theme.CHART_PALETTE)]
-                    x1 = int(rx * w)
+                    x1 = int(rx * w) + (2 if i else 0)
                     x2 = int((rx + rw) * w)
-                    canvas.create_rectangle(x1, 0, x2, 18, fill=color, outline="")
-                    rx += rw
-                rx = 0.0
-                for i, mc in enumerate(self._models):
-                    rw = mc.cost / total_cost
-                    x1 = int(rx * w)
-                    x2 = int((rx + rw) * w)
-                    cx = (x1 + x2) / 2
-                    if x2 - x1 > 28:
-                        canvas.create_text(cx, 9, text=mc.display_name,
-                                           fill=theme.FG_WHITE,
-                                           font=(theme.FONT_MONO_NAME, 8, "bold"))
+                    if x2 > x1:
+                        canvas.create_rectangle(x1, 0, x2, 8, fill=color, outline="")
                     rx += rw
 
             canvas.bind("<Configure>", draw_bar)
@@ -3466,7 +3480,9 @@ class ModelCompareView:
             name_lbl.pack(side="left")
 
             cost_str = model_display(mc, "m_cost")
-            share_str = f" · 占比 {mc.cost_share * 100:.1f}%" if len(self._models) >= 2 else ""
+            # cost_share 已是百分数（core 已 ×100）——走 SSOT 格式化，勿再 ×100
+            share_str = (f" · 成本占比 {model_display(mc, 'm_cost_share')}"
+                         if len(self._models) >= 2 else "")
             sub_lbl = tk.Label(cell, text=f"{cost_str} · {mc.session_count} 会话{share_str}",
                                bg=theme.PANEL_2, fg=theme.MUTED,
                                font=theme.FONT_UI_SMALL, anchor="w")
@@ -3524,7 +3540,7 @@ class ModelCompareView:
                 lbl = tk.Label(th_right, text=mc.display_name, bg=theme.PANEL_2, fg=theme.FG,
                                font=theme.FONT_UI_SMALL_BOLD, anchor="e")
                 lbl.grid(row=0, column=j, sticky="nsew", padx=4)
-                th_right.grid_columnconfigure(j, weight=1)
+                th_right.grid_columnconfigure(j, weight=1, uniform="mcol")
 
         # 逐行渲染指标（带斑马纹 + 悬停全行高亮 + 单模型紧凑自适应对齐）
         for i, metric in enumerate(group.metrics):
@@ -3562,7 +3578,7 @@ class ModelCompareView:
                 val = model_display(mc, key)
                 val_lbl = tk.Label(row, text=val, bg=row_bg,
                                    fg=row_colors.get(0, theme.FG_WHITE),
-                                   font=theme.FONT_VALUE, anchor="e")
+                                   font=theme.value_font(val), anchor="e")
                 val_lbl.pack(side="right", padx=(8, 16))
                 if tip_text:
                     Tooltip(val_lbl, tip_text)
@@ -3575,22 +3591,30 @@ class ModelCompareView:
                     val = model_display(mc, key)
                     val_lbl = tk.Label(val_container, text=val, bg=row_bg,
                                        fg=row_colors.get(j, theme.VALUE_NEUTRAL),
-                                       font=theme.FONT_VALUE, anchor="e")
+                                       font=theme.value_font(val), anchor="e")
                     val_lbl.grid(row=0, column=j, sticky="nsew", padx=4)
-                    val_container.grid_columnconfigure(j, weight=1)
+                    val_container.grid_columnconfigure(j, weight=1, uniform="mcol")
                     if tip_text:
                         Tooltip(val_lbl, tip_text)
                     widgets_in_row.append(val_lbl)
 
-            # 悬停全行高亮反馈
+            # 悬停全行高亮（全局唯一 hover token）；格间移动仍在本行内时不还原，防闪烁
             def _bind_hover(r=row, wlist=widgets_in_row, default_bg=row_bg):
                 def _enter(_e):
                     for w in wlist:
                         try:
-                            w.configure(bg=theme.CONTROL_BG)
+                            w.configure(bg=theme.HOVER_BG)
                         except tk.TclError:
                             pass
-                def _leave(_e):
+                def _leave(e):
+                    try:
+                        curr = e.widget.winfo_containing(e.x_root, e.y_root)
+                        while curr is not None:
+                            if curr == r:
+                                return
+                            curr = getattr(curr, "master", None)
+                    except Exception:
+                        pass
                     for w in wlist:
                         try:
                             w.configure(bg=default_bg)
@@ -3831,6 +3855,7 @@ class RealProjectsView:
         # （与会话卡片同款：$ 两位小数、FONT_VALUE、异常才着色——≥$50 警示橙，平时中性）
         row1 = tk.Frame(card.frame, bg=theme.PANEL_2)
         row1.pack(fill="x", padx=theme.PAD_S, pady=(theme.PAD_S, 0))
+        card.bind_to(row1)   # 行容器也随卡片 hover 换色、可点，否则标签间露出色斑
         arrow = tk.Label(row1, text="▾" if expanded else "▸", bg=theme.PANEL_2,
                          fg=theme.MUTED, font=theme.FONT_UI_SMALL)
         arrow.pack(side="left", padx=(2, 4))
@@ -3851,6 +3876,7 @@ class RealProjectsView:
         # 与项目卡同款 source_icon，Claude 自定义根自动用 ccswitch 图标）。
         row2 = tk.Frame(card.frame, bg=theme.PANEL_2)
         row2.pack(fill="x", padx=theme.PAD_S, pady=(2, 0))
+        card.bind_to(row2)
         for r in g["refs"]:
             self._icon_chip(row2, card, r)
 
@@ -6125,6 +6151,23 @@ class LlmReportsView:
         # 左顶部：标题栏 + 数量 + 清空按钮
         bar = tk.Frame(left, bg=theme.BG)
         bar.pack(fill="x", pady=(0, theme.PAD_XS))
+        # 右侧操作图标组：清空与取消任务。纯图标（文字进悬浮提示）且先于左侧
+        # 标签 pack——pack 按顺序分配空间，后 pack 者在窄栏里被挤压截断。
+        _trash_icon = ui_icon(bar, "trash")
+        clear_btn = flat_button(bar, "" if _trash_icon else "清空", self._clear_all,
+                                image=_trash_icon, bg=theme.BG,
+                                padx=2, pady=1)
+        clear_btn.pack(side="right", padx=(2, 0))
+        Tooltip(clear_btn, "清空所有本地 LLM 报告记录")
+
+        if on_cancel_tasks is not None:
+            _stop_icon = ui_icon(bar, "stop")
+            self._cancel_tasks_btn = flat_button(
+                bar, "" if _stop_icon else "取消生成中任务", on_cancel_tasks,
+                image=_stop_icon, bg=theme.BG, padx=2, pady=1)
+            self._cancel_tasks_btn.pack(side="right", padx=(2, 0))
+            Tooltip(self._cancel_tasks_btn, "取消生成中任务（终止所有进行中与排队中的后台分析任务）")
+
         _icon = ui_icon(bar, "session")
         if _icon is not None:
             tk.Label(bar, image=_icon, bg=theme.BG).pack(side="left", padx=(0, 4))
@@ -6141,27 +6184,12 @@ class LlmReportsView:
                 "TypeSafe Jev 引擎累计计费口径：仅真实网络调用（判定缓存命中不计），"
                 "按官方输入单价 $0.042/百万 token 折算，输出 token 免费")
 
-        # 右侧操作图标组：清空与取消任务（纯图标化，沉浸底色，悬停高亮，永不截断）
-        _trash_icon = ui_icon(bar, "trash")
-        clear_btn = flat_button(bar, "清空", self._clear_all,
-                                image=_trash_icon, bg=theme.BG,
-                                padx=2, pady=1)
-        clear_btn.pack(side="right", padx=(2, 0))
-        Tooltip(clear_btn, "清空所有本地 LLM 报告记录")
-
-        if on_cancel_tasks is not None:
-            _stop_icon = ui_icon(bar, "stop")
-            self._cancel_tasks_btn = flat_button(bar, "取消生成中任务", on_cancel_tasks,
-                                                 image=_stop_icon, bg=theme.BG,
-                                                 padx=2, pady=1)
-            self._cancel_tasks_btn.pack(side="right", padx=(2, 0))
-            Tooltip(self._cancel_tasks_btn, "取消生成中任务（终止所有进行中与排队中的后台分析任务）")
         # 搜索与类型过滤工具条（零多余空白死区，与侧栏自然紧凑贴合）
         self._filter_box = filter_box = tk.Frame(left, bg=theme.BG)
         filter_box.pack(fill="x", pady=(0, 2))
 
-        # 类型切换胶囊（流式自适应紧凑排布，零多余空白死区）
-        self._pill_frame = pill_box = tk.Frame(filter_box, bg=theme.BG)
+        # 类型切换胶囊（流式换行：窄栏排不下自动折行，不再裁掉末尾胶囊）
+        self._pill_frame = pill_box = FlowRow(filter_box, bg=theme.BG)
         pill_box.pack(fill="x", pady=(0, 2))
         self._pill_btns: dict[str, RoundedPill] = {}
 
@@ -6181,7 +6209,7 @@ class LlmReportsView:
                               fill=theme.CONTROL_BG, hover_fill=theme.HOVER_BG,
                               bg=theme.BG, fg=theme.FG, font=theme.FONT_UI_SMALL,
                               command=lambda _p=None, kind=k: self._set_kind_filter(kind))
-            btn.pack(side="left", padx=(0, 2))
+            pill_box.add(btn)
             self._pill_btns[k] = btn
 
         # 实时搜索框：与会话列表 (SessionColumn) 100% 一致的 RoundedSearchBox（抗锯齿圆角槽 + 内嵌放大镜）
@@ -6625,10 +6653,10 @@ class LlmReportsView:
         row2 = tk.Frame(card.frame, bg=card._bg)
         row2.pack(fill="x", padx=6, pady=(1, 2))
         card.track_bg(row2)
-        ti_disp = format_card_title(title, 26)
-        ti_lbl = tk.Label(row2, text=ti_disp, bg=card._bg, fg=theme.FG,
+        ti_lbl = tk.Label(row2, bg=card._bg, fg=theme.FG,
                           font=theme.FONT_UI_SMALL, anchor="w", justify="left")
         ti_lbl.pack(side="left", fill="x", expand=True)
+        fit_label(ti_lbl, format_card_title(title, 200))   # 按像素宽截断加省略号
         card.track_bg(ti_lbl)
         card.bind_to(ti_lbl)
 
@@ -6648,9 +6676,10 @@ class LlmReportsView:
         elif r.get("scope"):
             sum_parts.append(str(r["scope"]))
         sum_txt = " · ".join(sum_parts) or "—"
-        sum_lbl = tk.Label(row3, text=sum_txt, bg=card._bg, fg=theme.MUTED,
+        sum_lbl = tk.Label(row3, bg=card._bg, fg=theme.MUTED,
                            font=theme.FONT_UI_SMALL, anchor="w")
         sum_lbl.pack(side="left", fill="x", expand=True)
+        fit_label(sum_lbl, sum_txt)
         card.track_bg(sum_lbl)
         card.bind_to(sum_lbl)
 
@@ -6709,16 +6738,16 @@ class LlmReportsView:
             cnt = counts.get(k, 0)
             active = (self._kind_filter == k)
             if cnt == 0 and not active and k != "all":
-                btn.pack_forget()
+                self._pill_frame.set_visible(btn, False)
                 continue
-            else:
-                btn.pack(side="left", padx=(0, 2))
+            self._pill_frame.set_visible(btn, True)
             bg = theme.SEL_ROW_ACTIVE if active else theme.CONTROL_BG
             fg = theme.FG_WHITE if active else theme.MUTED
             label = {"all": "全部", "session": "会话", "dynamics": "相空间",
                      "crosscheck": "对账", "project": "项目", "compare": "对比",
                      "other": "其他"}.get(k, k)
             btn.config(text=f"{label} {cnt}", bg=bg, fg=fg)
+        self._pill_frame.relayout()  # 计数改字后胶囊可能变宽
 
         # 过滤报告集合
         filtered = [r for r in self._reports if self._matches_filter(r)]
@@ -7736,7 +7765,6 @@ class TermbaseView:
             font=theme.FONT_UI_BOLD,
             anchor="w",
         )
-        name_lbl.pack(side="left", fill="x", expand=True)
         card.track_bg(name_lbl)
         card.bind_to(name_lbl)
 
@@ -7757,6 +7785,8 @@ class TermbaseView:
         )
         st_lbl.pack(side="right")
         card.bind_to(st_lbl)
+        name_lbl.pack(side="left", fill="x", expand=True)   # 状态徽标先占右侧
+        fit_label(name_lbl, term.pref_label)
 
         # Row 2: slug + term_en
         row2 = tk.Frame(card.frame, bg=card._bg)
@@ -7778,13 +7808,12 @@ class TermbaseView:
             anchor="w",
         )
         sub_lbl.pack(side="left", fill="x", expand=True)
+        fit_label(sub_lbl, " · ".join(sub_parts))
         card.track_bg(sub_lbl)
         card.bind_to(sub_lbl)
 
-        # Row 3: definition snippet
+        # Row 3: definition snippet（按像素宽截断）
         def_txt = (term.definition or "").strip().replace("\n", " ")
-        if len(def_txt) > 36:
-            def_txt = def_txt[:35] + "…"
         if def_txt:
             row3 = tk.Frame(card.frame, bg=card._bg)
             row3.pack(fill="x", padx=6, pady=(1, 3))
@@ -7799,6 +7828,7 @@ class TermbaseView:
                 anchor="w",
             )
             desc_lbl.pack(side="left", fill="x", expand=True)
+            fit_label(desc_lbl, def_txt)
             card.track_bg(desc_lbl)
             card.bind_to(desc_lbl)
 
@@ -7946,17 +7976,9 @@ class TermbaseView:
             tk.Label(f, text=label_text, bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
                 anchor="w"
             )
-            ent = tk.Entry(
-                f,
-                bg=theme.CONTROL_BG,
-                fg=theme.FG,
-                insertbackground=theme.FG,
-                font=theme.FONT_UI,
-                relief="flat",
-                highlightthickness=0,
-            )
+            ent = entry_box(f, font=theme.FONT_UI)
             ent.insert(0, default_val)
-            ent.pack(fill="x", pady=(2, 0))
+            ent.box.pack(fill="x", pady=(2, 0))
             return ent
 
         # Row 1: 主标签 / 标识 / 状态
@@ -7967,7 +7989,7 @@ class TermbaseView:
 
         # Status 下拉（项目惯例 ttk.Combobox；显示纯中文，保存时反查 key）
         st_frame = tk.Frame(r1, bg=theme.BG)
-        st_frame.pack(side="left", padx=(0, theme.PAD_M))
+        st_frame.pack(side="left", padx=(0, theme.PAD_M), anchor="n")
         tk.Label(st_frame, text="状态", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
             anchor="w"
         )
@@ -7976,7 +7998,7 @@ class TermbaseView:
         st_menu = ttk.Combobox(
             st_frame, textvariable=self._f_status, state="readonly",
             values=list(_STATUS_CN.values()))
-        st_menu.pack(pady=(2, 0))
+        st_menu.pack(pady=(2, 0), ipady=4)   # 与输入框（4px 内衬）同高
 
         # Row 2: 英文名 / 概念层面 / 负责人
         r2 = tk.Frame(body, bg=theme.BG)
@@ -7984,7 +8006,7 @@ class TermbaseView:
         self._f_en = make_entry(r2, "英文名称", term.term_en)
 
         mda_frame = tk.Frame(r2, bg=theme.BG)
-        mda_frame.pack(side="left", padx=(0, theme.PAD_M))
+        mda_frame.pack(side="left", padx=(0, theme.PAD_M), anchor="n")
         _mda_lbl = tk.Label(mda_frame, text="概念层面", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL)
         _mda_lbl.pack(anchor="w")
         Tooltip(_mda_lbl, "机制＝代码实现规则；动态＝实际运行行为；体验＝用户感受。不确定可留空")
@@ -7993,7 +8015,7 @@ class TermbaseView:
         mda_menu = ttk.Combobox(
             mda_frame, textvariable=self._f_mda, state="readonly",
             values=list(_MDA_CN.values()))
-        mda_menu.pack(pady=(2, 0))
+        mda_menu.pack(pady=(2, 0), ipady=4)
 
         self._f_owner = make_entry(r2, "负责人", term.owner)
 
@@ -8050,17 +8072,9 @@ class TermbaseView:
             tk.Label(
                 cell, text=f"{rlabel}：", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL
             ).pack(anchor="w")
-            ent = tk.Entry(
-                cell,
-                bg=theme.CONTROL_BG,
-                fg=theme.FG,
-                insertbackground=theme.FG,
-                font=theme.FONT_UI_SMALL,
-                relief="flat",
-                highlightthickness=0,
-            )
+            ent = entry_box(cell, font=theme.FONT_UI_SMALL)
             ent.insert(0, term.renderings.get(rk, ""))
-            ent.pack(fill="x", pady=(2, 0))
+            ent.box.pack(fill="x", pady=(2, 0))
             self._rendering_entries[rk] = ent
 
         # Section: 常见误解
@@ -8124,35 +8138,17 @@ class TermbaseView:
         tk.Label(row_frame, text="误读以为：", bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
             side="left"
         )
-        wrong_ent = tk.Entry(
-            row_frame,
-            bg=theme.CONTROL_BG,
-            fg=theme.FG,
-            insertbackground=theme.FG,
-            font=theme.FONT_UI_SMALL,
-            relief="flat",
-            width=22,
-            highlightthickness=0,
-        )
+        wrong_ent = entry_box(row_frame, font=theme.FONT_UI_SMALL, width=22)
         wrong_ent.insert(0, (data or {}).get("wrong", ""))
-        wrong_ent.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
+        wrong_ent.box.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
 
         # 澄清
         tk.Label(row_frame, text="实际是：", bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
             side="left"
         )
-        act_ent = tk.Entry(
-            row_frame,
-            bg=theme.CONTROL_BG,
-            fg=theme.FG,
-            insertbackground=theme.FG,
-            font=theme.FONT_UI_SMALL,
-            relief="flat",
-            width=22,
-            highlightthickness=0,
-        )
+        act_ent = entry_box(row_frame, font=theme.FONT_UI_SMALL, width=22)
         act_ent.insert(0, (data or {}).get("actual", ""))
-        act_ent.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
+        act_ent.box.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
 
         # 删除行（小图标按钮，不用文本符号）
         del_btn = flat_button(

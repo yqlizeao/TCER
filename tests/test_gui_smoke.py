@@ -225,6 +225,53 @@ def test_flat_button_and_card_hover(root):
     frame.destroy()
 
 
+def test_card_hover_recolors_untracked_surface_children(root):
+    """Card hover/选中：未经 bind_to/track_bg 登记的同底行容器也随之换色（历史 bug：
+    项目聚合卡的行 Frame 漏登记，悬停露出色斑）；刻意另配底色的子区不受影响。"""
+    from tcer.gui import theme
+    from tcer.gui.widgets import Card
+
+    frame = tk.Frame(root)
+    frame.pack()
+    card = Card(frame, on_click=lambda c: None)
+    row = tk.Frame(card.frame, bg=theme.PANEL_2)
+    row.pack(fill="x")
+    lbl = tk.Label(row, text="x", bg=theme.PANEL_2)
+    lbl.pack()
+    inset = tk.Frame(card.frame, bg=theme.PANEL)
+    inset.pack(fill="x")
+    card._on_hover()
+    assert row.cget("bg") == lbl.cget("bg") == theme.HOVER_BG
+    assert inset.cget("bg") == theme.PANEL
+    card.set_selected(True)
+    assert row.cget("bg") == theme.SEL_ROW_ACTIVE
+    card.set_selected(False)
+    card._on_unhover()
+    assert row.cget("bg") == lbl.cget("bg") == theme.PANEL_2
+    assert inset.cget("bg") == theme.PANEL
+    frame.destroy()
+
+
+def test_flow_row_wraps_when_narrow(root):
+    """FlowRow：窄宽度自动折行、隐藏项不占位（LLM 报告过滤胶囊曾被单行 pack 裁掉）。"""
+    from tcer.gui.widgets import FlowRow
+
+    top = tk.Toplevel(root)
+    flow = FlowRow(top, width=100)
+    flow.pack(fill="x")
+    items = [flow.add(tk.Frame(flow, width=40, height=20)) for _ in range(5)]
+    top.geometry("100x200")
+    root.update()
+    ys = [w.winfo_y() for w in items]
+    assert ys[0] == ys[1] and ys[2] > ys[1], ys      # 每行放 2 个
+    assert flow.winfo_height() >= ys[-1] + 20
+    flow.set_visible(items[1], False)
+    root.update()
+    assert not items[1].winfo_ismapped()
+    assert items[2].winfo_y() == ys[0]                # 隐藏项让位
+    top.destroy()
+
+
 def test_mac_button_command_compat(root):
     """_MacButton：command 兼容 tk.Button 的构造传入与 .config(command=) 重设。
 
@@ -1494,7 +1541,8 @@ def test_llm_reports_view_cancel_tasks_button(root, monkeypatch, tmp_path):
     root.update_idletasks()
     btn = v_cb._cancel_tasks_btn
     assert btn is not None
-    assert btn.cget("text") == "取消生成中任务"
+    # 纯图标按钮（文字进悬浮提示）；图标资源缺失时回退文字
+    assert btn.cget("text") == ("" if str(btn.cget("image")) else "取消生成中任务")
     assert btn.winfo_manager() == "pack"  # 已布局显示而非仅创建
     btn.invoke()
     assert calls == [1]

@@ -24,6 +24,11 @@
   - ⑪`ScrollFrame` 自带按需显示的深色滚动条；
   - ⑫界面偏好（几何/分栏/筛选/上次项目/启动检查开关）经 `core/ui_prefs` 持久化到 `core/app_dirs.prefs_dir()`（发布版 exe 同目录，回退 `~/.tcer/`；早期 `~/.claude/` 自动迁移），与 Claude 数据源 `~/.claude` 分离；
   - ⑬**Toplevel 子窗口不设显式「关闭」按钮**（标题栏 × + Esc 即可,显式关闭按钮冗余;`UpdatePopup` / `RadarPopup` / `ConfirmDeletePopup` / `UploadDialog` 均此模式）。色值表 / 各组件 why / 图表细节见 [doc/style.md](style.md)。
+  - ⑭**卡片 hover / 选中换色**：`Card._apply_bg` 除登记控件外，还会递归把「与卡片当前底色相同」的 Frame / Label 一并换色——漏 `bind_to` / `track_bg` 的行容器曾在悬停时露出旧底色色斑（项目聚合卡）；刻意另配底色的子区（展开明细的 PANEL 表格）不受影响。
+  - ⑮**卡片文字截断用 `widgets.fit_label`**（按像素宽 + 省略号，宽度变化自动重算；标签 `width=1` + `fill="x", expand=True`）。按字符数截断会切在半个字上（「hover扌」「3.4 小」）。
+  - ⑯**数值字体用 `theme.value_font(text)`**：纯数字用等宽粗体，带中文单位 / 说明的值（「12.1 小时」「864 次（8 种）」）改 UI 粗体——等宽字体缺 CJK 字形，逐字回退后字距松散。指标网格列 `uniform="metric"` 等宽，跨分组列线对齐，超长值由 `MetricCell` 按格宽折行。
+  - ⑰**窄栏胶囊组用 `widgets.FlowRow`**（place 流式换行），单行 pack 排不下会直接裁掉末尾控件；窄栏工具按钮纯图标（文字进悬浮提示）且先于左侧标签 pack。
+  - ⑱**输入框用 `widgets.entry_box`**（同色 Frame 包一层留内衬；不用 highlight 边框，style 契约禁止）。
 
 <a id="ranking"></a>
 ### 原 #25 排名页
@@ -55,14 +60,16 @@
 
 复刻 cc-switch 的会话记录查看体验（版式 / 文案取自其 `sessions/reader/*`；MIT，署名见 THIRD_PARTY_NOTICES.md）。数据层是 `core/transcript.py`（`load_transcript` / `flatten_rows` / `find_search_hits` / `build_turn_index` / `transcript_to_markdown`），GUI 只做展示，**不进指标 / CSV**，页头数字全取自 `Transcript`（成本缺失显示「-」）。
 
-- **入口**：会话卡片右键「查看会话记录」→ `SessionColumn._on_right_click` → `TcerGui.show_transcript(report, siblings)`；`siblings` = 会话列表当前过滤 / 排序结果，窗口内「上一个 / 下一个会话」在其中切换。已开窗口复用（`app._transcript_win`），不重复开。会话详情弹窗暂未加入口（右键已覆盖）。
+- **入口**：会话卡片右键「查看会话记录」→ `SessionColumn._on_right_click` → `TcerGui.show_transcript(report, siblings)`；指标看板会话视角头部「会话记录」按钮 → `show_transcript_for_rendered`（项目汇总视角隐藏；「用户消息」格仍是旧版用户消息弹窗，二者不混用）；`siblings` = 会话列表当前过滤 / 排序结果，窗口内「上一个 / 下一个会话」在其中切换。已开窗口复用（`app._transcript_win`），不重复开。会话详情弹窗暂未加入口（右键已覆盖）。
 - **线程模型**：`load_transcript` 在 daemon worker 里跑；结果经窗口**自有** `queue.Queue` + 主线程 `after(60)` 轮询回填（加载中 30ms），禁裸跨线程 `after`；`except … as e` 里闭包先 `err_text = str(e)`。切会话先 `cancel_event.set()` 取消上一次，`_load_gen` 代号丢弃过期结果；失败显示「加载失败：…」且不崩，可从错误态切回。「显示全部」输出 / 改动全文（`read_content`）同样走 worker（`jsonl` / `file` 引用是 seek 读，同步取）。
 - **渲染策略**：主区**单个 `tk.Text` 文档流**，不用「一行一控件」。每轮 `tn:<n>` tag；行级跳转点用 `rw:<key>` **mark**，可点击片段用 `a:<n>` mark + 统一 `act` tag（点击时 `mark_previous` 回溯最近的 `a:` mark）——**不要给每行 / 每个动作建 tag**：几万个 tag 的 `tag_delete` 实测要数秒（收起全部 28s），改 mark 后同样场景 < 0.5s；`tn:` tag 不删、跨会话复用。轮次默认折叠，展开 / 重排只重绘该轮（删 `tn` 范围 + 在 `cur` mark 处重插）。首次渲染按「40ms / 4 万字符」预算分批 `after(1)`（勿 `after_idle`），状态栏显示「已加载 x / y 轮」。分轮线 = 一行带删除线的空格（`overstrike`，1px）。
 - **提问气泡 = 纯 tag，不嵌 widget**：Tk 的 tag 底色会把行首的缩进 / 对齐偏移区一并涂满，所以每行 = 无底色前导空格 + 带底色正文（补空格对齐成实心矩形）+ 无底色换行，整行 `justify=right`；按像素宽预折行（`wrap_text`，宽度变化 > 16px 时整篇分批重排）。**教训**：最初用 `window_create` 嵌 `tk.Label` 做气泡，在已建 `TcerGui` 的进程里，Text 尚未排版（宽度几像素）时嵌入窗口，或「先销毁 widget 再删文本」，会让 Tk 8.6.15 绘制时访问违例直接崩进程（faulthandler 只有 `update` 一帧，现象随堆布局漂移，改一两个无关图标就「消失」）。要嵌 widget 必须先 `update_idletasks()` 并「先删文本、后销毁」；能用 tag 就别嵌。
+- **执行过程折叠态**：摘要行只列「N 步 · 命令 · 改动 · F 个失败（红）· 耗时」，无整行色条；钉出的失败步骤（≤5）**只露标题行、不自动展开输出**（`core/transcript._step_rows`：`failure and not pinned`），超出的以「… 还有 N 个失败，展开执行过程查看」单列一行；展开执行过程后失败步骤才默认带 6 行预览。页头两行：信息条 + 工具组（视图胶囊、显示选项 / 展开 / 收起 / 导出 / 查找均纯图标）。数据推断说明（`tr.warnings`）文档顶部弱化为 MUTED，页头「N 条提示」保留醒目。
+- **表格**：`transcript_md.layout_table(rows, max_width, measure=…)` 按**像素**量宽排列宽（GUI 传粗体 `Font.measure`），总宽超可用宽时从最宽列起收缩、单元格折行**不截断**；单元格去行内标记（`**` / 反引号）；每表专属 tab stop tag 对齐（CJK 回退字体不是等宽 2 倍，按字符数 + `│` 对齐会逐行错位），表头加粗、行间 1px 删除线细线，`wrap="none"`。
 - **目录**：`_Outline`（Canvas 自绘）；文字自己按像素折行（`_wrap_lines`）、几何自己算，不依赖 canvas 的 `width=` 折行与 `bbox`；超过 120 条分批构建；当前轮 = 视口顶部行所属 `tn`（滚动防抖 80ms，滚到底强制最后一轮）+ 左 2px ACCENT rail + 浅底并自动滚入可见；点「你」跳提问、点 AI 跳最终回复（无则跳 AI 头像行 `ah:` mark）；跳转行 `flash` 底色 2s。
 - **查找**（Ctrl+F，输入防抖 150ms）：命中数 / 当前命中取自数据层 `find_search_hits`，渲染层再用 `Text.search` 给已入文部分打 `find_hit` 高亮、当前命中 `find_cur`；命中很多时（> 60 个轮）只自动展开当前命中所在轮（`_eff_search` 过滤集合），其余轮跳到时再展开——否则一搜常见词就把整段会话展开（18000 命中曾 61s）。Enter / Shift+Enter 上下一个，Esc 先关查找条再关窗。
 - **其他交互**：视图 全部 / 对话 / 改动（`RoundedPill`）；显示选项（展开全部过程、显示注入上下文，`FlatMenu` 用 `✓` 前缀表示勾选）与「展开 / 收起全部」；`j` / `k` 跳轮（`k`：视口顶距本轮起点 ≤ 1 行才去上一轮）；「最新」浮钮（行数 ≥ 8 且不在底部才显示）；导出 Markdown（`filedialog` + `transcript_to_markdown`）、复制整段 / 这一轮；「复制恢复命令」+ 下拉「进入目录并恢复」（PowerShell / cmd / bash 三种；无恢复命令时按钮置灰并写明原因，不拉起终端）。偏好 `transcript_expand_all` / `_show_injected` / `_include_thinking` / `_outline` 写进控制器共用的 `_ui_prefs`（单独 load/save 会被主窗口整份覆盖）。
-- **与 cc-switch 的差异**：无虚拟列表（单 Text + 折叠 + 分批，实测 1500 轮 / 4 万行可用）；气泡与头像不用逐源品牌色（统一 `SEL_ROW_BG` / `ACCENT`，来源只用 `source_icon`）；气泡无圆角 / 悬停复制按钮（右键菜单代替）；步骤详情的「参数」不折叠（只对 MCP / 其他 / 子代理 / 失败无结果的步骤显示）；Markdown 为自写轻量版（标题 / 列表 / 引用 / 围栏 / 表格 / 行内码 / 粗斜体 / 链接，表格用等宽 `│` 对齐、> 64KB 退化纯文本）；不做图片预览、不做「在终端中恢复」/ 删除会话。
+- **与 cc-switch 的差异**：无虚拟列表（单 Text + 折叠 + 分批，实测 1500 轮 / 4 万行可用）；气泡与头像不用逐源品牌色（气泡统一中性灰 `BUBBLE_BG`=`CONTROL_BG`，来源只用 `source_icon`）；气泡无圆角 / 悬停复制按钮（右键菜单代替）；步骤详情的「参数」不折叠（只对 MCP / 其他 / 子代理 / 失败无结果的步骤显示）；Markdown 为自写轻量版（标题 / 列表 / 引用 / 围栏 / 表格 / 行内码 / 粗斜体 / 链接，表格按像素 tab stop 对齐、> 64KB 退化纯文本）；不做图片预览、不做「在终端中恢复」/ 删除会话。
 - **验收**：`tests/test_transcript_view.py`（Markdown 纯函数 + 完整 `TcerGui` 入口级：右键菜单回调链 → worker → 轮询 → 分批渲染，覆盖目录条数 / 查找 / 切视图 / 导出 / 「显示全部」/ 跳轮 / 取消与复用窗口 / 加载失败）。
 
 ## 相图 PhasePortraitWidget（原 #39 ③）

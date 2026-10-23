@@ -856,7 +856,9 @@ def _step_rows(turn: Turn, step, depth: int, pinned: bool, step_overrides, searc
     override = step_overrides.get(step.id) if step_overrides else None
     failure = is_failure_step(step)
     search_hit = bool(search and step.id in search.step_ids)
-    expanded = override if override is not None else (failure or search_hit)
+    # 折叠态钉出的失败步骤只露标题行（失败信号不丢，输出不刷屏）；展开执行过程后
+    # 失败步骤才默认展开 6 行预览。
+    expanded = override if override is not None else ((failure and not pinned) or search_hit)
     base = FAILURE_PREVIEW_LINES if (failure and override is None) else STEP_PREVIEW_LINES
     preview_lines = (_BIG if (search_hit and search
                               and _preview_tail_has_query(step, base, search.query)) else base)

@@ -941,6 +941,14 @@ class TcerGui:
         else:
             self._transcript_win = TranscriptWindow(self.root, self, refs, idx)
 
+    def show_transcript_for_rendered(self) -> None:
+        """看板头部「会话记录」按钮：打开当前会话视角的会话；序列取会话列表当前
+        （过滤 / 排序后）结果，阅读器内可前后翻。项目汇总视角无单一会话，不响应。"""
+        report = self._rendered_report
+        if not report or report.meta.session_id == "(aggregate)":
+            return
+        self.show_transcript(report, self.session_col._reports)
+
     def show_tool_calls(self) -> None:
         if not self._current:
             return

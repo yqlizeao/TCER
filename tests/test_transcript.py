@@ -345,7 +345,8 @@ def test_flatten_collapsed_timeline_pins_failures_max_five():
     assert not tl.expanded and tl.hidden_failures == 2
     pinned = [r for r in rows if r.kind == "step"]
     assert len(pinned) == 5 and all(r.pinned and r.step.status == "error" for r in pinned)
-    assert all(r.expanded and r.preview_lines == T.FAILURE_PREVIEW_LINES for r in pinned)
+    # 折叠态钉出的失败只露标题行（不自动展开输出）；预览行数口径不变
+    assert all(not r.expanded and r.preview_lines == T.FAILURE_PREVIEW_LINES for r in pinned)
     assert "还有 2 个失败" in tl.text and "7 个失败" in tl.text
 
 
@@ -355,6 +356,7 @@ def test_flatten_expanded_all_steps_and_preview_lines():
     steps = [r for r in rows if r.kind == "step"]
     assert len(steps) == 10 and rows[1].expanded and rows[1].hidden_failures == 0
     assert not any(r.pinned for r in steps)
+    assert all(r.expanded for r in steps if r.step.status == "error")   # 展开后失败默认带预览
     ok = [r for r in steps if r.step.status == "success"]
     assert all(not r.expanded and r.preview_lines == T.STEP_PREVIEW_LINES for r in ok)
 

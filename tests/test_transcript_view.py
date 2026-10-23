@@ -60,12 +60,29 @@ def test_md_inline_segments():
     assert [s for s, _ in MD.inline_segments("a_b_c 2*3*4")] == ["a_b_c 2*3*4"]
 
 
-def test_md_table_alignment_counts_cjk_as_two_columns():
-    lines = MD.format_table([["名称", "n"], ["a", "10"]])
-    assert len(lines) == 3 and "┼" in lines[1]
+def test_md_table_layout_rows_and_rules():
+    widths, lines = MD.layout_table([["名称", "n"], ["a", "10"], ["b", "2"]], 80)
+    assert [k for k, _ in lines] == ["head", "sep", "body", "sep", "body"]
+    assert lines[0][1] == ["名称", "n"] and lines[2][1] == ["a", "10"]
     assert MD.display_width("名称") == 4
-    w = lambda ln: MD.display_width(ln[:ln.index("│")])
-    assert w(lines[0]) == w(lines[2])
+    assert widths == [4, 2]                      # 显示列口径：列宽 = 该列最宽单元格
+
+
+def test_md_table_strips_inline_marks_and_wraps_to_fit():
+    """单元格去行内标记；超宽时收缩列宽并折行——内容不丢、每列不超列宽、总宽不超可用宽。"""
+    long = "文档列表 V2（返回 Gzip 压缩的二进制文档流），主界面首屏消费点"
+    rows = [["端点", "URL", "说明"],
+            ["**`get-documents-v2`**", "`https://api.granola.ai/v2/get-documents`", long]]
+    widths, lines = MD.layout_table(rows, 60, gap=3)
+    assert sum(widths) + 3 * (len(widths) - 1) <= 60
+    cells = [c for _, ln in lines for c in ln]
+    assert not any("**" in c or "`" in c or "…" in c for c in cells)
+    body = [ln for k, ln in lines if k == "body"]
+    assert len(body) > 1                                   # 折行而非截断
+    assert all(MD.display_width(c) <= w for ln in body for c, w in zip(ln, widths))
+    joined = "".join(ln[2] for ln in body)
+    assert joined.replace(" ", "") == long.replace(" ", "")
+    assert "".join(ln[1] for ln in body) == "https://api.granola.ai/v2/get-documents"
 
 
 # =========================================================================== #
@@ -375,6 +392,37 @@ def test_entry_switch_sessions_cancels_previous_and_prev_next(root, app, tmp_pat
     assert again is win and win._idx == 0
     assert _ready(root, win)
     assert win._tr.session_id == "sess-1"
+
+
+def test_entry_metric_header_button_opens_reader(root, app, tmp_path):
+    """看板头部「会话记录」按钮（真实点击链）：会话视角显示并打开该会话，序列为会话
+    列表全部；项目汇总视角隐藏。「用户消息」格仍走旧弹窗，不受影响。"""
+    from types import SimpleNamespace
+    p1 = _write_session(tmp_path, "sess-1", n_filler=2)
+    p2 = _write_session(tmp_path / "other", "sess-2", n_filler=2)
+    r1, r2 = _report(p1, "sess-1", "第一个"), _report(p2, "sess-2", "第二个")
+    agg = _report(p1, "(aggregate)", "项目汇总")
+    app._current = SimpleNamespace(reports=[r1, r2], aggregate=agg)
+    app.session_col.update([r1, r2])
+    btn = app.metric_panel._transcript_btn
+
+    app.metric_panel.update(agg)
+    app._rendered_report = agg
+    root.update()
+    assert not btn.winfo_manager()
+
+    app.metric_panel.update(r2)
+    app._rendered_report = r2
+    root.update()
+    assert btn.winfo_manager() == "pack"
+    btn.event_generate("<Button-1>")
+    win = app._transcript_win
+    assert win.alive() and _ready(root, win)
+    assert win._tr.session_id == "sess-2" and len(win._refs) == 2
+    assert app.metric_panel._cells["user_msgs"].value is not None
+
+    app.metric_panel.clear()
+    assert not btn.winfo_manager()
 
 
 def test_entry_load_failure_shows_error_not_crash(root, app, tmp_path, monkeypatch):

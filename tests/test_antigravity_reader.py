@@ -244,8 +244,13 @@ def test_aggregate_usage_and_loc(tmp_path: Path):
     db_path = _create_mock_session_db(tmp_path / "conversations" / "test-session.db")
 
     usage = antigravity_reader.aggregate_usage(db_path)
-    assert usage.input_tokens == (100 + 200) + (150 + 300)  # 750
+    # input_tokens 只含未命中缓存部分；缓存命中单列，total_input 才是全量输入
+    assert usage.input_tokens == 100 + 150  # 250
     assert usage.cache_read_input_tokens == 200 + 300  # 500
+    assert usage.total_input == 750
+    assert usage.total == 750 + 110
+    pm = next(iter(usage.per_model.values()))
+    assert pm.input_tokens == 250 and pm.cache_read_input_tokens == 500
     assert usage.output_tokens == 50 + 60  # 110
     assert usage.reasoning_output_tokens == 25 + 30  # 55
     assert usage.peak_input_tokens == 450
@@ -342,7 +347,8 @@ def test_analyze_antigravity_project_integration(tmp_path: Path, monkeypatch):
     assert pa.project_hash == "testapp"
     assert pa.source == "antigravity"
     assert pa.n_sessions == 1
-    assert pa.aggregate.usage.input_tokens == 750
+    assert pa.aggregate.usage.input_tokens == 250
+    assert pa.aggregate.usage.total_input == 750
     assert pa.aggregate.usage.output_tokens == 110
     assert pa.aggregate.cost > 0
     assert pa.aggregate.tier is not None

@@ -442,6 +442,7 @@ class Card:
         self._state_rail_color: str | None = None
         self._registered_widgets: list[tk.Widget] = []
         self._label_fgs: dict[tk.Widget, str] = {}
+        self._surface_bg = bg  # 子控件当前应有的卡片底色（_apply_bg 兜底换色用）
         self._radius = radius
         self._bg_img = None
         self._last_draw_key = None
@@ -515,6 +516,24 @@ class Card:
                 w.configure(bg=bg_color)
             except tk.TclError:
                 pass
+        # 兜底：未经 bind_to / track_bg 登记、但与卡片同底的 Frame / Label（行容器
+        # 最常漏）一并换色——否则悬停时露出一块块旧底色的色斑。只认「当前卡片
+        # 底色」，刻意另配底色的子区（如展开明细的 PANEL 表格）不受影响。
+        old_bg, self._surface_bg = self._surface_bg, bg_color
+        if old_bg != bg_color:
+            self._recolor_surface(self.frame, old_bg, bg_color)
+
+    def _recolor_surface(self, parent, old_bg: str, new_bg: str) -> None:
+        for w in parent.winfo_children():
+            if w is self.rail:
+                continue
+            if type(w) in (tk.Frame, tk.Label):
+                try:
+                    if w.cget("bg") == old_bg:
+                        w.configure(bg=new_bg)
+                except tk.TclError:
+                    pass
+            self._recolor_surface(w, old_bg, new_bg)
 
     def bind_to(self, widget) -> tk.Widget:
         """Register a child widget to share click, hover, and selection styles."""
@@ -643,6 +662,13 @@ class MetricCell:
         tip = f"{metric.name}\n{metric.tip}"
         for w in widgets:
             Tooltip(w, tip)
+        # 等宽网格里格宽固定：超长值按格宽折行（而非裁掉或撑宽整列）
+        self.frame.bind("<Configure>", self._fit_wrap, add="+")
+
+    def _fit_wrap(self, e) -> None:
+        wl = max(60, e.width - 16)
+        if int(self.value.cget("wraplength") or 0) != wl:
+            self.value.config(wraplength=wl, justify="left")
 
     @property
     def key(self) -> str:
@@ -651,6 +677,7 @@ class MetricCell:
     def set_value(self, text: str) -> None:
         """Update displayed value and apply sentiment-based coloring."""
         self.var.set(text)
+        self.value.config(font=theme.value_font(text))
         if self.approx_lbl is not None:
             try:
                 num = float(text.replace(",", "").replace("%", "").replace("$", ""))
@@ -1342,6 +1369,114 @@ def get_rounded_rect_img(master, w: int, h: int, r: int, fill: str, bg: str,
     photo = ImageTk.PhotoImage(im, master=master)
     _ROUNDED_IMG_CACHE[key] = photo
     return photo
+
+
+_FIT_FONTS: dict = {}
+
+
+def entry_box(parent, *, font=theme.FONT_UI, width: int | None = None,
+              bg: str = theme.CONTROL_BG, pad: int = 4) -> tk.Entry:
+    """带内衬的扁平输入框：Entry 包在同色 Frame 里留出 ``pad`` 像素内边距
+    （tk.Entry 无 padx；不用 highlight 边框——style.md 禁边框表达状态）。
+
+    返回 Entry；布局请对 ``entry.box``（外层 Frame）调用 pack / grid。"""
+    box = tk.Frame(parent, bg=bg)
+    kw = {"width": width} if width is not None else {}
+    ent = tk.Entry(box, bg=bg, fg=theme.FG, insertbackground=theme.FG, font=font,
+                   relief="flat", bd=0, highlightthickness=0, **kw)
+    ent.pack(fill="both", expand=True, padx=pad + 2, pady=pad)
+    ent.box = box  # type: ignore[attr-defined]
+    return ent
+
+
+def fit_text(font, text: str, width: int) -> str:
+    """把 text 按像素宽截到 ``width`` 内，超出则末尾加「…」（二分查找）。"""
+    if width <= 0 or font.measure(text) <= width:
+        return text
+    budget = width - font.measure("…")
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if font.measure(text[:mid]) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + "…"
+
+
+def fit_label(label: tk.Label, text: str) -> tk.Label:
+    """标签文字按实际像素宽截断加省略号，布局宽度变化时自动重算。
+
+    按字符数截断会切在半个字上、且中英文字宽不同误差大（侧栏卡片标题曾出现
+    「hover扌」「3.4 小」这类半截字）。标签设 ``width=1`` 不按全文请求宽度，
+    须以 ``fill="x", expand=True`` 布局，由容器分配宽度后再截。"""
+    import tkinter.font as tkfont
+    spec = str(label.cget("font"))
+    font = _FIT_FONTS.get(spec)
+    if font is None:
+        font = _FIT_FONTS[spec] = tkfont.Font(font=label.cget("font"))
+    label._fit_full = text  # type: ignore[attr-defined]
+
+    def refit(_e=None) -> None:
+        w = label.winfo_width() - 2 * int(label.cget("padx")) - 4
+        full = label._fit_full  # type: ignore[attr-defined]
+        txt = full if w <= 8 else fit_text(font, full, w)
+        if label.cget("text") != txt:
+            label.configure(text=txt)
+
+    if not getattr(label, "_fit_bound", False):
+        label.bind("<Configure>", refit, add="+")
+        label._fit_bound = True  # type: ignore[attr-defined]
+    label.configure(width=1, text=text)
+    refit()
+    return label
+
+
+class FlowRow(tk.Frame):
+    """流式换行容器：子控件按加入顺序横排，超出宽度自动折行。
+
+    子控件须以本容器为 parent 创建，经 ``add`` 加入、``set_visible`` 显隐
+    （勿再 pack/grid）。用 place 定位 + 显式设高——pack 单行排不下时会把
+    末尾控件直接裁掉（窄侧栏里的过滤胶囊就是这么消失的）。
+    """
+
+    def __init__(self, parent, *, gap_x: int = 2, gap_y: int = 2, **kw) -> None:
+        super().__init__(parent, **kw)
+        self._gap_x, self._gap_y = gap_x, gap_y
+        self._items: list[tk.Widget] = []
+        self._hidden: set[tk.Widget] = set()
+        self.bind("<Configure>", lambda _e: self.relayout(), add="+")
+
+    def add(self, widget: tk.Widget) -> tk.Widget:
+        self._items.append(widget)
+        self.relayout()
+        return widget
+
+    def set_visible(self, widget: tk.Widget, visible: bool) -> None:
+        if visible:
+            self._hidden.discard(widget)
+        else:
+            self._hidden.add(widget)
+        self.relayout()
+
+    def relayout(self) -> None:
+        avail = self.winfo_width()
+        if avail <= 1:  # 尚未排版：先按单行摆，<Configure> 到来后重排
+            avail = 1 << 30
+        x = y = row_h = 0
+        for w in self._items:
+            if w in self._hidden:
+                w.place_forget()
+                continue
+            ww, wh = w.winfo_reqwidth(), w.winfo_reqheight()
+            if x and x + ww > avail:
+                x, y, row_h = 0, y + row_h + self._gap_y, 0
+            w.place(x=x, y=y)
+            x += ww + self._gap_x
+            row_h = max(row_h, wh)
+        height = max(y + row_h, 1)
+        if int(self.cget("height")) != height:
+            self.configure(height=height)
 
 
 class RoundedPill(tk.Canvas):

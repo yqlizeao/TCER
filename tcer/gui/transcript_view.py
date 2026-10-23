@@ -43,6 +43,7 @@ from .widgets import FlatMenu, RoundedPill, Tooltip, flat_button, new_window
 # --------------------------------------------------------------------------- #
 CONTENT_MAX_W = 820          # 主区内容最大宽（px），其余留白居中
 BUBBLE_FRAC = 0.72           # 提问气泡占内容宽比例
+BUBBLE_BG = theme.CONTROL_BG  # 提问气泡底（中性灰，对齐 cc-switch；文档与目录同色）
 OUTLINE_W = 260              # 右侧目录默认宽
 IND = theme.PAD_L * 2        # AI 区（步骤 / 回复）左缩进（对应头像列）
 DETAIL_IND = IND + theme.PAD_L * 2
@@ -333,7 +334,7 @@ class _Outline:
         th = ls * len(lines)
         x1 = right
         x0 = right - tw - 2 * theme.PAD_S
-        r = c.create_rectangle(x0, y, x1, y + th + 2 * theme.PAD_XS, fill=theme.SEL_ROW_BG,
+        r = c.create_rectangle(x0, y, x1, y + th + 2 * theme.PAD_XS, fill=BUBBLE_BG,
                                outline="", tags=("ol_hit", tag_i, "ol_you"))
         c.create_text(x0 + theme.PAD_S, y + theme.PAD_XS, anchor="nw", text="\n".join(lines),
                       fill=theme.FG, font=theme.FONT_UI_SMALL, justify="left",
@@ -474,6 +475,9 @@ class TranscriptWindow:
         self._hover_act = None
         self._bfont = tkfont.Font(font=theme.FONT_UI)       # 气泡折行量字用
         self._space_w = max(1, self._bfont.measure(" "))
+        self._tbl_font_b = tkfont.Font(font=theme.FONT_UI_BOLD)   # 表格列宽量字（取粗体，偏保守）
+        self._rule_w = max(1, tkfont.Font(font=theme.FONT_UI_SMALL).measure(" "))
+        self._tbl_seq = 0
         self._pad_font = tkfont.Font(font=(theme.FONT_UI[0], 3))
         self._render_bpx = 0
         self.perf: dict = {}
@@ -582,49 +586,50 @@ class TranscriptWindow:
                                    font=theme.FONT_HEADING, anchor="w", width=1)
         self._title_lbl.pack(side="left", fill="x", expand=True)
         self._title_lbl.bind("<Configure>", lambda _e: self._fit_title())
-        self._info = tk.Frame(hdr, bg=theme.PANEL_2)
-        self._info.pack(fill="x", padx=theme.PAD_L, pady=(0, theme.PAD_M))
+        # 第 2 行：左信息条 + 右工具组（对齐 cc-switch 两行页头；工具组先 pack，窄窗时
+        # 只挤压信息条，按钮不被截断）
+        row2 = tk.Frame(hdr, bg=theme.PANEL_2)
+        row2.pack(fill="x", padx=theme.PAD_L, pady=(0, theme.PAD_M))
+        inner = tk.Frame(row2, bg=theme.PANEL_2)
+        inner.pack(side="right")
+        self._info = tk.Frame(row2, bg=theme.PANEL_2)
+        self._info.pack(side="left", fill="x", expand=True)
         self._reason_lbl = tk.Label(hdr, text="", bg=theme.PANEL_2, fg=theme.MUTED,
                                     font=theme.FONT_UI_SMALL, anchor="w")
         tk.Frame(win, bg=theme.BORDER, height=1).pack(fill="x")
 
-        # ---- 工具栏 ----
-        tb = tk.Frame(win, bg=theme.PANEL)
-        tb.pack(fill="x")
-        inner = tk.Frame(tb, bg=theme.PANEL)
-        inner.pack(fill="x", padx=theme.PAD_L, pady=theme.PAD_S)
         self._outline_btn = self._icon_btn(inner, "panel-right", "显示 / 隐藏对话目录",
-                                           self._toggle_outline, bg=theme.PANEL)
-        self._outline_btn.pack(side="left", padx=(0, theme.PAD_M))
+                                           self._toggle_outline, bg=theme.PANEL_2)
+        self._outline_btn.pack(side="left", padx=(theme.PAD_M, theme.PAD_S))
         self._pills: dict = {}
         for key, label in ((T.VIEW_ALL, "全部"), (T.VIEW_CONVERSATION, "对话"),
                            (T.VIEW_CHANGES, "改动")):
             p = RoundedPill(inner, text=label, width=52, height=24, radius=theme.RADIUS_M,
-                            fill=theme.CONTROL_BG, bg=theme.PANEL, fg=theme.MUTED,
+                            fill=theme.CONTROL_BG, bg=theme.PANEL_2, fg=theme.MUTED,
                             font=theme.FONT_UI_SMALL,
                             command=lambda _p=None, k=key: self._set_view(k))
-            p.pack(side="left", padx=(0, theme.PAD_S))
+            p.pack(side="left", padx=(0, theme.PAD_XS))
             self._pills[key] = p
         self._refresh_pills()
-        self._opt_btn = flat_button(inner, "显示选项", self._open_options_menu,
-                                    image=ui_icon(inner, "sliders"))
-        self._opt_btn.pack(side="left", padx=(theme.PAD_M, theme.PAD_S))
+        self._opt_btn = self._icon_btn(inner, "sliders", "显示选项", self._open_options_menu,
+                                       bg=theme.PANEL_2)
+        self._opt_btn.pack(side="left", padx=(theme.PAD_M, 0))
         self._expand_btn = self._icon_btn(inner, "expand-all", "展开全部过程",
-                                          lambda: self._set_expand_all(True), bg=theme.PANEL)
-        self._expand_btn.pack(side="left")
+                                          lambda: self._set_expand_all(True), bg=theme.PANEL_2)
+        self._expand_btn.pack(side="left", padx=(theme.PAD_XS, 0))
         self._collapse_btn = self._icon_btn(inner, "collapse-all", "收起全部过程",
-                                            lambda: self._set_expand_all(False), bg=theme.PANEL)
+                                            lambda: self._set_expand_all(False), bg=theme.PANEL_2)
         self._collapse_btn.pack(side="left", padx=(theme.PAD_XS, 0))
-        self._find_btn = flat_button(inner, "查找", self._toggle_find,
-                                     image=ui_icon(inner, "search"))
-        self._find_btn.pack(side="right")
-        self._export_btn = flat_button(inner, "导出", self._export_md,
-                                       image=ui_icon(inner, "export"))
-        self._export_btn.pack(side="right", padx=(0, theme.PAD_S))
-        self._status = tk.Label(inner, text="", bg=theme.PANEL, fg=theme.MUTED,
+        self._export_btn = self._icon_btn(inner, "export", "导出 Markdown", self._export_md,
+                                          bg=theme.PANEL_2)
+        self._export_btn.pack(side="left", padx=(theme.PAD_M, 0))
+        self._find_btn = self._icon_btn(inner, "search", "查找（Ctrl+F）", self._toggle_find,
+                                        bg=theme.PANEL_2)
+        self._find_btn.pack(side="left", padx=(theme.PAD_XS, 0))
+        # 状态提示（复制成功 / 加载进度）浮在信息条右端，紧贴工具组
+        self._status = tk.Label(row2, text="", bg=theme.PANEL_2, fg=theme.MUTED,
                                 font=theme.FONT_UI_SMALL)
-        self._status.pack(side="right", padx=theme.PAD_M)
-        tk.Frame(win, bg=theme.BORDER, height=1).pack(fill="x")
+        self._status.pack(side="right", padx=theme.PAD_M, before=self._info)
 
         # ---- 查找条（隐藏态）----
         self._findbar = tk.Frame(win, bg=theme.PANEL_2)
@@ -696,7 +701,8 @@ class TranscriptWindow:
                         justify="center", spacing1=theme.PAD_L * 4)
         t.tag_configure("err_msg", font=theme.FONT_UI, foreground=theme.ERROR,
                         justify="center", spacing1=theme.PAD_L * 4, spacing3=theme.PAD_S)
-        t.tag_configure("warn_msg", font=small, foreground=theme.WARNING, spacing3=pad_s)
+        # 数据推断说明（非告警）：弱化显示；页头「N 条提示」保留醒目入口
+        t.tag_configure("warn_msg", font=small, foreground=theme.MUTED, spacing3=pad_s)
         # 分轮线：一行带删除线的空格（1px 线）
         t.tag_configure("divider", overstrike=True, overstrikefg=theme.BORDER,
                         foreground=theme.BG, wrap="none", spacing1=theme.PAD_L,
@@ -708,8 +714,8 @@ class TranscriptWindow:
         # 整行 justify=right。Tk 的 tag 底色会把行首的缩进 / 对齐偏移区一并涂满，所以
         # 行首 / 行尾必须是无底色字符，气泡才不会铺成整行色条。
         t.tag_configure("q_line", justify="right", spacing1=0, spacing3=0, font=ui)
-        t.tag_configure("q_bub", foreground=theme.FG_WHITE, background=theme.SEL_ROW_BG)
-        t.tag_configure("q_pad", font=(ui[0], 3), background=theme.SEL_ROW_BG)
+        t.tag_configure("q_bub", foreground=theme.FG_WHITE, background=BUBBLE_BG)
+        t.tag_configure("q_pad", font=(ui[0], 3), background=BUBBLE_BG)
         t.tag_configure("q_more", font=small, foreground=theme.CYAN, justify="right")
         # AI 头像行
         t.tag_configure("ai_head", spacing1=theme.PAD_M, spacing3=pad_s, lmargin1=0, lmargin2=0)
@@ -717,8 +723,12 @@ class TranscriptWindow:
         t.tag_configure("ai_meta", font=small, foreground=theme.MUTED)
         t.tag_configure("ai_model", font=(theme.FONT_MONO[0], small[1]), foreground=theme.MUTED)
         # 时间线摘要行
-        t.tag_configure("tl_head", font=small, foreground=theme.MUTED, background=theme.PANEL_2,
+        t.tag_configure("tl_head", font=small, foreground=theme.MUTED,
                         lmargin1=IND, lmargin2=IND, spacing1=pad_xs, spacing3=pad_xs)
+        t.tag_configure("tl_err", foreground=theme.ERROR)
+        t.tag_configure("tl_more", font=small, foreground=theme.MUTED,
+                        lmargin1=IND + theme.PAD_L, lmargin2=IND + theme.PAD_L,
+                        spacing1=pad_xs, spacing3=pad_xs)
         # 步骤行
         for d in (0, 1):
             m = IND + d * theme.PAD_L * 2
@@ -790,6 +800,12 @@ class TranscriptWindow:
                             spacing1=pad_s)
             t.tag_configure(f"md_hr{sfx}", font=small, foreground=theme.BORDER,
                             lmargin1=base, lmargin2=base)
+        # 表格：表头加粗提亮；分隔线 = 一行带删除线的空格（同分轮线做法，1px 细线）
+        t.tag_configure("md_th", font=theme.FONT_UI_BOLD, foreground=theme.FG_WHITE,
+                        spacing1=pad_xs, spacing3=pad_xs)
+        t.tag_configure("md_td", font=ui, foreground=theme.FG)
+        t.tag_configure("md_trule", font=small, overstrike=True, overstrikefg=theme.BORDER,
+                        foreground=theme.BG, spacing1=pad_xs, spacing3=pad_xs)
         t.tag_configure("md_gap", font=(ui[0], pad_s))
         t.tag_configure("md_bold", font=theme.FONT_UI_BOLD, foreground=theme.FG_WHITE)
         t.tag_configure("md_italic", font=italic)
@@ -1428,7 +1444,8 @@ class TranscriptWindow:
         head_done = False
         eff = self._eff_search()
         step_hits = eff.step_ids if eff is not None else ()
-        for row in rows:
+        hidden_fail = 0
+        for ri, row in enumerate(rows):
             k = row.kind
             if k != "step" or row.step.id in step_hits:
                 self._mark(f"rw:{row.key}")
@@ -1440,8 +1457,13 @@ class TranscriptWindow:
                 self._render_question(turn, row)
             elif k == "timeline":
                 self._render_timeline(turn, row)
+                hidden_fail = 0 if row.expanded else row.hidden_failures
             elif k == "step":
                 self._render_step(turn, row)
+                nxt = rows[ri + 1] if ri + 1 < len(rows) else None
+                if hidden_fail and row.pinned and not (
+                        nxt is not None and nxt.kind == "step" and nxt.pinned):
+                    self._render_more_failures(turn, hidden_fail)
             elif k == "final":
                 self._render_final(turn, row)
             elif k == "event":
@@ -1521,10 +1543,28 @@ class TranscriptWindow:
         self._rerender_turn(turn_idx)
 
     def _render_timeline(self, turn, row) -> None:
-        mark = "▾ " if row.expanded else "▸ "
-        self._act(mark + row.text, ("tl_head",),
-                  lambda k=turn.key, ex=row.expanded, ti=turn.index: self._toggle_turn(k, ex, ti),
-                  trailing="\n", trailing_tags=("tl_head",))
+        # 「还有 N 个失败」不进摘要行（与「F 个失败」重复），改在钉出的失败行之后单列
+        text = S.format_turn_summary(row.summary, no_final=row.no_final, aborted=row.aborted)
+        err = (S.t("summaryErrors", count=row.summary.error_count)
+               if row.summary.error_count else "")
+
+        def draw() -> None:
+            self._ins("▾ " if row.expanded else "▸ ", "tl_head")
+            if err and err in text:
+                a, b = text.split(err, 1)
+                self._ins(a, "tl_head")
+                self._ins(err, "tl_head", "tl_err")
+                self._ins(b + "\n", "tl_head")
+            else:
+                self._ins(text + "\n", "tl_head")
+
+        self._act_block(draw, lambda k=turn.key, ex=row.expanded, ti=turn.index:
+                        self._toggle_turn(k, ex, ti))
+
+    def _render_more_failures(self, turn, n: int) -> None:
+        self._act(f"… 还有 {n} 个失败，展开执行过程查看", ("tl_more",),
+                  lambda k=turn.key, ti=turn.index: self._toggle_turn(k, False, ti),
+                  trailing="\n", trailing_tags=("tl_more",))
 
     def _toggle_turn(self, key: str, expanded: bool, turn_idx: int) -> None:
         self._turn_ov[key] = not expanded
@@ -1807,6 +1847,8 @@ class TranscriptWindow:
         self._rerender_turn(turn_idx)
 
     def _render_final(self, turn, row) -> None:
+        if turn.steps and self._view == T.VIEW_ALL:
+            self._ins("\n", "md_gap")      # 与上方执行过程拉开间距
         self._md(turn.final.text)
 
     def _render_event(self, row) -> None:
@@ -1844,10 +1886,33 @@ class TranscriptWindow:
             elif k == "hr":
                 self._ins("─" * 24 + "\n", f"md_hr{sfx}")
             elif k == "table":
-                self._code_lines(MD.format_table(b[1]), f"md_codeblock{sfx}")
+                self._table(b[1], sfx)
                 self._ins("\n", "md_gap")
             else:
                 self._md_inline(b[1], f"md_p{sfx}")
+
+    def _table(self, rows, sfx: str) -> None:
+        """表格：按像素量宽排列宽 + 每表专属 tab stop 精确对齐（CJK 回退字体的字宽
+        不是等宽 2 倍，按字符数对齐会错位）；单元格折行不截断，整表不软换行。"""
+        base = DETAIL_IND if sfx else IND
+        x0 = base + theme.PAD_S
+        gap = theme.PAD_L * 2
+        avail = max(200, self._cw - x0 - theme.PAD_M)
+        widths, lines = MD.layout_table(rows, avail, measure=self._tbl_font_b.measure, gap=gap)
+        stops, x = [], x0
+        for w in widths[:-1]:
+            x += w + gap
+            stops.append(x)
+        self._tbl_seq += 1
+        tt = f"tbl{self._tbl_seq}"
+        self._txt.tag_configure(tt, lmargin1=x0, lmargin2=x0, tabs=tuple(stops) or "",
+                                wrap="none")
+        rule_n = max(1, (sum(widths) + gap * (len(widths) - 1)) // self._rule_w)
+        for kind, cells in lines:
+            if kind == "sep":
+                self._ins(" " * rule_n + "\n", tt, "md_trule")
+            else:
+                self._ins("\t".join(cells) + "\n", tt, "md_th" if kind == "head" else "md_td")
 
     def _md_inline(self, text: str, line_tag: str) -> None:
         for seg, flags in MD.inline_segments(text):

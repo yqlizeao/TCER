@@ -147,6 +147,18 @@ FONT_UI_SMALL_BOLD = (FONT_CJK, 9, "bold")
 FONT_VALUE = (FONT_MONO_NAME, 10, "bold")   # 数值沉稳有力（等宽粗体，扎实锚点）
 FONT_MONO = (FONT_MONO_NAME, 10)
 FONT_STAT = (FONT_CJK, 9)                   # 状态栏字号清晰可辨
+
+
+def has_cjk(text: str) -> bool:
+    """含中日韩文字 / 全角标点（等宽字体缺这些字形，Tk 逐字回退后字距松散）。"""
+    return any("\u2e80" <= c <= "\u9fff" or "\uff00" <= c <= "\uffef"
+               or "\u3000" <= c <= "\u303f" for c in text)
+
+
+def value_font(text: str, mono=FONT_VALUE, cjk=FONT_UI_BOLD):
+    """数值字体：纯数字 / ASCII 用等宽粗体（对齐扎实）；带中文单位或说明的值改用
+    UI 粗体——「12.1 小时」「864 次（8 种）」在等宽字体里会被回退字形撑出空洞。"""
+    return cjk if has_cjk(text) else mono
 def setup_style(ttk) -> None:
     """Configure the ttk Style for the dark theme (call once after Style() creation)."""
     style = ttk.Style()

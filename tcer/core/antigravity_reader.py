@@ -583,7 +583,10 @@ def aggregate_usage(
                 total_in = uncached_in + cached_in
                 decoded_gens.append((model, uncached_in, total_out, cached_in, reasoning))
 
-                u.input_tokens += total_in
+                # 口径同其余源：input_tokens 只记未命中缓存部分，缓存命中单列
+                # cache_read（total_input = 二者之和）。曾把 total_in 记进 input，
+                # 缓存被计两遍且按全价计费（实测 Token ×2、成本 ×7.7）。
+                u.input_tokens += uncached_in
                 u.output_tokens += total_out
                 u.cache_read_input_tokens += cached_in
                 u.reasoning_output_tokens += reasoning
@@ -593,7 +596,7 @@ def aggregate_usage(
                     norm_m = pricing.normalize(model)
                     u.models.add(norm_m)
                     mu = u.bucket(norm_m)
-                    mu.input_tokens += total_in
+                    mu.input_tokens += uncached_in
                     mu.output_tokens += total_out
                     mu.cache_read_input_tokens += cached_in
 

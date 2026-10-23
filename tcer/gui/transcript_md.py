@@ -10,7 +10,7 @@
     ("li", depth, marker, text)   列表项（marker 为「•」或「1.」；任务项「[ ]」「[x]」）
     ("quote", text)               引用
     ("hr",)                       分隔线
-    ("table", rows)               表格（rows: list[list[str]]，首行为表头）
+    ("table", rows)               表格（rows: list[list[str]]，首行为表头；排版见 layout_table）
     ("p", text)                   段落行
 """
 from __future__ import annotations
@@ -167,42 +167,70 @@ def plain_inline(text: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 表格对齐（等宽，CJK 记 2 列）
+# 表格排版（宽度口径由调用方注入：GUI 传像素量字函数，测试 / 纯文本用显示列）
 # --------------------------------------------------------------------------- #
 def display_width(s: str) -> int:
+    """显示列宽（CJK 记 2 列）——纯文本场景的默认量宽口径。"""
     return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
 
 
-def format_table(rows: list[list[str]]) -> list[str]:
-    """表格 → 等宽文本行（列用 ``│`` 分隔，表头下一行用 ``─┼─``）。"""
+def _wrap_cell(s: str, w: int, measure) -> list[str]:
+    """按 ``measure`` 量宽折行；优先在空白处断开，超长词按字符硬断。"""
+    out: list[str] = []
+    for para in s.split("\n"):
+        cur = ""
+        for word in re.split(r"(\s+)", para):
+            if measure(cur + word) <= w:
+                cur += word
+                continue
+            if word.isspace():
+                out.append(cur.rstrip())
+                cur = ""
+                continue
+            if cur.strip():
+                out.append(cur.rstrip())
+                cur = ""
+            for ch in word:
+                if cur and measure(cur + ch) > w:
+                    out.append(cur)
+                    cur = ""
+                cur += ch
+        out.append(cur.rstrip())
+    return out or [""]
+
+
+def layout_table(rows: list[list[str]], max_width: int, measure=display_width,
+                 gap: int = 3, min_col: int | None = None,
+                 max_col: int | None = None) -> tuple[list[int], list[tuple[str, list[str]]]]:
+    """表格 → ``(列宽, [(种类, 各列文本)])``，种类 ``head`` / ``sep`` / ``body``。
+
+    单元格先去行内 Markdown 标记（``**`` / 反引号不再原样露出）；列宽取内容
+    自然宽（单列封顶 ``max_col``），总宽超过 ``max_width`` 时从最宽列起逐步收缩，
+    单元格折行而不截断——不丢内容。表头下与各表体行之间插 ``sep`` 分隔线。
+    列宽 / 间距与 ``measure`` 同单位（GUI 为像素，用 tab stop 精确对齐）。"""
     if not rows:
-        return []
+        return [], []
     cols = max(len(r) for r in rows)
-    norm = [r + [""] * (cols - len(r)) for r in rows]
-    widths = [min(40, max(display_width(r[c]) for r in norm)) for c in range(cols)]
+    norm = [[plain_inline(c).strip() for c in r] + [""] * (cols - len(r)) for r in rows]
+    unit = max(1, measure("0"))
+    min_col = min_col if min_col is not None else 6 * unit
+    max_col = max_col if max_col is not None else max(min_col, max_width * 2 // 5)
+    widths = [max(unit, min(max_col, max(measure(r[c]) for r in norm))) for c in range(cols)]
+    budget = max(cols * min_col, max_width - gap * (cols - 1))
+    step = max(1, unit // 2)
+    while sum(widths) > budget:
+        i = max(range(cols), key=lambda k: widths[k])
+        if widths[i] <= min_col:
+            break
+        widths[i] = max(min_col, widths[i] - step)
 
-    def clip(s: str, w: int) -> str:
-        if display_width(s) <= w:
-            return s
-        out, acc = "", 0
-        for ch in s:
-            cw = display_width(ch)
-            if acc + cw > w - 1:
-                break
-            out += ch
-            acc += cw
-        return out + "…"
+    def phys(r) -> list[list[str]]:
+        cells = [_wrap_cell(c, w, measure) for c, w in zip(r, widths)]
+        h = max(len(c) for c in cells)
+        return [[c[li] if li < len(c) else "" for c in cells] for li in range(h)]
 
-    def fmt(r):
-        cells = []
-        for c, w in zip(r, widths):
-            c = clip(c, w)
-            cells.append(c + " " * (w - display_width(c)))
-        return " │ ".join(cells)
-
-    lines = [fmt(norm[0])]
-    if len(norm) > 1:
-        lines.append("─┼─".join("─" * (w + (0 if k in (0, cols - 1) else 0))
-                                for k, w in enumerate(widths)))
-        lines.extend(fmt(r) for r in norm[1:])
-    return lines
+    lines: list[tuple[str, list[str]]] = [("head", ln) for ln in phys(norm[0])]
+    for r in norm[1:]:
+        lines.append(("sep", []))
+        lines.extend(("body", ln) for ln in phys(r))
+    return widths, lines
