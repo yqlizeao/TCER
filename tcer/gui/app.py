@@ -930,6 +930,8 @@ class TcerGui:
     def show_transcript(self, report, siblings=None) -> None:
         """会话记录阅读器：已开则复用窗口，序列取自会话列表当前的过滤 / 排序结果。"""
         from .transcript_view import TranscriptWindow, refs_from_reports
+        if siblings is None and hasattr(self, "session_col"):
+            siblings = self.session_col._reports
         reports = list(siblings) if siblings else []
         idx = next((i for i, r in enumerate(reports) if r is report), None)
         if idx is None:

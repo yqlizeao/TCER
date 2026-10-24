@@ -878,8 +878,9 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, pady=No
     """
     custom_bg = kw.pop("bg", None)
     custom_fg = kw.pop("fg", None)
+    custom_hover = kw.pop("hover_bg", None)
     base_bg = custom_bg if custom_bg is not None else (theme.ACCENT if primary else theme.PANEL)
-    hover_bg = theme.HOVER_ACCENT if primary else theme.HOVER_BG
+    hover_bg = custom_hover if custom_hover is not None else (theme.HOVER_ACCENT if primary else theme.HOVER_BG)
     fg = custom_fg if custom_fg is not None else (theme.FG_WHITE if primary else theme.FG)
     pad_x = theme.PAD_M if padx is None else padx
     pad_y = theme.PAD_XS if pady is None else pady
@@ -899,8 +900,10 @@ def flat_button(parent, text, command=None, *, primary=False, padx=None, pady=No
                                           # 蚂蚁线无法用 highlight 选项关闭，只能
                                           # 不抢焦点（点击后焦点留在原处，规范⑥）
                     **kw)
-    btn.bind("<Enter>", lambda _e: btn.config(bg=hover_bg), add="+")
-    btn.bind("<Leave>", lambda _e: btn.config(bg=base_bg), add="+")
+    btn._base_bg = base_bg    # type: ignore[attr-defined]
+    btn._hover_bg = hover_bg  # type: ignore[attr-defined]
+    btn.bind("<Enter>", lambda _e: btn.config(bg=btn._hover_bg) if str(btn.cget("state")) != "disabled" else None, add="+")
+    btn.bind("<Leave>", lambda _e: btn.config(bg=btn._base_bg), add="+")
     return btn
 
 

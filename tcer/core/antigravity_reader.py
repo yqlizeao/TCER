@@ -581,6 +581,11 @@ def aggregate_usage(
                     continue
                 model, uncached_in, total_out, cached_in, reasoning = _decode_gen_metadata(data)
                 total_in = uncached_in + cached_in
+                if total_in == 0 and total_out == 0:
+                    # 零 usage 错误桩（如请求前 400 失败）不产生 step_type=15，
+                    # 若写入 decoded_gens 会使后续 turn_stats 整体错位 1 回合。
+                    u.empty_usage_skipped += 1
+                    continue
                 decoded_gens.append((model, uncached_in, total_out, cached_in, reasoning))
 
                 # 口径同其余源：input_tokens 只记未命中缓存部分，缓存命中单列

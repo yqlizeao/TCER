@@ -3521,7 +3521,16 @@ class ModelCompareView:
                              font=theme.FONT_UI_BOLD, anchor="w", cursor=CLICK_CURSOR)
         arrow_lbl.pack(side="left", fill="y", padx=(8, 6))
 
-        tk.Label(header, text=f"{len(group.metrics)} 项", bg=header_bg, fg=theme.MUTED,
+        right_note = f"{len(group.metrics)} 项"
+        if group.id == "M_QUAL" and any(
+            getattr(mc, "solo_session_count", mc.session_count) < mc.session_count
+            for mc in self._models
+        ):
+            if all(getattr(mc, "mixed_only", False) for mc in self._models):
+                right_note = f"混合模型会话不拆分会话级代码与行为 · {right_note}"
+            else:
+                right_note = f"仅统计单模型独立会话 · {right_note}"
+        tk.Label(header, text=right_note, bg=header_bg, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL).pack(side="right", padx=10)
 
         body = tk.Frame(gframe, bg=theme.PANEL)
@@ -3560,16 +3569,22 @@ class ModelCompareView:
 
             widgets_in_row = [row, name_lbl]
 
-            # 计算最优值高亮（金色 VALUE_BEST）
+            # 计算最优值高亮（金色 VALUE_BEST）：必须展示文本本身也有区分度，
+            # 防止浮点尾数微差（如 8.000000000000002% vs 8.0%）让两个显示完全
+            # 相同的单元格一金一白。
             row_colors: dict[int, str] = {}
             if metric.sentiment in ("up", "down"):
-                valid = [(j, model_raw(mc, key)) for j, mc in enumerate(self._models)]
-                valid = [(j, v) for j, v in valid if isinstance(v, (int, float))]
-                distinct = {v for _, v in valid}
-                if len(distinct) >= 2:
-                    target = max(distinct) if metric.sentiment == "up" else min(distinct)
-                    for j, v in valid:
-                        if v == target:
+                valid = [
+                    (j, model_raw(mc, key), model_display(mc, key))
+                    for j, mc in enumerate(self._models)
+                ]
+                valid = [(j, v, d) for j, v, d in valid if isinstance(v, (int, float))]
+                distinct_disp = {d for _, _, d in valid}
+                if len(distinct_disp) >= 2:
+                    target = max(v for _, v, _ in valid) if metric.sentiment == "up" else min(v for _, v, _ in valid)
+                    best_disp = next(d for _, v, d in valid if v == target)
+                    for j, v, d in valid:
+                        if v == target or d == best_disp:
                             row_colors[j] = theme.VALUE_BEST
 
             # 单模型 vs 多模型排版

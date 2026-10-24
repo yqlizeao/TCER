@@ -226,6 +226,12 @@ def _tag_content(text: str, tag: str) -> str | None:
     return text[start: j if j >= 0 else len(text)]
 
 
+_MAX_META_FIELDS = frozenset({
+    "input_tokens", "output_tokens", "cache_read_tokens",
+    "cache_write_tokens", "reasoning_tokens",
+})
+
+
 def _merge_meta(target: MessageMeta | None, nxt: MessageMeta | None) -> MessageMeta | None:
     if nxt is None:
         return target
@@ -234,7 +240,11 @@ def _merge_meta(target: MessageMeta | None, nxt: MessageMeta | None) -> MessageM
     for f in nxt.__dataclass_fields__:
         v = getattr(nxt, f)
         if v is not None:
-            setattr(target, f, v)
+            prev = getattr(target, f)
+            if f in _MAX_META_FIELDS and prev is not None:
+                setattr(target, f, max(prev, v))
+            else:
+                setattr(target, f, v)
     return target
 
 
@@ -245,6 +255,7 @@ class _Claude:
         self.messages: list[Message] = []
         self.last_api_id: str | None = None      # 上一条 message 的 api id（相邻合并用）
         self.seen_api_ids: set[str] = set()
+        self.api_msgs: dict[str, Message] = {}   # api id → 首条承接 token 的 Message（防隔行双计）
         self.seen_blocks: dict[str, set] = {}
         self.seen_tool_use: set[str] = set()
         self.seen_tool_result: set[str] = set()
@@ -423,8 +434,16 @@ class _Claude:
                 and self.last_api_id == mid):
             last.blocks.extend(blocks)
             last.meta = _merge_meta(last.meta, meta)
+        elif mid is not None and mid in self.api_msgs:
+            # 同一 API 响应被中间记录拆成多段时：流式最大 token 归入首段，续段仅保留 model 防双计
+            first_m = self.api_msgs[mid]
+            first_m.meta = _merge_meta(first_m.meta, meta)
+            model_only = MessageMeta(model=meta.model) if (meta and meta.model) else None
+            self.push("assistant", ts, obj.get("uuid"), blocks, api_id=mid, meta=model_only)
         else:
-            self.push("assistant", ts, obj.get("uuid"), blocks, api_id=mid, meta=meta)
+            pushed = self.push("assistant", ts, obj.get("uuid"), blocks, api_id=mid, meta=meta)
+            if mid:
+                self.api_msgs[mid] = pushed
         if mid:
             self.seen_api_ids.add(mid)
             self.last_api_id = mid
@@ -432,6 +451,8 @@ class _Claude:
     @staticmethod
     def message_meta(msg, model) -> MessageMeta | None:
         usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
+        if usage.get("estimated") is True:
+            usage = {}
 
         def tok(k):
             v = usage.get(k)
@@ -912,6 +933,12 @@ def _diff_summary(files: list[dict]) -> dict:
             "removed": sum(f["removed"] for f in files), "full": None}
 
 
+_CODEX_TOK_KEYS = (
+    "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+    "output_tokens", "reasoning_output_tokens",
+)
+
+
 class _Codex:
     def __init__(self, path: Path, cancel):
         self.path = path
@@ -920,6 +947,8 @@ class _Codex:
         self.turn_id: str | None = None
         self.last_model: str | None = None
         self.pending_model: tuple | None = None
+        self.prev_tok: dict[str, int] = {}
+        self.pending_tok: list[int] = [0, 0, 0, 0, 0]   # inp, out, cr, cw, reas
         self.calls: dict[str, tuple] = {}     # call_id → (ToolCallBlock, flavor)
         self.open: list[str] = []
         self.last_compaction: Message | None = None
@@ -930,6 +959,24 @@ class _Codex:
 
     def ref(self, pointer: str) -> ContentRef:
         return ContentRef("jsonl_idx", str(self.path), index=self.n, pointer=pointer, source="codex")
+
+    @staticmethod
+    def _add_tok_to_meta(m: Message, inp: int, out: int, cr: int, cw: int, reas: int,
+                         model: str | None) -> None:
+        meta = m.meta or MessageMeta(model=model)
+        if model and not meta.model:
+            meta.model = model
+        if inp > 0:
+            meta.input_tokens = (meta.input_tokens or 0) + inp
+        if out > 0:
+            meta.output_tokens = (meta.output_tokens or 0) + out
+        if cr > 0:
+            meta.cache_read_tokens = (meta.cache_read_tokens or 0) + cr
+        if cw > 0:
+            meta.cache_write_tokens = (meta.cache_write_tokens or 0) + cw
+        if reas > 0:
+            meta.reasoning_tokens = (meta.reasoning_tokens or 0) + reas
+        m.meta = meta
 
     # ---- 推送 ------------------------------------------------------------------ #
     def _flush_model(self):
@@ -956,14 +1003,20 @@ class _Codex:
             if mid:
                 last.id = mid
             self.last_compaction = None
-            return last
-        m = self.push("assistant", ts, mid, blocks)
-        if self.last_model:
-            m.meta = MessageMeta(model=self.last_model)
+            m = last
+        else:
+            m = self.push("assistant", ts, mid, blocks)
+            if self.last_model:
+                m.meta = MessageMeta(model=self.last_model)
+        if any(self.pending_tok):
+            inp, out, cr, cw, reas = self.pending_tok
+            self.pending_tok = [0, 0, 0, 0, 0]
+            self._add_tok_to_meta(m, inp, out, cr, cw, reas, self.last_model)
         return m
 
     def start_turn(self, turn: str):
         if self.turn_id != turn:
+            self.pending_tok = [0, 0, 0, 0, 0]
             self.turn_id = turn
         self._flush_model()
 
@@ -1049,6 +1102,43 @@ class _Codex:
             self.compaction_event(ts, None)
         elif sub == "patch_apply_end":
             self.patch_end(pl)
+        elif sub == "token_count":
+            self.token_count(pl, cr)
+
+    def token_count(self, pl, cr):
+        info = pl.get("info") if isinstance(pl.get("info"), dict) else {}
+        usage = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else None
+        total = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else None
+        rec = None
+        if total is not None:
+            delta = {k: cr._as_int(total.get(k)) - self.prev_tok.get(k, 0) for k in _CODEX_TOK_KEYS}
+            self.prev_tok = {k: cr._as_int(total.get(k)) for k in _CODEX_TOK_KEYS}
+            if all(v >= 0 for v in delta.values()):
+                rec = delta if any(delta.values()) else None
+            else:
+                rec = usage
+        elif usage is not None:
+            rec = usage
+        if not rec:
+            return
+        cr_tok = cr._as_int(rec.get("cached_input_tokens"))
+        cw_tok = cr._as_int(rec.get("cache_write_input_tokens"))
+        inp_tok = max(0, cr._as_int(rec.get("input_tokens")) - cr_tok - cw_tok)
+        out_tok = cr._as_int(rec.get("output_tokens"))
+        reas_tok = cr._as_int(rec.get("reasoning_output_tokens"))
+        if inp_tok + cr_tok + cw_tok + out_tok <= 0:
+            return
+        for m in reversed(self.messages):
+            if m.turn_id != self.turn_id:
+                break
+            if m.role == "assistant" and not m.injected:
+                self._add_tok_to_meta(m, inp_tok, out_tok, cr_tok, cw_tok, reas_tok, self.last_model)
+                return
+        self.pending_tok[0] += inp_tok
+        self.pending_tok[1] += out_tok
+        self.pending_tok[2] += cr_tok
+        self.pending_tok[3] += cw_tok
+        self.pending_tok[4] += reas_tok
 
     def question(self, umsg: dict, ts, mid):
         text = umsg["text"]
@@ -1969,16 +2059,50 @@ class _OpenCode:
 # --------------------------------------------------------------------------- #
 # Antigravity
 # --------------------------------------------------------------------------- #
+def _agy_extract_tool_calls(agy, payload) -> list[tuple[str, str, str]]:
+    """step 15 payload 字段 20 下可重复出现多个字段 7（单轮并行工具调用）。"""
+    if not payload:
+        return []
+    f20 = agy._find_field(agy._parse_proto_fields(payload), 20)
+    if not isinstance(f20, bytes):
+        return []
+    out: list[tuple[str, str, str]] = []
+    for fn, wt, f7 in agy._parse_proto_fields(f20):
+        if fn != 7 or wt != 2 or not isinstance(f7, bytes):
+            continue
+        sf7 = agy._parse_proto_fields(f7)
+        cid = _agy_str(agy._find_field(sf7, 1))
+        name = _agy_str(agy._find_field(sf7, 2))
+        args = _agy_str(agy._find_field(sf7, 3))
+        if name:
+            out.append((name, args, cid))
+    return out
+
+
 def _agy_build(path: Path, cancel) -> tuple[list[Message], list[str]]:
     from tcer.core import antigravity_reader as agy
     msgs: list[Message] = []
     warnings: list[str] = []
     calls: dict[str, ToolCallBlock] = {}
     paired: set[str] = set()
+    batch: list[ToolCallBlock] = []
     if not path.is_file():
         return msgs, warnings
     with agy._connect_ro(path) as conn:
         cur = conn.cursor()
+        decoded_gens: list[tuple[str, int, int, int, int]] = []
+        try:
+            cur.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC")
+            for _, gdata in cur.fetchall():
+                if not gdata:
+                    continue
+                gm, u_in, t_out, c_in, g_reas = agy._decode_gen_metadata(gdata)
+                if u_in + c_in == 0 and t_out == 0:
+                    continue
+                decoded_gens.append((gm, u_in, t_out, c_in, g_reas))
+        except sqlite3.Error:
+            decoded_gens = []
+        gen_pos = 0
         cur.execute("SELECT idx, step_type, metadata, step_payload FROM steps ORDER BY idx ASC")
         for k, (idx, stype, meta, payload) in enumerate(cur.fetchall()):
             if k % 256 == 0:
@@ -1990,29 +2114,47 @@ def _agy_build(path: Path, cancel) -> tuple[list[Message], list[str]]:
                 if txt:
                     msgs.append(Message("user", ts, str(idx), None, False, [TextBlock(txt)]))
             elif stype == 15:
-                name, args_json, cid = agy._extract_tool_call(payload)
+                g_meta: MessageMeta | None = None
+                if gen_pos < len(decoded_gens):
+                    gm, u_in, t_out, c_in, g_reas = decoded_gens[gen_pos]
+                    cand_meta = MessageMeta(
+                        model=gm if gm else None,
+                        input_tokens=u_in if u_in > 0 else None,
+                        output_tokens=t_out if t_out > 0 else None,
+                        cache_read_tokens=c_in if c_in > 0 else None,
+                        reasoning_tokens=g_reas if g_reas > 0 else None,
+                    )
+                    if not cand_meta.is_empty():
+                        g_meta = cand_meta
+                gen_pos += 1
+                raw_calls = _agy_extract_tool_calls(agy, payload)
                 blocks: list = []
                 thought, said = _agy_text_fields(agy, payload)
                 if thought:
                     blocks.append(make_thinking(thought, summary=None, redacted=False))
                 if said:
                     blocks.append(TextBlock(said))
-                if name:
+                batch = []
+                for ci, (name, args_json, cid) in enumerate(raw_calls):
                     canon = agy._canon_tool(name, args_json)
                     try:
                         args = json.loads(args_json) if args_json else None
                     except ValueError:
                         args = None
-                    call = _agy_call(canon, name, cid or f"agy-{idx}", args, args_json)
+                    fallback_id = f"agy-{idx}" if ci == 0 else f"agy-{idx}-{ci}"
+                    call = _agy_call(canon, name, cid or fallback_id, args, args_json)
                     calls[call.id] = call
+                    batch.append(call)
                     blocks.append(call)
                 if blocks:
-                    msgs.append(Message("assistant", ts, str(idx), None, False, blocks))
+                    msgs.append(Message("assistant", ts, str(idx), None, False, blocks, g_meta))
             elif stype == 132:
                 out_text, exit_code = agy._extract_tool_result(payload)
-                # 结果 payload 不带 call_id：按出现顺序配最近一个未配对的调用
-                target = next((c for c in reversed(list(calls.values()))
-                               if c.id not in paired), None)
+                # 结果 payload 不带 call_id：优先按当前轮并行调用的 FIFO 顺序配对，否则配最近未配对调用
+                target = next((c for c in batch if c.id not in paired), None)
+                if target is None:
+                    target = next((c for c in reversed(list(calls.values()))
+                                   if c.id not in paired), None)
                 cid = target.id if target is not None else ""
                 if target is not None:
                     paired.add(target.id)
@@ -2079,12 +2221,12 @@ def _agy_summary(agy, payload) -> str:
 _AGY_KIND = {"Read": KIND_READ, "Write": KIND_WRITE, "Edit": KIND_EDIT, "Bash": KIND_SHELL,
              "Task": KIND_AGENT, "WebSearch": KIND_WEB, "WebFetch": KIND_WEB, "Ask": "ask"}
 _AGY_ARG_KEYS = {
-    KIND_READ: ("AbsolutePath", "absolute_path", "path", "file_path"),
-    KIND_WRITE: ("TargetFile", "target_file", "AbsolutePath", "path", "file_path"),
-    KIND_EDIT: ("TargetFile", "target_file", "AbsolutePath", "path", "file_path"),
+    KIND_READ: ("AbsolutePath", "absolute_path", "Path", "path", "file_path"),
+    KIND_WRITE: ("TargetFile", "target_file", "AbsolutePath", "Path", "path", "file_path"),
+    KIND_EDIT: ("TargetFile", "target_file", "AbsolutePath", "Path", "path", "file_path"),
     KIND_SHELL: ("CommandLine", "command_line", "command", "Command"),
     KIND_WEB: ("query", "Query", "url", "Url"),
-    KIND_AGENT: ("TaskName", "task_name", "description", "Description"),
+    KIND_AGENT: ("Role", "TaskName", "task_name", "description", "Description", "Prompt"),
     "ask": ("question", "Question"),
 }
 
@@ -2095,6 +2237,7 @@ def _agy_call(canon: str, raw_name: str, cid: str, args, args_json: str) -> Tool
     server = n.server
     title = ""
     detail = None
+    diff = None
     if kind == KIND_MCP:
         sp = ts_.split_mcp_name(canon)
         title = ts_.title_mcp(*sp) if sp else ts_.one_line_title(raw_name)
@@ -2102,17 +2245,37 @@ def _agy_call(canon: str, raw_name: str, cid: str, args, args_json: str) -> Tool
     else:
         v = ts_.str_field(args, _AGY_ARG_KEYS.get(kind, ())) if isinstance(args, dict) else None
         if v:
-            title = ts_.one_line_title(v)
+            if kind == KIND_READ and isinstance(args, dict):
+                s_ln = ts_._u64_field(args, ("StartLine", "start_line", "offset"))
+                e_ln = ts_._u64_field(args, ("EndLine", "end_line"))
+                lim = ((e_ln - (s_ln or 1) + 1)
+                       if (e_ln is not None and e_ln >= (s_ln or 1))
+                       else ts_._u64_field(args, ("limit",)))
+                title, detail = ts_.title_read(v, s_ln, lim)
+            else:
+                title = ts_.one_line_title(v)
         if isinstance(args, dict):
             d = ts_.str_field(args, ("toolAction", "toolSummary"))
-            detail = ts_.one_line_title(d) if d else None
+            if d:
+                detail = ts_.one_line_title(d)
+            if kind == KIND_WRITE and v:
+                content = ts_._str_allow_empty(args, ("CodeContent", "code_content", "Content", "content"))
+                if content is not None:
+                    diff = ts_.single_file_diff(v, "add", ts_.count_lines(content), 0)
+            elif kind == KIND_EDIT and v:
+                old = ts_._str_allow_empty(args, ("TargetContent", "target_content", "Target", "old_string"))
+                new = ts_._str_allow_empty(args, ("ReplacementContent", "replacement_content", "Replacement", "new_string"))
+                if old is not None and new is not None:
+                    a, r = ts_.line_change_counts(old, new)
+                    diff = ts_.single_file_diff(v, "update", a, r)
     if kind == KIND_SHELL and title:
         kind = ts_.refine_shell_kind(title)
     if not title:
         title = ts_.one_line_title(raw_name)
     p = ts_.preview_chars(args_json or "", INPUT_PREVIEW_CHARS)
     return ToolCallBlock(id=cid, raw_name=raw_name, kind=kind, title=title, detail=detail,
-                         server=server, input_preview=p.text, input_total_len=p.total_len)
+                         server=server, input_preview=p.text, input_total_len=p.total_len,
+                         diff=diff)
 
 
 # --------------------------------------------------------------------------- #

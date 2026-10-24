@@ -1684,6 +1684,47 @@ def test_antigravity_adapter(tmp_path):
     assert T.load_transcript("antigravity", db, with_usage=True, use_cache=False).question_count == 2
 
 
+def test_antigravity_parallel_tool_calls_fifo_pairing_and_path_args(tmp_path):
+    """单步 step_type=15 携带多个 repeated field 7 工具调用时，全部提取并与后续
+    step_type=132 按 FIFO 一一配对（杜绝第 2..N 个输出悬空为孤立「工具输出」）；
+    支持 read_file/edit_file 的 Path/StartLine/EndLine/Target/Replacement 参数。"""
+    db = tmp_path / "703d5cd2-4dbd-44d7-8cf3-3488f8d077de.db"
+    con = sqlite3.connect(db)
+    con.execute("create table steps (idx integer primary key, step_type integer, status integer default 0, "
+                "has_subtrajectory numeric default 'false', metadata blob, error_details blob, permissions blob, "
+                "task_details blob, render_info blob, step_payload blob, step_format integer default 0)")
+    t0 = 1_790_000_000
+    c1 = _ld(7, _sf(1, "id1") + _sf(2, "read_file") +
+             _sf(3, '{"Path":"C:/GitHub/TCER/a.py","StartLine":10,"EndLine":25}'))
+    c2 = _ld(7, _sf(1, "id2") + _sf(2, "read_file") +
+             _sf(3, '{"Path":"C:/GitHub/TCER/b.py"}'))
+    c3 = _ld(7, _sf(1, "id3") + _sf(2, "edit_file") +
+             _sf(3, '{"Path":"C:/GitHub/TCER/b.py","Target":"old","Replacement":"new\\nline"}'))
+    rows = [
+        (0, 14, t0, _ld(19, _sf(2, "并行读两个文件再修改"))),
+        (1, 15, t0 + 1, _ld(20, _sf(3, "先并行读取") + c1 + c2 + c3)),
+        (2, 132, t0 + 2, _ld(140, _ld(2, _sf(1, "content of a.py")))),
+        (3, 132, t0 + 3, _ld(140, _ld(2, _sf(1, "content of b.py")))),
+        (4, 132, t0 + 4, _ld(140, _ld(2, _sf(1, "Made 1 replacement")))),
+    ]
+    for idx, st, ts, payload in rows:
+        con.execute("insert into steps (idx, step_type, metadata, step_payload) values (?,?,?,?)",
+                    (idx, st, _agy_meta(ts), payload))
+    con.commit()
+    con.close()
+
+    tr = load("antigravity", db)
+    assert tr.tool_call_count == 3
+    t1 = tr.turns[0]
+    tools = [s for s in t1.steps if s.kind == "tool"]
+    assert len(tools) == 3 and all(s.call is not None and s.result is not None for s in tools)
+    assert tools[0].call.title == "C:/GitHub/TCER/a.py" and tools[0].call.detail == ":10-25"
+    assert tools[0].result.preview == "content of a.py"
+    assert tools[1].call.title == "C:/GitHub/TCER/b.py" and tools[1].result.preview == "content of b.py"
+    assert tools[2].call.kind == "edit" and tools[2].call.title == "C:/GitHub/TCER/b.py"
+    assert tools[2].call.diff["added"] == 2 and tools[2].call.diff["removed"] == 1
+
+
 # =========================================================================== #
 # WorkBuddy adapter
 # =========================================================================== #

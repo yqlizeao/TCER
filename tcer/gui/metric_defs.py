@@ -977,14 +977,33 @@ _MODEL_EXTRACTORS = {
 }
 
 
+# 仅从「单模型会话」精确归因的逐模型指标（LOC 与工具行为是会话级聚合；
+# 若某模型仅出现在混合模型会话中，mixed_only=True，显示「不适用」而非编造）。
+_MODEL_SOLO_ONLY_KEYS: frozenset[str] = frozenset({
+    "m_code_per_dollar",
+    "m_net_loc_per_session",
+    "m_tool_error_rate",
+    "m_exploration_ratio",
+    "m_edit_ratio",
+    "m_read_write_ratio",
+    "m_churn",
+    "m_read_before_write",
+    "m_files_per_session",
+})
+
+
 def model_raw(mc, key: str):
     """Numeric value of a per-model metric (for best-in-row highlighting)."""
+    if key in _MODEL_SOLO_ONLY_KEYS and getattr(mc, "mixed_only", False):
+        return None
     ext = _MODEL_EXTRACTORS.get(key)
     return ext[0](mc) if ext else None
 
 
 def model_display(mc, key: str) -> str:
     """Display string of a per-model metric (model 对比 tab)."""
+    if key in _MODEL_SOLO_ONLY_KEYS and getattr(mc, "mixed_only", False):
+        return UNSUPPORTED_LABEL
     ext = _MODEL_EXTRACTORS.get(key)
     return ext[1](mc) if ext else "-"
 

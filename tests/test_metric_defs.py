@@ -259,6 +259,31 @@ def test_model_display_free_and_none():
     assert md(mc, "m_churn") == "-"
 
 
+def test_model_display_mixed_only_shows_unsupported():
+    """When a model only appeared in mixed-model sessions (mixed_only=True),
+    session-level LOC & behavior metrics render as UNSUPPORTED_LABEL ('不适用')."""
+    mc = metrics.ModelComparison(
+        model_id="gemini-3.8-flash",
+        display_name="Gemini 3.8 Flash",
+        input_tokens=260_102,
+        output_tokens=1_521,
+        cost=0.2008,
+        session_count=1,
+        solo_session_count=0,
+        mixed_only=True,
+        tokens_per_dollar=1_303_032,
+        cache_hit_ratio=0.0,
+    )
+    md = metric_defs.model_display
+    mr = metric_defs.model_raw
+    assert md(mc, "m_total_tokens") == "261,623"
+    assert md(mc, "m_cost") == "$0.2008"
+    assert md(mc, "m_tokens_per_dollar") == "1,303,032/$"
+    for k in metric_defs._MODEL_SOLO_ONLY_KEYS:
+        assert md(mc, k) == metric_defs.UNSUPPORTED_LABEL
+        assert mr(mc, k) is None
+
+
 def test_model_tip_borrowed_from_session():
     """Linked model metrics borrow the session metric's name+tip; others None."""
     tip = metric_defs.model_tip("m_cache_hit_ratio")

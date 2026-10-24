@@ -196,9 +196,10 @@ Claude 缓存写按 TTL 分档：1h 档单价 = 5m 档 × 1.6（`CACHE_1H_PREMIU
   - **待做**：成本轴改 p̄ 比率与 TCER 解耦（正交化，需指标版本化 + audit 重验）。
 
 <a id="compare-models"></a>
-### 原 #23 模型对比分摊
+### 原 #23 模型对比归因
 
-- `compare_models` 行为/产出/质量指标按 token 占比加权（`_weight_sum`），单模型会话权重 1.0 与旧「主模型全额归因」一致，混合会话按占比拆分不再丢弃。
+- `compare_models` 中 Token 用量、成本、缓存命中率、Token 效率按 `TokenUsage.per_model` 精确分桶统计（含单模型与多模型混用会话）；
+- 代码效率（`m_code_per_dollar`）与「代码质量与行为」8 项指标均为会话级回放结果，**仅统计单模型独立完成的会话**（`solo_session_count` / `_solo_cost`）。多模型混用会话不按 Token 占比 $w$ 分摊（按 $w$ 加权再除以 $\sum w$ 在单会话或共现会话下恒有 $w/w=1$ 约分，导致两个模型显示完全相同的净增行/读写比/返工率，且浮点尾数微差触发虚假的金色最优高亮；同时 `net_loc * w / cost` 会把代码效率变成 Token 效率的常数倍）。若某模型仅出现在混合会话中（`mixed_only=True`），上述 9 项指标显示「不适用」。
 
 <a id="new-metrics"></a>
 ### 原 #34 新指标族（v1.6.0 审查批次）

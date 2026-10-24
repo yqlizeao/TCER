@@ -268,3 +268,42 @@ DASH_LINE_COLORS = {
     "G6": "#b65bd6",   # 亮紫
 }
 
+# 会话记录阅读器（对齐 cc-switch v7 暗色 token：--agent-* 与 14% mix 气泡底色）
+TRANSCRIPT_AGENT_ACCENT = {
+    "claude": "#e08a6a",
+    "codex": "#d4d4d8",
+    "antigravity": "#8ab4f8",
+    "gemini": "#8ab4f8",
+    "opencode": "#5eead4",
+    "pi": "#c4b5fd",
+    "omp": "#c4b5fd",
+    "workbuddy": "#ababb3",
+    "generic": "#ababb3",
+}
+TRANSCRIPT_BUBBLE_BG = {
+    "claude": "#403433",       # color-mix(in srgb, #e08a6a 14%, #26262a)
+    "codex": "#3e3e43",        # color-mix(in srgb, #d4d4d8 14%, #26262a)
+    "antigravity": "#343a47",  # color-mix(in srgb, #8ab4f8 14%, #26262a)
+    "gemini": "#343a47",
+    "opencode": "#2e4142",     # color-mix(in srgb, #5eead4 14%, #26262a)
+    "pi": "#3c3a48",           # color-mix(in srgb, #c4b5fd 14%, #26262a)
+    "omp": "#3c3a48",
+    "workbuddy": "#39393d",
+    "generic": "#39393d",
+}
+TRANSCRIPT_CODE_BG = "#2a2a2e"       # 行内代码 / 代码块正文底色（对齐 cc-switch bg-subtle）
+TRANSCRIPT_CODE_FG = "#e2e8f0"       # 行内代码前景色（清亮冷白，与正文形成微妙语法区分）
+TRANSCRIPT_CODE_HEAD_BG = "#323237"  # 围栏代码块顶栏底色
+TRANSCRIPT_TABLE_ALT_BG = "#232327"  # 表格斑马纹交替行微底色
+TRANSCRIPT_SYN_KW = "#569cd6"        # 围栏代码块语法色：关键字蓝
+TRANSCRIPT_SYN_STR = "#ce9178"       # 围栏代码块语法色：字符串暖橙
+TRANSCRIPT_SYN_CMT = "#6a9955"       # 围栏代码块语法色：注释柔和绿
+TRANSCRIPT_SYN_FN = "#dcdcaa"        # 围栏代码块语法色：函数 / 装饰器淡金
+TRANSCRIPT_SYN_NUM = "#b5cea8"       # 围栏代码块语法色：数值 / 常量清浅绿
+TRANSCRIPT_SEL_BG = "#264f78"        # 阅读器文本选区深海蓝（对齐 VS Code / Chrome Dark 柔和选区色）
+TRANSCRIPT_RAIL_VP = "#2e3440"       # 阅读器多色热点刻度轨视口滑块底色
+TRANSCRIPT_RAIL_BORDER = "#4b5563"   # 阅读器多色热点刻度轨视口滑块描边
+TRANSCRIPT_ACTION_BG = "#ea580c"     # cc-switch 主操作按钮暖橙色（--action-bg）
+TRANSCRIPT_ACTION_HOVER = "#f06d1f"  # cc-switch 主操作按钮悬停色（--action-hover）
+
+

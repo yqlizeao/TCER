@@ -580,18 +580,23 @@ class ModelComparison:
     churn_ratio: float | None = None
     read_before_write: float | None = None
     files_per_session: float | None = None
-    # 内部累加器（按 token 权重分摊：单模型会话权重 1.0，混合会话按占比拆分，
-    # 不再把混合会话的行为数据整段丢弃或全额记给主模型）
-    _weight_sum: float = 0.0  # Σ 会话权重，作产出/行为/质量指标的分母
+    # 会话归因计数：Token/成本/缓存按 per_model 精确分桶；而 LOC 与工具行为是
+    # 会话级回放结果，仅在「单模型会话」中可 100% 真实归因给该模型。若某模型
+    # 仅出现在多模型混用会话中（solo_session_count == 0），mixed_only=True，
+    # 产出与行为指标显示「不适用」而非按 Token 占比编造（w/w 约分会让混用模型
+    # 克隆整场会话的完全相同数值）。
+    solo_session_count: int = 0
+    mixed_only: bool = False
+    _solo_cost: float = 0.0
     _rbw_sum: float = 0.0
-    _rbw_weight: float = 0.0
+    _rbw_count: int = 0
     _tool_calls: dict = None
-    _tool_errors: float = 0.0
-    _code_added: float = 0.0
-    _code_deleted: float = 0.0
-    _code_reworked: float = 0.0
-    _net_loc: float = 0.0
-    _files_touched: float = 0.0
+    _tool_errors: int = 0
+    _code_added: int = 0
+    _code_deleted: int = 0
+    _code_reworked: int = 0
+    _net_loc: int = 0
+    _files_touched: int = 0
 
     def __post_init__(self):
         if self._tool_calls is None:
@@ -609,6 +614,8 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
     buckets: dict[str, ModelComparison] = {}
     for r in reports:
         u = r.usage
+        real_models = [mid for mid in u.per_model if mid not in _SKIP_MODELS]
+        is_single_model = len(real_models) == 1
         for model_id, mu in u.per_model.items():
             if model_id in _SKIP_MODELS:
                 continue
@@ -622,27 +629,34 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
             mc.cache_read_tokens += mu.cache_read_input_tokens
             mc.cache_write_1h_tokens += getattr(mu, "cache_write_1h_tokens", 0)
             mc.session_count += 1
-            # 产出/行为/质量按该模型在会话内的 token 占比分摊。单模型会话
-            # 权重恰为 1.0（与旧的「主模型全额归因」结果一致）；混合会话按
-            # 占比拆分（旧逻辑要么整段丢弃、要么全额记给 >50% 的主模型）。
-            mu_total = mu.input_tokens + mu.output_tokens + mu.cache_creation_input_tokens + mu.cache_read_input_tokens
-            w = (mu_total / u.total) if u.total > 0 else 0.0
-            if w > 0:
-                mc._weight_sum += w
+            # 产出/行为/质量仅从「单模型会话」精确归因：混合会话的 LOC 与工具
+            # 调用是会话级聚合，若按 token 权重 w 分摊再除以 Σw，单会话下 w/w=1
+            # 会让所有混用模型显示完全相同的净增行/读写比/返工率，且把代码效率
+            # 伪装成 Token 效率的常数倍。遵循铁律 #1：拿不准的不编造。
+            if is_single_model:
+                mc.solo_session_count += 1
+                mc._solo_cost += cost_usd(
+                    _FakeModelUsage(
+                        mu.input_tokens, mu.output_tokens,
+                        mu.cache_creation_input_tokens, mu.cache_read_input_tokens,
+                        getattr(mu, "cache_write_1h_tokens", 0),
+                    ),
+                    model=model_id,
+                )
                 for tool, cnt in u.tool_calls.items():
-                    mc._tool_calls[tool] = mc._tool_calls.get(tool, 0) + cnt * w
-                mc._tool_errors += u.tool_errors * w
-                mc._code_added += (r.code_added or 0) * w
-                mc._code_deleted += (r.code_deleted or 0) * w
+                    mc._tool_calls[tool] = mc._tool_calls.get(tool, 0) + cnt
+                mc._tool_errors += u.tool_errors
+                mc._code_added += r.code_added or 0
+                mc._code_deleted += r.code_deleted or 0
                 # Mirror compute(): self-rework count, falling back to gross
                 # deletions when a session predates the code_reworked field.
                 reworked = r.code_reworked if r.code_reworked is not None else r.code_deleted
-                mc._code_reworked += (reworked or 0) * w
-                mc._net_loc += (r.net_loc or 0) * w
-                mc._files_touched += (r.files_touched or 0) * w
+                mc._code_reworked += reworked or 0
+                mc._net_loc += r.net_loc or 0
+                mc._files_touched += r.files_touched or 0
                 if r.read_before_write is not None:
-                    mc._rbw_sum += r.read_before_write * w
-                    mc._rbw_weight += w
+                    mc._rbw_sum += r.read_before_write
+                    mc._rbw_count += 1
 
     # Compute derived metrics
     grand_tokens = sum(mc.total_tokens for mc in buckets.values())
@@ -657,32 +671,34 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
         total_input = mc.input_tokens + mc.cache_creation_tokens + mc.cache_read_tokens
         mc.cache_hit_ratio = mc.cache_read_tokens / total_input if total_input > 0 else None
         mc.tokens_per_dollar = mc.total_tokens / mc.cost if mc.cost > 0 else None
-        mc.code_per_dollar = mc._net_loc / mc.cost if mc.cost > 0 else None
         mc.token_share = mc.total_tokens / grand_tokens * 100 if grand_tokens else 0
-        # 产出效率
-        mc.net_loc_per_session = mc._net_loc / mc._weight_sum if mc._weight_sum > 0 else None
-        # 行为特征
-        total_tools = sum(mc._tool_calls.values())
-        if total_tools > 0:
-            # Align with tool_usage_metrics (Grep/Glob/Web + MCP search aliases).
-            fake = TokenUsage()
-            fake.tool_calls = dict(mc._tool_calls)
-            tm = tool_usage_metrics(fake)
-            mc.exploration_ratio = tm.get("exploration_ratio")
-            edit_write = (
-                mc._tool_calls.get("Edit", 0)
-                + mc._tool_calls.get("MultiEdit", 0)
-                + mc._tool_calls.get("Write", 0)
-            )
-            edit = mc._tool_calls.get("Edit", 0) + mc._tool_calls.get("MultiEdit", 0)
-            mc.edit_ratio = edit / edit_write if edit_write > 0 else None
-            # Prefer the r/w ratio that includes MCP read/scrape aliases.
-            mc.read_write_ratio = tm.get("read_write_ratio")
-            mc.tool_error_rate = mc._tool_errors / total_tools
-        # 代码质量 (self-rework, consistent with compute()/SessionReport.churn_ratio)
-        mc.churn_ratio = mc._code_reworked / mc._code_added if mc._code_added > 0 else None
-        mc.read_before_write = mc._rbw_sum / mc._rbw_weight if mc._rbw_weight > 0 else None
-        mc.files_per_session = mc._files_touched / mc._weight_sum if mc._weight_sum > 0 else None
+        mc.mixed_only = mc.session_count > 0 and mc.solo_session_count == 0
+        if mc.solo_session_count > 0:
+            mc.code_per_dollar = mc._net_loc / mc._solo_cost if mc._solo_cost > 0 else None
+            # 产出效率
+            mc.net_loc_per_session = mc._net_loc / mc.solo_session_count
+            # 行为特征
+            total_tools = sum(mc._tool_calls.values())
+            if total_tools > 0:
+                # Align with tool_usage_metrics (Grep/Glob/Web + MCP search aliases).
+                fake = TokenUsage()
+                fake.tool_calls = dict(mc._tool_calls)
+                tm = tool_usage_metrics(fake)
+                mc.exploration_ratio = tm.get("exploration_ratio")
+                edit_write = (
+                    mc._tool_calls.get("Edit", 0)
+                    + mc._tool_calls.get("MultiEdit", 0)
+                    + mc._tool_calls.get("Write", 0)
+                )
+                edit = mc._tool_calls.get("Edit", 0) + mc._tool_calls.get("MultiEdit", 0)
+                mc.edit_ratio = edit / edit_write if edit_write > 0 else None
+                # Prefer the r/w ratio that includes MCP read/scrape aliases.
+                mc.read_write_ratio = tm.get("read_write_ratio")
+                mc.tool_error_rate = mc._tool_errors / total_tools
+            # 代码质量 (self-rework, consistent with compute()/SessionReport.churn_ratio)
+            mc.churn_ratio = mc._code_reworked / mc._code_added if mc._code_added > 0 else None
+            mc.read_before_write = mc._rbw_sum / mc._rbw_count if mc._rbw_count > 0 else None
+            mc.files_per_session = mc._files_touched / mc.solo_session_count
     for mc in buckets.values():
         mc.cost_share = mc.cost / grand_cost * 100 if grand_cost else 0
 

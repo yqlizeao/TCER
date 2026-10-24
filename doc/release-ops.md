@@ -1,6 +1,7 @@
 # 发版与运维（release-ops）
 
-> 发版必须手写 `RELEASE_NOTES.md` 详细中文说明，不能只丢提交记录（见仓库根 RELEASE_NOTES.md）。
+> 发版必须同步手写仓库根 `RELEASE_NOTES.md` 与 `doc/RELEASE_NOTES.md` 详细中文说明，不能只丢提交记录。
+> **硬规则：每次发版 `RELEASE_NOTES.md` 与 `doc/RELEASE_NOTES.md` 仅保留当前本版本内容，严禁附带或累加历史版本说明**（CI `.github/workflows/build-release.yml` 直接以 `doc/RELEASE_NOTES.md` 全文作为 GitHub Release 正文）。
 
 > 本节自 CLAUDE.md 迁移而来（2026-10 瘦身）：CLAUDE.md 只保留一行硬规则，完整细节、实测数据与历史缘由在此。条目前缀「原 #N」= 瘦身前 CLAUDE.md 的「关键注意事项」编号，可据此追溯。
 
@@ -14,8 +15,8 @@
 
 ## 历史与教训（发版）
 
+- **Release Notes 只留当前版本**：`RELEASE_NOTES.md` 与 `doc/RELEASE_NOTES.md` 每次发版必须覆写为仅含本版本说明，不得保留历史版本段落（否则 GitHub Release 与客户端更新弹窗会把历史版本一并展示）。
 - **配置不再放 `~/.claude/`**：那是 Claude Code 的目录；发布版配置放 exe 同目录（便携），不可写回退 `~/.tcer/`；旧位置首次启动自动迁移。
 - **opt-in 联网只查公开 Release、不发用户数据**，与上传（#3 例外）严格区分；启动检查默认值随运行形态。
 - **自更新调用后必须立即 `SystemExit`**；Windows 用 `updater.bat` 绕过运行中 exe 锁，`mbcs` 编码兼容中文路径。
 - **`launch.bat` 文件为 GBK 编码**以保 cmd 中文注释，编辑时别转成 UTF-8。
-

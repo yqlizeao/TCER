@@ -483,3 +483,399 @@ def test_prefs_persist_via_controller_dict(root, app, tmp_path, monkeypatch):
 def test_plain_inline_strips_markers():
     from tcer.gui import transcript_md as MD
     assert MD.plain_inline("问题 **是** `x` 和 [链接](http://a)") == "问题 是 x 和 链接 (http://a)"
+
+
+def test_md_table_expands_capped_columns_into_remaining_budget():
+    from tcer.gui import transcript_md as MD
+    long_desc = "流中断时的估算占位 usage 被当成真实计费，已排除；接入新的 cost-state 自报成本，实测与价表计价的中位比值为 1.00"
+    rows = [
+        ["来源", "依据", "主要修复"],
+        ["Claude Code", "本机 2.1.307 实测", long_desc],
+    ]
+    widths, _ = MD.layout_table(rows, 88, gap=3)
+    # 窄列保持自然宽，剩余预算优先回补给被 max_col 截断的宽说明列
+    assert widths[0] == MD.display_width("Claude Code")
+    assert widths[1] == MD.display_width("本机 2.1.307 实测")
+    assert widths[2] > 88 * 2 // 5
+    assert sum(widths) + 3 * (len(widths) - 1) == 88
+
+
+def test_atomic_inline_code_and_word_wrapping(root, app, tmp_path, monkeypatch):
+    """行内代码芯片（如 `download`）与英文单词整体折行，不在词中硬生生拆成两截。"""
+    p = _write_session(tmp_path, n_filler=1)
+    win = _right_click_open(app, root, monkeypatch, [_report(p)])
+    assert _ready(root, win)
+    segs = MD.inline_segments(
+        "https://api.granola.ai/v1/get-versions 已于昨天（2026-10-21）全线切入 `7.668.2`（`production`、`beta`、`download` 三位一体对齐）。"
+    )
+    vlines = win._wrap_md_segments(segs, 420, win._bfont)
+    assert len(vlines) >= 2
+    code_tokens = [txt for vline in vlines for txt, flags in vline if "md_code" in flags]
+    assert any("download" in tok for tok in code_tokens)
+    assert not any(tok.strip() in ("downl", "oad") for tok in code_tokens)
+
+
+def test_md_syntax_highlight_and_path_detection():
+    """纯函数校验：围栏代码轻量语法切片保真不丢字，本地路径识别排除版本号与 URL。"""
+    py_ln = 'def calc(x: int = 42) -> str:  # comment'
+    toks = MD.highlight_code_line(py_ln, "python")
+    assert "".join(s for s, _ in toks) == py_ln
+    tags = {s: tg for s, tg in toks if tg}
+    assert tags["def"] == "syn_kw" and tags["calc"] == "syn_fn"
+    assert tags["42"] == "syn_num" and tags["# comment"] == "syn_cmt"
+
+    js_ln = '{"model": "claude-opus-4-8", "tokens": 1200, "cached": true}'
+    jtoks = MD.highlight_code_line(js_ln, "json")
+    assert "".join(s for s, _ in jtoks) == js_ln
+    jtags = {s: tg for s, tg in jtoks if tg}
+    assert jtags['"model"'] == "syn_kw" and jtags['"claude-opus-4-8"'] == "syn_str"
+    assert jtags["1200"] == "syn_num" and jtags["true"] == "syn_num"
+
+    assert MD.highlight_code_line("+added", "diff") == [("+added", "dt_sign_add")]
+    assert MD.highlight_code_line("-removed", "diff") == [("-removed", "dt_sign_del")]
+
+    assert MD.looks_like_path("CLAUDE.md")
+    assert MD.looks_like_path("TCER/gui/transcript_view.py:10-25")
+    assert MD.looks_like_path(r"C:\vg1\trunk\docs\MapAligner.md")
+    assert not MD.looks_like_path("7.668.2")
+    assert not MD.looks_like_path("v0.24.0")
+    assert not MD.looks_like_path("https://api.granola.ai/v2")
+    assert not MD.looks_like_path("--resume")
+    assert MD.split_path_loc("login.py:1-40") == ("login.py", "1-40")
+    assert MD.split_path_loc(r"C:\a\b.py") == (r"C:\a\b.py", None)
+
+
+def test_kinsoku_and_outline_word_wrap(root, app, tmp_path, monkeypatch):
+    """避头尾（Kinsoku）禁则与目录路径整词折行：句号/顿号不孤立在行首，英文名不在词中硬断。"""
+    from tcer.gui import transcript_view as TV
+    p = _write_session(tmp_path, n_filler=1)
+    win = _right_click_open(app, root, monkeypatch, [_report(p)])
+    assert _ready(root, win)
+
+    # 目录 _wrap_lines：路径不在 M|onolith-AI 中间硬劈，句号不落行首
+    ol_lines = TV._wrap_lines(
+        win._outline._font,
+        r"Monolith-AI 分发，只需要C:\vx-tools\Monolith-AI此路径即可，两处由于是同一仓库",
+        210, 2,
+    )
+    assert not ol_lines[-1].startswith("onolith")
+    ol_punc = TV._wrap_lines(
+        win._outline._font,
+        "阅读器界面已完成并验收过，没有新的进展。上一条汇报里的两件事还在等你",
+        212, 2,
+    )
+    assert not ol_punc[-1].startswith("。")
+
+    # 正文 _wrap_md_segments：右标点不落行首，左括号不孤留行尾
+    segs = MD.inline_segments(
+        "只有 Grok 会填的 13 个数据字段（如 `api_calls`、`ITL`、`ttft`）也删了。"
+    )
+    for w in range(180, 380, 25):
+        vlines = win._wrap_md_segments(segs, w, win._bfont)
+        for li, vl in enumerate(vlines):
+            row_txt = "".join(s for s, _ in vl)
+            if li > 0 and row_txt:
+                assert row_txt[0] not in MD.KINSOKU_NO_START, (w, vlines)
+            if li < len(vlines) - 1 and row_txt:
+                assert row_txt[-1] not in MD.KINSOKU_NO_END, (w, vlines)
+
+
+def test_polish_and_ux_upgrades_end_to_end(root, app, tmp_path, monkeypatch):
+    """端到端验收：
+    1) Claude 风格 ⏺ 规整为几何圆点 ●，超长步骤按像素截断且 step_d0 不软折行；
+    2) 单会话自动收起 < 1/1 > 导航框，多会话自动显示；
+    3) 富表格保留单元格代码胶囊、彩色状态符（✓/⚠/✗），且仅表头下有一条分隔线；
+    4) 围栏代码语法着色 + 超 80 行折叠与点击展开；
+    5) 单轮「复制」「复制回复」可用，且 ui_chrome 不污染 Ctrl+F 命中；
+    6) 本地存在路径着色 md_code_path，目录顶栏显示异常轮徽标并支持一键跳错。"""
+    proj_dir = tmp_path / "repo"
+    proj_dir.mkdir()
+    real_file = proj_dir / "CLAUDE.md"
+    real_file.write_text("# Guide\n", encoding="utf-8")
+
+    long_cmd = "git rm -q " + " ".join(f"TCER/core/module_{i}_reader.py" for i in range(25))
+    long_py = "\n".join([f"def fn_{i}(x={i}):  # step {i}\n    return 'ok'" for i in range(55)])
+    reply_md = (
+        "已更新 `CLAUDE.md` 与 [规范文档](https://example.com/spec)：\n\n"
+        "| 步骤 | 结果 |\n"
+        "|---|---|\n"
+        "| 检出 `CLAUDE.md` | ✅ 工作区干净 |\n"
+        "| 编译 `monolith_proxy.cpp` | ⚠️ 需重新构建 |\n"
+        "| 旧模块检查 | ❌ 已废弃 |\n\n"
+        f"```python\n{long_py}\n```\n"
+    )
+    sess_lines = [
+        {"type": "ai-title", "aiTitle": "全量打磨验收", "sessionId": "s-ux"},
+        {"type": "user", "uuid": "u0", "timestamp": _ts(0), "sessionId": "s-ux",
+         "cwd": str(proj_dir), "message": {"role": "user", "content": "请执行全量升级并输出验证表"}},
+        {"type": "assistant", "uuid": "a1", "timestamp": _ts(2), "sessionId": "s-ux",
+         "cwd": str(proj_dir),
+         "message": {"role": "assistant", "id": "m1", "model": "claude-opus-4-8",
+                     "content": [_tu("c1", "Bash", {"command": long_cmd, "description": "清理历史模块并核查残留"})],
+                     "usage": {"input_tokens": 50, "output_tokens": 20}}},
+        _cr("c1", "Exit code 128\nfatal: pathspec did not match", 4, is_error=True),
+        {"type": "assistant", "uuid": "a2", "timestamp": _ts(8), "sessionId": "s-ux",
+         "cwd": str(proj_dir),
+         "message": {"role": "assistant", "id": "m2", "model": "claude-opus-4-8",
+                     "content": [{"type": "text", "text": reply_md}],
+                     "usage": {"input_tokens": 80, "output_tokens": 120}}},
+        # 第 2 轮无错（验证目录异常徽标精准跳回第 1 轮）
+        {"type": "user", "uuid": "u1", "timestamp": _ts(20), "sessionId": "s-ux",
+         "cwd": str(proj_dir), "message": {"role": "user", "content": "第二轮确认"}},
+        {"type": "assistant", "uuid": "a3", "timestamp": _ts(22), "sessionId": "s-ux",
+         "cwd": str(proj_dir),
+         "message": {"role": "assistant", "id": "m3", "model": "claude-opus-4-8",
+                     "content": [{"type": "text", "text": "全部确认完毕。"}],
+                     "usage": {"input_tokens": 20, "output_tokens": 10}}},
+    ]
+    sp = tmp_path / "s-ux.jsonl"
+    sp.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in sess_lines) + "\n", encoding="utf-8")
+    r_single = _report(sp, "s-ux", "全量打磨验收")
+
+    win = _right_click_open(app, root, monkeypatch, [r_single])
+    assert _ready(root, win)
+
+    # 1) 单会话隐藏 < 1/1 > 导航框
+    assert not win._nav_box.winfo_manager()
+
+    # 2) 步骤行 ⏺ -> ●，且 step_d0 强制单行不断轨
+    doc = _doc(win)
+    assert "⏺" not in doc and "●" in doc
+    assert str(win._txt.tag_cget("step_d0", "wrap")) == "none"
+
+    # 3) 富表格：保留 md_tbl_code 芯片，状态符规整为 ✓ / ⚠ / ✗，且 md_trule 只有 1 条（表头下）
+    assert win._txt.tag_ranges("md_tbl_code")
+    assert "✓" in doc and "⚠" in doc and "✗" in doc
+    assert len(win._txt.tag_ranges("md_trule")) == 2   # 单个连续区间 = (start, end) 2 个端点
+
+    # 4) 本地真实存在的 CLAUDE.md 获得 md_code_path 高亮
+    assert win._txt.tag_ranges("md_code_path")
+
+    # 5) 围栏代码：语法高亮生效 + 超 80 行折叠并可点击展开/收起
+    assert win._txt.tag_ranges("syn_kw") and win._txt.tag_ranges("syn_fn")
+    assert "fn_54" not in doc and "展开全部代码" in doc
+    win._toggle_text("cb:t1:2", 0)
+    root.update()
+    assert "fn_54" in _doc(win) and "收起代码" in _doc(win)
+    win._toggle_text("cb:t1:2", 0)
+    root.update()
+    assert "fn_54" not in _doc(win)
+
+    # 6) 单轮「复制提问」与「复制回复」：点击触发 act_ok 绿标反馈，且搜索「复制」不会把 UI 按钮算进 find_hit
+    q_act = next(n for n in win._txt.mark_names()
+                 if n.startswith("a:") and "tn:0" in win._txt.tag_names(n)
+                 and "q_act" in win._txt.tag_names(n)
+                 and win._txt.get(n, f"{n}+2c") == "复制")
+    win._acts[q_act]()
+    assert root.clipboard_get() == "请执行全量升级并输出验证表"
+    assert win._txt.tag_ranges("act_ok")
+    ai_act = next(n for n in win._txt.mark_names()
+                  if n.startswith("a:") and "tn:0" in win._txt.tag_names(n)
+                  and "ai_head" in win._txt.tag_names(n)
+                  and win._txt.get(n, f"{n}+4c") == "复制回复")
+    win._acts[ai_act]()
+    assert root.clipboard_get() == reply_md
+
+    # 工具栏精简：不重复排布展开/收起/导出快捷图标，保留显示选项与查找
+    assert not win._expand_btn.winfo_manager()
+    assert not win._collapse_btn.winfo_manager()
+    assert not win._export_btn.winfo_manager()
+    assert win._opt_btn.winfo_manager() == "pack" and win._find_btn.winfo_manager() == "pack"
+
+    win._apply_query("复制")
+    root.update()
+    assert not win._txt.tag_ranges("find_hit")        # 原文不含「复制」，UI 按钮被 ui_chrome 排除
+    win._apply_query("")
+
+    # 7) 对话目录整卡零死角点击与选中锁定 + 异常徽标循环跳错
+    from types import SimpleNamespace
+    assert "1 轮异常" in win._outline._err_lbl.cget("text")
+    y0_1, y1_1 = win._outline._y[1]
+    win._outline._on_click(SimpleNamespace(y=int((y0_1 + y1_1) // 2)))
+    root.update()
+    assert win._outline._cur == 1
+    y0_0, _ = win._outline._y[0]
+    win._outline._on_click(SimpleNamespace(y=int(y0_0 + 4)))
+    root.update()
+    assert win._outline._cur == 0
+    win._goto_turn(1, flash=False)
+    root.update()
+    win._outline._step_error()
+    root.update()
+    assert win._outline._cur == 0
+    assert "(1/1)" in win._outline._err_lbl.cget("text")
+    assert win._txt.tag_ranges("err_flash") and not win._txt.tag_ranges("flash")
+    assert "异常轮次 1/1" in win._status.cget("text")
+
+    # 8) 文本选区 sel_vis 与纯净复制：绝不选中换行符 \n、间距空行与 ui_chrome（「复制回复」等）
+    win._txt.tag_add("sel", "1.0", "25.0")
+    win._on_selection_changed()
+    vis_ranges = win._txt.tag_ranges("sel_vis")
+    assert vis_ranges
+    for vi in range(0, len(vis_ranges), 2):
+        seg = win._txt.get(vis_ranges[vi], vis_ranges[vi + 1])
+        assert "\n" not in seg
+        assert "复制回复" not in seg
+    win._copy_selection()
+    copied = root.clipboard_get()
+    assert "已更新 CLAUDE.md" in copied and "复制回复" not in copied
+    win._txt.tag_remove("sel", "1.0", "end")
+    win._on_selection_changed()
+
+    # 8) 切到多会话序列时，< 1/2 > 导航框自动恢复显示
+    p2 = _write_session(tmp_path / "other", "sess-2", n_filler=1)
+    r2 = _report(p2, "sess-2", "第二个")
+    _right_click_open(app, root, monkeypatch, [r_single, r2], which=0)
+    assert _ready(root, win)
+    assert win._nav_box.winfo_manager() == "pack"
+
+
+def test_six_product_enhancements_end_to_end(root, app, tmp_path, monkeypatch):
+    """端到端验收六项深度增强：
+    1) 单轮遥测胶囊（模型 · Token · 成本 · +增 −删）及点击查看输入/输出/缓存明细；
+    2) 对话目录卡片右侧 +增 −删 徽标与热点 ◆ / 上下文切换 ◈ 标记；
+    3) 「改动」视图顶部交互式「涉及文件汇总」卡片（统计返工次数、点击跳到并展开首个 Diff 步骤）；
+    4) 超长思考与超长工具参数按需懒加载展开全文 / 收起；
+    5) Diff 块「复制新代码」「复制 Diff」及选区剔除行号与 +/- 符号（仅复制纯净代码）；
+    6) 滚动条左侧多色语义概览标尺（_MarkerRail：绿/紫/青/蓝/黄/红，普通单步工具报错不标红）。"""
+    from types import SimpleNamespace
+    from tcer.core import transcript as T
+
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
+    long_think = "\n".join(f"Thinking line {i}: evaluating invariant #{i}" for i in range(95))
+    big_payload = "x" * 2600
+
+    sess_lines = [
+        {"type": "ai-title", "aiTitle": "六项增强验收", "sessionId": "s-six"},
+        # 第 1 轮：含超长思考、超长 MCP 参数、同一文件 3 次 Edit（返工）+ 普通单步工具报错（不应触发标尺 abort 红标）
+        {"type": "user", "uuid": "u0", "timestamp": _ts(0), "sessionId": "s-six",
+         "cwd": str(proj_dir), "message": {"role": "user", "content": "重构 auth.py 并校验"}},
+        {"type": "assistant", "uuid": "a1", "timestamp": _ts(2), "sessionId": "s-six",
+         "cwd": str(proj_dir),
+         "message": {"role": "assistant", "id": "m1", "model": "claude-opus-4-8",
+                     "content": [
+                         {"type": "thinking", "thinking": long_think},
+                         _tu("c_mcp", "mcp__probe__query", {"payload": big_payload}),
+                         _tu("c_e1", "Edit", {"file_path": str(proj_dir / "auth.py"),
+                                              "old_string": "a = 1\n", "new_string": "a = 2\nb = 3\n"}),
+                         _tu("c_e2", "Edit", {"file_path": str(proj_dir / "auth.py"),
+                                              "old_string": "b = 3\n", "new_string": "b = 4\n"}),
+                         _tu("c_e3", "Edit", {"file_path": str(proj_dir / "auth.py"),
+                                              "old_string": "b = 4\n", "new_string": "b = 5\nc = 6\n"}),
+                         _tu("c_err", "Bash", {"command": "pytest -q"}),
+                     ],
+                     "usage": {"input_tokens": 120_000, "output_tokens": 18_000,
+                               "cache_read_input_tokens": 300_000}}},
+        _cr("c_mcp", "ok", 3),
+        _cr("c_e1", "updated", 4),
+        _cr("c_e2", "updated", 5),
+        _cr("c_e3", "updated", 6),
+        _cr("c_err", "1 failed", 7, is_error=True),
+        {"type": "assistant", "uuid": "a2", "timestamp": _ts(9), "sessionId": "s-six",
+         "cwd": str(proj_dir),
+         "message": {"role": "assistant", "id": "m2", "model": "claude-opus-4-8",
+                     "content": [{"type": "text", "text": "已完成三次迭代重构。"}],
+                     "usage": {"input_tokens": 10_000, "output_tokens": 2_000}}},
+        # 第 2 轮：切换模型为 claude-sonnet-4-8（触发上下文演进 context 标记），轻量问答
+        {"type": "user", "uuid": "u1", "timestamp": _ts(20), "sessionId": "s-six",
+         "cwd": str(proj_dir), "message": {"role": "user", "content": "确认状态"}},
+        {"type": "assistant", "uuid": "a3", "timestamp": _ts(22), "sessionId": "s-six",
+         "cwd": str(proj_dir),
+         "message": {"role": "assistant", "id": "m3", "model": "claude-sonnet-4-8",
+                     "content": [{"type": "text", "text": "状态正常。"}],
+                     "usage": {"input_tokens": 1_500, "output_tokens": 300}}},
+    ]
+    sp = tmp_path / "s-six.jsonl"
+    sp.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in sess_lines) + "\n", encoding="utf-8")
+    win = _right_click_open(app, root, monkeypatch, [_report(sp, "s-six", "六项增强验收")])
+    assert _ready(root, win)
+
+    # 1) 单轮遥测数据与胶囊展示：第 1 轮为热点轮次（▲），带 +5 −3 代码增删徽标，点击弹出输入/输出/缓存明细
+    tels = win._telemetries
+    assert len(tels) == 2
+    assert tels[0].is_hotspot and tels[0].has_code_change
+    assert tels[0].added == 5 and tels[0].removed == 3
+    assert tels[1].has_context_shift and not tels[1].is_hotspot
+    doc = _doc(win)
+    assert "▲" in doc and "tok" in doc and "+5" in doc and "−3" in doc
+    assert win._txt.tag_ranges("ai_loc_add") and win._txt.tag_ranges("ai_loc_del")
+    win._show_turn_telemetry(tels[0])
+    assert "输入" in win._status.cget("text") and "缓存读" in win._status.cget("text")
+
+    # 2) 对话目录卡片：右侧绘制 +5 / −3 增删徽标与 ◆ 热点 / ◈ 上下文切换标记
+    ol_texts = [
+        win._outline.canvas.itemcget(it, "text")
+        for it in win._outline.canvas.find_all()
+        if win._outline.canvas.type(it) == "text"
+    ]
+    assert "+5" in ol_texts and "−3" in ol_texts
+    assert "◆" in ol_texts and "◈" in ol_texts
+
+    # 3) 多色语义概览标尺（_MarkerRail）：含 change(绿)、hotspot(紫)、context(青)，且第 1 轮虽有单步工具报错但不标 abort(红)
+    ticks_by_turn = {turn_idx: tags for _f0, _f1, turn_idx, tags, _tip in win._marker_rail._ticks}
+    assert "change" in ticks_by_turn[0] and "hotspot" in ticks_by_turn[0]
+    assert "abort" not in ticks_by_turn[0]
+    assert "context" in ticks_by_turn[1]
+    # 查找命中时动态叠加 search(金黄) 刻度
+    win._apply_query("状态正常")
+    root.update()
+    ticks_search = {turn_idx: tags for _f0, _f1, turn_idx, tags, _tip in win._marker_rail._ticks}
+    assert "search" in ticks_search[1]
+    win._apply_query("")
+    root.update()
+    # 点击标尺跳转到对应轮次
+    win._marker_rail._on_click(SimpleNamespace(y=max(1, win._marker_rail.canvas.winfo_height() - 2)))
+    root.update()
+
+    # 4) 超长思考与超长工具参数按需展开全文
+    win._toggle_turn(win._turns[0].key, False, 0)
+    root.update()
+    think_step = next(s for s in win._turns[0].steps if s.kind == "thinking")
+    win._toggle_step(think_step.id, False, 0)
+    root.update()
+    assert "Thinking line 85" not in _doc(win) and "展开完整思考" in _doc(win)
+    win._show_all_thinking(think_step, think_step.block, 0)
+    assert _pump(root, lambda: "Thinking line 85" in _doc(win) and "收起思考" in _doc(win))
+
+    mcp_step = next(s for s in win._turns[0].steps if s.kind == "tool" and s.call.id == "c_mcp")
+    win._toggle_step(mcp_step.id, False, 0)
+    root.update()
+    assert "展开完整参数" in _doc(win)
+    win._show_all_input(mcp_step.call, 0)
+    assert _pump(root, lambda: ("x" * 2400) in _doc(win) and "收起参数" in _doc(win))
+
+    # 5) Diff 块「复制新代码」「复制 Diff」及纯净代码选区（自动剥离行号与 +/-）
+    first_edit = next(s for s in win._turns[0].steps if s.kind == "tool" and s.call.id == "c_e1")
+    win._toggle_step(first_edit.id, False, 0)
+    root.update()
+    assert "复制新代码" in _doc(win) and "复制 Diff" in _doc(win)
+    copy_new_act = next(
+        n for n in win._txt.mark_names()
+        if n.startswith("a:") and "dt_file" in win._txt.tag_names(n)
+        and win._txt.get(n, f"{n}+5c") == "复制新代码"
+    )
+    win._acts[copy_new_act]()
+    assert root.clipboard_get() == "a = 2\nb = 3"
+    # 选中 Diff 新增行时，sel_vis 与 _clean_selected_text 自动剥离行号与 '+' 号
+    add_rng = win._txt.tag_ranges("dt_add")
+    assert add_rng
+    win._txt.tag_remove("sel", "1.0", "end")
+    win._txt.tag_add("sel", str(add_rng[0]), str(add_rng[1]))
+    win._on_selection_changed()
+    cleaned_diff = win._clean_selected_text()
+    assert "a = 2" in cleaned_diff and "+" not in cleaned_diff
+    win._txt.tag_remove("sel", "1.0", "end")
+    win._on_selection_changed()
+
+    # 6) 「改动」视图顶部「涉及文件汇总」卡片：显示 auth.py、+5 −3、返工 3 次，点击跳到并展开首个改动步骤
+    win._set_view(T.VIEW_CHANGES)
+    assert _pump(root, lambda: win._render_done)
+    chg_doc = _doc(win)
+    assert "涉及文件汇总 · 1 个文件" in chg_doc
+    assert "auth.py" in chg_doc and "返工 3 次" in chg_doc
+    assert win._txt.tag_ranges("chg_head") and win._txt.tag_ranges("chg_row")
+    win._step_ov.clear()
+    win._jump_to_change_step(0, first_edit.id)
+    root.update()
+    assert win._step_ov.get(first_edit.id) is True

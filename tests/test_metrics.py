@@ -470,6 +470,64 @@ def test_compare_models_aggregates_per_model_fields():
     assert comps["model-y"].net_loc_per_session == pytest_approx(90)
 
 
+def test_compare_models_mixed_session_does_not_fabricate_loc_or_behavior():
+    """Mixed-model session: per-model tokens/cost/CHR are exact, but session-level
+    LOC & behavior metrics must not be cloned/pro-rated onto both models."""
+    u = _u(i=900_000, o=100_000)
+    u.tool_calls = {"Read": 4, "Edit": 3}
+    u.tool_errors = 0
+    mu_a = u.bucket("gemini-4-argon")
+    mu_a.input_tokens, mu_a.output_tokens = 870_000, 97_000
+    mu_b = u.bucket("gemini-3.8-flash")
+    mu_b.input_tokens, mu_b.output_tokens = 30_000, 3_000
+    u.models.update({"gemini-4-argon", "gemini-3.8-flash"})
+    r = metrics.compute(META, u, net_loc=81, code_added=100, code_deleted=19, code_reworked=8)
+
+    comps = {mc.model_id: mc for mc in metrics.compare_models([r])}
+    assert set(comps) == {"gemini-4-argon", "gemini-3.8-flash"}
+    for mc in comps.values():
+        assert mc.session_count == 1
+        assert mc.solo_session_count == 0
+        assert mc.mixed_only is True
+        assert mc.cost > 0
+        assert mc.tokens_per_dollar > 0
+        assert mc.code_per_dollar is None
+        assert mc.net_loc_per_session is None
+        assert mc.churn_ratio is None
+        assert mc.read_write_ratio is None
+        assert mc.files_per_session is None
+
+
+def test_compare_models_mixed_plus_solo_sessions():
+    """When Model A has both solo and mixed sessions while Model B only appears in
+    the mixed session, Model A's LOC/behavior comes from its solo session (with
+    _solo_cost as the code_per_dollar denominator), and Model B is mixed_only."""
+    r_solo = _single_model_report("gemini-4-argon", added=200, deleted=20, reworked=20, net_loc=180)
+    u_mix = _u(i=500_000, o=50_000)
+    mu_a = u_mix.bucket("gemini-4-argon")
+    mu_a.input_tokens, mu_a.output_tokens = 400_000, 40_000
+    mu_b = u_mix.bucket("gemini-3.8-flash")
+    mu_b.input_tokens, mu_b.output_tokens = 100_000, 10_000
+    u_mix.models.update({"gemini-4-argon", "gemini-3.8-flash"})
+    r_mix = metrics.compute(META, u_mix, net_loc=999, code_added=999, code_deleted=0, code_reworked=500)
+
+    comps = {mc.model_id: mc for mc in metrics.compare_models([r_solo, r_mix])}
+    mc_a = comps["gemini-4-argon"]
+    mc_b = comps["gemini-3.8-flash"]
+    assert mc_a.session_count == 2
+    assert mc_a.solo_session_count == 1
+    assert mc_a.mixed_only is False
+    assert mc_a.net_loc_per_session == pytest_approx(180)
+    assert mc_a.churn_ratio == pytest_approx(0.10)
+    assert mc_a.code_per_dollar == pytest_approx(180 / r_solo.cost)
+
+    assert mc_b.session_count == 1
+    assert mc_b.solo_session_count == 0
+    assert mc_b.mixed_only is True
+    assert mc_b.net_loc_per_session is None
+    assert mc_b.code_per_dollar is None
+
+
 # --------------------------------------------------------------------------- #
 # New quality metrics: tool errors, thinking, files_touched, file quality
 # --------------------------------------------------------------------------- #

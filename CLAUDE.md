@@ -103,7 +103,7 @@ TCER/
 18. **逐回合时间线**：`TokenUsage.turn_stats`，merge 时 rebase；`output_tps`（自报逐响应 duration）仅 `{omp,pi}`；`est_output_tps`（日志时间戳估算、含首字等待、门槛 输出≥200/耗时≥1s、Σ/Σ）支持 `{claude,codex,opencode,omp,pi}`，字段 `est_gen_output_tokens/est_gen_duration_ms`；首字延迟显示逐回合中位数。[data-format.md#turn-stats](doc/data-format.md#turn-stats)。
 19. **F1 修正**：`toolUseResult.originalFile` 回溯修正首写行数，`scan_session` 与 `session_loc_full` 必须逐字节一致。[data-format.md#f1](doc/data-format.md#f1)。
 20. **Codex 工具错误**：exit code 权威；无码只认显式失败前缀，**禁止**全文 `error` 子串匹配。[data-format.md#codex-errors](doc/data-format.md#codex-errors)。
-23. **模型对比分摊**：`compare_models` 按 token 占比加权（`_weight_sum`）。[metrics.md#compare-models](doc/metrics.md#compare-models)。
+23. **模型对比归因**：`compare_models` 的 Token/成本/缓存按 `per_model` 精确统计；而代码效率与代码质量/行为仅统计「单模型独立会话」（混合会话不按 Token 占比分摊——否则单会话下 $w/w=1$ 会让混用模型克隆完全相同的质量/行为数值，且将代码效率伪装为 Token 效率的常数倍；仅混用时 `mixed_only=True` 显示「不适用」）。[metrics.md#compare-models](doc/metrics.md#compare-models)。
 26. **omp 格式**：`~/.omp/agent/sessions`；usage 每响应一个直接累加；`snapshotsPruned` 的 edit 不能跳过（用 diff 回退）；子代理在主文件同名子目录；辅助用量（`model_usage` 等）暂不并入。[data-format.md#omp](doc/data-format.md#omp)。
 27. **Codex 会话发现**：resume 复用同一线程 id 写累积快照 → 按**线程 id** 折叠只留最大文件，**只去重不求和**；项目列表头读（不进 file_cache）；`.jsonl.zst` 需 Python 3.14+。[data-format.md#codex-discovery](doc/data-format.md#codex-discovery)。
 28. **`tool_variants`**：Skill/Agent 身份补录，仅 Claude 源；MCP 键自带服务器名。[data-format.md#tool-variants](doc/data-format.md#tool-variants)。
@@ -137,7 +137,7 @@ TCER/
 
 ### opt-in 联网、LLM 与术语库（解读层，不进指标）
 
-30. **更新与配置存储**：配置放 `app_dirs.prefs_dir()`（发布版 exe 同目录，回退 `~/.tcer/`，**不用 `~/.claude/`**）；检查更新只查公开 Release、不发用户数据；自更新后须立即 `SystemExit`。[release-ops.md#update-config](doc/release-ops.md#update-config)。
+30. **发版、更新与配置存储**：每次发版 `RELEASE_NOTES.md` 与 `doc/RELEASE_NOTES.md` **仅写当前本版本内容**（严禁附带历史版本说明）；配置放 `app_dirs.prefs_dir()`（发布版 exe 同目录，回退 `~/.tcer/`，**不用 `~/.claude/`**）；检查更新只查公开 Release、不发用户数据；自更新后须立即 `SystemExit`。[release-ops.md#update-config](doc/release-ops.md#update-config)。
 38. **LLM 解读层**：①未配置零联网；②输出只进解读层，**永不进**评分/CSV；③纯 urllib，不发采样参数；**每次数据出境必须弹知情确认、无「记住选择」**；会话右键走有界线程池 + UI 队列回填 + (session_id,kind) 去重；`audit_warnings` 机械审计反谄媚；语义审计只审自由生成叙事。[llm-layer.md#llm-interpret](doc/llm-layer.md#llm-interpret)。
 39. **相空间动力学 / Jev 双引擎**：`_DYNAMICS_SYSTEM` 禁 LaTeX，正文平实化（禁物理黑话）；Jev 题面稳定（SHA-256 缓存）、分类题必带 none/other 逃生口、证据来自确定性遥测；相图交互见 [gui-notes.md#phase-portrait](doc/gui-notes.md#phase-portrait)。[llm-layer.md#dynamics](doc/llm-layer.md#dynamics)。
 40. **团队术语库**：`termbase.find_terms_in_text` 是全系统唯一匹配引擎（拉丁词用严格词边界环视，**禁子串匹配**）；歧义阈值 `AMBIGUITY_FLAG_THRESHOLD=0.5`；术语数据**绝不**进指标/CSV；测试全离线 mock；新 GUI 功能验收必须构建完整 `TcerGui` 走真实入口，组件级绿 ≠ 可用。[llm-layer.md#termbase](doc/llm-layer.md#termbase) · [gui-notes.md#termbase-gui](doc/gui-notes.md#termbase-gui) · [教训](doc/llm-layer.md#delivery-lessons)。

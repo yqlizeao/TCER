@@ -228,21 +228,23 @@ def _models_section(reports: list[SessionReport]) -> str:
         body.append(f'<tr class="sub"><td colspan="{len(comps) + 1}">{_esc(g.name)}</td></tr>')
         for m in g.metrics:
             raws = [metric_defs.model_raw(mc, m.key) for mc in comps]
-            best = None
+            disps = [metric_defs.model_display(mc, m.key) for mc in comps]
+            best_disp = None
             if m.sentiment and len(comps) > 1:
-                vals = [v for v in raws if v is not None]
-                if vals:
-                    best = max(vals) if m.sentiment == "up" else min(vals)
+                valid = [(v, d) for v, d in zip(raws, disps) if v is not None]
+                if len({d for _, d in valid}) >= 2:
+                    best = max(v for v, _ in valid) if m.sentiment == "up" else min(v for v, _ in valid)
+                    best_disp = next(d for v, d in valid if v == best)
             tip = metric_defs.model_tip(m.key)
             tip_attr = f' title="{_esc(tip)}"' if tip else ""
             cells = []
-            for mc, raw in zip(comps, raws):
-                cls = "v best" if (best is not None and raw == best) else "v"
-                cells.append(f'<td class="{cls}">{_esc(metric_defs.model_display(mc, m.key))}</td>')
+            for disp in disps:
+                cls = "v best" if (best_disp is not None and disp == best_disp) else "v"
+                cells.append(f'<td class="{cls}">{_esc(disp)}</td>')
             body.append(f"<tr><td{tip_attr}>{_esc(m.name)}</td>{''.join(cells)}</tr>")
     note = ('<p class="note">金色 = 该行最优值（按指标好坏方向）。'
-            '产出/行为/质量指标按各模型在会话内的 Token 占比加权分摊：'
-            '单模型会话全额归因，混合会话按占比拆分到每个模型。</p>')
+            'Token/成本/缓存按各模型真实用量统计；代码效率与代码质量/行为仅统计单模型独立会话，'
+            '多模型混用会话不按比例编造（仅混用时显示「不适用」）。</p>')
     return f'<div class="scroll"><table>{head}{"".join(body)}</table></div>{note}'
 
 

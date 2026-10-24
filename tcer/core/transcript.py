@@ -1506,3 +1506,227 @@ def format_time_range(started: int | None, ended: int | None) -> str:
         return s
     e = b.strftime("%H:%M") if a.date() == b.date() else format_message_time(ended)
     return f"{s} → {e} ({format_duration(max(0, ended - started))})"
+
+
+# --------------------------------------------------------------------------- #
+# 单轮遥测与改动文件汇总（纯函数，仅作阅读器展示，不进指标 / CSV）
+# --------------------------------------------------------------------------- #
+@dataclass
+class TurnTelemetry:
+    turn_index: int
+    model: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_tokens: int = 0
+    cost_usd: float | None = None
+    cost_share: float = 0.0
+    token_share: float = 0.0
+    added: int = 0
+    removed: int = 0
+    files_changed: int = 0
+    atomic_steps: int = 0
+    has_code_change: bool = False
+    is_hotspot: bool = False
+    has_context_shift: bool = False
+    is_deep_turn: bool = False
+    is_severe_abort: bool = False
+
+
+@dataclass
+class FileChangeEntry:
+    path: str
+    display_path: str
+    added: int = 0
+    removed: int = 0
+    edit_count: int = 0
+    ops: set[str] = field(default_factory=set)
+    first_turn: int = 0
+    first_step_id: str = ""
+    turn_indices: list[int] = field(default_factory=list)
+
+
+def _walk_atomic_steps(steps: Iterable):
+    for st in steps:
+        if st.kind == "merged":
+            yield from _walk_atomic_steps(st.children)
+        else:
+            yield st
+
+
+def compute_turn_telemetries(tr: Transcript) -> list[TurnTelemetry]:
+    """逐轮汇总 Token / 成本 / 代码增删与多色热点语义标签（拿不准的字段留空，绝不编造）。"""
+    from tcer.core import pricing
+
+    msgs = tr.messages
+    n_msgs = len(msgs)
+    out: list[TurnTelemetry] = []
+    prev_model: str | None = None
+
+    for turn in tr.turns:
+        inp = out_t = cr = cw = 0
+        cost_sum = 0.0
+        has_cost = False
+        turn_model = turn.final.model if (turn.final and turn.final.model) else None
+
+        lo = max(0, turn.first_message_index)
+        hi = min(n_msgs - 1, turn.last_message_index)
+        for mi in range(lo, hi + 1):
+            m = msgs[mi]
+            if m.injected or m.role != "assistant" or m.meta is None:
+                continue
+            mm = m.meta
+            if mm.model:
+                turn_model = mm.model
+            mi_i = mm.input_tokens or 0
+            mi_o = mm.output_tokens or 0
+            mi_cr = mm.cache_read_tokens or 0
+            mi_cw = mm.cache_write_tokens or 0
+            inp += mi_i
+            out_t += mi_o
+            cr += mi_cr
+            cw += mi_cw
+            if mm.cost_usd is not None and mm.cost_usd > 0:
+                cost_sum += float(mm.cost_usd)
+                has_cost = True
+            elif mi_i + mi_o + mi_cr + mi_cw > 0:
+                rates = pricing.resolve(mm.model or turn_model or tr.model or "")
+                cost_sum += (
+                    mi_i * rates["input"]
+                    + mi_cw * rates["cache_write"]
+                    + mi_cr * rates["cache_read"]
+                    + mi_o * rates["output"]
+                ) / 1_000_000
+                has_cost = True
+
+        total_tok = inp + out_t + cr + cw
+        if total_tok == 0 and turn.step_costs:
+            sc_tok = sum(sc.tokens or 0 for sc in turn.step_costs)
+            sc_cost = sum(float(sc.cost_usd) for sc in turn.step_costs
+                          if sc.cost_usd is not None and sc.cost_usd > 0)
+            total_tok = sc_tok
+            if not has_cost and sc_cost > 0:
+                cost_sum = sc_cost
+                has_cost = True
+
+        added = removed = 0
+        files_set: set[str] = set()
+        atomic_n = 0
+        ctx_shift = False
+        severe_abort = bool(turn.aborted)
+
+        for ev in (*turn.leading_events, *turn.trailing_events):
+            ek = ev.block.kind
+            if ek in (EV_COMPACTION, EV_MODEL_CHANGE, EV_SUB_AGENT):
+                ctx_shift = True
+            elif ek in (EV_ABORTED, EV_ERROR):
+                severe_abort = True
+
+        for st in _walk_atomic_steps(turn.steps):
+            atomic_n += 1
+            if st.kind == "event":
+                ek = st.block.kind
+                if ek in (EV_COMPACTION, EV_MODEL_CHANGE, EV_SUB_AGENT):
+                    ctx_shift = True
+                elif ek in (EV_ABORTED, EV_ERROR):
+                    severe_abort = True
+            elif st.kind == "tool" and st.call is not None:
+                if st.call.kind == KIND_AGENT:
+                    ctx_shift = True
+                if not is_failure_step(st) and st.call.diff:
+                    d = st.call.diff
+                    added += int(d.get("added") or 0)
+                    removed += int(d.get("removed") or 0)
+                    for f in d.get("files") or ():
+                        if isinstance(f, dict) and f.get("path"):
+                            files_set.add(os.path.normcase(str(f["path"]).replace("\\", "/")))
+
+        if prev_model and turn_model and turn_model != prev_model:
+            ctx_shift = True
+        if turn_model:
+            prev_model = turn_model
+        has_chg = (added + removed > 0) or bool(files_set)
+        out.append(TurnTelemetry(
+            turn_index=turn.index,
+            model=turn_model,
+            input_tokens=inp,
+            output_tokens=out_t,
+            cache_read_tokens=cr,
+            cache_write_tokens=cw,
+            total_tokens=total_tok,
+            cost_usd=cost_sum if has_cost else None,
+            added=added,
+            removed=removed,
+            files_changed=len(files_set),
+            atomic_steps=atomic_n,
+            has_code_change=has_chg,
+            has_context_shift=ctx_shift,
+            is_deep_turn=atomic_n >= 15,
+            is_severe_abort=severe_abort,
+        ))
+
+    active_turns = sum(1 for tl in out if tl.total_tokens > 0 or (tl.cost_usd or 0.0) > 0)
+    sum_cost = sum(tl.cost_usd or 0.0 for tl in out)
+    sum_tok = sum(tl.total_tokens for tl in out)
+    for tl in out:
+        if sum_cost > 0 and tl.cost_usd:
+            tl.cost_share = tl.cost_usd / sum_cost
+        if sum_tok > 0 and tl.total_tokens:
+            tl.token_share = tl.total_tokens / sum_tok
+        if active_turns >= 2:
+            if sum_cost >= 0.02:
+                tl.is_hotspot = tl.cost_share >= 0.25 and (tl.cost_usd or 0.0) >= 0.01
+            elif sum_tok >= 10_000:
+                tl.is_hotspot = tl.token_share >= 0.25 and tl.total_tokens >= 4_000
+    return out
+
+
+def summarize_file_changes(tr: Transcript) -> list[FileChangeEntry]:
+    """汇总会话内所有成功（非失败）改动步骤触及的文件、增删行数与编辑频次。"""
+    entries: OrderedDict[str, FileChangeEntry] = OrderedDict()
+    for turn in tr.turns:
+        for st in _walk_atomic_steps(turn.steps):
+            if st.kind != "tool" or st.call is None or is_failure_step(st) or not is_change_step(st):
+                continue
+            call = st.call
+            diff = call.diff or {}
+            raw_files = diff.get("files") or []
+            if not raw_files and call.title:
+                raw_files = [{
+                    "path": call.title,
+                    "op": "add" if call.kind == KIND_WRITE else "update",
+                    "added": int(diff.get("added") or 0),
+                    "removed": int(diff.get("removed") or 0),
+                }]
+            for f in raw_files:
+                if not isinstance(f, dict):
+                    continue
+                raw_p = str(f.get("path") or "").strip()
+                if not raw_p:
+                    continue
+                norm_k = os.path.normcase(raw_p.replace("\\", "/"))
+                ent = entries.get(norm_k)
+                if ent is None:
+                    ent = FileChangeEntry(
+                        path=raw_p,
+                        display_path=ts_.shorten_path(raw_p, tr.cwd),
+                        first_turn=turn.index,
+                        first_step_id=st.id,
+                    )
+                    entries[norm_k] = ent
+                ent.added += int(f.get("added") or 0)
+                ent.removed += int(f.get("removed") or 0)
+                ent.edit_count += 1
+                op = str(f.get("op") or "update")
+                ent.ops.add(op)
+                if not ent.turn_indices or ent.turn_indices[-1] != turn.index:
+                    ent.turn_indices.append(turn.index)
+    return list(entries.values())
+
+
+def extract_diff_new_code(lines: list[DiffLine]) -> str:
+    """从解析后的 DiffLine 序列中提取改动后的新代码（保留 add 与 context 行，剔除 del / 行号）。"""
+    if not any(ln.type == "add" for ln in lines):
+        return ""
+    return "\n".join(ln.text for ln in lines if ln.type in ("add", "context"))
