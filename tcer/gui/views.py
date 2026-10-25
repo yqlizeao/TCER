@@ -712,6 +712,12 @@ class StatusBar:
                                     fg=theme.FG, font=theme.FONT_STAT)
         self._status_lbl.pack(side="left")
 
+        # 选中上下文（常驻）：「项目 X」／「项目 X › 会话 10-25 16:46」——
+        # 会话标识用开始时间短格式（标题太长不上状态栏，见卡片）。
+        self._ctx_lbl = tk.Label(left_box, text="", bg=theme.STATUS_BG,
+                                 fg=theme.FG, font=theme.FONT_STAT)
+        self._ctx_lbl.pack(side="left", padx=(16, 0))
+
         # 右侧：状态栏纯图标快捷入口群（从右向左有序挂载）
         right_box = tk.Frame(inner, bg=theme.STATUS_BG)
         right_box.pack(side="right", fill="y")
@@ -767,6 +773,15 @@ class StatusBar:
         self._analysis_btn.update_idletasks()
         menu.tk_popup(self._analysis_btn.winfo_rootx(),
                       self._analysis_btn.winfo_rooty() - 2)
+
+    def set_context(self, project: str | None, session: str | None = None) -> None:
+        """更新选中上下文段：有会话 =「项目 X › 会话 T」，仅项目 =「项目 X」。"""
+        if project and session:
+            self._ctx_lbl.configure(text=f"{project}  ›  会话 {session}")
+        elif project:
+            self._ctx_lbl.configure(text=f"项目 {project}")
+        else:
+            self._ctx_lbl.configure(text="")
 
     def set_status(self, text: str, *, fg: str | None = None) -> None:
         clean_text = text.strip()
@@ -1447,8 +1462,13 @@ class ProjectColumn:
         open_in_file_manager(project_open_path(project_dir))
 
     def _copy_text(self, text):
+        """复制并经状态栏反馈「已复制 "…"」（剪贴板存全量，显示超长省略中段）。"""
         self.controller.root.clipboard_clear()
         self.controller.root.clipboard_append(text)
+        shown = text if len(text) <= 72 else text[:44] + "…" + text[-24:]
+        if "\n" in shown:
+            shown = shown.split("\n", 1)[0] + "…"
+        self.controller.filter.set_status(f'已复制 "{shown}"')
 
 
 class SessionColumn:
@@ -1873,38 +1893,6 @@ class SessionColumn:
             command=lambda: self.controller.show_transcript(report, self._reports),
             image=ui_icon(self.container, "outline"), compound="left",
         )
-        menu.add_command(
-            label="查看工具调用",
-            command=lambda: popups.ToolCallsPopup(
-                self.controller.root, report.usage, f" · {sid[:16]}…"),
-            image=ui_icon(self.container, "wrench"), compound="left",
-        )
-        has_files = bool(report.files_touched_details)
-        menu.add_command(
-            label=f"查看涉及文件（{report.files_touched} 个）",
-            command=lambda: popups.FilesTouchedPopup(
-                self.controller.root, report.files_touched_details,
-                report.searched_paths_details),
-            state="normal" if has_files else "disabled",
-            image=ui_icon(self.container, "folder"), compound="left",
-        )
-        menu.add_command(
-            label="查看模型使用",
-            command=lambda: popups.ModelsPopup(
-                self.controller.root, report.usage, f" · {sid[:16]}…"),
-            image=ui_icon(self.container, "model"), compound="left",
-        )
-
-        menu.add_separator()
-
-        # Analysis sub-items
-        menu.add_command(
-            label="在趋势图中定位",
-            command=lambda: self._navigate_to_trend(sid),
-            image=ui_icon(self.container, "trend"), compound="left",
-        )
-
-        menu.add_separator()
 
         # LLM 深度解读分组（独立一组，高阶洞察直达）
         _sparkle = ui_icon(self.container, "sparkle")
@@ -1940,30 +1928,10 @@ class SessionColumn:
             image=ui_icon(self.container, "folder"), compound="left",
         )
 
-        # Copy actions
+        # Copy actions（复制后状态栏反馈「已复制 "…"」）
         menu.add_command(
             label="复制会话路径",
             command=lambda: self._copy_text(str(report.meta.path)),
-            image=ui_icon(self.container, "copy"), compound="left",
-        )
-        menu.add_command(
-            label="复制会话 ID",
-            command=lambda: self._copy_text(sid),
-            image=ui_icon(self.container, "copy"), compound="left",
-        )
-        title = report.meta.title or "(无标题)"
-        menu.add_command(
-            label="复制会话标题",
-            command=lambda: self._copy_text(title),
-            image=ui_icon(self.container, "copy"), compound="left",
-        )
-        cost_str = format_value("cost", report.cost)
-        tcer_str = format_value("tcer", report.tcer)
-        menu.add_command(
-            label=f"复制摘要（TCER={tcer_str} · {cost_str}）",
-            command=lambda: self._copy_text(
-                f"会话: {sid}\n标题: {title}\n"
-                f"TCER: {tcer_str} · 成本: {cost_str}"),
             image=ui_icon(self.container, "copy"), compound="left",
         )
 
@@ -1992,34 +1960,14 @@ class SessionColumn:
             on_confirm=lambda: self.controller.delete_session(report),
         )
 
-    def _navigate_to_trend(self, sid):
-        """Switch to trend tab and highlight this session's data point."""
-        if not self.controller._current:
-            show_info(self.controller.root, "定位", "请先分析一个项目，趋势图才有数据。")
-            return
-        # Switch notebook to the tab hosting the trend chart（按控件归属定位，
-        # 不硬编码索引——页签重排后索引会失同步）。
-        try:
-            nb = self.controller._nb
-            trend_root = self.controller.trend_chart._body  # 页签直接子控件
-            for tab_id in nb.tabs():
-                if nb.nametowidget(tab_id) is trend_root:
-                    nb.select(tab_id)
-                    break
-        except Exception:
-            pass
-        # Ensure trend chart has data (may not have been drawn yet)
-        tc = self.controller.trend_chart
-        if not tc._reports:
-            tc.update(self.controller._current.reports)
-        # Highlight the session in the trend chart
-        tc.select_session_by_sid(sid)
-        # Also select in the session column for consistency
-        self.controller.on_select_session(sid)
-
     def _copy_text(self, text):
+        """复制并经状态栏反馈「已复制 "…"」；剪贴板存全量，显示超长做中段省略。"""
         self.controller.root.clipboard_clear()
         self.controller.root.clipboard_append(text)
+        shown = text if len(text) <= 72 else text[:44] + "…" + text[-24:]
+        if "\n" in shown:
+            shown = shown.split("\n", 1)[0] + "…"
+        self.controller.filter.set_status(f'已复制 "{shown}"')
 
     def _open_session_file(self, report):
         from .platform import open_in_file_manager

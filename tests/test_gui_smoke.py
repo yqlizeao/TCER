@@ -905,6 +905,7 @@ def test_smart_view_follows_selection():
         llm_reports_view=SimpleNamespace(select_session_report=lambda sid: None),
         _refresh_views=lambda *, full: refreshed.append(full),
         _update_status_bar_metrics=lambda: None,
+        _update_status_context=lambda: None,
     )
     g._set_session_view = lambda sid: TcerGui._set_session_view(g, sid)
     g.reanalyze = lambda: rean.append(True)
@@ -966,6 +967,7 @@ def test_on_analysis_no_default_session_select():
             _marks_for_current_project=lambda: (set(), set()),
             _refresh_views=lambda *, full: None,
             _update_status_bar_metrics=lambda: None,
+            _update_status_context=lambda: None,
             view_mode=tk.StringVar(value=mode),
         )
         g._set_session_view = lambda sid: TcerGui._set_session_view(g, sid)

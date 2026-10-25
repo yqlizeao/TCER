@@ -435,6 +435,7 @@ class TcerGui:
         self._set_session_view(None)
         self.session_col.update([])
         self.trend_chart.update([])
+        self._update_status_context()
         self.model_compare.update([])
         self.metric_panel.clear()
         if hasattr(self, "status_bar") and self.status_bar is not None:
@@ -452,9 +453,11 @@ class TcerGui:
             self._set_session_view(None)
             self._refresh_views(full=False)
             self._update_status_bar_metrics()
+            self._update_status_context()
             if proj_changed:
                 self.reanalyze()
         else:
+            self._update_status_context()
             self.reanalyze()
 
     def _selected_project(self):
@@ -645,12 +648,13 @@ class TcerGui:
         # 按页签惰性渲染：切项目只画当前看得见的页签（四视图全画要 ~600ms），
         # 其余标记待渲染，用户切过去时经 <<NotebookTabChanged>> 补上。
         self._refresh_views(full=True)
-        status = f"完成 · 共 {a.n_sessions} 个会话"
+        status = f"分析完成 · {a.n_sessions} 个会话"
         unmatched = metrics.unmatched_pricing_models(a.aggregate.usage)
         if unmatched:
             status += f" · ⚠ {len(unmatched)} 个模型默认价（点「模型」查看）"
         self.filter.set_status(status)
         self._update_status_bar_metrics()
+        self._update_status_context()
 
     # --------------------------------------------------------------- sessions / view
     def on_select_session(self, sid: str | None) -> None:
@@ -663,6 +667,7 @@ class TcerGui:
         self._set_session_view(sid)
         self._refresh_views(full=False)
         self._update_status_bar_metrics()
+        self._update_status_context()
         if sid and hasattr(self, "llm_reports_view"):
             self.llm_reports_view.select_session_report(sid)
     # --------------------------------------------------------------- session marks
@@ -825,6 +830,21 @@ class TcerGui:
                 self.model_compare.update([report])
         else:
             self.model_compare.update(self._current.reports)
+
+    def _update_status_context(self) -> None:
+        """状态栏选中上下文：项目名总在；选中会话时追加「会话 + 开始时间短格式」
+        （标题太长不上状态栏）。数据缺失（如启动期）静默置空。"""
+        if not hasattr(self, "status_bar") or self.status_bar is None:
+            return
+        from tcer.core.format import FMT_SHORT_MINUTE, fmt_dt
+        proj = self._selected_project()
+        proj_label = views.project_label(proj) if proj is not None else None
+        sess_label = None
+        if self._selected_session_id:
+            rep = self._session_report(self._selected_session_id)
+            t = (rep.usage.started_at or rep.usage.ended_at) if rep is not None else None
+            sess_label = fmt_dt(t, FMT_SHORT_MINUTE) if t else "已选中"
+        self.status_bar.set_context(proj_label, sess_label)
 
     def _update_status_bar_metrics(self) -> None:
         if not hasattr(self, "status_bar") or self.status_bar is None:
