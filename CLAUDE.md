@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-基于真实 AI 编程助手会话数据，构建多维 AI 编程效率计量体系（TCER + 综合效率分）。支持七个数据来源：Claude Code（`~/.claude`）、Codex（`~/.codex`）、OpenCode（`~/.local/share/opencode`，仅 SQLite `opencode.db`）、Oh My Pi / omp（`~/.omp`）、Pi / earendil-works/pi（`~/.pi`）、Antigravity（`~/.gemini/antigravity-cli`）、WorkBuddy / CodeBuddy（`~/.workbuddy-ai` 等）。**已移除**（2026-10）：Grok 数据源与 Grok 独有指标（xAI 模型价格保留）、OpenCode 旧版磁盘 JSON 存储兼容。
+基于真实 AI 编程助手会话数据，构建多维 AI 编程效率计量体系（TCER 为核心）。支持七个数据来源：Claude Code（`~/.claude`）、Codex（`~/.codex`）、OpenCode（`~/.local/share/opencode`，仅 SQLite `opencode.db`）、Oh My Pi / omp（`~/.omp`）、Pi / earendil-works/pi（`~/.pi`）、Antigravity（`~/.gemini/antigravity-cli`）、WorkBuddy / CodeBuddy（`~/.workbuddy-ai` 等）。**已移除**（2026-10）：Grok 数据源与 Grok 独有指标（xAI 模型价格保留）、OpenCode 旧版磁盘 JSON 存储兼容。
 
 - **GUI-only**：`python -m TCER` 启动桌面界面
 - **纯离线**：不依赖 git、不做联网操作，数据来自本地 JSONL / SQLite 文件
@@ -32,7 +32,7 @@ python -m tcer.audit --ci --summary-json audit-summary.json   # 等价 CI 预设
 # 退出码 0/1；cost_sum_per_model 校验逐模型成本加总
 ```
 
-库入口：`tcer.core.audit.audit_project` / `audit_ref` / `summarize`（pytest 也可调）。检查项含：会话 Token 与文件重算一致、子代理折叠、LOC/unseen_writes、聚合 Token 求和、聚合综合效率分与公式重算一致（`aggregate_score_recompute`）、`cost_usd` 不崩、`abort_reasons` 求和 == `aborted_task_count`、`turn_stats_match_total`、`all_models_priced`。`paths.project_has_sessions` 统一判断空项目（GUI 置灰 + audit `--skip-empty`）。
+库入口：`tcer.core.audit.audit_project` / `audit_ref` / `summarize`（pytest 也可调）。检查项含：会话 Token 与文件重算一致、子代理折叠、LOC/unseen_writes、聚合 Token 求和、聚合综合效率分与公式重算一致（`aggregate_score_recompute`；core 评分计算保留供 CSV/上传/服务端，GUI 已于 2026-10 移除评分展示）、`cost_usd` 不崩、`abort_reasons` 求和 == `aborted_task_count`、`turn_stats_match_total`、`all_models_priced`。`paths.project_has_sessions` 统一判断空项目（GUI 置灰 + audit `--skip-empty`）。
 
 ## 仓库结构
 
@@ -51,7 +51,7 @@ TCER/
 |------|------|
 | [doc/architecture.md](doc/architecture.md) | MVC 架构、模块职责、SourceAdapter、file_cache、护栏测试 |
 | [doc/data-format.md](doc/data-format.md) | 各数据源 JSONL/SQLite 格式、去重、LOC 回放、子代理、版本漂移基线 |
-| [doc/metrics.md](doc/metrics.md) | 指标公式、综合效率分 v2、计价、任务类型、算例 |
+| [doc/metrics.md](doc/metrics.md) | 指标公式、计价、任务类型、算例（综合效率分章节已于 2026-10 随 GUI 移除而弃用，core 计算保留） |
 | [doc/style.md](doc/style.md) / [doc/gui-notes.md](doc/gui-notes.md) | GUI 样式规范 / GUI 实现细节与踩坑 |
 | [doc/llm-layer.md](doc/llm-layer.md) | LLM 解读、相空间动力学、Jev 双引擎、术语库 |
 | [doc/server.md](doc/server.md) / [doc/concept-alignment-server.md](doc/concept-alignment-server.md) | server 聚合口径 / 团队概念对齐设计 |
@@ -59,15 +59,15 @@ TCER/
 
 ## 指标分类（6 组 · 以 `metric_defs.GROUPS` 为准）
 
-扁平 6 组：G1 会话概况 · G2 Token 用量 · G3 缓存效率 · G4 代码产出与质量 · G5 成本分析 · G6 综合评分（效率指标 + 综合效率分三正交轴 + 基准参数）。数量以代码 SSOT 为准。**字体颜色**：白色 = 基准值/纯数据；黄色 = 含 magic number，仅作参考。公式与算例：[doc/metrics.md](doc/metrics.md)。
+扁平 6 组：G1 会话概况 · G2 Token 用量 · G3 缓存效率 · G4 代码产出与质量 · G5 成本分析 · G6 效率基准（TCER · 效率衰减比 · 基准参数）。**已移除**（2026-10）：综合效率分/评级/任务类型/TTAF/归一化效率（人为拟合评判，core 计算保留供 CSV/上传/服务端）。数量以代码 SSOT 为准。**字体颜色**：白色 = 基准值/纯数据；黄色 = 含 magic number，仅作参考。公式与算例：[doc/metrics.md](doc/metrics.md)。
 
 ## 指标唯一真理源（SSOT）
 
-`TCER/gui/metric_defs.py` 是**所有指标展示的唯一真理源**（名称/提示/单位/格式/好坏方向/取值），四个页签与全部 popups 都从这里取，禁止各处再自管：
+`TCER/gui/metric_defs.py` 是**所有指标展示的唯一真理源**（名称/提示/单位/格式/好坏方向/取值），六个页签与全部 popups 都从这里取，禁止各处再自管：
 
 - **会话/项目级**：`raw_value` / `format_value` / `display` / `report_values`；每个 `Metric` 带 `fmt`（`int`/`pct`/`float:N`/`money`/`text`）。
 - **逐模型**：`MODEL_GROUPS` + `model_raw` / `model_display` / `model_tip`，同义指标转调 `format_value`；唯一例外：模型对比大数用 K/M 紧凑显示。
-- **综合效率分构成**：`SCORE_AXES`。**评级体系**：`core/metrics.SCORE_TIER_BANDS`（来自 config `score_tiers`）是唯一源，`tier()`/排名条/趋势带均派生，勿手写阈值。
+- **评分展示已移除**（2026-10）：`SCORE_AXES`/`SCORE_TIER_BANDS` 派生的排名条/趋势带/评级徽标随效率榜一并移除；core `tier()` 仍被 CSV/上传/服务端使用，勿删。
 - **源能力感知**：`_SOURCE_SUPPORT` 标注「数据源根本不产生该字段」→ `display()` 返回「不适用」、`raw_value()` 返回 None；部分支持**不**标注，仍显示 "-"。改数据源支持范围后必须同步它。
 - **HTML 报告**：`gui/html_report.py`（无 Tk 依赖）数值全走 `metric_defs.display`，与网格逐字节一致；图表组件在 `gui/charts.py`。
 
@@ -91,11 +91,11 @@ TCER/
 4. **过滤 `<synthetic>`**：伪 assistant 消息（零 usage）在 reader 层丢弃，不进 `models`/`per_model`。[data-format.md#synthetic](doc/data-format.md#synthetic)。
 5. **子代理并入父会话**：Token/LOC 保留真实成本，不单独计 session；Codex/OpenCode/omp/Pi 各有折叠规则，file_cache key 必须并入子代理签名。[data-format.md#subagents](doc/data-format.md#subagents)。
 6. **时序分析**：`ToolOp(turn, tool, path)`；搜索后编辑比按回合就近（3 回合内）匹配、不绑文件；merge 时 rebase turn。[metrics.md#temporal](doc/metrics.md#temporal)。
-7. **任务类型**：3 大类各有 TTAF，`ntcer = TCER / ttaf` 跨任务公平比较。[metrics.md#task-type](doc/metrics.md#task-type)。
+7. **任务类型**（core 保留；GUI 选择器与展示已移除，分析恒走 AUTO 归一）：3 大类各有 TTAF，`ntcer = TCER / ttaf` 跨任务公平比较。[metrics.md#task-type](doc/metrics.md#task-type)。
 8. **返工率 = 自返工率**：只计本会话先写后又被自己删/替换的行；删除会话外既有代码不计。[metrics.md#rework](doc/metrics.md#rework)。
-9. **综合效率分 v2**（取代已移除的 CTEI）：产出/成本/质量三正交轴 → 半饱和 → 按 net_loc 证据收缩 → 加权 0–100；聚合有效，聚合分**重算**不取平均。详见 [metrics.md#score-v2](doc/metrics.md#score-v2)。
+9. **综合效率分 v2 已移除**（2026-10，人为拟合评判不符合指标看板定位；曾取代更早的 CTEI）：三正交轴/半饱和/收缩/加权公式仍保留在 `core/metrics` 供 CSV/上传/服务端聚合口径，GUI 不再展示。详见 [metrics.md#score-v2](doc/metrics.md#score-v2)。
 10. **自定义 Claude 配置目录**：以规范目录的父目录兄弟扫描识别（`.zclaude` 等），同 hash 跨根各成一卡；进程级缓存，新建目录需重启。[data-format.md#claude-roots](doc/data-format.md#claude-roots)。
-11. **任务类型 SSOT**：`TASK_CATEGORIES`/TTAF 只来自 `composite_baselines.json`；基准参数默认 `None`→调用时读实时全局（**禁**用 `=TCER_BASELINE` 这类 def 时冻结的默认值）；个人基准至少 `MIN_BASELINE_SESSIONS=5` 条。[metrics.md#task-ssot](doc/metrics.md#task-ssot)。
+11. **任务类型 SSOT**（core 保留）：`TASK_CATEGORIES`/TTAF 只来自 `composite_baselines.json`；基准参数默认 `None`→调用时读实时全局（**禁**用 `=TCER_BASELINE` 这类 def 时冻结的默认值）。个人基准 UI（BaselinesPopup）已移除（2026-10），`metrics.compute_baselines*` 保留。[metrics.md#task-ssot](doc/metrics.md#task-ssot)。
 13. **high_churn 合并**：子代理折叠/聚合用 `loc.merge_session_locs`，合并后重算。[metrics.md#high-churn](doc/metrics.md#high-churn)。
 15. **「用户提问」口径 SSOT `core/user_input.py`**（cc-switch 规则）：注入/斜杠/中断/`!cmd` 不是提问，`<system-reminder>`/IDE 上下文块剥除后剩余文字才是；指标、弹窗、周报、上传、LLM、阅读器全经它，**只读主会话**（子代理派发 prompt 不是用户消息）；`api-request-blob` 存档记录不是会话事件。正文懒加载。[data-format.md#user-msgs-lazy](doc/data-format.md#user-msgs-lazy)。[data-format.md#user-msgs-lazy](doc/data-format.md#user-msgs-lazy)。
 16. **缓存写 TTL 分档**：1h 缓存写子集按 `CACHE_1H_PREMIUM=0.6` 加溢价，漏掉会系统性低估成本。[metrics.md#cache-ttl](doc/metrics.md#cache-ttl)。
@@ -117,7 +117,7 @@ TCER/
 43. **洞察引擎 `core/insights.py`**：纯离线确定性规则（不调 LLM），`session_insights`/`project_insights` 产出亮点/拖累/建议；只在指标确有数据时判断，不臆测。[metrics.md#insights](doc/metrics.md#insights)。
 
 34. **新指标族**：压缩代价、自报成本偏差、LOC 可信度、重试循环、单回合成本、人机时间、分段效率、项目级分析（热点文件/模型切换/工具画像）。[metrics.md#new-metrics](doc/metrics.md#new-metrics)。
-36. **评分门控**：`net_loc≤0` 的会话**不评分**（三轴 None）；评级带按真实分位校准；逐源基准解析链 逐项目>逐源>全局；同模型跨源对照要求每源 ≥3 个有产出会话。[metrics.md#score-gating](doc/metrics.md#score-gating)。
+36. **评分门控**（core 保留，GUI 展示已移除）：`net_loc≤0` 的会话**不评分**；逐源基准解析链 逐项目>逐源>全局；同模型跨源对照要求每源 ≥3 个有产出会话。[metrics.md#score-gating](doc/metrics.md#score-gating)。
 
 ### 性能与架构
 
@@ -130,7 +130,7 @@ TCER/
 ### GUI
 
 24. **GUI 样式**（SSOT `gui/theme.py`，规范见 [style.md](doc/style.md)）：按钮 `widgets.flat_button`、菜单 `widgets.FlatMenu`、间距 `theme.PAD_*`、**禁 emoji 当图标**、Windows 高 DPI 须在创建 Tk 前设置、聚焦环全局消除（`takefocus=0`）、Toplevel 不设「关闭」按钮、折线抗锯齿 `charts._aa_layer`、数值禁科学计数法。[gui-notes.md#style](doc/gui-notes.md#style)。
-25. **排名页**：综合效率分默认可算；无 score 时回退按 TCER 排名并提示。[gui-notes.md#ranking](doc/gui-notes.md#ranking)。
+25. **排名页已移除**（2026-10，效率榜整体下线；LLM 报告承接评估职能）。主区现为 6 页签：指标看板/模型对比/趋势分析/项目聚合/LLM 报告/术语库。[gui-notes.md#unified-dialog](doc/gui-notes.md#unified-dialog)。
 35. **GUI 新视图**：相关矩阵、仪表盘自定义、页签惰性渲染、SelectableLabel 合并结算（勿逐实例 `update_idletasks`）、时间线收敛诊断。[gui-notes.md#views](doc/gui-notes.md#views)。
 37. **项目聚合页签**：按 `normcase+normpath(cwd)` 聚合，**父子路径不合并**，读不到 cwd 的 ref 独立成组；比率「分子和÷分母和」重算。[gui-notes.md#real-projects](doc/gui-notes.md#real-projects)。
 45. **会话记录阅读器**（`gui/transcript_view.py`）：单个 `tk.Text` 文档流 + mark/tag，加载走 worker + 窗口自有队列 60ms 轮询；**往 Text 里嵌 widget（`window_create`）在窗口未排版时会让 Tk 8.6.15 崩进程，气泡一律纯 tag**；纯展示，数字全取自 `Transcript`。[gui-notes.md#transcript-reader](doc/gui-notes.md#transcript-reader)。
@@ -144,7 +144,7 @@ TCER/
 
 ### server
 
-29. **server 聚合口径与桌面端一致**：比率一律「分子和÷分母和」重算，不取算术平均（Simpson 悖论）；聚合综合效率分重算。[server.md#aggregation](doc/server.md#aggregation)。
+29. **server 聚合口径与桌面端一致**：比率一律「分子和÷分母和」重算，不取算术平均（Simpson 悖论）；聚合综合效率分重算（core 保留计算，上传/服务端仍消费）。[server.md#aggregation](doc/server.md#aggregation)。
 41. **团队概念对齐**：仅处理 `semantic_consent=1` 的实名会话；术语匹配复用客户端引擎；披露层 `disclosure.py` 唯一出口；概念模块不读效率指标列（红线 R1）。[server.md#concepts](doc/server.md#concepts) · [设计](doc/concept-alignment-server.md)。
 
 > 编号说明：#1–#43（42、43 原见旧 AGENTS.md） 全部保留编号，仅按主题分组排列；原条目全文在 doc/ 对应「原 #N」小节。

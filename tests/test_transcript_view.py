@@ -419,7 +419,6 @@ def test_entry_metric_header_button_opens_reader(root, app, tmp_path):
     win = app._transcript_win
     assert win.alive() and _ready(root, win)
     assert win._tr.session_id == "sess-2" and len(win._refs) == 2
-    assert app.metric_panel._cells["user_msgs"].value is not None
 
     app.metric_panel.clear()
     assert not btn.winfo_manager()

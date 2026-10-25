@@ -15,7 +15,7 @@ import traceback
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 from tcer import __version__
 from tcer.core import analyze, export as export_mod, metrics
@@ -26,8 +26,10 @@ from tcer.core.paths import (
 )
 from tcer.core.reader import discover_jsonl
 from . import html_report, popups, theme, views
-from .views import ScoreRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
-from .widgets import RoundedFrame, Tooltip, flat_button
+from .views import FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
+from .widgets import (RoundedFrame, Tooltip, flat_button,
+                      ask_yes_no, ask_yes_no_cancel, message_dialog,
+                      show_error, show_info)
 
 # 发布版(PyInstaller 打包,sys.frozen=True)默认开启「启动时自动检查更新」;
 # 源码运行(python -m tcer,frozen 不存在)默认关闭——开发者无需每次启动查更新。
@@ -45,7 +47,6 @@ class TcerGui:
         self._selected_session_id: str | None = None
         self.view_mode = tk.StringVar(value="project")
         self._rendered_report = None  # last report rendered in MetricPanel (for popups)
-        self._no_loc: bool = False
         self._analysis_generation = 0
         self._analysis_cancel = threading.Event()
         self._upload_prefs: dict = upload_prefs.load()
@@ -268,7 +269,6 @@ class TcerGui:
                 "geometry": self.root.geometry(),
                 "sashes": sashes,
                 "source": self.filter.get_source(),
-                "task_type": params.get("task_type"),
                 "until": params.get("until"),
                 "last_project": views.ref_uid(proj) if proj else None,
                 "check_update_on_start": self._ui_prefs.get("check_update_on_start", False),
@@ -344,7 +344,6 @@ class TcerGui:
         ))
         tab_m = tk.Frame(nb, bg=theme.BG)
         tab_c = tk.Frame(nb, bg=theme.PANEL)
-        tab_b = tk.Frame(nb, bg=theme.PANEL)
         tab_t = tk.Frame(nb, bg=theme.PANEL)
         tab_r = tk.Frame(nb, bg=theme.PANEL)
         tab_l = tk.Frame(nb, bg=theme.BG)
@@ -352,7 +351,6 @@ class TcerGui:
         tabs_spec = [
             (tab_m, "指标看板", "grid"),
             (tab_c, "模型对比", "compare"),
-            (tab_b, "效率榜", "rank"),
             (tab_t, "趋势分析", "trend"),
             (tab_r, "项目聚合", "layers"),
             (tab_l, "LLM 报告", "chat"),
@@ -363,7 +361,6 @@ class TcerGui:
 
         self.metric_panel = MetricPanel(tab_m, self)
         self.model_compare = ModelCompareView(tab_c, controller=self)
-        self.ranking_view = ScoreRankingView(tab_b, controller=self)
         self.trend_chart = TrendChart(tab_t, controller=self)
         self.real_projects_view = views.RealProjectsView(tab_r, controller=self)
         self.llm_reports_view = views.LlmReportsView(
@@ -437,7 +434,6 @@ class TcerGui:
         self._rendered_report = None
         self._set_session_view(None)
         self.session_col.update([])
-        self.ranking_view.update([])
         self.trend_chart.update([])
         self.model_compare.update([])
         self.metric_panel.clear()
@@ -446,8 +442,8 @@ class TcerGui:
 
     def on_select_project(self, idx: int) -> None:
         """点项目卡：切项目重算；会话视角下再点当前项目 = 回项目汇总视角
-        （只清选中不重算——数据没变）。无选中会话时保留「点项目 = 重算」的
-        旧语义（右键「刷新此项目」走这条入口）。"""
+        （只清选中不重算——数据没变）。无选中会话时保留「点项目 = 重算」
+        语义（点当前项目即刷新）。"""
         proj_changed = (idx != self._selected_project_idx)
         self._selected_project_idx = idx
         if self._selected_session_id is not None:
@@ -483,7 +479,7 @@ class TcerGui:
     def apply_time_filter(self) -> None:
         """时间筛选变化时：按 since 隐藏左栏项目，必要时改选可见项，再 reanalyze 一次。
 
-        until 不参与左栏。任务类型变化不走此路（直接 reanalyze）。
+        until 不参与左栏。
         """
         hidden = self._compute_hidden()
         self.project_col.set_hidden(hidden)
@@ -526,12 +522,12 @@ class TcerGui:
             project=proj.key,
             source=proj.source,
             project_ref=proj,
-            task_type=params["task_type"],
+            task_type=metrics.AUTO_TASK_TYPE,
             baseline_tcer=pb["tcer"],
             baseline_cpe=pb["cpe"],
             since=params["since"],
             until=params["until"],
-            no_loc=self._no_loc,
+            no_loc=False,
             cancel_event=cancel_event,
         )
         threading.Thread(target=self._worker, args=(generation, args, cancel_event), daemon=True).start()
@@ -567,7 +563,7 @@ class TcerGui:
                     _, generation, payload = item
                     if generation == self._analysis_generation:
                         self.filter.set_status("出错")
-                        messagebox.showerror("TCER 分析出错", payload)
+                        message_dialog(self.root, "TCER 分析出错", payload, kind="error", scroll=True)
                 elif kind == "overview":
                     _, rows, errors = item
                     note = f"（{errors} 个项目分析失败）" if errors else ""
@@ -592,9 +588,6 @@ class TcerGui:
                     if reset:
                         setattr(self, reset, False)
                     self.filter.set_status(f"{label}失败：{err_text}")
-                elif kind == "baselines":
-                    _, mode, min_loc, method, per_project, errors, callback = item
-                    self._on_baselines_computed(mode, min_loc, method, per_project, errors, callback)
                 elif kind == "upload":
                     _, dialog, ok, message = item
                     if ok:
@@ -653,15 +646,6 @@ class TcerGui:
         # 其余标记待渲染，用户切过去时经 <<NotebookTabChanged>> 补上。
         self._refresh_views(full=True)
         status = f"完成 · 共 {a.n_sessions} 个会话"
-        if self.filter.get_params().get("task_type") == metrics.AUTO_TASK_TYPE and a.reports:
-            from collections import Counter
-            counts = Counter(r.task_type for r in a.reports if r.task_type)
-            if counts:
-                parts = "、".join(
-                    f"{metrics.TASK_CATEGORIES.get(k, {}).get('name', k)}×{n}"
-                    for k, n in counts.most_common()
-                )
-                status += f" · 自动任务类型：{parts}"
         unmatched = metrics.unmatched_pricing_models(a.aggregate.usage)
         if unmatched:
             status += f" · ⚠ {len(unmatched)} 个模型默认价（点「模型」查看）"
@@ -738,19 +722,18 @@ class TcerGui:
         删除按磁盘路径定位，保证不残留 subagent 数据。删除后若项目仍有会话则
         重算，否则刷新项目列表（该项目转为「无会话」）。
         """
-        from tkinter import messagebox
         from tcer.core import reader
 
         sid = report.meta.session_id or report.meta.path.stem
         if (report.meta.source or "claude") != "claude":
             from tcer.gui.metric_defs import SOURCE_LABELS
             label = SOURCE_LABELS.get(report.meta.source, report.meta.source)
-            messagebox.showinfo("删除会话", f"{label} 会话当前仅支持只读分析，暂不删除本地会话数据。")
+            show_info(self.root, "删除会话", f"{label} 会话当前仅支持只读分析，暂不删除本地会话数据。")
             return
         try:
             removed = reader.delete_session(report.meta.path)
         except OSError as e:
-            messagebox.showerror("删除失败", f"无法删除会话 {sid[:16]}…\n{e}")
+            show_error(self.root, "删除失败", f"无法删除会话 {sid[:16]}…\n{e}")
             return
         self._remove_session_marks(sid)
 
@@ -792,22 +775,22 @@ class TcerGui:
         变化（数据不变，仅按当前选中重画）。仍挂起的 full 脏标记不被 False
         刷新降级——未访问过的页签首次补渲染时依旧要灌数据。
         """
-        for i in range(4):
+        for i in range(3):
             if full or i not in self._dirty_tabs:
                 self._dirty_tabs[i] = full
         self._render_tab(self._nb.index(self._nb.select()))
 
     def _render_tab(self, idx: int) -> None:
         """渲染指定页签（未标脏则跳过）。补渲染时按脏标记决定是否重灌数据。"""
-        if idx == 6:
+        if idx == 5:
             # 术语库页签不依赖 self._current（读持久化词条库），每次切入重载。
             self.termbase_view.on_show()
             return
-        if idx == 5:
+        if idx == 4:
             # LLM 报告页签不依赖 self._current（读持久化文件），每次切入重载。
             self.llm_reports_view.on_show()
             return
-        if idx == 4:
+        if idx == 3:
             # 项目聚合页签不依赖 self._current（自扫全部项目），首次切入加载。
             self.real_projects_view.on_show()
             return
@@ -818,11 +801,6 @@ class TcerGui:
             self._render_metrics()
         elif idx == 1:
             self._update_model_compare()
-        elif idx == 2:
-            if full:
-                self.ranking_view.update(self._current.reports,
-                                         aggregate=self._current.aggregate)
-            self._update_ranking_view()
         else:
             if full:
                 self.trend_chart.update(self._current.reports)
@@ -830,26 +808,11 @@ class TcerGui:
                 self.trend_chart.select_session_by_sid(self._selected_session_id)
 
     def switch_to_termbase(self, slug: str | None = None) -> None:
-        """切换至第 7 页签（术语库），并可选定位高亮具体词条。"""
+        """切换至第 6 页签（术语库），并可选定位高亮具体词条。"""
         if hasattr(self, "_nb"):
-            self._nb.select(6)
+            self._nb.select(5)
             if hasattr(self, "termbase_view") and slug:
                 self.termbase_view.select_term(slug)
-
-    def _update_ranking_view(self) -> None:
-        """按视角驱动综合效率分排名右栏（对齐指标分类/模型对比的项目/会话切换）。
-
-        会话视角且有选中 → 展示该会话构成拆解 + 会话洞察；否则 → 项目视角排名概览
-        + 项目洞察。排名表本身（左栏）在两种视角都在，作导航用。
-        """
-        if not self._current:
-            return
-        mode = self.view_mode.get()
-        if mode == "session" and self._selected_session_id:
-            report = self._session_report(self._selected_session_id)
-            self.ranking_view.set_view_mode("session", report)
-        else:
-            self.ranking_view.set_view_mode("project")
 
     def _update_model_compare(self) -> None:
         """Update model compare based on view mode. Does not touch TrendChart."""
@@ -936,13 +899,6 @@ class TcerGui:
         self.metric_panel.update(self._current.aggregate)
 
     # --------------------------------------------------------------- popups
-    def show_session_detail(self, sid: str) -> None:
-        if not self._current:
-            return
-        report = self._session_report(sid)
-        if report:
-            popups.SessionDetailPopup(self.root, report)
-
     def show_transcript(self, report, siblings=None) -> None:
         """会话记录阅读器：已开则复用窗口，序列取自会话列表当前的过滤 / 排序结果。"""
         from .transcript_view import TranscriptWindow, refs_from_reports
@@ -1003,35 +959,6 @@ class TcerGui:
             suffix = " · 项目汇总"
         popups.CostBreakdownPopup(self.root, usage, suffix)
 
-    def show_user_msgs(self) -> None:
-        report = self._rendered_report
-        if not report:
-            messagebox.showinfo("用户消息", "当前会话未记录到用户消息。")
-            return
-        # 聚合视图要遍历项目全部会话文件（Claude 还含 subagents 目录），大项目
-        # 在主线程读会卡死界面 — 放后台线程，读完回 Tk 主循环弹窗。
-        reports = list(self._current.reports) if self._current else []
-        self.filter.set_status("读取用户消息…")
-
-        def _work() -> None:
-            try:
-                msgs, label = self._load_user_messages(report, reports)
-                err = None
-            except Exception as e:  # noqa: BLE001 — 后台线程兜底，错误回主线程展示
-                msgs, label, err = None, "", str(e)
-            self.root.after(0, lambda: self._show_user_msgs_done(msgs, label, err))
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _show_user_msgs_done(self, msgs, label: str, err: str | None) -> None:
-        self.filter.set_status("就绪")
-        if err is not None:
-            messagebox.showerror("用户消息", f"读取失败：{err}")
-        elif msgs:
-            popups.UserMsgsPopup(self.root, msgs)
-        else:
-            messagebox.showinfo("用户消息", f"当前 {label} 会话未记录到用户消息。")
-
     @staticmethod
     def _session_label(report) -> str:
         """会话来源标识：``日期 · 标题 · sessionid``。
@@ -1091,7 +1018,7 @@ class TcerGui:
             popups.FilesTouchedPopup(self.root, report.files_touched_details,
                                      report.searched_paths_details)
         else:
-            messagebox.showinfo("涉及文件", "当前会话未涉及任何文件操作。")
+            show_info(self.root, "涉及文件", "当前会话未涉及任何文件操作。")
 
     def show_memory_files(self) -> None:
         report = self._rendered_report
@@ -1100,118 +1027,8 @@ class TcerGui:
         if agg and agg.memory_files is not None and agg.memory_dir:
             popups.MemoryFilesPopup(self.root, agg.memory_dir, agg.memory_files)
         else:
-            messagebox.showinfo("项目记忆文件", "当前项目没有 memory/ 目录或目录为空。")
+            show_info(self.root, "项目记忆文件", "当前项目没有 memory/ 目录或目录为空。")
 
-    # --------------------------------------------------------------- tools
-    def compute_baselines(self) -> None:
-        """打开个人基准校准弹窗。先开窗，由弹窗按需触发后台校准（不预先计算）。
-
-        弹窗提供：全部会话 / 逐项目 两种模式、离群过滤开关（默认开）。基准始终
-        基于**全部历史会话**，不受顶栏时间范影响。
-        """
-        if not self._projects:
-            messagebox.showinfo("计算基准", "无项目可用于计算。")
-            return
-        proj = self._selected_project()
-        popups.BaselinesPopup(
-            self.root,
-            on_compute=self._baseline_compute,
-            on_apply=self._baseline_apply,
-            current_project_label=views.project_label(proj) if proj else None,
-        )
-
-    def _baseline_compute(self, mode: str, filter_outliers: bool, method: str, callback) -> None:
-        """后台按模式汇总会话并算基准，完成后在主线程调 callback(result)。
-
-        基准与时间范围无关——**不传 since/until**，始终全量历史会话。method 为
-        中位数/平均数。task_type 用当前筛选值（只影响 TCER 归一，不影响 eligible）。
-        """
-        params = self.filter.get_params()
-        projects = list(self._projects)
-        min_loc = None if filter_outliers else 0
-        self.filter.set_status(f"个人基准校准中…（{mode} · {len(projects)} 个项目）")
-
-        def _work() -> None:
-            per_project = []  # (uid, label, reports)
-            errors = 0
-            for p in projects:
-                try:
-                    a = analyze.analyze_project(
-                        p.key, source=getattr(p, "source", "claude"),
-                        project_ref=p if hasattr(p, "session_paths") else None,
-                        task_type=params["task_type"],
-                        no_loc=self._no_loc,   # 注意：不传 since/until —— 基准不受时间范围影响
-                    )
-                except Exception:  # noqa: BLE001 — 单项目失败不拦汇总
-                    errors += 1
-                    continue
-                per_project.append((views.ref_uid(p), views.project_label(p), a.reports))
-            self._q.put(("baselines", mode, min_loc, method, per_project, errors, callback))
-
-        self._spawn_bg(_work, "个人基准校准")
-
-    def _on_baselines_computed(self, mode, min_loc, method, per_project, errors, callback) -> None:
-        """主线程：后台汇总的会话按模式算成基准结结果，回调给弹窗渲染。"""
-        note = f"{errors} 个项目分析失败已跳过" if errors else ""
-        need = metrics.MIN_BASELINE_SESSIONS
-        if mode == "all":
-            all_reports = [r for _, _, reps in per_project for r in reps]
-            eligible = metrics.baseline_eligible_reports(all_reports, min_net_loc=min_loc)
-            values = metrics.compute_baselines(all_reports, min_net_loc=min_loc, method=method)
-            msg = ""
-            if values is None:
-                msg = (f"有效会话不足：需至少 {need} 个完整会话，当前跨项目共 "
-                       f"{len(eligible)} 个。样本过少时波动大，暂不建议写入。")
-            self.filter.set_status("个人基准校准完成" if values else "个人基准：样本不足")
-            callback({"values": values, "n": len(eligible), "note": note, "msg": msg})
-        elif mode == "per_source":   # 按数据源 —— 跨源公平比较用的逐源基准
-            all_reports = [r for _, _, reps in per_project for r in reps]
-            by_src = metrics.compute_baselines_per_source(
-                all_reports, min_net_loc=min_loc, method=method)
-            out = []
-            for src in sorted(by_src):
-                n = len(metrics.baseline_eligible_reports(
-                    [r for r in all_reports if r.meta.source == src],
-                    min_net_loc=min_loc))
-                vals = by_src[src]
-                item = {"source": src, "label": views.source_label(src), "n": n,
-                        "values": vals}
-                if vals is None:
-                    item["reason"] = f"有效会话 {n} 个 < 所需 {need}，跳过"
-                out.append(item)
-            n_ok = sum(1 for it in out if it["values"])
-            self.filter.set_status(
-                f"按源校准完成 · {n_ok}/{len(out)} 个源可校准" if n_ok else "按源校准：无源达标")
-            callback({"per_source": out, "note": note,
-                      "msg": "" if out else "没有可用于计算的会话。"})
-        else:    # per_proj —— 列出**全部项目**，样本不足者也显示（values=None）
-            out = []
-            for uid, label, reps in per_project:
-                n = len(metrics.baseline_eligible_reports(reps, min_net_loc=min_loc))
-                vals = metrics.compute_baselines(reps, min_net_loc=min_loc, method=method)
-                item = {"uid": uid, "label": label, "n": n, "values": vals}
-                if vals is None:
-                    item["reason"] = f"有效会话 {n} 个 < 所需 {need}，跳过"
-                out.append(item)
-            # 有会话的项目排前、可校准的更靠前，便于查看
-            out.sort(key=lambda it: (it["values"] is None, -it["n"]))
-            n_ok = sum(1 for it in out if it["values"])
-            self.filter.set_status(
-                f"逐项目校准完成 · {n_ok}/{len(out)} 可校准" if n_ok else "逐项目校准：无项目达标")
-            callback({"per_project": out, "note": note,
-                      "msg": "" if out else "没有可用于计算的项目。"})
-
-    def _baseline_apply(self, mode: str, payload) -> None:
-        """应用基准：全局 / 逐项目 / 逐数据源写入 config，然后重算当前项目。"""
-        if mode == "all":
-            metrics.save_baselines(payload)  # 写全局
-        elif mode == "per_source":
-            for src, vals in payload.items():
-                metrics.save_baselines(vals, source=src)  # 逐源写入
-        else:
-            for uid, vals in payload.items():
-                metrics.save_baselines(vals, project_uid=uid)  # 逐项目写入
-        self.reanalyze()
 
     def show_tool_sequence(self) -> None:
         report = self._rendered_report
@@ -1239,9 +1056,9 @@ class TcerGui:
                     a = analyze.analyze_project(
                         p.key, source=getattr(p, "source", "claude"),
                         project_ref=p if hasattr(p, "session_paths") else None,
-                        task_type=params["task_type"],
+                        task_type=metrics.AUTO_TASK_TYPE,
                         since=params["since"], until=params["until"],
-                        no_loc=self._no_loc,
+                        no_loc=False,
                     )
                 except Exception:  # noqa: BLE001 — 单项目失败不拦对照
                     errors += 1
@@ -1256,8 +1073,7 @@ class TcerGui:
         """项目聚合页签数据：后台扫全部项目 → 按真实工作目录分组 + 逐 ref 聚合。
 
         聚合口径：Token/成本/净增行/缓存token 求和；TCER/CPE/缓存命中按合计重算
-        （非各卡均值——避免 Simpson 悖论）；效率分从聚合轴输入重算（与 server
-        ``_agg_metrics`` 同一处理：聚合 TCER 作产出轴代理、质量轴用求和比率）。
+        （非各卡均值——避免 Simpson 悖论）；聚合口径与 server _agg_metrics 对齐。：聚合 TCER 作产出轴代理、质量轴用求和比率）。
         首次切入自动扫（force=False 且未加载过）；工具栏「刷新」强制重扫。
         """
         if self._realproj_scanning or (self._realproj_loaded and not force):
@@ -1271,7 +1087,6 @@ class TcerGui:
         self.filter.set_status(f"项目聚合计算中…（{len(projects)} 张项目卡）")
 
         def _work() -> None:
-            import statistics
             from collections import Counter
 
             from tcer.core.paths import project_has_sessions
@@ -1284,16 +1099,14 @@ class TcerGui:
                 ref_rows = []
                 tot = {"n": 0, "tokens": 0, "cost": 0.0, "net": 0,
                        "requests": 0, "user_msgs": 0}
-                sums = {"cr": 0, "inp": 0, "cw": 0, "added": 0, "reworked": 0,
-                        "tools": 0, "tool_errors": 0}
-                rbws = []
+                sums = {"cr": 0, "inp": 0, "cw": 0}
                 for ref in g.refs:
                     try:
                         a = analyze.analyze_project(
                             ref.key, source=ref.source, project_ref=ref,
-                            task_type=params["task_type"],
+                            task_type=metrics.AUTO_TASK_TYPE,
                             since=params["since"], until=params["until"],
-                            no_loc=self._no_loc,
+                            no_loc=False,
                         )
                     except Exception:  # noqa: BLE001 — 单卡失败不拦聚合
                         errors += 1
@@ -1310,14 +1123,6 @@ class TcerGui:
                     sums["cr"] += u.cache_read_input_tokens
                     sums["inp"] += u.input_tokens
                     sums["cw"] += u.cache_creation_input_tokens
-                    sums["added"] += agg.code_added or 0
-                    sums["reworked"] += (agg.code_reworked
-                                         if agg.code_reworked is not None
-                                         else agg.code_deleted) or 0
-                    sums["tools"] += sum(u.tool_calls.values())
-                    sums["tool_errors"] += u.tool_errors
-                    if agg.read_before_write is not None:
-                        rbws.append(agg.read_before_write)
                     ref_rows.append({
                         "source": ref.source,
                         "icon": views.project_icon_key(ref),
@@ -1332,8 +1137,6 @@ class TcerGui:
                         "tcer": agg.tcer,
                         "cpe": agg.cpe,
                         "chr": agg.chr,
-                        "score": agg.score,
-                        "tier": agg.tier,
                     })
                 if not ref_rows:
                     continue
@@ -1349,13 +1152,6 @@ class TcerGui:
                 tot["chr"] = (sums["cr"] / denom_in) if denom_in else None
                 tot["tcer"] = (tot["net"] / (tot["tokens"] / 1e6)) if tot["tokens"] else None
                 tot["cpe"] = (tot["cost"] / tot["net"] * 1000) if tot["net"] > 0 else None
-                churn = (sums["reworked"] / sums["added"]) if sums["added"] else None
-                err = (sums["tool_errors"] / sums["tools"]) if sums["tools"] else None
-                rbw = statistics.median(rbws) if rbws else None
-                score = metrics.efficiency_score(
-                    tot["tcer"], tot["cpe"], churn, err, rbw, net_loc=tot["net"])
-                tot["score"] = score
-                tot["tier"] = metrics.tier(score)
                 rows.append({"key": g.key, "display": g.display,
                              "refs": ref_rows, "totals": tot})
             self._q.put(("realproj", rows, errors))
@@ -1386,9 +1182,9 @@ class TcerGui:
                     a = analyze.analyze_project(
                         p.key, source=getattr(p, "source", "claude"),
                         project_ref=p if hasattr(p, "session_paths") else None,
-                        task_type=params["task_type"],
+                        task_type=metrics.AUTO_TASK_TYPE,
                         since=params["since"], until=params["until"],
-                        no_loc=self._no_loc,
+                        no_loc=False,
                     )
                 except Exception:  # noqa: BLE001 — 单项目失败不拦总览
                     errors += 1
@@ -1541,34 +1337,29 @@ class TcerGui:
         确定性判定对账——分歧点（疑似误报/漏报）是深挖入口。结果只进解读层
         报告（kind="crosscheck"），绝不回写指标。
         """
-        from tkinter import messagebox
         from concurrent.futures import ThreadPoolExecutor
         from uuid import uuid4
         from tcer.core import llm_prefs
 
         if not llm_prefs.typesafe_enabled():
-            messagebox.showinfo(
-                "纠正信号交叉验证",
+            show_info(
+                self.root, "纠正信号交叉验证",
                 "该功能使用 TypeSafe Jev 引擎做语义判定。\n\n"
-                "请先点击工具栏「LLM设置」配置 TypeSafe API Key。",
-                parent=self.root)
+                "请先点击工具栏「LLM设置」配置 TypeSafe API Key。")
             self.show_llm_config()
             return
 
         # 消息量级预估（出境内容 = 用户消息文本，截断 400 字符/条）
-        try:
-            n_msgs = len(report.usage.user_msgs or 0) or 0
-        except Exception:
-            n_msgs = 0
-        if not messagebox.askyesno(
+        n_msgs = report.usage.user_msgs or 0
+        if not ask_yes_no(
+                self.root,
                 "纠正信号交叉验证（数据出境确认）",
                 "将向 TypeSafe System One 发送本会话的**用户消息文本**做语义判定：\n"
                 f"模型：{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}\n"
                 f"出境范围：用户消息（约 {n_msgs} 条，每条截断 400 字符）\n"
                 "预计成本：不足 1 美分（单请求 Noul 扇出）。\n\n"
                 "判定结果只进「LLM 报告」收信箱，不参与任何指标计算；出境后不可撤销。\n\n"
-                "是否立即开始？",
-                parent=self.root):
+                "是否立即开始？"):
             return
 
         sid = report.meta.session_id or report.meta.path.stem
@@ -1654,8 +1445,7 @@ class TcerGui:
         if not rep and self._current and self._current.reports:
             rep = self._current.reports[0]
         if not rep:
-            from tkinter import messagebox
-            messagebox.showinfo("术语考古", "请先在左侧选择一个项目或会话后再行考古。", parent=self.root)
+            show_info(self.root, "术语考古", "请先在左侧选择一个项目或会话后再行考古。")
             return
         self.run_session_terms_archaeology(rep)
 
@@ -1666,7 +1456,6 @@ class TcerGui:
         若配置了通用 LLM 与 TypeSafe Key 则发起新词提名与 Jev 归属（遵守 D-4 每次确认）；
         若未配置则优雅降级为本地纯离线热力图统计。
         """
-        from tkinter import messagebox
         from concurrent.futures import ThreadPoolExecutor
         from uuid import uuid4
         from tcer.core import llm_prefs
@@ -1675,11 +1464,9 @@ class TcerGui:
         has_jev = llm_prefs.typesafe_enabled()
 
         if has_llm and has_jev:
-            try:
-                n_msgs = len(report.usage.user_msgs or 0) or 0
-            except Exception:
-                n_msgs = 0
-            if not messagebox.askyesno(
+            n_msgs = report.usage.user_msgs or 0
+            if not ask_yes_no(
+                self.root,
                 "术语考古（数据出境确认）",
                 "将向 LLM 与 TypeSafe Jev 引擎发送抽样的**用户消息文本**进行团队黑话挖掘：\n"
                 f"通用 LLM：{llm_prefs.model()} @ {llm_prefs.base_url()}\n"
@@ -1688,17 +1475,16 @@ class TcerGui:
                 "预计成本：不足 1 美分。\n\n"
                 "分析结果将保存至「LLM 报告」收信箱，不参与任何指标计算；出境后不可撤销。\n\n"
                 "是否立即开始？",
-                parent=self.root,
             ):
                 return
         else:
-            if not messagebox.askyesno(
+            if not ask_yes_no(
+                self.root,
                 "术语考古（纯离线热力图模式）",
                 "当前未配置通用 LLM 或 TypeSafe API Key。\n\n"
                 "TCER 将以**纯离线模式**运行：仅统计术语库已知词条在历史消息中的命中热力图与上下文，"
                 "跳过新词自动挖掘。\n\n"
                 "是否继续？",
-                parent=self.root,
             ):
                 return
 
@@ -1835,7 +1621,6 @@ class TcerGui:
 
     def _run_session_llm(self, report, is_dynamics: bool) -> None:
         """从会话列表直接派发 LLM 任务（收信箱模型：首次确认 + 去重 + 有界线程池 + UI 队列回填）。"""
-        from tkinter import messagebox
         from concurrent.futures import ThreadPoolExecutor
         from uuid import uuid4
         from tcer.core import llm_prefs, llm_prompts
@@ -1846,32 +1631,30 @@ class TcerGui:
         use_typesafe = False
         if is_dynamics:
             if not ts_avail and not gen_avail:
-                messagebox.showinfo(
-                    "相空间分析",
-                    "请先点击工具栏「LLM设置」完成服务配置（可配置 TypeSafe Jev 或通用大模型）。",
-                    parent=self.root)
+                show_info(
+                    self.root, "相空间分析",
+                    "请先点击工具栏「LLM设置」完成服务配置（可配置 TypeSafe Jev 或通用大模型）。")
                 self.show_llm_config()
                 return
             if ts_avail and gen_avail:
-                ans = messagebox.askyesnocancel(
-                    "相空间动力学分析引擎选择",
+                ans = ask_yes_no_cancel(
+                    self.root, "相空间动力学分析引擎选择",
                     "检测到您已同时配置 TypeSafe Jev 与通用大模型。\n\n"
                     "是否优先使用【TypeSafe Jev 多阶段级联判定】？\n\n"
                     "• [是(Y)]：使用 Jev 两阶段级联分析（快速判定整体形态、关键转折成因与反事实推演）\n"
                     f"• [否(N)]：使用通用大模型（{llm_prefs.model()}）生成长文本解读报告\n"
-                    "• [取消]：放弃分析",
-                    parent=self.root)
+                    "• [取消]：放弃分析")
                 if ans is None:
                     return
-                use_typesafe = ans
+                use_typesafe = (ans == "yes")
             elif ts_avail:
-                if not messagebox.askyesno(
+                if not ask_yes_no(
+                        self.root,
                         "TypeSafe Jev 级联相空间分析",
                         f"将向 TypeSafe System One 发起两阶段级联评估：\n"
                         f"模型：{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}\n\n"
                         "分析内容：整体形态判定、关键卡点突破、关键转折点深挖、反事实检验与四项能力评分。\n"
-                        "总耗时仅约 1~2 秒。\n\n是否立即开始？",
-                        parent=self.root):
+                        "总耗时仅约 1~2 秒。\n\n是否立即开始？"):
                     return
                 use_typesafe = True
             else:
@@ -1880,10 +1663,9 @@ class TcerGui:
                 use_typesafe = False
         else:
             if not gen_avail:
-                messagebox.showinfo(
-                    "LLM 解读",
-                    "请先点击工具栏「LLM设置」完成通用大模型服务配置。",
-                    parent=self.root)
+                show_info(
+                    self.root, "LLM 解读",
+                    "请先点击工具栏「LLM设置」完成通用大模型服务配置。")
                 self.show_llm_config()
                 return
             if not self._confirm_llm_direct(report, is_dynamics):
@@ -1941,15 +1723,15 @@ class TcerGui:
         scope_labels = " · ".join(
             f"[{llm_prefs.SCOPE_LABELS.get(s, s)}]" for s in scopes) or "（未授权数据）"
         action = "相空间收敛动力学分析" if is_dynamics else "LLM 过程收敛解读"
-        return messagebox.askyesno(
+        return ask_yes_no(
+            self.root,
             "LLM 直达分析确认",
             f"右键直达{action}：将把会话数据发送到\n"
             f"{llm_prefs.model()} @ {llm_prefs.base_url()}\n\n"
             f"出境范围：{scope_labels}\n\n"
             f"预估约 {est:,} tokens（dialog 档含完整对话全文，出境后不可撤销）。\n"
             "解读结果只进「LLM 报告」收信箱，不参与任何指标计算。\n\n"
-            "确认后将立即开始生成（完成后自动收入收信箱）。",
-            parent=self.root)
+            "确认后将立即开始生成（完成后自动收入收信箱）。")
 
     def _llm_worker(self, report, derived: dict, scopes, is_dynamics: bool,
                     task_id: str, task_desc: str, use_typesafe: bool = False) -> None:
@@ -2210,13 +1992,6 @@ class TcerGui:
         popups.SessionComparePopup(self.root, self._current.reports,
                                    preselect_sid=self._selected_session_id)
 
-    def show_advanced(self) -> None:
-        def _apply(no_loc):
-            self._no_loc = no_loc
-            self.reanalyze()
-
-        popups.AdvancedPopup(self.root, self._no_loc, _apply)
-
     # --------------------------------------------------------------- export
     def export(self, fmt: str, scope: str = "project") -> None:
         if not self._current:
@@ -2286,7 +2061,7 @@ class TcerGui:
             Path(path).write_text(content, encoding="utf-8")
             self.filter.set_status(f"已导出 → {Path(path).name}")
         except OSError as e:
-            messagebox.showerror("导出失败", str(e))
+            show_error(self.root, "导出失败", str(e))
 
     # --------------------------------------------------------------- upload
     def show_upload(self) -> None:
@@ -2367,10 +2142,10 @@ class TcerGui:
             return
         params = self.filter.get_params()
         analysis_args = dict(
-            task_type=params["task_type"],
+            task_type=metrics.AUTO_TASK_TYPE,
             since=None,
             until=None,
-            no_loc=self._no_loc,
+            no_loc=False,
         )
         cfg = dict(server_url=server_url, auth_token=upload_config.auth_token(),
                    detail=upload_config.upload_detail(),
@@ -2514,10 +2289,10 @@ class TcerGui:
         self._auto_upload_running = True
         params = self.filter.get_params()
         analysis_args = dict(
-            task_type=params["task_type"],
+            task_type=metrics.AUTO_TASK_TYPE,
             since=None,
             until=None,
-            no_loc=self._no_loc,
+            no_loc=False,
         )
         cfg = dict(
             server_url=server_url,

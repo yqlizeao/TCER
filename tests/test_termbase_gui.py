@@ -68,12 +68,22 @@ def report():
 
 
 def _msg_box(monkeypatch):
-    import tkinter.messagebox as mb
-    monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
-    monkeypatch.setattr(mb, "showinfo", lambda *a, **k: None)
-    monkeypatch.setattr(mb, "showwarning", lambda *a, **k: None)
-    monkeypatch.setattr(mb, "showerror", lambda *a, **k: None)
-    return mb
+    """统一对话框短路：ask_* 自动放行、show_* 静默。
+
+    from .widgets import 在各使用方模块导入时已定结名字绑定，必须逐模块
+    setattr 才能生效（patch widgets 本体无效）。"""
+    import tcer.gui.app as _app
+    import tcer.gui.popups as _popups
+    import tcer.gui.popups_analysis as _pa
+    import tcer.gui.transcript_view as _tv
+    import tcer.gui.views as _views
+    for m in (_app, _popups, _pa, _tv, _views):
+        monkeypatch.setattr(m, "ask_yes_no", lambda *a, **k: True, raising=False)
+        monkeypatch.setattr(m, "ask_yes_no_cancel", lambda *a, **k: "yes", raising=False)
+        monkeypatch.setattr(m, "show_info", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(m, "show_warning", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(m, "show_error", lambda *a, **k: None, raising=False)
+    return None
 
 
 # ---------------------------------------------------------------- 接线与 CRUD
@@ -92,9 +102,9 @@ def test_terms_report_empty_termbase_guidance():
 
 def test_tab_switch_and_crud_roundtrip(root, app, isolated):
     """第 7 页签接线 + 新建→编辑→保存→落盘→重载→搜索 全闭环。"""
-    app._nb.select(6)
+    app._nb.select(5)
     root.update()
-    assert app._nb.index(app._nb.select()) == 6
+    assert app._nb.index(app._nb.select()) == 5
     view = app.termbase_view
     assert view._termbase is not None
 
@@ -122,7 +132,7 @@ def test_tab_switch_and_crud_roundtrip(root, app, isolated):
 def test_switch_to_termbase_navigation(root, app):
     app.switch_to_termbase()
     root.update()
-    assert app._nb.index(app._nb.select()) == 6
+    assert app._nb.index(app._nb.select()) == 5
 
 
 def test_import_popup_single_entry(root, app, isolated, monkeypatch):
@@ -143,7 +153,6 @@ def test_import_from_report_extracts_all_blocks(root, app, isolated, monkeypatch
     """考古报告合入必须全量提取多个 ```json 提案块——曾用 re.search 非贪婪
     只取第一块,12 份提案只载入 1 份(用户实测「怎么就生成了一个词汇」);
     且 load() 新→旧排序应取 [0] 最新报告(曾取 [-1] 最旧)。"""
-    import tkinter.messagebox as mb
     from tcer.core import llm_reports
     from tcer.gui.popups import TermImportPopup
 
@@ -205,7 +214,6 @@ def test_lookup_local_hit(root, app):
 def test_lookup_remote_mocked(root, app, isolated, monkeypatch):
     """remote 兜底全链(mock evaluate):钉 evaluate 必传 api_key/base_url/model、
     worker 队列回填(裸跨线程 after 在无 mainloop 时抛 RuntimeError 静默死线程)。"""
-    import tkinter.messagebox as mb
     from tcer.core import typesafe_client
     from tcer.core.termbase import TermEntry
     from tcer.gui.popups import TermLookupPopup
@@ -222,7 +230,7 @@ def test_lookup_remote_mocked(root, app, isolated, monkeypatch):
                                            "probabilities": {"cp": 0.82}}}}
 
     monkeypatch.setattr(typesafe_client, "evaluate", fake_eval)
-    monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
+    _msg_box(monkeypatch)   # 统一对话框短路（出境确认自动放行）
 
     terms = [TermEntry(slug="cp", pref_label="客户端预测", definition="d", status="active")]
     tb = type("T", (), {"terms": terms, "errors": [],
@@ -271,7 +279,6 @@ def test_ambiguity_degraded_offline(root, app, monkeypatch):
 def test_ambiguity_remote_mocked(root, app, isolated, monkeypatch):
     """remote 全链(mock evaluate):钉 build_ambiguity_payload(text, hits) 参数序、
     format_ambiguity_report(text, hits, answers) 签名、报告入库 kind=ambiguity。"""
-    import tkinter.messagebox as mb
     from tcer.core import typesafe_client
     from tcer.gui.popups import AmbiguityDetectPopup
 
@@ -285,7 +292,7 @@ def test_ambiguity_remote_mocked(root, app, isolated, monkeypatch):
         return {"answers": {"misread_0": {"noul": 0.82}}}
 
     monkeypatch.setattr(typesafe_client, "evaluate", fake_eval)
-    monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
+    _msg_box(monkeypatch)   # 统一对话框短路（出境确认自动放行）
 
     p = AmbiguityDetectPopup(root, controller=None, termbase=_tb_with_misconceptions())
     p._text_box.insert("1.0", "客户端预测的手感回跳")
@@ -342,7 +349,6 @@ def test_archaeology_remote_error_path(root, app, report, isolated, monkeypatch)
     的异常变量 e → NameError 被 drain 吞 → 错误回填从未到达、任务表永不
     清理、状态栏永远停在「正在进行」(用户实测两次打回)。
     """
-    import tkinter.messagebox as mb
     from tcer.core import llm_client, typesafe_client
     from tcer.gui.app import TcerGui
 
@@ -374,7 +380,6 @@ def test_archaeology_remote_error_path(root, app, report, isolated, monkeypatch)
 def test_archaeology_remote_mocked(root, app, report, isolated, monkeypatch):
     """remote 全链(mock chat + evaluate):钉 llm_client.chat 真实签名
     (曾调不存在的 chat_completion)、LLM 提名→Jev 归属→报告入库。"""
-    import tkinter.messagebox as mb
     from tcer.core import llm_client, typesafe_client
     from tcer.gui.app import TcerGui
 

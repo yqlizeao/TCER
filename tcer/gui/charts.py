@@ -17,8 +17,8 @@ from tcer.core.format import FMT_SHORT_MINUTE, fmt_dt
 from . import theme
 from .metric_defs import (GROUPS, Metric, METRIC_BY_KEY, format_plot,
                           metric_name, raw_value)
-from .widgets import (CheckRow, FlatMenu, RoundedFrame, RoundedPill,
-                      ScrollFrame, StatusBadge, Tooltip, flat_button)
+from .widgets import (CheckRow, FlatMenu, RoundedFrame,
+                      ScrollFrame, Tooltip, flat_button)
 from .platform import CLICK_CURSOR
 
 # 兼容旧名：图表代码里沿用 views 时代的别名。
@@ -38,7 +38,7 @@ except ImportError:
 # Metrics that cannot be plotted (metadata / categorical / constant).
 _NON_PLOTTABLE = frozenset({
     "models", "tools", "started", "last_time", "entrypoint",
-    "task_type", "tier", "bl_tcer", "bl_cpe",
+    "bl_tcer", "bl_cpe",
 })
 
 # Baseline reference lines (key → metrics module constant name).
@@ -50,32 +50,9 @@ _METRIC_BASELINE: dict[str, str] = {
 # Fixed palette for multi-metric overlay (up to 4 lines) — 主题变体在 theme。
 _OVERLAY_COLORS = list(theme.OVERLAY_COLORS)
 
-# 综合效率分 tier background bands (lo, hi, fill_color, label) — names + thresholds
-# derived from the metric SSOT (metrics.SCORE_TIER_BANDS); trend-fill 色随主题
-# （theme.SCORE_BAND_FILL）。
-_BAND_FILL = theme.SCORE_BAND_FILL
-
 # 仪表盘折线色（theme.DASH_LINE_COLORS）：分类原色是为大块表头填充设计的，
 # 画细折线需同色相提亮（深色主题）/加深（浅色主题）——表头条仍用原 GROUP_COLORS。
 _DASHBOARD_LINE_COLORS = theme.DASH_LINE_COLORS
-
-
-def _build_score_bands() -> list[tuple[float, float, str, str]]:
-    gb = metrics.SCORE_TIER_BANDS  # [(label, lower_bound)] best→worst，0–100
-    bands = []
-    for i, (label, lo) in enumerate(gb):
-        hi = gb[i - 1][1] if i > 0 else 100.0
-        if i == 0:
-            rng = f">{lo:g}"
-        elif i == len(gb) - 1:
-            rng = f"<{gb[i - 1][1]:g}"
-        else:
-            rng = f"{lo:g}–{hi:g}"
-        bands.append((lo, hi, _BAND_FILL[label], f"{label} {rng}"))
-    return bands
-
-
-_SCORE_BANDS: list[tuple[float, float, str, str]] = _build_score_bands()
 
 
 def _units_compatible(overlays: list[_OverlayLine]) -> bool:
@@ -614,7 +591,6 @@ class TrendChart:
         self.canvas.bind("<Button-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.canvas.bind("<Double-Button-1>", self._on_double_click)
         self.canvas.bind("<Button-3>", self._on_right_click)
         self.canvas.bind("<Destroy>", lambda e: self._tooltip.hide())
         self.canvas.bind("<Left>", self._on_key_prev)
@@ -847,13 +823,6 @@ class TrendChart:
         self._selected_idx = None
         self._draw()
 
-    def _on_double_click(self, event) -> None:
-        """Double-click: show radar popup for the nearest data point."""
-        idx = self._hit_test(event.x, event.y)
-        if idx is not None and idx < len(self._reports):
-            from . import popups
-            popups.RadarPopup(self.canvas, self._reports[idx], self._reports)
-
     def _on_right_click(self, event) -> None:
         """Right-click: context menu for the nearest data point."""
         if not self._controller:
@@ -865,25 +834,10 @@ class TrendChart:
         sid = r.meta.session_id or r.meta.path.stem
         menu = FlatMenu(self.canvas)
         menu.add_command(
-            label=f"查看会话详情 · {sid[:16]}…",
-            command=lambda: self._controller.show_session_detail(sid)
-                            if self._controller else None,
-        )
-        menu.add_command(
-            label="查看雷达图",
-            command=lambda: self._show_radar_for(idx),
-        )
-        menu.add_separator()
-        menu.add_command(
             label=f"选中此会话（第 {idx + 1} 个）",
             command=lambda: self._select_point(idx),
         )
         menu.tk_popup(event.x_root, event.y_root)
-
-    def _show_radar_for(self, idx: int) -> None:
-        if idx < len(self._reports):
-            from . import popups
-            popups.RadarPopup(self.canvas, self._reports[idx], self._reports)
 
     def _select_point(self, idx: int) -> None:
         self._selected_idx = idx
@@ -1035,9 +989,6 @@ class TrendChart:
             def yv(v):
                 return pad_t + plot_h * (1 - (v - lo) / (hi - lo))
 
-            if ol.key == "score":
-                self._draw_score_bands(c, yv, pad_l, plot_w, lo, hi)
-
             ticks = _nice_ticks(lo, hi, 5)
             for tv in ticks:
                 ty = yv(tv)
@@ -1138,20 +1089,6 @@ class TrendChart:
             y_off = 10 if (i // step) % 2 == 0 else 20
             c.create_text(px, pad_t + plot_h + y_off, text=label,
                           fill=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="n")
-
-    def _draw_score_bands(self, c, yv, pad_l, plot_w, lo, hi) -> None:
-        """Draw tier background bands when 综合效率分 is selected."""
-        for lo_b, hi_b, color_b, _label in _SCORE_BANDS:
-            if hi_b < lo or lo_b > hi:
-                continue
-            y_top = yv(min(hi_b, hi))
-            y_bot = yv(max(lo_b, lo))
-            c.create_rectangle(pad_l, y_top, pad_l + plot_w, y_bot,
-                               fill=color_b, outline="")
-            # Right-edge label
-            c.create_text(pad_l + plot_w - 4, (y_top + y_bot) / 2,
-                          text=_label, anchor="e",
-                          fill="#555555", font=theme.FONT_UI_SMALL)
 
     @staticmethod
     def _find_extrema(values: list[float]) -> tuple[list[int], list[int]]:
@@ -1657,11 +1594,7 @@ class ScatterChart:
         _items = []
         for xi, yi, ri in zip(xs, ys, ris):
             px, py = xv(xi), yv(yi)
-            color = theme.ACCENT
-            tier_ = self._reports[ri].tier
-            if tier_:
-                color = theme.GRADE_HEX.get(tier_, theme.ACCENT)
-            _items.append(("dot", px, py, 4, color, theme.FG))
+            _items.append(("dot", px, py, 4, theme.ACCENT, theme.FG))
             self._point_coords.append((int(px), int(py), ri))
         _aa_layer(c, _items, self._aa_imgs)
 
@@ -1878,7 +1811,7 @@ class DashboardChart:
         ("G3", "chr"),
         ("G4", "net_loc"),
         ("G5", "cost"),
-        ("G6", "score"),
+        ("G6", "tcer"),
     ]
 
     # 按日聚合时可直接求和的代表指标；其余按日取均值。
@@ -2119,7 +2052,7 @@ class HeatmapChart:
 
     _WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     # (下拉标签, metric key or None=会话数)
-    _MODES = [("会话数", None), ("TCER 均值", "tcer"), ("综合效率分均值", "score"),
+    _MODES = [("会话数", None), ("TCER 均值", "tcer"),
               ("成本合计", "cost"), ("总 Token 合计", "total_tokens"),
               ("返工率均值", "churn")]
     _SUM_KEYS = {"cost", "total_tokens"}  # 合计而非均值

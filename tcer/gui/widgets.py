@@ -481,7 +481,9 @@ class Card:
         if draw_key == getattr(self, "_last_draw_key", None):
             return
         self._last_draw_key = draw_key
-        draw_rounded_rect_bg(self.frame, w, h, self._radius, fill_col, self._parent_bg, "card_bg")
+        # 1px BORDER 描边：卡面与容器的清晰分界（结构分隔 token，非状态表达）
+        draw_rounded_box(self.frame, w, h, self._radius, fill_col, self._parent_bg,
+                         outline=theme.BORDER, tag="card_bg")
 
     def set_state_rail(self, color: str | None) -> None:
         """设置左侧状态条颜色（例如收敛向心绿、逃逸橙红等）。"""
@@ -626,13 +628,19 @@ class MetricCell:
             cursor=CLICK_CURSOR if on_click else "arrow",
         )
         color = theme.LEVEL_COLORS.get(metric.level, theme.LEVEL_BASIC)
-        title_text = f"{metric.name}（{metric.unit}）" if metric.unit else metric.name
         # 标题按指标层级着色（core/compound 黄色信号等）；此前算了没用、恒灰
         title_fg = theme.LEVEL_COLORS.get(metric.level, theme.LEVEL_BASIC)
-        # 指标名是用户主扫读对象：9pt（8pt 黄/白小字在暗底可读性差）
-        self.title = tk.Label(self.frame, text=title_text, bg=theme.PANEL, fg=title_fg,
+        # 指标名是用户主扫读对象：9pt（8pt 黄/白小字在暗底可读性差）。
+        # 名称与单位分两行（2026-10）：拼接式「名（单位）」在等宽网格窄格内
+        # 会被裁断或词中断裂；分层排版后各自行内完整显示。
+        self.title = tk.Label(self.frame, text=metric.name, bg=theme.PANEL, fg=title_fg,
                               font=theme.FONT_UI, anchor="w")
         self.title.pack(anchor="w", padx=10, pady=(6, 0))
+        self._unit_lbl: tk.Label | None = None
+        if metric.unit:
+            self._unit_lbl = tk.Label(self.frame, text=metric.unit, bg=theme.PANEL,
+                                      fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+            self._unit_lbl.pack(anchor="w", padx=10, pady=(0, 0))
 
         self.var = tk.StringVar(value="-")
         value_fg = theme.VALUE_NEUTRAL
@@ -690,8 +698,11 @@ class MetricCell:
     def key(self) -> str:
         return self.metric.key
 
-    def set_value(self, text: str) -> None:
-        """Update displayed value and apply sentiment-based coloring."""
+    def set_value(self, text: str, fg: str | None = None) -> None:
+        """Update displayed value and apply sentiment-based coloring.
+
+        ``fg`` 由调用方显式给定（如看板的「达标绿」规则）时优先于内部异常阈值着色。
+        """
         self.var.set(text)
         self.value.config(font=theme.value_font(text))
         if self.approx_lbl is not None:
@@ -701,6 +712,9 @@ class MetricCell:
                 self.approx_lbl.config(text=fmt_approx_cn(num) or "")
             except (ValueError, TypeError):
                 self.approx_lbl.config(text="")
+        if fg is not None:
+            self.value.config(fg=fg)
+            return
         if text == UNSUPPORTED_LABEL:
             # 数据源不提供该字段 — 弱化显示，与「无数据 -」区分。
             self.value.config(fg=theme.MUTED)
@@ -2959,6 +2973,141 @@ def new_window(parent, title, size, bg=theme.BG):
     win.bind("<Map>", lambda e: apply_dark_titlebar(win), add="+")
     win.bind("<Escape>", lambda e: win.destroy(), add="+")
     return win
+
+
+# ---------------------------------------------------------------------------
+# 统一模态对话框（替代 tkinter.messagebox 的系统样式）
+# ---------------------------------------------------------------------------
+_DIALOG_KINDS = {
+    # kind → (徽标文案, StatusBadge kind, 警示符号, 符号色)
+    "info":    ("提示", "info", "", ""),
+    "success": ("完成", "success", "", ""),
+    "warning": ("注意", "warning", "⚠", theme.WARNING),
+    "error":   ("出错", "error", "⚠", theme.ERROR),
+    "confirm": ("请确认", "warning", "", ""),
+    "danger":  ("高危操作", "error", "⚠", theme.DANGER),
+}
+
+
+def message_dialog(parent, title, message, *, kind="info", detail="",
+                   buttons=(("ok", "知道了", "accent"),),
+                   scroll=False) -> "str | None":
+    """统一样式模态对话框——替代 tkinter.messagebox（系统样式与主题割裂）。
+
+    样式对齐 ConfirmDeletePopup：留白页头（语义徽标 + 警示符号 + 标题）+
+    SurfaceCard 正文卡（message 可选中复制，detail 次要说明）+ 右对齐按钮行。
+    buttons 为 ``(key, 文案, 样式)`` 三元组列表，样式 "accent"（强调主操作）/
+    "danger"（红色警示）/ None（中性）。实际布局：**列表首项最靠左（主操作
+    在左）**，末项（取消侧）最靠右——与 Windows 对话框习惯一致。
+    ``scroll=True`` 用可滚动正文承载长文本（如完整 traceback）；非 scroll 模式
+    窗口高度按内容自适应（按钮行永不被裁）。
+    返回所点按钮 key；标题栏 × / Esc 关闭返回 None。grab_set + wait_window
+    模态阻塞（与 messagebox 语义一致）。
+    """
+    badge_text, badge_kind, glyph, glyph_fg = _DIALOG_KINDS.get(kind, _DIALOG_KINDS["info"])
+    win = new_window(parent, title, "640x500" if scroll else "520x250")
+    win.transient(parent)
+    win.resizable(False, False)
+
+    head = tk.Frame(win, bg=theme.BG)
+    head.pack(fill="x", padx=20, pady=(18, 8))
+    StatusBadge(head, text=badge_text, kind=badge_kind, dot=True, bg=theme.BG).pack(side="right")
+    if glyph:
+        tk.Label(head, text=glyph, bg=theme.BG, fg=glyph_fg,
+                 font=(theme.FONT_MONO_NAME, 16, "bold")).pack(side="left", padx=(0, 8))
+    tk.Label(head, text=title, bg=theme.BG, fg=theme.FG_WHITE,
+             font=theme.FONT_TITLE).pack(side="left")
+
+    card = SurfaceCard(win, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=16, pad_y=12)
+    card.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+    if scroll:
+        sf = ScrollFrame(card.body, bg=theme.SURFACE_CARD)
+        sf.pack(fill="both", expand=True)
+        msg_parent, msg_w = sf.inner, 72
+    else:
+        msg_parent, msg_w = card.body, 52
+    SelectableLabel(msg_parent, text=message, bg=theme.SURFACE_CARD, fg=theme.FG,
+                    font=theme.FONT_UI, justify="left", width=msg_w).pack(fill="x")
+    if detail:
+        card.add_divider(pady=6)
+        SelectableLabel(card.body, text=detail, bg=theme.SURFACE_CARD, fg=theme.MUTED,
+                        font=theme.FONT_UI_SMALL, justify="left", width=52).pack(fill="x")
+
+    btn_bar = tk.Frame(win, bg=theme.BG)
+    btn_bar.pack(fill="x", padx=20, pady=(8, 16))
+    result: list = [None]
+
+    def _pick(key):
+        result[0] = key
+        win.destroy()
+
+    cancel_btn = None
+    for key, text, style in reversed(buttons):   # 末项先 pack → 最靠右（取消侧）
+        if style == "danger":
+            btn = tk.Button(btn_bar, text=text, command=lambda k=key: _pick(k),  # style-exempt: style.md §3 豁免：危险操作红色警示
+                            bg=theme.DANGER, fg=theme.FG_WHITE, relief="flat",
+                            activebackground=theme.DANGER_ACTIVE, activeforeground=theme.FG_WHITE,
+                            padx=16, pady=5, font=theme.FONT_UI_BOLD, cursor=CLICK_CURSOR)
+            btn.pack(side="right", padx=(8, 0))
+        else:
+            btn = flat_button(btn_bar, text, lambda k=key: _pick(k),
+                              primary=(style == "accent"))
+            btn.pack(side="right", padx=(8, 0))
+        cancel_btn = cancel_btn or btn   # 聚焦取消侧（列表末项 = 最右）
+    if cancel_btn is not None:
+        cancel_btn.focus_set()
+    # 高度自适应（创建时估算）：正文在 Canvas 窗口项内，reqheight 反馈不到
+    # （卡面高度是 canvas 选项），只能按文本量直接估算窗高——按钮行 pack 在
+    # 最后，被裁即不可点（Esc 会当「否」处理，违反知情确认）。
+    import math
+    import tkinter.font as _tkfont
+    _f = _tkfont.Font(font=theme.FONT_UI)
+    _avail_px = 420            # 卡片正文可用像素宽（520 - 页头/卡边距）
+    _text_lines = sum(
+        max(1, math.ceil(_f.measure(seg) / _avail_px))
+        for seg in message.split("\n"))
+    _need_h = 150 + _text_lines * 21 + (34 if detail else 0)
+    _max_h = max(300, win.winfo_screenheight() - 90)
+    if _need_h > 250:
+        win.geometry(f"520x{min(_need_h, _max_h)}+{win.winfo_x()}+{win.winfo_y()}")
+    win.bind("<Escape>", lambda _e: win.destroy(), add="+")
+    win.grab_set()
+    win.wait_window()
+    return result[0]
+
+
+def show_info(parent, title, message) -> None:
+    """替代 messagebox.showinfo。"""
+    message_dialog(parent, title, message, kind="info")
+
+
+def show_warning(parent, title, message) -> None:
+    """替代 messagebox.showwarning。"""
+    message_dialog(parent, title, message, kind="warning")
+
+
+def show_error(parent, title, message) -> None:
+    """替代 messagebox.showerror。"""
+    message_dialog(parent, title, message, kind="error")
+
+
+def ask_yes_no(parent, title, message, *, confirm_text="确定", danger=False) -> bool:
+    """替代 messagebox.askyesno；Esc / 关闭 = 否。danger=True 走红色警示主按钮。"""
+    key = message_dialog(
+        parent, title, message,
+        kind="danger" if danger else "confirm",
+        buttons=(("yes", confirm_text, "danger" if danger else "accent"),
+                 ("no", "取消", None)),
+    )
+    return key == "yes"
+
+
+def ask_yes_no_cancel(parent, title, message, *, yes_text="是", no_text="否") -> "str | None":
+    """替代 messagebox.askyesnocancel；返回 "yes" / "no" / None（取消或关闭）。"""
+    return message_dialog(
+        parent, title, message, kind="confirm",
+        buttons=(("yes", yes_text, "accent"), ("no", no_text, None), ("cancel", "取消", None)),
+    )
 
 
 class ModalShell:

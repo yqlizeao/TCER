@@ -31,9 +31,9 @@
   - ⑱**输入框用 `widgets.entry_box`**（同色 Frame 包一层留内衬；不用 highlight 边框，style 契约禁止）。
 
 <a id="ranking"></a>
-### 原 #25 排名页
+### 原 #25 排名页（**已移除**，2026-10）
 
-- （`views.ScoreRankingView`）：综合效率分默认即可计算，排名页默认就有数据；仅当会话无 score（no_loc 或无净增行/成本→无产出轴）时回退按 TCER 排名并显示提示条。得分构成面板展示三正交轴（半饱和值 0–1、中点 0.5=与基准持平）+ 加权合成，标签取自 `metric_defs.SCORE_AXES`。`launch.bat` 优先 `pyw`/`pythonw`（`start` 分离，无残留控制台；文件为 GBK 编码保 cmd 中文注释）。
+- **效率榜页签与 `views.ScoreRankingView` 已整体下线**（人为拟合评判不符合工具定位；评估职能由 LLM 报告承接）。主区 6 页签：指标看板/模型对比/趋势分析/项目聚合/LLM 报告/术语库；ActivityBar 页组与 `_render_tab` 序号已同步重排。core 评分计算（`metrics.efficiency_score`/`tier`/`score_decompose`）保留供 CSV/上传/服务端。`launch.bat` 优先 `pyw`/`pythonw`（`start` 分离，无残留控制台；文件为 GBK 编码保 cmd 中文注释）——此条仍有效。
 
 ## 视图与页签
 
@@ -46,7 +46,7 @@
 ### 智能项目/会话视角（选中驱动，无切换开关）
 
 - **视角 = 当前选中**：有选中会话 ⇔ 会话视角；否则项目视角。唯一写点 `app.TcerGui._set_session_view(sid)`（同步 activity_bar 兼容桩）；「项目/会话」分段控件与项目右键「项目视角/会话视角」均已移除，`FilterBar` 不再持有 `view_mode`。
-- **丝滑回程两条**：①再点已选会话卡 = 取消选中回项目汇总（`SessionColumn._select` 识别，`on_select_session(None)`）；②会话视角下点当前项目卡 = 清选中回项目视角，**不重算**（数据没变）。无选中会话时点项目保留「点项目 = 重算」旧语义——右键「刷新此项目」走这条入口，勿改成纯切换。
+- **丝滑回程两条**：①再点已选会话卡 = 取消选中回项目汇总（`SessionColumn._select` 识别，`on_select_session(None)`）；②会话视角下点当前项目卡 = 清选中回项目视角，**不重算**（数据没变）。无选中会话时点项目保留「点项目 = 重算」语义（点当前项目即刷新）。项目右键菜单已收敛为「在资源管理器中打开 + 复制项目路径」两项（「刷新此项目」「复制项目名称」及视角切换项均已移除）。
 - **不自动选第一个会话**：`_on_analysis` 只在「同项目重分析且上一选中会话仍可见（或处于分批构建待选 `_pending_select_sid`）」时延续选中（会话视角保持）；否则 `_set_session_view(None)` 落回项目视角。`_clear_analysis_view` 同步复位视角，保证「sid=None ⇔ 项目视角」不变量处处成立。
 - **选中来源全走同一入口**：会话卡 / 效率榜排名行 / 趋势图定位均触发 `on_select_session`；各消费方（`_render_metrics`/`_update_ranking_view`/`_update_model_compare`/状态栏徽标/「会话记录」按钮）沿用 `mode == "session" and _selected_session_id` 双条件守卫，不变量下行为自洽。
 - **指标看板小分类平铺**：`MetricPanel._build_group` 不再按 `group.subgroups` 渲染「· 基础/行为/质量」标题行，G4 整组一张网格（`group.metrics` 即 `_subgrouped` 保证的扁平序）。子类结构保留在 `metric_defs`（HTML 报告 `html_report.py` 仍按子类分节），勿在看板重新加回小分类行。
@@ -160,4 +160,11 @@
 - **Variable trace 必须随 widget 销毁解除**：`ToggleSwitch`/`SegmentedControl`/`RoundedEntry` 的 `trace_add` 在 `<Destroy>` 里 `trace_remove`（各组件 `_release_var_trace`，判 `e.widget is self` 防「<Destroy> 对后代销毁逐个冒泡」误触发）。tk Variable 以 `PY_VARn` 活在解释器级，不解除则闭包把整棵已销毁控件子树钉在内存里，弹窗每开一次漏一棵。
 - **`<TouchpadScroll>` 解码勿臆测打包方向**：本地 Tk 8.6 无法实证该虚拟事件的 %d 格式，`platform.bind_mousewheel` 按「官方 API 优先」三级回退：`tk::PreciseScrollDeltas`（Tcl 层字符串脚本绑定 + `%D` 替换，gitk 同款）→ %d 多值列表 → 裸 32 位按 WM_MOUSEWHEEL 惯例取**高** 16 位（曾错取低 16 位，垂直滚动会落在水平分量上）。解码纯函数 `touchpad_dy_from_raw` 有离线单测；真机触控板首验仍要等 Tk 9.0.4 打包版。
 
+<a id="unified-dialog"></a>
+### 统一模态对话框与次级窗口收敛（2026-10 大手术第一刀）
 
+- **禁新增 `tkinter.messagebox`**：系统样式与 Monokai Dimmed 主题割裂。全部提示/确认走 `widgets.message_dialog` 及其薄壳 `show_info / show_warning / show_error / ask_yes_no / ask_yes_no_cancel`——样式对齐 ConfirmDeletePopup（语义徽标页头 + SurfaceCard 正文 + 右对齐按钮行），`grab_set + wait_window` 模态阻塞（与 messagebox 语义一致）；`ask_yes_no(danger=True)` 红色警示主按钮（不可恢复删除类）；长文本（traceback/导入清单）传 `scroll=True`。
+- **测试 stub 必须 patch 使用方模块的名字**：对话框函数经 `from .widgets import ...` 已在各模块导入时定型为名字绑定，`monkeypatch.setattr(widgets, "ask_yes_no", ...)` 无效——须逐模块 setattr（`test_termbase_gui._msg_box` 是标准写法：遍历 app/popups/popups_analysis/transcript_view/views）。测试环境 `wait_window` 会真阻塞，漏 stub 即整套挂死（曾以 500s timeout 才定位）。
+- **已移除次级窗口（功能收敛）**：`SessionDetailPopup`（会话详情）、`UserMsgsPopup`（用户消息）、`RadarPopup`（效率雷达）及其全部入口（会话卡双击、右键「查看详情/查看用户消息/查看效率雷达」、趋势图双击/右键雷达项）。看板「用户消息」格后续亦整体移出 SSOT（见第三刀）。
+- **项目右键菜单收敛**：仅「在资源管理器中打开 + 复制项目路径」两项（「刷新此项目」「复制项目名称」已移除；点当前项目卡即刷新）。
+- **第三刀（2026-10 续）**：①「用户消息」格移出 SSOT（RealProjects 列名改字面量）；②SessionComparePopup 叠加雷达删除（`RADAR_AXES`/`radar_resolve_axes`/`radar_normalize` 一并删除，逐回合 Token 曲线保留）；③「设置与工具」提纯为「设置」（仅 LLM 设置/检查更新/自启检查），六个分析工具迁至状态栏版本号旁「分析 ▾」菜单（`StatusBar._open_analysis_menu` + `FilterBar._build_analysis_menu`）；④BaselinesPopup/AdvancedPopup（跳过 LOC 开关）及整条个人基准校准链路删除（`_no_loc` 恒 False，核心参数保留）；⑤FilterBar 任务类型选择器与设置菜单任务单选移除（`get_params` 恒回 AUTO，状态栏「自动任务类型」后缀删除）。- **会话卡片去色（2026-10，C 方案）**：日期圆点与左侧 rail 原按综合效率分评级变色（绿=优秀/良好、橙=待改进/低效、灰=中等），评分体系移除后颜色失去可解释性——整体移除，视觉状态只保留选中高亮。会话卡当前刻意「无状态着色」；若将来加颜色，必须是可解释的客观信号（如中断 abort_reasons）且先在此处登记约定。- **第四刀（2026-10 续）**：看板头部两枚上下文胶囊（`_tag_time` 时间/会话数、`_tag_meta` 来源/分支/子代理/推理）移除——项目视角与视角无关的冗余信息，同数据在会话卡与状态栏已有。看板头部现为：标题·回合 + 耗时 + 会话记录按钮（左）‖ 简要版/完整版切换（右）。

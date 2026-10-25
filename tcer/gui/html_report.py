@@ -8,11 +8,9 @@
 from __future__ import annotations
 
 import html
-from datetime import datetime
 
 from tcer.core import format as fmt
 from tcer.core import metrics
-from tcer.core.export import score_ranking
 from tcer.core.models import SessionReport
 from tcer.gui import metric_defs, theme
 
@@ -126,13 +124,8 @@ def _kpi_section(rep: SessionReport, n_sessions: int | None) -> str:
         _kpi("净增行", d("net_loc")),
         _kpi("TCER（行/百万）", d("tcer"), theme.SUCCESS),
         _kpi("缓存命中率", d("chr")),
+        _kpi("千行代码成本", d("cpe")),
     ]
-    if rep.score is not None:
-        color = theme.GRADE_HEX.get(rep.tier or "", "")
-        cards.append(_kpi("综合效率分", d("score"), color))
-        cards.append(_kpi("评级", d("tier"), color))
-    else:
-        cards.append(_kpi("千行代码成本", d("cpe")))
     return f'<div class="kpis">{"".join(cards)}</div>'
 
 
@@ -162,30 +155,6 @@ def _groups_section(rep: SessionReport) -> str:
     return f'<div class="groups">{"".join(_group_card(rep, g) for g in metric_defs.GROUPS)}</div>'
 
 
-def _score_section(reports: list[SessionReport]) -> str:
-    ranking = score_ranking(reports)
-    if not ranking:
-        return ('<p class="note">无可评分会话（会话未产出可计量净代码，或已禁用 LOC 统计）。</p>')
-    # 综合效率分天然有界 0–100，条形直接按满刻度，无需 P90 截尾。
-    rows = []
-    for label, score, tier in ranking:
-        w = max(1.0, min(100.0, score))
-        color = theme.GRADE_HEX.get(tier, theme.ACCENT)
-        rows.append(
-            f'<div class="barrow"><span class="lbl">{_esc(label)}</span>'
-            f'<span class="track"><span class="fill" style="width:{w:.1f}%;'
-            f'background:{color}"></span></span>'
-            f'<span class="val">{score:.1f}　{_esc(tier)}</span></div>')
-    return "".join(rows)
-
-
-def _grade_pill(tier: str | None) -> str:
-    if not tier:
-        return "-"
-    color = theme.GRADE_HEX.get(tier, "#555")
-    return f'<span class="grade" style="background:{color}">{_esc(tier)}</span>'
-
-
 def _num_td(raw: float | None, text: str) -> str:
     dv = f' data-v="{raw}"' if raw is not None else ""
     return f'<td class="v"{dv}>{_esc(text)}</td>'
@@ -194,8 +163,7 @@ def _num_td(raw: float | None, text: str) -> str:
 def _sessions_table(reports: list[SessionReport]) -> str:
     head = ("<tr><th>会话</th><th>开始时间</th><th class='num'>回合</th>"
             "<th class='num'>总 Token</th><th class='num'>成本</th>"
-            "<th class='num'>净增行</th><th class='num'>TCER</th>"
-            "<th class='num'>综合效率分</th><th>评级</th></tr>")
+            "<th class='num'>净增行</th><th class='num'>TCER</th></tr>")
     rows = []
     for r in reports:
         u = r.usage
@@ -210,8 +178,7 @@ def _sessions_table(reports: list[SessionReport]) -> str:
             + _num_td(r.cost, metric_defs.display(r, "cost"))
             + _num_td(r.net_loc, metric_defs.display(r, "net_loc"))
             + _num_td(r.tcer, metric_defs.display(r, "tcer"))
-            + _num_td(r.score, metric_defs.display(r, "score"))
-            + f"<td>{_grade_pill(r.tier)}</td></tr>")
+            + "</tr>")
     return (f'<div class="scroll"><table class="sortable"><thead>{head}</thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>'
             '<p class="note">点击表头排序。</p>')
@@ -321,9 +288,9 @@ def _shell(title: str, body: str) -> str:
 # Public entry points
 # --------------------------------------------------------------------------- #
 # 项目级报告的可选章节 key（导出弹窗据此勾选；默认全选 = 旧行为）。
-PROJECT_SECTIONS = ("kpi", "groups", "score", "models", "sessions", "details")
+PROJECT_SECTIONS = ("kpi", "groups", "models", "sessions", "details")
 _SECTION_LABELS = {
-    "kpi": "总览 KPI", "groups": "六组指标", "score": "评分与排名",
+    "kpi": "总览 KPI", "groups": "六组指标",
     "models": "模型对比", "sessions": "会话明细表", "details": "每会话完整指标",
 }
 
@@ -338,7 +305,7 @@ def render_project_html(
     n_subagents: int = 0,
     sections: "list[str] | tuple[str, ...] | set[str] | None" = None,
 ) -> str:
-    """项目级自包含 HTML 报告：总览 + 聚合指标 + 综合效率分排名 + 模型对比 + 会话明细。
+    """项目级自包含 HTML 报告：总览 + 聚合指标 + 模型对比 + 会话明细。
 
     ``sections`` 传入要保留的章节 key 子集（见 ``PROJECT_SECTIONS``），未选
     章节直接不拼对应 HTML 块；None = 全选（默认，旧行为不变）。
@@ -356,11 +323,9 @@ def render_project_html(
         body += [
             "<h2>聚合指标（六组分类）</h2>",
             '<p class="note">白色 = 基准值/纯数据；黄色 = 含 magic number，仅作参考。'
-            "综合效率分为三正交轴加权，聚合视图按聚合口径重算后有效。</p>",
+            "聚合视图比率按聚合口径重算（分子和 ÷ 分母和）。</p>",
             _groups_section(agg),
         ]
-    if "score" in sel:
-        body += ["<h2>综合效率分排名</h2>", _score_section(reports)]
     if "models" in sel:
         body += ["<h2>模型对比</h2>", _models_section(reports)]
     if "sessions" in sel:

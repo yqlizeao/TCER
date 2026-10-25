@@ -104,15 +104,15 @@ def test_report_values_golden_strings():
     assert v["added"] == "420"
     assert v["deleted"] == "20"
     assert v["churn"] == "4.8%"              # reworked 20 / added 420
-    assert v["user_msgs"] == "12"
+    assert "user_msgs" not in v              # 「用户消息」格已移出 SSOT（2026-10 收敛）
     assert v["turns"] == "50（+3 跳过）"
     assert v["thinking_count"] == "7"
     assert v["tools"] == "15 次（2 种）"
     assert v["entrypoint"] == "claude-vscode"
-    assert v["task_type"] == "代码创作"
     assert v["edit_ratio"] == "100.0%"       # Edit / (Edit+Write) = 5/5
     assert v["read_write_ratio"] == "2.0"     # Read/(Write+Edit)=10/5; a ratio, not %
-    assert v["tier"] in ("优秀", "良好", "中等", "待改进", "低效")
+    # 人为拟合指标（综合效率分/评级/任务类型/归一化效率）已移出 SSOT
+    assert "task_type" not in v and "tier" not in v and "score" not in v
 
 
 def test_raw_value_scaling_and_none():
@@ -124,7 +124,6 @@ def test_raw_value_scaling_and_none():
     assert metric_defs.raw_value(r, "churn") == r.churn_ratio
     # text metrics are not numeric
     assert metric_defs.raw_value(r, "models") is None
-    assert metric_defs.raw_value(r, "tier") is None
 
 
 def test_numeric_grid_metrics_are_chartable():

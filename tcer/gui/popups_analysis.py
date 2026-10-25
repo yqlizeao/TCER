@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import tkinter as tk
-from pathlib import Path
 from tkinter import ttk
 
 from tcer.core import format as fmt
@@ -21,8 +20,12 @@ from .widgets import (
     StatusBadge,
     SurfaceCard,
     Tooltip,
+    ask_yes_no,
+    ask_yes_no_cancel,
     flat_button,
     new_window as _new_window,
+    show_error,
+    show_info,
 )
 
 
@@ -111,56 +114,18 @@ class SessionComparePopup:
         self._build_overlay(sel)
         for group in GROUPS:
             self._build_group(group, sel)
-
     # ------------------------------------------------------------------ 叠加可视化
     def _build_overlay(self, sel) -> None:
-        """表格上方：叠加雷达（形状感）+ 逐回合 Token 曲线（谁在后期膨胀）。"""
-        import math
-
-        from .metric_defs import raw_value as metric_raw_value
-        from .metric_defs import METRIC_BY_KEY
-        from .popups import RadarPopup
-
+        """表格上方：逐回合 Token 曲线（各自归一到峰值，看形状与谁在后期膨胀）。"""
         card = RoundedFrame(self._container, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
                             outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
         card.pack(fill="x", padx=2, pady=(0, 8))
-        canvas = tk.Canvas(card, bg=theme.SURFACE_CARD, highlightthickness=0, height=280)
+        canvas = tk.Canvas(card, bg=theme.SURFACE_CARD, highlightthickness=0, height=240)
         canvas.pack(fill="x", padx=8, pady=8)
         self._ov_canvas = canvas
 
-        # ---- 左：叠加雷达（RadarPopup 同款绝对刻度归一，多边形叠加）----
-        axes = RadarPopup._resolve_axes()
-        cx, cy, R = 175, 148, 96
-        n = len(axes)
-        for frac in (0.5, 1.0):
-            pts = []
-            for ai in range(n):
-                ang = math.pi / 2 + 2 * math.pi * ai / n
-                pts.extend([cx + R * frac * math.cos(ang),
-                            cy - R * frac * math.sin(ang)])
-            canvas.create_polygon(pts, outline=theme.BORDER, fill="", dash=(2, 3))
-        for ai, (key, _ntype, ref) in enumerate(axes):
-            ang = math.pi / 2 + 2 * math.pi * ai / n
-            canvas.create_line(cx, cy, cx + R * math.cos(ang), cy - R * math.sin(ang),
-                               fill=theme.BORDER)
-            lx, ly = cx + (R + 16) * math.cos(ang), cy - (R + 16) * math.sin(ang)
-            m = METRIC_BY_KEY.get(key)
-            canvas.create_text(lx, ly, text=(m.name if m else key)[:4],
-                               fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-        for j, r in enumerate(sel):
-            color = self._COL_COLORS[j % len(self._COL_COLORS)]
-            pts = []
-            for ai, (key, ntype, ref) in enumerate(axes):
-                norm = RadarPopup._normalize(metric_raw_value(r, key), ntype, ref)
-                ang = math.pi / 2 + 2 * math.pi * ai / n
-                pts.extend([cx + R * norm * math.cos(ang),
-                            cy - R * norm * math.sin(ang)])
-            canvas.create_polygon(pts, outline=color, fill="", width=2)
-        canvas.create_text(cx, 262, text="叠加雷达（绝对刻度，外圈=最优）",
-                           fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-
-        # ---- 右：逐回合 Token 曲线（各自归一到峰值，看形状与膨胀）----
-        ox, oy, ow, oh = 390, 36, 520, 200
+        # 逐回合 Token 曲线（各自归一到峰值；保留原先雷达右侧的曲线部分）
+        ox, oy, ow, oh = 30, 36, 840, 160
         canvas.create_rectangle(ox, oy, ox + ow, oy + oh, outline=theme.BORDER)
         canvas.create_text(ox + ow / 2, oy - 10, text="逐回合 Token（各自归一）",
                            fill=theme.MUTED, font=theme.FONT_UI_SMALL)
@@ -188,6 +153,7 @@ class SessionComparePopup:
             canvas.create_text(ox + j * 180 + 12, ly,
                                text=(r.meta.title or "?")[:18], fill=theme.MUTED,
                                font=theme.FONT_UI_SMALL, anchor="w")
+
 
     def _build_group(self, group, sel) -> None:
         # 先算出该组有内容的行；整组皆空则不渲染
@@ -782,15 +748,10 @@ class SessionTimelinePopup:
     def _on_llm_interpret(self) -> None:
         if self._llm_busy:
             return
-        from tkinter import messagebox
         from tcer.core import llm_prefs
         from tcer.core import llm_prompts
         if not llm_prefs.enabled():
-            # parent=本弹窗：确认/提示框关闭后前台还给本弹窗（无 parent 时以
-            # 主窗为 owner，关闭后本弹窗会被主窗盖住——用户看着像「消失了」）。
-            messagebox.showinfo(
-                "LLM 解读", "请先点击工具栏「LLM设置」完成服务配置。",
-                parent=self._win)
+            show_info(self._win, "LLM 解读", "请先点击工具栏「LLM设置」完成服务配置。")
             return
         scopes = llm_prefs.scopes()
         derived = self._llm_derived()
@@ -802,15 +763,15 @@ class SessionTimelinePopup:
         scope_labels = " · ".join(
             f"[{llm_prefs.SCOPE_LABELS.get(s, s)}]" for s in scopes
         ) or "（未授权数据）"
-        if not messagebox.askyesno(
+        if not ask_yes_no(
+                self._win,
                 "LLM 解读",
                 f"将把本会话数据发送到：\n{llm_prefs.model()} @ "
                 f"{llm_prefs.base_url()}\n\n"
                 f"出境范围：{scope_labels}\n\n"
                 f"预估约 {est:,} tokens（粗估，用户消息按采样上限计）。"
                 "解读结果仅供参考，不参与任何指标计算。\n\n"
-                "生成可能需要数十秒，请保持本窗口开启（关闭则结果丢弃）。",
-                parent=self._win):
+                "生成可能需要数十秒，请保持本窗口开启（关闭则结果丢弃）。"):
             return
         self._llm_busy = True
         btn = getattr(self, "_llm_btn", None)
@@ -829,7 +790,6 @@ class SessionTimelinePopup:
     def _on_dynamics_interpret(self) -> None:
         if self._llm_busy:
             return
-        from tkinter import messagebox
         from threading import Thread
         from tcer.core import llm_prefs, llm_prompts
 
@@ -837,9 +797,8 @@ class SessionTimelinePopup:
         gen_avail = llm_prefs.enabled()
 
         if not ts_avail and not gen_avail:
-            messagebox.showinfo(
-                "相空间分析", "请先点击主界面工具栏「LLM设置」完成服务配置（可配置 TypeSafe Jev 或通用大模型）。",
-                parent=self._win)
+            show_info(self._win, "相空间分析",
+                      "请先点击主界面工具栏「LLM设置」完成服务配置（可配置 TypeSafe Jev 或通用大模型）。")
             return
 
         derived = self._llm_derived()
@@ -847,25 +806,24 @@ class SessionTimelinePopup:
         # 双引擎可用时，询问是否优先使用 TypeSafe Jev 极速判定
         use_typesafe = False
         if ts_avail and gen_avail:
-            ans = messagebox.askyesnocancel(
-                "相空间动力学分析引擎选择",
+            ans = ask_yes_no_cancel(
+                self._win, "相空间动力学分析引擎选择",
                 "检测到您已同时配置 TypeSafe Jev 与通用大模型。\n\n"
                 "是否优先使用【TypeSafe Jev 极速判定】？\n\n"
                 "• [是(Y)]：使用 Jev 快速判定（测定整体形态、各阶段轨迹与四项能力评分）\n"
                 f"• [否(N)]：使用通用大模型（{llm_prefs.model()}）生成长文本解读报告\n"
-                "• [取消]：放弃分析",
-                parent=self._win)
+                "• [取消]：放弃分析")
             if ans is None:
                 return
-            use_typesafe = ans
+            use_typesafe = (ans == "yes")
         elif ts_avail:
-            if not messagebox.askyesno(
+            if not ask_yes_no(
+                    self._win,
                     "TypeSafe Jev 极速相空间分析",
                     f"将向 TypeSafe System One 发起单请求并行评估：\n"
                     f"模型：{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}\n\n"
                     "分析内容：整体收敛形态、关键卡点突破、各关键回合所处阶段与推动力、四项工程能力评分。\n"
-                    "单次请求耗时仅约 300~500ms。\n\n是否立即开始？",
-                    parent=self._win):
+                    "单次请求耗时仅约 300~500ms。\n\n是否立即开始？"):
                 return
             use_typesafe = True
         else:
@@ -898,15 +856,15 @@ class SessionTimelinePopup:
         scope_labels = " · ".join(
             f"[{llm_prefs.SCOPE_LABELS.get(s, s)}]" for s in scopes
         ) or "（未授权数据）"
-        if not messagebox.askyesno(
+        if not ask_yes_no(
+                self._win,
                 "相空间收敛动力学分析",
                 f"将生成专属《相空间动力学报告》并发送数据到：\n{llm_prefs.model()} @ "
                 f"{llm_prefs.base_url()}\n\n"
                 f"出境范围：{scope_labels}\n\n"
                 f"分析框架：把需求说清楚、逐步接近目标、避开惯性套路、最终回到正题的完整收敛过程。\n"
                 f"预估约 {est:,} tokens。报告将作为独立专属报告收入「LLM 报告」页签。\n\n"
-                "生成可能需要数十秒，请保持本窗口开启（关闭则结果丢弃）。",
-                parent=self._win):
+                "生成可能需要数十秒，请保持本窗口开启（关闭则结果丢弃）。"):
             return
         self._llm_busy = True
         btn = getattr(self, "_dyn_btn", None)
@@ -1164,7 +1122,7 @@ class SessionTimelinePopup:
 class ProjectOverviewPopup:
     """项目总览 — 全部项目并排对比（点击表头排序）。
 
-    聚合口径与主界面一致（同一 analyze_project 结果）。综合效率分/评级为三正交轴
+    聚合口径与主界面一致（同一 analyze_project 结果）。评分为三正交轴
     加权，按聚合口径重算后有效（见 AGENTS.md 评分模型）。
     """
 
@@ -1267,7 +1225,7 @@ class ProjectOverviewPopup:
 
     def _export_html(self) -> None:
         from pathlib import Path as _Path
-        from tkinter import filedialog, messagebox
+        from tkinter import filedialog
 
         from .html_report import render_overview_html
 
@@ -1281,7 +1239,7 @@ class ProjectOverviewPopup:
         try:
             _Path(path).write_text(render_overview_html(self._data), encoding="utf-8")
         except OSError as e:
-            messagebox.showerror("导出失败", str(e))
+            show_error(self._win, "导出失败", str(e))
 
     def _sort_by(self, key: str) -> None:
         if self._sort_col == key:
@@ -1595,7 +1553,6 @@ class CrossSourceModelsPopup:
         ("cpe", "CPE", 78),
         ("pbar", "p̄ $/Mt", 76),
         ("chr", "缓存命中", 76),
-        ("score", "综合分", 66),
         ("net", "净产中位", 76),
         ("tpc", "工具/百行", 78),
     ]
@@ -1648,16 +1605,13 @@ class CrossSourceModelsPopup:
         for m in models:
             self.tree.insert(
                 "", "end", text=m["label"], open=True,
-                values=(sum(s["n"] for s in m["sources"]), "", "", "", "", "", "", ""))
-            best = max((s for s in m["sources"] if s.get("score") is not None),
-                       key=lambda s: s["score"], default=None)
+                values=(sum(s["n"] for s in m["sources"]), "", "", "", "", "", ""))
             for s in m["sources"]:
-                tags = ("best",) if best is not None and s is best else ()
                 self.tree.insert(
-                    "", "end", text=f"    {source_label(s['source'])}", tags=tags,
+                    "", "end", text=f"    {source_label(s['source'])}",
                     values=(s["n"], self._f(s.get("tcer"), "0.0"),
                             self._usd(s.get("cpe"), 1), self._usd(s.get("pbar"), 2),
-                            self._pct(s.get("chr")), self._f(s.get("score"), "0.0"),
+                            self._pct(s.get("chr")),
                             self._int(s.get("net_loc")),
                             self._f(s.get("tools_per_100loc"), "0.0")))
 
@@ -1665,8 +1619,7 @@ class CrossSourceModelsPopup:
             win,
             text="怎么读差距来自哪：TCER / 工具每百行 差 = 行为差异（每行代码的往返与 token 消耗）；"
                  "p̄（混合单价）/ CPE 差 = 价格组合差异（缓存结构 + 单价）；净产中位差 = 任务组合差异"
-                 "（你在不同 agent 里干的活不同）。绿色 = 该模型各源中综合分最高。"
-                 "想按源公平比较分数，可先在「计算个人基准 → 按数据源」写入逐源基准。",
+                 "（你在不同 agent 里干的活不同）。",
             bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
             justify="left").pack(fill="x", padx=10, pady=(0, 8))
 
@@ -2099,14 +2052,13 @@ class WeeklyReportPopup:
         if use_llm and not llm_prefs.enabled():
             use_llm = False
         if use_llm:
-            from tkinter import messagebox
-            if not messagebox.askyesno(
+            if not ask_yes_no(
+                    self.win,
                     "周报 LLM 提炼确认",
                     "将把所选周期的会话事实（含用户需求原文摘录、改动文件、产出与成本统计）发送到\n"
                     f"{llm_prefs.model()} @ {llm_prefs.base_url()}\n\n"
                     "出境后不可撤销；结果只进「LLM 报告」收信箱，不参与任何指标计算。\n\n"
-                    "选「否」可改用本地离线规则生成。",
-                    parent=self.win):
+                    "选「否」可改用本地离线规则生成。"):
                 return
 
         # 工作线程只往队列投递 UI 回调，由主线程轮询执行（跨线程直接 after 在

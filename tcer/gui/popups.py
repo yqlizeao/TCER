@@ -8,15 +8,10 @@ from __future__ import annotations
 
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk
 
-from tcer.core import format as fmt
-from tcer.core import metrics
 from . import theme
 from .metric_defs import METRIC_BY_KEY
 from .widgets import (
-    CheckRow,
-    ProgressBarWidget,
     RoundedEntry,
     RoundedFrame,
     ScrollFrame,
@@ -26,8 +21,12 @@ from .widgets import (
     SurfaceCard,
     ToggleSwitch,
     Tooltip,
+    ask_yes_no,
     flat_button,
     new_window,
+    show_error,
+    show_info,
+    show_warning,
 )
 from .platform import CLICK_CURSOR
 
@@ -153,118 +152,6 @@ class UpdatePopup:
                         ).pack(anchor="w", pady=(8, 0))
         except tk.TclError:
             pass
-
-
-class SessionDetailPopup:
-    """会话详情 — metadata + per-model cost breakdown, unified card style."""
-
-    _COST_COLOR = theme.WARNING  # 成本条暖橙（与 WARNING 同源）
-
-    def __init__(self, parent, report) -> None:
-        from tcer.core import metrics as metrics_mod
-        from tcer.core.pricing import label as model_label
-
-        r = report
-        u = r.usage
-        sid = (r.meta.session_id or r.meta.path.stem)[:16]
-        win = _new_window(parent, f"会话详情 · {sid}…", "740x560")
-        self._win = win
-
-        total_cost = metrics_mod.cost_usd(u)
-        hdr = tk.Frame(win, bg=theme.BG)
-        hdr.pack(fill="x", padx=16, pady=(14, 8))
-        StatusBadge(hdr, text=f"{u.total:,} Token · {fmt.fmt_money(total_cost)}",
-                    kind="info", bg=theme.BG).pack(side="right", padx=(10, 0))
-        tk.Label(hdr, text="会话详情", bg=theme.BG, fg=theme.FG_WHITE,
-                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
-
-        body_wrap = tk.Frame(win, bg=theme.BG)
-        body_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 14))
-        sf = ScrollFrame(body_wrap, bg=theme.BG)
-        inner = sf.inner
-
-        # 1. 基本信息圆角卡片
-        meta_card = SurfaceCard(inner, title="基本信息", subtitle=fmt.models_label(u),
-                                bg=theme.SURFACE_CARD, parent_bg=theme.BG)
-        meta_card.pack(fill="x", padx=(0, 6), pady=(2, 12))
-
-        SelectableLabel(meta_card.body, text=r.meta.title or "(无标题)",
-                        bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
-                        font=theme.FONT_UI_BOLD, justify="left").pack(fill="x", pady=(0, 4))
-        meta_card.add_divider(pady=6)
-
-        meta_items = [
-            ("会话 ID", r.meta.session_id or "(无)"),
-            ("工作目录", r.meta.cwd or "(未知)"),
-            ("开始时间", fmt.fmt_dt(u.started_at, fmt.FMT_SECOND)),
-            ("结束时间", fmt.fmt_dt(u.ended_at, fmt.FMT_SECOND)),
-        ]
-        for idx_m, (key, val) in enumerate(meta_items):
-            if idx_m > 0:
-                meta_card.add_divider(pady=4)
-            row = tk.Frame(meta_card.body, bg=theme.SURFACE_CARD)
-            row.pack(fill="x", pady=2)
-            tk.Label(row, text=key, bg=theme.SURFACE_CARD, fg=theme.MUTED, width=10,
-                     anchor="w", font=theme.FONT_UI_SMALL).pack(side="left")
-            SelectableLabel(row, text=str(val), bg=theme.SURFACE_CARD, fg=theme.FG,
-                            font=theme.FONT_UI,
-                            justify="left").pack(side="left", fill="x", expand=True)
-
-        # 2. 逐模型成本圆角卡片
-        _SKIP = {"<synthetic>", ""}
-        per_model = {k: v for k, v in u.per_model.items() if k not in _SKIP and k}
-
-        if per_model:
-            cost_card = SurfaceCard(inner, title="逐模型成本",
-                                    subtitle=f"共 {len(per_model)} 个模型参与",
-                                    bg=theme.SURFACE_CARD, parent_bg=theme.BG)
-            cost_card.pack(fill="x", padx=(0, 6), pady=(0, 12))
-
-            cost_items = []
-            for m, bucket in per_model.items():
-                cost = metrics_mod.cost_usd(bucket, model=m)
-                tok = (bucket.input_tokens + bucket.output_tokens
-                       + bucket.cache_creation_input_tokens + bucket.cache_read_input_tokens)
-                cost_items.append((m, cost, tok))
-            cost_items.sort(key=lambda x: x[1], reverse=True)
-            max_cost = cost_items[0][1] if cost_items else 1
-
-            for idx_c, (m, cost, tok) in enumerate(cost_items):
-                if idx_c > 0:
-                    cost_card.add_divider(pady=8)
-                pct = cost / total_cost * 100 if total_cost else 0
-                name = model_label(m) if m else "(未记录)"
-
-                m_hdr = tk.Frame(cost_card.body, bg=theme.SURFACE_CARD)
-                m_hdr.pack(fill="x")
-                tk.Label(m_hdr, text=name, bg=theme.SURFACE_CARD, fg=theme.FG_WHITE, anchor="w",
-                         font=theme.FONT_VALUE).pack(side="left")
-                tk.Label(m_hdr, text=f"{fmt.fmt_money(cost)}（{pct:.1f}%）",
-                         bg=theme.SURFACE_CARD, fg=theme.FG, anchor="e",
-                         font=theme.FONT_MONO).pack(side="right")
-
-                bar_wrap = tk.Frame(cost_card.body, bg=theme.SURFACE_CARD, pady=4)
-                bar_wrap.pack(fill="x")
-                bar_bg = tk.Frame(bar_wrap, bg=theme.CONTROL_BG, height=6)
-                bar_bg.pack(fill="x")
-                if max_cost > 0 and cost > 0:
-                    tk.Frame(bar_bg, bg=self._COST_COLOR, height=6).place(
-                        relx=0, rely=0, relwidth=min(1.0, cost / max_cost), relheight=1.0)
-
-                tk.Label(cost_card.body, text=f"Token {tok:,}",
-                         bg=theme.SURFACE_CARD, fg=theme.MUTED,
-                         font=theme.FONT_UI_SMALL, anchor="w").pack(anchor="w")
-
-        # 3. 未见文件写入提示卡
-        if r.unseen_writes:
-            warn_card = SurfaceCard(inner, bg=theme.WARN_TINT_BG, parent_bg=theme.BG,
-                                    outline=theme.WARN_TINT_BORDER, pady=10)
-            warn_card.pack(fill="x", padx=(0, 6), pady=(0, 8))
-            SelectableLabel(warn_card.body,
-                            text=f"注意：{r.unseen_writes} 个「未见文件的写入」（LOC 假定为新文件，"
-                                 "若覆写已有文件可能高估新增行）",
-                            bg=theme.WARN_TINT_BG, fg=theme.WARNING, justify="left",
-                            font=theme.FONT_UI_SMALL).pack(fill="x")
 
 
 class ToolCallsPopup:
@@ -591,358 +478,6 @@ class CostBreakdownPopup:
                      font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
 
 
-class BaselinesPopup:
-    """个人基准校准 —— 上下布局、先开窗后校准、可选全部会话 / 逐项目 / 按数据源。
-
-    交互：开窗即在（不预先计算）→ 用户选模式 + 是否过滤离群 → 点「开始校准」→
-    后台计算完成回填结果 → 「应用为基准」写入。无「取消」按钮（标题栏 × / Esc 关闭）。
-
-    回调契约（均由控制器提供，弹窗不碰数据）：
-      on_compute(mode, filter_outliers, callback) —— 后台按模式汇总会话（忽略时间
-        范围），完成后在主线程调 callback(result)。result:
-          mode=="all"         → {"values": {...}, "n": int, "note": str}
-          mode=="per_proj"    → {"per_project": {uid: {"values":{...}, "n":int, "label":str}},
-                                 "note": str}
-          mode=="per_source"  → {"per_source": [{"source": str, "label": str,
-                                 "values": {...}|None, "n": int}], "note": str}
-        任一模式 values 为 None 表示样本不足（result 带 "msg" 说明）。
-      on_apply(mode, payload) —— mode=="all": payload={tcer,cpe} 写全局；
-        mode=="per_proj": payload={uid: {tcer,cpe}} 写逐项目；
-        mode=="per_source": payload={source: {tcer,cpe}} 写逐源（跨源公平比较）。
-    """
-
-    _COLOR = theme.BASELINE_ACCENT
-
-    def __init__(self, parent, *, on_compute, on_apply,
-                 current_project_label: str | None = None) -> None:
-        self._on_compute = on_compute
-        self._on_apply = on_apply
-        self._result = None  # 最近一次计算结果（用于应用）
-
-        win = _new_window(parent, "计算个人基准", "740x560")
-        self._win = win
-
-        hdr = tk.Frame(win, bg=theme.BG)
-        hdr.pack(fill="x", padx=16, pady=(14, 8))
-        btn_bar = tk.Frame(hdr, bg=theme.BG)
-        btn_bar.pack(side="right")
-        self._apply_btn = flat_button(btn_bar, "应用为基准", self._do_apply,
-                                      padx=theme.PAD_L, pady=theme.PAD_S)
-        self._apply_btn.pack(side="right", padx=(6, 0))
-        self._calc_btn = flat_button(btn_bar, "开始校准", self._do_compute,
-                                     primary=True, padx=theme.PAD_L, pady=theme.PAD_S)
-        self._calc_btn.pack(side="right")
-        self._set_apply_enabled(False)
-        tk.Label(hdr, text="计算个人基准", bg=theme.BG, fg=theme.FG_WHITE,
-                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
-
-        body_wrap = tk.Frame(win, bg=theme.BG)
-        body_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 14))
-        sf = ScrollFrame(body_wrap, bg=theme.BG)
-        inner = sf.inner
-        self._inner = inner
-
-        # -- 1. 校准配置卡片（对标 OpenResearch 分组设置卡） --
-        cfg_card = SurfaceCard(inner, title="校准设置",
-                               subtitle="始终基于全部历史会话，不受顶栏时间筛选影响",
-                               bg=theme.SURFACE_CARD, parent_bg=theme.BG)
-        cfg_card.pack(fill="x", padx=(0, 6), pady=(2, 14))
-
-        self._mode = tk.StringVar(value="all")
-        self._mode_rows: dict[str, CheckRow] = {}
-        r_mode = cfg_card.add_row(
-            "计算范围",
-            "全部会话汇总统一基准；逐项目独立校准；或按数据源分别校准以实现跨源公平比较",
-        )
-        self._mode_seg = SegmentedControl(
-            r_mode,
-            [("all", "全部会话"), ("per_proj", "逐项目"), ("per_source", "按数据源")],
-            variable=self._mode,
-            on_change=self._pick_mode,
-            bg=theme.SURFACE_CARD,
-        )
-        self._mode_seg.pack(side="right")
-
-        cfg_card.add_divider()
-
-        self._filter_outliers = tk.BooleanVar(value=True)
-        r_out = cfg_card.add_row(
-            "忽略近零产出的离群会话",
-            f"自动剔除净增行 < {metrics.MIN_BASELINE_NET_LOC} 的会话，防止极小改动放大每千行成本拉偏基准",
-        )
-        ToggleSwitch(r_out, self._filter_outliers, bg=theme.SURFACE_CARD).pack(side="right")
-
-        cfg_card.add_divider()
-
-        self._method = tk.StringVar(value="median")
-        self._method_rows: dict[str, CheckRow] = {}
-        r_meth = cfg_card.add_row(
-            "统计方法",
-            "中位数抗个别极端会话干扰（推荐）；平均数对全体高低值均敏感",
-        )
-        self._method_seg = SegmentedControl(
-            r_meth,
-            [("median", "中位数"), ("mean", "平均数")],
-            variable=self._method,
-            on_change=self._pick_method,
-            bg=theme.SURFACE_CARD,
-        )
-        self._method_seg.pack(side="right")
-
-        # -- 2. 结果区（校准后填充）--
-        res_card = SurfaceCard(inner, title="校准结果", bg=theme.SURFACE_CARD, parent_bg=theme.BG)
-        res_card.pack(fill="x", padx=(0, 6), pady=(0, 8))
-        self._result_frame = res_card.body
-        tk.Label(self._result_frame, text="点击右上角「开始校准」计算你的个人效率基准。",
-                 bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI,
-                 anchor="w").pack(anchor="w", pady=4)
-
-        self._pick_mode("all")
-
-    @staticmethod
-    def _metric_label(key: str) -> str:
-        """SSOT 指标名 + 单位（如「TCER（行/百万）」「千行代码成本（美元/千行）」）。
-        取自 metric_defs.METRIC_BY_KEY——遵守中心指标守则，不自造相似名。"""
-        m = METRIC_BY_KEY.get(key)
-        if not m:
-            return key
-        return f"{m.name}（{m.unit}）" if m.unit else m.name
-
-    @staticmethod
-    def _metric_short(key: str) -> str:
-        """SSOT 指标名（紧凑，逐项目一行两列用）。"""
-        m = METRIC_BY_KEY.get(key)
-        return m.name if m else key
-
-    @staticmethod
-    def _section_header(parent, text: str) -> None:
-        """醒目分区标题：色条 + 加粗白字（区别于淡灰说明文字）。"""
-        bar = tk.Frame(parent, bg=theme.PANEL)
-        bar.pack(fill="x", padx=8, pady=(10, 3))
-        tk.Frame(bar, bg=theme.BASELINE_ACCENT, width=3).pack(side="left", fill="y")
-        tk.Label(bar, text=text, bg=theme.PANEL, fg=theme.FG_WHITE,
-                 font=theme.FONT_UI_BOLD, anchor="w").pack(side="left", padx=(8, 0))
-
-    def _pick_method(self, method: str) -> None:
-        self._method.set(method)
-        for val, row in self._method_rows.items():
-            row.var.set(val == method)
-            row._draw()
-        # 换方法后旧结果失效
-        self._result = None
-        self._set_apply_enabled(False)
-
-    # -- mode radio (single-select via CheckRow rows) --
-    def _pick_mode(self, mode: str) -> None:
-        self._mode.set(mode)
-        for val, row in self._mode_rows.items():
-            row.var.set(val == mode)
-            row._draw()
-        # 换模式后旧结果失效
-        self._result = None
-        self._set_apply_enabled(False)
-        self._clear_results()
-
-    def _set_apply_enabled(self, on: bool) -> None:
-        try:
-            self._apply_btn.config(state="normal" if on else "disabled")
-        except tk.TclError:
-            pass
-
-    def _clear_results(self) -> None:
-        for w in self._result_frame.winfo_children():
-            w.destroy()
-
-    # -- compute (delegates to controller; async) --
-    def _do_compute(self) -> None:
-        self._clear_results()
-        self._result = None
-        self._set_apply_enabled(False)
-        tk.Label(self._result_frame, text="正在扫描并校准历史会话…", bg=theme.SURFACE_CARD,
-                 fg=theme.MUTED, font=theme.FONT_UI).pack(anchor="w", pady=6)
-        try:
-            self._calc_btn.config(state="disabled")
-        except tk.TclError:
-            pass
-        self._on_compute(self._mode.get(), bool(self._filter_outliers.get()),
-                         self._method.get(), self._on_computed)
-
-    def _on_computed(self, result: dict) -> None:
-        """主线程回调：渲染结果。"""
-        try:
-            self._calc_btn.config(state="normal")
-        except tk.TclError:
-            return  # 窗口已关
-        self._clear_results()
-        self._result = result
-        mode = self._mode.get()
-        if mode == "all":
-            self._render_all(result)
-        elif mode == "per_source":
-            self._render_per_source(result)
-        else:
-            self._render_per_project(result)
-
-    def _render_all(self, result: dict) -> None:
-        note = result.get("note") or ""
-        values = result.get("values")
-        if values is None:
-            SelectableLabel(self._result_frame, text=result.get("msg", "样本不足，无法计算基准。"),
-                            bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI,
-                            justify="left").pack(fill="x", pady=4)
-            return
-        head = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
-        head.pack(fill="x", pady=(0, 6))
-        StatusBadge(head, text=f"{result.get('n', 0)} 个会话", kind="info",
-                    bg=theme.SURFACE_CARD).pack(side="right")
-        tk.Label(head, text=f"基于 {result.get('n', 0)} 个会话计算 · {note}".rstrip(" ·"),
-                 bg=theme.SURFACE_CARD, fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
-                 wraplength=460, justify="left").pack(side="left", anchor="w")
-        current = {"tcer": metrics.TCER_BASELINE, "cpe": metrics.CPE_BASELINE}
-        for idx_k, key in enumerate(("tcer", "cpe")):
-            tk.Frame(self._result_frame, bg=theme.DIVIDER, height=1).pack(fill="x", pady=6)
-            self._value_card(self._result_frame, key, values[key], current.get(key))
-        self._set_apply_enabled(True)
-
-    def _render_per_project(self, result: dict) -> None:
-        note = result.get("note") or ""
-        per = result.get("per_project") or []
-        if not per:
-            SelectableLabel(self._result_frame, text=result.get("msg", "没有可用于计算的项目。"),
-                            bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI,
-                            justify="left").pack(fill="x", pady=4)
-            return
-        n_ok = sum(1 for it in per if it.get("values"))
-        head = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
-        head.pack(fill="x", pady=(0, 6))
-        StatusBadge(head, text=f"{n_ok}/{len(per)} 可校准", kind="success" if n_ok else "warning",
-                    bg=theme.SURFACE_CARD).pack(side="right")
-        tk.Label(head, text=f"共 {len(per)} 个项目 · {note}".rstrip(" ·"),
-                 bg=theme.SURFACE_CARD, fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
-                 wraplength=440, justify="left").pack(side="left", anchor="w")
-        for info in per:
-            vals = info.get("values")
-            ok = bool(vals)
-            tk.Frame(self._result_frame, bg=theme.DIVIDER, height=1).pack(fill="x", pady=6)
-            title = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
-            title.pack(fill="x")
-            tk.Label(title, text=info.get("label", info.get("uid", "")),
-                     bg=theme.SURFACE_CARD, fg=theme.FG if ok else theme.MUTED,
-                     font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
-            tk.Label(title, text=f"{info.get('n', 0)} 会话", bg=theme.SURFACE_CARD,
-                     fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e").pack(side="right")
-            if ok:
-                line = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
-                line.pack(fill="x", pady=(2, 0))
-                tk.Label(line, text=f"{self._metric_short('tcer')} {vals.get('tcer', 0):.2f}",
-                         bg=theme.SURFACE_CARD, fg=self._COLOR, font=theme.FONT_MONO,
-                         anchor="w").pack(side="left")
-                tk.Label(line, text=f"{self._metric_short('cpe')} {vals.get('cpe', 0):.2f}",
-                         bg=theme.SURFACE_CARD, fg=self._COLOR, font=theme.FONT_MONO,
-                         anchor="e").pack(side="right")
-            else:
-                SelectableLabel(self._result_frame,
-                                text=info.get("reason", "样本不足，跳过"),
-                                bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI_SMALL
-                                ).pack(fill="x", pady=(2, 0))
-        if n_ok:
-            self._set_apply_enabled(True)
-
-    def _render_per_source(self, result: dict) -> None:
-        note = result.get("note") or ""
-        per = result.get("per_source") or []
-        if not per:
-            SelectableLabel(self._result_frame, text=result.get("msg", "没有可用于计算的会话。"),
-                            bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI,
-                            justify="left").pack(fill="x", pady=4)
-            return
-        n_ok = sum(1 for it in per if it.get("values"))
-        head = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
-        head.pack(fill="x", pady=(0, 4))
-        StatusBadge(head, text=f"{n_ok}/{len(per)} 可校准", kind="success" if n_ok else "warning",
-                    bg=theme.SURFACE_CARD).pack(side="right")
-        tk.Label(head,
-                 text=f"共 {len(per)} 个数据源 · {note}".rstrip(" ·"),
-                 bg=theme.SURFACE_CARD, fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
-                 wraplength=440, justify="left").pack(side="left", anchor="w")
-        SelectableLabel(self._result_frame,
-                        text="逐源基准写入后，各源分数回到「相对该源自己的中位水平」——"
-                             "跨源比较才公平；不写入则所有源共用全局基准。",
-                        bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                        justify="left").pack(fill="x", pady=(2, 4))
-        for info in per:
-            vals = info.get("values")
-            ok = bool(vals)
-            tk.Frame(self._result_frame, bg=theme.DIVIDER, height=1).pack(fill="x", pady=6)
-            title = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
-            title.pack(fill="x")
-            tk.Label(title, text=info.get("label", info.get("source", "")),
-                     bg=theme.SURFACE_CARD, fg=theme.FG if ok else theme.MUTED,
-                     font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
-            tk.Label(title, text=f"{info.get('n', 0)} 会话", bg=theme.SURFACE_CARD,
-                     fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e").pack(side="right")
-            if ok:
-                line = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
-                line.pack(fill="x", pady=(2, 0))
-                tk.Label(line, text=f"{self._metric_short('tcer')} {vals.get('tcer', 0):.2f}",
-                         bg=theme.SURFACE_CARD, fg=self._COLOR, font=theme.FONT_MONO,
-                         anchor="w").pack(side="left")
-                tk.Label(line, text=f"{self._metric_short('cpe')} {vals.get('cpe', 0):.2f}",
-                         bg=theme.SURFACE_CARD, fg=self._COLOR, font=theme.FONT_MONO,
-                         anchor="e").pack(side="right")
-            else:
-                SelectableLabel(self._result_frame,
-                                text=info.get("reason", "样本不足，跳过"),
-                                bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI_SMALL
-                                ).pack(fill="x", pady=(2, 0))
-        if n_ok:
-            self._set_apply_enabled(True)
-
-    def _value_card(self, parent, key, val, cur) -> None:
-        card = tk.Frame(parent, bg=theme.SURFACE_CARD)
-        card.pack(fill="x")
-        hdr = tk.Frame(card, bg=theme.SURFACE_CARD)
-        hdr.pack(fill="x")
-        tk.Label(hdr, text=self._metric_label(key), bg=theme.SURFACE_CARD, fg=theme.FG,
-                 anchor="w", font=theme.FONT_VALUE).pack(side="left")
-        tk.Label(hdr, text=f"{val:.3f}", bg=theme.SURFACE_CARD, fg=self._COLOR,
-                 anchor="e", font=theme.FONT_MONO).pack(side="right")
-        if cur:
-            diff_pct = (val - cur) / cur * 100
-            better = diff_pct < 0 if key == "cpe" else diff_pct > 0
-            cmp_row = tk.Frame(card, bg=theme.SURFACE_CARD)
-            cmp_row.pack(fill="x", pady=(3, 0))
-            tk.Label(cmp_row, text=f"当前基准 {cur:.3f}", bg=theme.SURFACE_CARD,
-                     fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left")
-            StatusBadge(cmp_row, text=f"{diff_pct:+.1f}%",
-                        kind="success" if better else "error",
-                        height=20, padx=7, bg=theme.SURFACE_CARD).pack(side="right")
-
-    def _do_apply(self) -> None:
-        if not self._result:
-            return
-        mode = self._mode.get()
-        if mode == "all":
-            values = self._result.get("values")
-            if not values:
-                return
-            self._on_apply("all", values)
-        elif mode == "per_source":
-            per = self._result.get("per_source") or []
-            payload = {info["source"]: info["values"]
-                       for info in per if info.get("values")}
-            if not payload:
-                return
-            self._on_apply("per_source", payload)
-        else:
-            per = self._result.get("per_project") or []
-            payload = {info["uid"]: info["values"] for info in per if info.get("values")}
-            if not payload:
-                return
-            self._on_apply("per_proj", payload)
-        self._win.destroy()
-
-
 class HtmlSectionsPopup:
     """HTML 报告选节 — 导出项目报告前勾选要包含的章节（默认全选 = 旧行为）。"""
 
@@ -986,116 +521,6 @@ class HtmlSectionsPopup:
             r_slot.title_lbl.bind("<Button-1>", lambda _e, s=sw: s.click())
 
 
-class AdvancedPopup:
-    """高级选项 — 跳过 LOC 开关（产品定位：只分析会话数据，无仓库扫描项）。"""
-
-    def __init__(self, parent, no_loc: bool, on_apply) -> None:
-        win = _new_window(parent, "高级选项", "540x320")
-        self._win = win
-
-        hdr = tk.Frame(win, bg=theme.BG)
-        hdr.pack(fill="x", padx=16, pady=(14, 8))
-        tk.Label(hdr, text="高级选项", bg=theme.BG, fg=theme.FG_WHITE,
-                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
-
-        btn_bar = tk.Frame(win, bg=theme.BG)
-        btn_bar.pack(side="bottom", fill="x", padx=16, pady=(6, 12))
-        no_loc_var = tk.BooleanVar(value=no_loc)
-        flat_button(btn_bar, "应用并重算",
-                    lambda: (on_apply(no_loc_var.get()), win.destroy()),
-                    primary=True, padx=theme.PAD_L, pady=theme.PAD_S).pack(side="right")
-        flat_button(btn_bar, "取消", win.destroy,
-                    padx=theme.PAD_L, pady=theme.PAD_S).pack(side="right", padx=(0, 8))
-
-        body = tk.Frame(win, bg=theme.BG)
-        body.pack(fill="both", expand=True, padx=16, pady=(0, 4))
-        card = SurfaceCard(body, title="计算策略", bg=theme.SURFACE_CARD, parent_bg=theme.BG)
-        card.pack(fill="x", pady=(2, 0))
-        r_slot = card.add_row(
-            "跳过代码行数回放（跳过 LOC）",
-            "仅统计 Token 与成本指标，不计算 TCER、千行代码成本与综合效率分",
-        )
-        ToggleSwitch(r_slot, no_loc_var, bg=theme.SURFACE_CARD).pack(side="right")
-        card.add_divider()
-        SelectableLabel(card.body,
-                        text="全部指标均来自本地会话数据离线回放；TCER 不读取真实代码仓库、不依赖 git。",
-                        bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                        justify="left").pack(fill="x")
-
-
-class UserMsgsPopup:
-    """用户消息 — 卡片式列表。
-
-    ``messages`` 支持两种形态：
-      * ``list[str]``：单会话视图，扁平消息列表。
-      * ``list[tuple[str, list[str]]]``：聚合视图，``(会话标识, 该会话消息)``
-        分组；每组前渲染一条来源标识条（标题 + sessionid，均已限长）。
-    """
-
-    _ACCENT = theme.CHART_PALETTE[0]  # blue accent for badges
-
-    def __init__(self, parent, messages) -> None:
-        groups = self._normalize(messages)
-        total = sum(len(msgs) for _, msgs in groups)
-        total_chars = sum(len(m) for _, msgs in groups for m in msgs)
-        win = _new_window(parent, "用户消息", "740x540")
-        top = tk.Frame(win, bg=theme.BG)
-        top.pack(fill="x", padx=16, pady=(14, 6))
-        tk.Label(top, text="用户消息", bg=theme.BG, fg=theme.FG_WHITE,
-                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
-
-        sf = ScrollFrame(win, bg=theme.BG)
-        sf.canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        inner = sf.inner
-
-        if not total:
-            tk.Label(inner, text="未记录到用户消息", bg=theme.BG, fg=theme.MUTED,
-                     font=theme.FONT_UI, pady=40).pack()
-            return
-
-        summary = f"共 {total} 条消息 · {total_chars:,} 字符"
-        grouped = len(groups) > 1 or (len(groups) == 1 and groups[0][0] is not None)
-        if grouped:
-            summary += f" · {len(groups)} 个会话"
-        StatusBadge(top, text=summary, kind="success", dot=True, bg=theme.BG).pack(side="right")
-
-        idx = 0
-        for label, msgs in groups:
-            if label is not None:
-                self._session_bar(inner, label, len(msgs))
-            for txt in msgs:
-                idx += 1
-                self._msg_card(inner, idx, txt)
-
-    @staticmethod
-    def _normalize(messages) -> "list[tuple[str | None, list[str]]]":
-        """Coerce either input shape into ``[(label|None, [msg, ...]), ...]``."""
-        if messages and isinstance(messages[0], tuple):
-            return [(lbl, list(msgs)) for lbl, msgs in messages]
-        return [(None, list(messages))]
-
-    def _session_bar(self, parent, label: str, count: int) -> None:
-        bar = tk.Frame(parent, bg=theme.BG, padx=6, pady=4)
-        bar.pack(fill="x", pady=(10, 2))
-        tk.Label(bar, text=label, bg=theme.BG, fg=self._ACCENT,
-                 font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
-        tk.Label(bar, text=f"{count} 条", bg=theme.BG, fg=theme.MUTED,
-                 font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
-
-    def _msg_card(self, parent, idx: int, txt: str) -> None:
-        card = RoundedFrame(parent, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
-                            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
-        card.pack(fill="x", padx=4, pady=4)
-        hdr = tk.Frame(card, bg=theme.SURFACE_CARD)
-        hdr.pack(fill="x", padx=12, pady=(8, 2))
-        badge = tk.Label(hdr, text=f"#{idx}", bg=self._ACCENT, fg=theme.FG_WHITE,
-                         font=(theme.FONT_MONO_NAME, 8, "bold"), padx=6, pady=1)
-        badge.pack(side="left")
-        tk.Label(hdr, text=f"{len(txt)} 字符", bg=theme.SURFACE_CARD, fg=theme.MUTED,
-                 font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
-        SelectableLabel(card, text=txt, bg=theme.SURFACE_CARD, fg=theme.FG,
-                        font=theme.FONT_UI, justify="left",
-                        width=60).pack(fill="x", padx=12, pady=(4, 8))
 
 
 class FilesTouchedPopup:
@@ -1311,146 +736,6 @@ class MemoryFilesPopup:
                 relx=0, rely=0, relwidth=size / max_size, relheight=1.0)
 
 
-class RadarPopup:
-    """六维效率雷达 — hexagonal radar chart with absolute-grade normalization.
-
-    Each axis uses a fixed reference scale (grade thresholds or natural bounds)
-    instead of project min/max, so outliers don't distort the shape.
-    """
-
-    # (key, norm_type, ref) — axis label + value text come from the metric SSOT
-    # (metric_defs) so the radar reads exactly like the 指标分类 tab. ``norm_type``
-    # / ``ref`` are radar-only (how the 0–1 polygon radius is scaled).
-    #
-    # ``ref=None`` means "resolve from the live SSOT at construction time" (see
-    # ``_resolve_axes``): TCER / CPE baselines (``metrics.TCER_BASELINE`` /
-    # ``CPE_BASELINE``). Hardcoding them drifted stale after the config moved and
-    # broke silently after "保存个人基准" — the SSOT is the only correct source.
-    # 综合效率分本身有界 0–100，用 "score" 归一（÷100），无需参照基准。
-    _AXES = [
-        ("score", "score",     100.0),
-        ("chr",   "pct100",    1.0),
-        ("cpe",   "grade_inv", None),
-        ("churn", "pct_inv",   1.0),
-        ("read_write_ratio", "ratio", 3.0),
-        ("tcer",  "grade",     None),
-    ]
-
-    @staticmethod
-    def _resolve_axes():
-        """Bind live baselines into the axis refs (SSOT, not frozen)."""
-        refs = {
-            "tcer": metrics.TCER_BASELINE,
-            "cpe": metrics.CPE_BASELINE,
-        }
-        return [
-            (key, ntype, refs[key] if ref is None else ref)
-            for key, ntype, ref in RadarPopup._AXES
-        ]
-
-    def __init__(self, parent, report, all_reports) -> None:
-        import math
-        from .metric_defs import raw_value as metric_raw_value
-        from .metric_defs import display as metric_display, METRIC_BY_KEY
-
-        sid = (report.meta.session_id or report.meta.path.stem)[:16]
-        win = _new_window(parent, f"效率雷达 · {sid}…", "520x560")
-        win.bind("<Escape>", lambda e: win.destroy())  # 无显式关闭按钮,Esc 兜底
-        top = tk.Frame(win, bg=theme.BG)
-        top.pack(fill="x", padx=16, pady=(14, 6))
-        tk.Label(top, text="六维效率雷达", bg=theme.BG, fg=theme.FG_WHITE,
-                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
-
-        tier_ = report.tier or "-"
-        score_val = metric_display(report, "score")
-        StatusBadge(top, text=f"效率分 {score_val} · 评级 {tier_}", kind="info", dot=True, bg=theme.BG).pack(side="right")
-
-        card = SurfaceCard(win, bg=theme.SURFACE_CARD, parent_bg=theme.BG, subtitle=report.meta.title or sid, pad_x=10, pad_y=8)
-        card.pack(padx=14, pady=6)
-
-        # Radar canvas
-        canvas = tk.Canvas(card.body, bg=theme.SURFACE_CARD, highlightthickness=0,
-                           width=400, height=400)
-        canvas.pack(padx=8, pady=4)
-
-        # Normalize each axis to 0-1 using absolute scales; label + value from SSOT.
-        axis_data = []
-        for key, ntype, ref in self._resolve_axes():
-            raw = metric_raw_value(report, key)
-            norm = self._normalize(raw, ntype, ref)
-            label = METRIC_BY_KEY[key].name
-            value_text = metric_display(report, key)
-            axis_data.append((key, label, value_text, norm))
-
-        # Draw hexagonal radar
-        cx, cy, R = 200, 200, 140
-        n = len(axis_data)
-
-        # Concentric grid rings
-        for frac in (0.25, 0.5, 0.75, 1.0):
-            pts = []
-            for ai in range(n):
-                angle = math.pi / 2 + 2 * math.pi * ai / n
-                px = cx + R * frac * math.cos(angle)
-                py = cy - R * frac * math.sin(angle)
-                pts.extend([px, py])
-            canvas.create_polygon(pts, outline=theme.BORDER, fill="", dash=(2, 3))
-        canvas.create_text(cx + R * 0.52, cy - 4, text="50%",
-                           fill=theme.MUTED, font=theme.FONT_MONO)
-
-        # Axes + labels
-        for ai, (key, label, value_text, norm) in enumerate(axis_data):
-            angle = math.pi / 2 + 2 * math.pi * ai / n
-            ex = cx + R * math.cos(angle)
-            ey = cy - R * math.sin(angle)
-            canvas.create_line(cx, cy, ex, ey, fill=theme.BORDER)
-            lx = cx + (R + 24) * math.cos(angle)
-            ly = cy - (R + 24) * math.sin(angle)
-            canvas.create_text(lx, ly, text=label, fill=theme.FG,
-                               font=theme.FONT_UI_SMALL_BOLD)
-            rx = cx + (R + 24) * math.cos(angle)
-            ry = cy - (R + 24) * math.sin(angle) + 14
-            canvas.create_text(rx, ry, text=value_text, fill=theme.MUTED,
-                               font=theme.FONT_MONO)
-
-        # Data polygon
-        data_pts = []
-        for ai, (key, label, value_text, norm) in enumerate(axis_data):
-            angle = math.pi / 2 + 2 * math.pi * ai / n
-            px = cx + R * norm * math.cos(angle)
-            py = cy - R * norm * math.sin(angle)
-            data_pts.extend([px, py])
-        canvas.create_polygon(data_pts, outline=theme.ACCENT,
-                              fill=theme.RADAR_FILL, width=2)
-        for ai in range(0, len(data_pts), 2):
-            px, py = data_pts[ai], data_pts[ai + 1]
-            canvas.create_oval(px - 3, py - 3, px + 3, py + 3,
-                               fill=theme.ACCENT, outline=theme.FG)
-
-        canvas.create_text(cx, 14, text="绝对刻度，外圈 = 100%",
-                           fill=theme.MUTED, font=theme.FONT_UI_SMALL)
-        # 无显式「关闭」按钮:标题栏 × / Esc 即可
-
-    @staticmethod
-    def _normalize(raw, ntype, ref):
-        """Normalize raw value to 0-1 using absolute scale."""
-        if raw is None:
-            return 0.0
-        if ntype == "score":
-            return max(0.0, min(1.0, raw / ref))  # 综合效率分 0–100 → 0–1
-        if ntype == "grade":
-            return max(0.0, min(1.0, raw / ref))
-        if ntype == "grade_inv":
-            return max(0.0, min(1.0, ref / raw)) if raw > 0 else 1.0
-        if ntype == "pct100":
-            return max(0.0, min(1.0, raw / 100.0))
-        if ntype == "pct":
-            return max(0.0, min(1.0, raw))
-        if ntype == "pct_inv":
-            return max(0.0, min(1.0, 1.0 - raw))
-        if ntype == "ratio":
-            return max(0.0, min(1.0, raw / ref))
-        return 0.0
 
 
 class ConfirmDeletePopup:
@@ -1586,6 +871,8 @@ class UploadDialog:
         body_wrap.pack(side="top", fill="both", expand=True, padx=16, pady=(0, 4))
         sf = ScrollFrame(body_wrap, bg=theme.BG)
         self._sf = sf  # 供 _fit_window 读取表单实际高度
+
+
         inner = sf.inner
 
         # -- 1. 上传目标卡片（对标 OpenResearch 圆角细描边卡片） --
@@ -1835,6 +1122,7 @@ class UploadDialog:
                 font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
             select_btn.pack(side="right")
             g["select_btn"] = select_btn
+
 
             # 左侧依次 pack
             arrow_lbl = tk.Label(grp_hdr, text="▸", bg=theme.PANEL_2, fg=theme.MUTED,
@@ -2736,14 +2024,12 @@ class TermLookupPopup:
             return
 
         # 3. 出境确认弹窗（D-4 口径，绝不自动记住）
-        from tkinter import messagebox
-
-        ok = messagebox.askyesno(
+        ok = ask_yes_no(
+            self._win,
             "出境确认",
             f"本地术语库未直接命中「{q}」。\n\n"
             "即将向 TypeSafe Jev 发起 1 次反向语义推断（预估 ~200 Tokens，操作不可撤销）。\n\n"
             "是否继续发送查询？",
-            parent=self._win,
         )
         if not ok:
             self._status_lbl.config(text="用户取消了 Jev 语义推断", fg=theme.MUTED)
@@ -3097,13 +2383,12 @@ class AmbiguityDetectPopup:
         ).pack(expand=True)
 
     def _on_run(self) -> None:
-        from tkinter import messagebox
         from tcer.core.termbase import find_terms_in_text
         from tcer.core import llm_prefs
 
         raw_text = self._text_box.get("1.0", "end").strip()
         if not raw_text:
-            messagebox.showwarning("提示", "请输入待检测文本", parent=self._win)
+            show_warning(self._win, "提示", "请输入待检测文本")
             return
 
         hits = find_terms_in_text(raw_text, self.termbase)
@@ -3135,7 +2420,8 @@ class AmbiguityDetectPopup:
             return
 
         # D-4 每次出境确认
-        if not messagebox.askyesno(
+        if not ask_yes_no(
+            self._win,
             "歧义探测（数据出境确认）",
             "将向 TypeSafe Jev 引擎发送误读探针做语义概率估算：\n"
             f"模型：{llm_prefs.typesafe_model()} @ {llm_prefs.typesafe_base_url()}\n"
@@ -3143,7 +2429,6 @@ class AmbiguityDetectPopup:
             "预计成本：不足 1 美分（单请求 Noul 扇出）。\n\n"
             "判定结果将同时保存至「LLM 报告」收信箱；出境后不可撤销。\n\n"
             "是否立即开始？",
-            parent=self._win,
         ):
             return
 
@@ -3377,7 +2662,6 @@ class TermImportPopup:
     def _load_from_latest_report(self) -> None:
         import json
         import re
-        from tkinter import messagebox
         from tcer.core import llm_reports
 
         reports = llm_reports.load()
@@ -3386,10 +2670,10 @@ class TermImportPopup:
             if getattr(r, "kind", "") == "terms" or (isinstance(r, dict) and r.get("kind") == "terms")
         ]
         if not term_reports:
-            messagebox.showinfo(
+            show_info(
+                self._win,
                 "无考古报告",
                 "未找到术语考古报告。\n请先在会话列表中右键点击会话，选择「术语考古」挖掘新词提案。",
-                parent=self._win,
             )
             return
 
@@ -3432,7 +2716,6 @@ class TermImportPopup:
 
     def _do_import(self) -> None:
         import json
-        from tkinter import messagebox
         from tcer.core.termbase import (
             default_termbase_path,
             load_termbase,
@@ -3443,7 +2726,7 @@ class TermImportPopup:
 
         raw = self._text.get("1.0", "end").strip()
         if not raw:
-            messagebox.showwarning("提示", "请输入 JSON 内容", parent=self._win)
+            show_warning(self._win, "提示", "请输入 JSON 内容")
             return
 
         if raw.startswith("```"):
@@ -3457,7 +2740,7 @@ class TermImportPopup:
         try:
             parsed = json.loads(raw)
         except Exception as e:
-            messagebox.showerror("JSON 解析失败", f"无效的 JSON 格式：\n{e}", parent=self._win)
+            show_error(self._win, "JSON 解析失败", f"无效的 JSON 格式：\n{e}")
             return
 
         entries_to_import: list[dict] = []
@@ -3479,7 +2762,7 @@ class TermImportPopup:
                     entries_to_import.append(item)
 
         if not entries_to_import:
-            messagebox.showwarning("提示", "未在 JSON 中识别到有效的词条数据", parent=self._win)
+            show_warning(self._win, "提示", "未在 JSON 中识别到有效的词条数据")
             return
 
         tb = load_termbase(default_termbase_path())
@@ -3496,12 +2779,13 @@ class TermImportPopup:
             preview_lines.append(f"· {_label}  [{_slug}]{_mark}")
         if len(entries_to_import) > 20:
             preview_lines.append(f"…等共 {len(entries_to_import)} 条")
-        if not messagebox.askyesno(
+        if not ask_yes_no(
+            self._win,
             "确认导入词条",
             f"即将向术语库写入以下 {len(entries_to_import)} 条词条（均为草稿，"
             "可稍后在术语库页签编辑修订）：\n\n" + "\n".join(preview_lines)
             + "\n\n是否确认导入？",
-            parent=self._win,
+            scroll=True,
         ):
             return
 
@@ -3509,18 +2793,18 @@ class TermImportPopup:
             entry = TermEntry.from_dict(d)
             errs = validate_entry(entry)
             if errs:
-                messagebox.showerror(
+                show_error(
+                    self._win,
                     "词条校验失败",
                     f"词条「{entry.pref_label}」存在错误：\n" + "\n".join(errs),
-                    parent=self._win,
                 )
                 return
 
             if entry.slug in existing_slugs:
-                if not messagebox.askyesno(
+                if not ask_yes_no(
+                    self._win,
                     "覆盖确认",
                     f"词条 slug '{entry.slug}' 已存在，是否覆盖更新？",
-                    parent=self._win,
                 ):
                     continue
                 tb.terms = [t for t in tb.terms if t.slug != entry.slug]
@@ -3531,7 +2815,7 @@ class TermImportPopup:
 
         if imported_count > 0:
             save_termbase(tb)
-            messagebox.showinfo("导入成功", f"成功导入 {imported_count} 个词条！", parent=self._win)
+            show_info(self._win, "导入成功", f"成功导入 {imported_count} 个词条！")
             if self.on_imported:
                 self.on_imported()
             self._win.destroy()

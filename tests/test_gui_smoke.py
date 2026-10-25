@@ -116,27 +116,6 @@ def test_project_overview_popup(root, reports):
     p._sort_by("net")
 
 
-def test_session_detail_popup(root, reports):
-    from tcer.gui.popups import SessionDetailPopup
-    from tcer.gui.widgets import SelectableLabel
-
-    SessionDetailPopup(root, reports[0])
-    root.update_idletasks()
-
-    # 元数据值（session ID / 工作目录）渲染为可选中复制文本
-    sels = []
-    def _collect(w):
-        for c in w.winfo_children():
-            if isinstance(c, SelectableLabel):
-                sels.append(c)
-            _collect(c)
-    _collect(root)
-    assert sels, "SessionDetailPopup 未渲染 SelectableLabel"
-    sid = reports[0].meta.session_id or ""
-    assert any(sid and sid in s.get("1.0", "end-1c") for s in sels), \
-        "session ID 应出现在可选中文本中（可拖选复制）"
-
-
 def test_metric_panel_renders(root, reports):
     from tcer.gui.views import MetricPanel
 
@@ -448,31 +427,6 @@ def test_project_column_empty_state_and_preferred(root):
     frame.destroy()
 
 
-def test_ranking_falls_back_to_tcer(root, reports):
-    from tcer.gui.views import ScoreRankingView
-
-    frame = tk.Frame(root)
-    frame.pack()
-    view = ScoreRankingView(frame)
-    # 合成 reports 有净增行与成本 → 有综合效率分:正常模式
-    view.update(reports)
-    assert not view._fallback_tcer
-    # 去掉综合效率分 → 回退按 TCER 排名,提示条出现
-    import copy
-    stripped = [copy.copy(r) for r in reports]
-    for r in stripped:
-        r.score = None
-        r.tier = None
-    view.update(stripped)
-    assert view._fallback_tcer
-    assert view._ranking and view._ranking[0][1] == max(r.tcer for r in stripped)
-    root.update_idletasks()
-    # 回到正常模式提示条隐藏
-    view.update(reports)
-    assert not view._fallback_tcer
-    frame.destroy()
-
-
 def _walk_labels(w, out):
     from tcer.gui.widgets import SelectableLabel
     for c in w.winfo_children():
@@ -487,164 +441,6 @@ def _walk_labels(w, out):
             except tk.TclError:
                 pass
         _walk_labels(c, out)
-
-
-def test_ranking_decompose_uses_ssot_labels(root, reports):
-    """选中会话后三轴分解面板渲染，标签取自指标 SSOT（综合效率分全称 +
-    产出效率/成本/质量三轴中文名）。"""
-    from tcer.gui.views import ScoreRankingView, _SCORE_NAME
-    from tcer.gui.metric_defs import SCORE_AXES
-
-    frame = tk.Frame(root)
-    frame.pack()
-    view = ScoreRankingView(frame)
-    view.update(reports)
-    kids = view._tree.get_children()
-    assert kids, "排名表应有数据行"
-    # 会话视角由控制器按选中驱动（set_view_mode 仅视图层入口）。
-    view.set_view_mode("session", reports[0])
-    root.update_idletasks()
-
-    texts = []
-    _walk_labels(view._decomp_inner, texts)
-    blob = "\n".join(texts)
-    # 全称出现，三轴中文名出现（SSOT 驱动）
-    assert _SCORE_NAME in blob
-    for a in SCORE_AXES:
-        assert a.name in blob, f"轴名缺失: {a.name}"
-    # 概览区一句话解释可见（去术语门槛）
-    assert any("产出效率" in t and "成本"in t and "质量" in t for t in texts)
-    frame.destroy()
-
-
-def test_ranking_row_click_keeps_project_view(root, reports):
-    """排名视图不自转视角：点行只把选中的 sid 通知控制器；视图层视角仍为项目
-    （控制器 mock 未驱动 set_view_mode）。应用层翻转由智能视角统一负责
-    （见 test_smart_view_follows_selection）。"""
-    from tcer.gui.views import ScoreRankingView
-
-    calls = []
-
-    class _Ctl:
-        def on_select_session(self, sid):
-            calls.append(sid)
-
-    frame = tk.Frame(root)
-    frame.pack()
-    view = ScoreRankingView(frame, controller=_Ctl())
-    view.update(reports)
-    assert view._view_mode == "project"
-
-    kids = view._tree.get_children()
-    view._tree.selection_set(kids[0])
-    view._on_tree_select()
-    root.update_idletasks()
-
-    assert view._view_mode == "project", "排名视图自身不得翻转视角（翻转在控制器）"
-    assert calls, "点行应通知控制器选中 sid"
-    texts = []
-    _walk_labels(view._decomp_inner, texts)
-    assert any("洞察与意见 (项目)" in t for t in texts), "右栏应保持项目视角"
-    frame.destroy()
-
-
-def test_ranking_insights_section_renders(root, reports):
-    """洞察与意见区块渲染：至少一条带标记(勾/箭头)的可执行洞察出现在分解面板。"""
-    from tcer.gui.views import ScoreRankingView
-
-    frame = tk.Frame(root)
-    frame.pack()
-    view = ScoreRankingView(frame)
-    view.update(reports)
-    kids = view._tree.get_children()
-    assert kids
-    # 会话视角由控制器按选中驱动（set_view_mode 仅视图层入口）。
-    view.set_view_mode("session", reports[0])
-    root.update_idletasks()
-
-    texts = []
-    _walk_labels(view._decomp_inner, texts)
-    # 章节标题出现（CollapsibleSection 头部可能带 ▼ 前缀，故用 in）
-    assert any("洞察与意见" in t for t in texts)
-    # 至少一条洞察带行首标记（✓ 亮点 / ! 拖累 / → 改进）
-    assert any(t[:1] in ("✓", "!", "→") for t in texts)
-    frame.destroy()
-
-
-def test_ranking_empty_state_shows_project_insights(root):
-    """空态（未选会话）展示项目级跨会话洞察：多会话反复出现的系统性短板。"""
-    import copy
-    from tcer.gui.views import ScoreRankingView
-
-    base = _report("p0", 300)
-    # 造 3 个高返工会话（系统性 churn drag）。
-    reps = []
-    for i in range(3):
-        r = copy.copy(base)
-        r.meta = copy.copy(base.meta)
-        r.meta.session_id = f"p{i}"
-        r.churn_ratio = 0.5
-        reps.append(r)
-
-    frame = tk.Frame(root)
-    frame.pack()
-    view = ScoreRankingView(frame)
-    view.update(reps)  # no selection -> empty state renders project insights
-    root.update_idletasks()
-
-    texts = []
-    _walk_labels(view._decomp_inner, texts)
-    assert any("洞察与意见 (项目)" in t for t in texts), "empty state should show 项目视角洞察"
-    assert any("系统性" in t for t in texts), "systemic drag should surface"
-    frame.destroy()
-
-
-def test_ranking_dual_view_switch(root, reports):
-    """排名页项目/会话双视角：视图层视角只由 set_view_mode（控制器驱动）切换，
-    点排名行只通知 on_select_session（翻转与否由应用层智能视角决定）；程序化选中不触发回调。"""
-    from tcer.gui.views import ScoreRankingView
-
-    calls = []
-
-    class _Ctl:
-        def on_select_session(self, sid):
-            calls.append(("sess", sid))
-
-    frame = tk.Frame(root)
-    frame.pack()
-    view = ScoreRankingView(frame, controller=_Ctl())
-    view.update(reports)
-
-    def texts():
-        out = []
-        _walk_labels(view._decomp_inner, out)
-        return out
-
-    # 项目视角（默认）
-    assert any("洞察与意见 (项目)" in t for t in texts())
-    # 控制器驱动会话视角
-    view.set_view_mode("session", reports[0])
-    root.update_idletasks()
-    assert any("洞察与意见 (会话)" in t for t in texts())
-    assert view._tree.selection()  # 会话行高亮
-    # 回到项目视角，清空选中
-    view.set_view_mode("project")
-    root.update_idletasks()
-    assert any("洞察与意见 (项目)" in t for t in texts())
-    assert not view._tree.selection()
-    # 用户点排名行 → on_select_session 一次；视图层视角保持项目（应用层另行驱动）。
-    calls.clear()
-    kids = view._tree.get_children()
-    view._tree.selection_set(kids[1])
-    view._on_tree_select()
-    assert calls and calls[0][0] == "sess"
-    assert view._view_mode == "project", "排名视图自身不得翻转视角"
-    assert any("洞察与意见 (项目)" in t for t in texts()), "控制器未驱动时右栏保持项目视角"
-    # 程序化选中不触发回调
-    calls.clear()
-    view.set_view_mode("session", reports[2])
-    assert calls == []
-    frame.destroy()
 
 
 def test_ref_uid_disambiguates_same_key_cross_root():
@@ -666,75 +462,6 @@ def test_ref_uid_disambiguates_same_key_cross_root():
     assert views.find_ref_by_uid(refs, views.ref_uid(rb_ref)) is rb_ref
     assert views.find_ref_by_uid(refs, h) is ra_ref  # 裸 key 降级取首个
     assert views.find_ref_by_uid(refs, None) is None
-
-
-def test_user_msgs_popup_renders(root):
-    """UserMsgsPopup 正文用 SelectableLabel(disabled Text) —— 拦构建崩溃 +
-    校验文本写入/置 disabled;不断言确切 height(无头下 count 取值不稳定)。"""
-    from tcer.gui.popups import UserMsgsPopup
-    from tcer.gui.widgets import SelectableLabel
-
-    long_msg = "验证自动换行与高度撑开的多行用户消息文本。" * 15
-    UserMsgsPopup(root, ["短消息", long_msg])
-    root.update_idletasks()
-
-    def _collect(w, acc):
-        for c in w.winfo_children():
-            if isinstance(c, SelectableLabel):
-                acc.append(c)
-            _collect(c, acc)
-
-    labels: list = []
-    _collect(root, labels)
-    assert labels, "UserMsgsPopup 未渲染出 SelectableLabel"
-    # module-scoped root 累积先前测试的 Toplevel，用 any/all 避免与其它弹窗的
-    # SelectableLabel 顺序耦合（labels[0] 可能是早先弹窗的 session id 等）。
-    texts = [s.get("1.0", "end-1c") for s in labels]
-    assert all(s.cget("state") == "disabled" for s in labels), "SelectableLabel 应只读"
-    assert any("短消息" in t for t in texts), "短消息应写入某 SelectableLabel"
-    assert any(int(s.cget("height")) >= 1 for s in labels), "高度应撑开"
-
-
-def test_user_msgs_popup_grouped(root):
-    """聚合视图：``[(会话标识, [消息])]`` 形态渲染来源标识条 + 各会话消息卡片。"""
-    from tcer.gui.popups import UserMsgsPopup
-    from tcer.gui.widgets import SelectableLabel
-
-    grouped = [
-        ("会话一 · abc123def456…", ["来自会话一的消息", "会话一第二条"]),
-        ("会话二 · zzz999…", ["来自会话二的消息"]),
-    ]
-    UserMsgsPopup(root, grouped)
-    root.update_idletasks()
-
-    def _collect(w, acc):
-        for c in w.winfo_children():
-            if isinstance(c, SelectableLabel):
-                acc.append(c)
-            _collect(c, acc)
-
-    labels: list = []
-    _collect(root, labels)
-    texts = [lbl.get("1.0", "end-1c") for lbl in labels]
-    # 3 条消息全部渲染为可选中正文
-    assert any("来自会话一的消息" in t for t in texts)
-    assert any("来自会话二的消息" in t for t in texts)
-    # 来源标识条文字出现在某个普通 Label（非 SelectableLabel）里
-    found_bar = {"one": False, "two": False}
-
-    def _scan_labels(w):
-        import tkinter as tk
-        for c in w.winfo_children():
-            if isinstance(c, tk.Label):
-                t = c.cget("text")
-                if "会话一 ·" in t:
-                    found_bar["one"] = True
-                if "会话二 ·" in t:
-                    found_bar["two"] = True
-            _scan_labels(c)
-
-    _scan_labels(root)
-    assert found_bar["one"] and found_bar["two"], "来源标识条未渲染"
 
 
 def test_session_label_date_title_sid():
@@ -910,9 +637,7 @@ def test_filter_bar_since_routes_to_apply_time_filter(root):
     ctl.calls.clear()
     bar._set_preset("all")
     assert ctl.calls == ["apply"]
-    ctl.calls.clear()
-    bar._on_task_type_change(None)
-    assert ctl.calls == ["reanalyze"]
+    # 任务类型选择器已移除（分析恒走 AUTO），不再有 reanalyze 触发路径
     frame.destroy()
 
 
@@ -962,68 +687,6 @@ def test_update_popup_release_notes_selectable(root):
     _collect(root)
     texts = [s.get("1.0", "end-1c") for s in sels]
     assert any("发布说明正文样例" in t for t in texts), "发布说明应渲染为可选中文本"
-
-
-def test_ranking_insights_are_selectable_no_copy_button(root):
-    """ScoreView 洞察/规则/推荐文本为 SelectableLabel；复制按钮已由选中复制取代。"""
-    import copy
-    from tcer.gui.views import ScoreRankingView
-    from tcer.gui.widgets import SelectableLabel
-
-    base = _report("p0", 300)
-    reps = []
-    for i in range(3):
-        r = copy.copy(base)
-        r.meta = copy.copy(base.meta)
-        r.meta.session_id = f"p{i}"
-        r.churn_ratio = 0.5
-        reps.append(r)
-
-    frame = tk.Frame(root)
-    frame.pack()
-    view = ScoreRankingView(frame)
-    view.update(reps)
-    root.update_idletasks()
-
-    # 分解面板内有 SelectableLabel（洞察/规则/推荐文本）
-    sels = []
-    def _collect(w):
-        for c in w.winfo_children():
-            if isinstance(c, SelectableLabel):
-                sels.append(c)
-            _collect(c)
-    _collect(view._decomp_inner)
-    assert sels, "洞察区应渲染 SelectableLabel"
-
-    # 复制按钮已被选中复制取代 —— 遍历 Button 确认无「复制规则/复制指令」残留
-    btn_texts = []
-    def _scan_btn(w):
-        for c in w.winfo_children():
-            if isinstance(c, tk.Button):
-                btn_texts.append(c.cget("text"))
-            _scan_btn(c)
-    _scan_btn(view._decomp_inner)
-    assert not any("复制规则" in t or "复制指令" in t for t in btn_texts), \
-        "选中复制取代后不应再有复制按钮"
-    frame.destroy()
-
-
-def test_radar_popup_axes_track_live_baselines(root, reports):
-    """RadarPopup 构建不崩 + 归一化刻度从 SSOT 取（不硬编码 76.59/8.22）。
-
-    历史 bug：radar 的 tcer/cpe 轴 ref 硬编码，config 基准迁移后刻度失真。改为
-    _resolve_axes 从 metrics.TCER_BASELINE / CPE_BASELINE 实时取值；综合效率分轴
-    有界 0–100，ref 固定 100（÷100 归一），不依赖基准。
-    """
-    from tcer.gui.popups import RadarPopup
-
-    axes = {k: ref for k, _n, ref in RadarPopup._resolve_axes()}
-    assert axes["tcer"] == metrics.TCER_BASELINE
-    assert axes["cpe"] == metrics.CPE_BASELINE
-    assert axes["score"] == 100.0
-    # 构建弹窗（无头下 canvas 渲染不崩即通过）。
-    RadarPopup(root, reports[0], reports)
-    root.update_idletasks()
 
 
 def test_session_column_pin_flag_marks(root, reports):
@@ -1227,7 +890,7 @@ def test_smart_view_follows_selection():
 
     - 选中会话 → 会话视角；取消选中（再点已选卡，sid=None）→ 项目视角。
     - 会话视角下点当前项目卡 → 清会话选中回项目视角，且不重算（数据没变）。
-    - 无选中会话时点项目 → 保留「点项目 = 重算」语义（含右键「刷新此项目」）。
+    - 无选中会话时点项目 → 保留「点项目 = 重算」语义（点当前项目即刷新）。
     """
     from types import SimpleNamespace
     from tcer.gui.app import TcerGui
@@ -1440,18 +1103,18 @@ def test_llm_timeline_button_and_interpret(root, reports, monkeypatch, tmp_path)
     monkeypatch.setattr(llm_reports, "_path",
                         lambda: tmp_path / "llm_reports.json")
     r = reports[0]
-    import tkinter.messagebox as mb
     called = []
     monkeypatch.setattr(llm_client, "chat",
                         lambda **kw: called.append(kw) or "解读内容")
 
-    # 按钮常驻：未配置也在，点击 → showinfo 提示，零请求
+    # 按钮常驻：未配置也在，点击 → 提示对话框（统一对话框桩），零请求
+    import tcer.gui.popups_analysis as _pa
     monkeypatch.setattr(llm_prefs, "enabled", lambda: False)
     p = SessionTimelinePopup(root, r)
     root.update_idletasks()
     assert p._llm_btn is not None
     infos = []
-    monkeypatch.setattr(mb, "showinfo",
+    monkeypatch.setattr(_pa, "show_info",
                         lambda *a, **k: infos.append(a) or "ok")
     p._on_llm_interpret()
     assert called == [] and infos
@@ -1465,11 +1128,11 @@ def test_llm_timeline_button_and_interpret(root, reports, monkeypatch, tmp_path)
     p2 = SessionTimelinePopup(root, r, load_user_texts=lambda: ["用户意图消息"],
                               on_report_saved=saved_ids.append)
     root.update_idletasks()
-    monkeypatch.setattr(mb, "askyesno", lambda *a, **k: False)
+    monkeypatch.setattr(_pa, "ask_yes_no", lambda *a, **k: False)
     p2._on_llm_interpret()
     assert called == [] and p2._llm_busy is False   # 拒绝确认 → 零请求
 
-    monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
+    monkeypatch.setattr(_pa, "ask_yes_no", lambda *a, **k: True)
     p2._on_llm_interpret()   # 占位提示已 pack、busy 置位（也起了真 daemon 线程）
     assert p2._llm_busy is True
     # 同意路径：同步直调 worker（测试 root 无 mainloop，跨线程 after 注册不了，
@@ -1693,8 +1356,8 @@ def test_llm_reports_view(root, monkeypatch, tmp_path):
     v.select_report("r_proj")
     v._copy_markdown()
     assert v._copy_btn.cget("text") == "已复制 ✓"
-    import tkinter.messagebox as mb
-    monkeypatch.setattr(mb, "askyesno", lambda *a, **k: True)
+    from tcer.gui import views as _views
+    monkeypatch.setattr(_views, "ask_yes_no", lambda *a, **k: True)
     v._delete_selected()   # 二次确认（mock 放行）
     assert len(v._tree.get_children()) == 3
     v._clear_all()
@@ -1994,8 +1657,10 @@ def test_app_session_llm_confirm_every_time(root, reports, monkeypatch, tmp_path
     calls = []
     monkeypatch.setattr(llm_client, "chat", lambda **kw: calls.append(kw) or "文本")
 
+    # 统一对话框：确认走 tcer.gui.app.ask_yes_no（名字绑定），逐次记录调用
+    import tcer.gui.app as _app
     answers = []
-    monkeypatch.setattr("tkinter.messagebox.askyesno",
+    monkeypatch.setattr(_app, "ask_yes_no",
                         lambda *a, **k: answers.append(k) or False)
 
     monkeypatch.setattr(TcerGui, "refresh_projects", lambda self: None)
@@ -2006,14 +1671,14 @@ def test_app_session_llm_confirm_every_time(root, reports, monkeypatch, tmp_path
     assert len(answers) == 1 and not calls and not app._llm_tasks
 
     # 确认：放行一次
-    monkeypatch.setattr("tkinter.messagebox.askyesno", lambda *a, **k: True)
+    monkeypatch.setattr(_app, "ask_yes_no", lambda *a, **k: True)
     app.run_session_llm_interpret(reports[0])
     _drain_llm_queue(app, root)
     assert len(calls) == 1
 
     # 再次派发：必须再次确认（每次都弹，无「记住」机制）
     answers2 = []
-    monkeypatch.setattr("tkinter.messagebox.askyesno",
+    monkeypatch.setattr(_app, "ask_yes_no",
                         lambda *a, **k: answers2.append(k) or False)
     app.run_session_llm_interpret(reports[0])
     assert len(answers2) == 1 and len(calls) == 1, "第二次派发也要先确认，拒绝则零新增请求"
@@ -2405,26 +2070,4 @@ def test_card_resize_fast_without_redundant_pil(root):
     for c in cards:
         c.frame.destroy()
     container.destroy()
-
-
-def test_score_ranking_grade_bar_resize_skip(root):
-    """测试效率榜等级条在宽度大于 640 且未变动时短路跳过重绘。"""
-    from tcer.gui.views import ScoreRankingView
-    v = ScoreRankingView(root)
-    v._grade_canvas.configure(width=800)
-    v._draw_grade_bar(force=True)
-    call_count = [0]
-    orig_delete = v._grade_canvas.delete
-    def wrapped_delete(*args, **kwargs):
-        call_count[0] += 1
-        return orig_delete(*args, **kwargs)
-    v._grade_canvas.delete = wrapped_delete
-
-    # 连续改变宽度 800 -> 850（bar_w 始终锁定为 min(w-24, 640) = 640）
-    for w in range(800, 850, 5):
-        v._grade_canvas.configure(width=w)
-        v._draw_grade_bar()
-    # 由于 bar_w 封顶且 filter 没变，不应重复清空重绘
-    assert call_count[0] == 0, f"宽度变动时应跳过不必要重绘，实际重绘了 {call_count[0]} 次"
-    v._grade_canvas.delete = orig_delete
 

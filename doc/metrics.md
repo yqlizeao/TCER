@@ -35,7 +35,9 @@ Claude 缓存写按 TTL 分档：1h 档单价 = 5m 档 × 1.6（`CACHE_1H_PREMIU
 
 > 比率类指标的 Bash 盲区：`read_write_ratio` / `exploration_ratio` 只统计 Read/Grep/Glob 等专用工具；Claude Code 中大量阅读与搜索经 `Bash`（cat/rg/find）完成，不计入，故这两项实测普遍低于直觉，仅作粗略趋势参考。
 
-## 综合效率分 v2（取代 CTEI）
+## 综合效率分 v2（取代 CTEI）【已弃用 · 2026-10】
+
+> **GUI 展示已移除**（效率榜与看板评分随人为拟合评判清理下线）。本章公式保留——`core/metrics` 仍按此计算，供 CSV 导出、上传与服务端聚合消费；勿据本章恢复 GUI 展示。
 
 代码入口：`core/metrics.py` 的 `score_axes` / `efficiency_score` / `_half_sat` / `output_axis` / `cost_axis` / `quality_axis` / `_shrink` / `tier`；GUI 构成面板标签取自 `metric_defs.SCORE_AXES`。
 

@@ -2,7 +2,7 @@
 
 One place for every color / font / grade mapping, so views stay free of magic
 numbers. ``LEVEL_COLORS`` maps the semantic ``level`` tag carried by each metric
-definition (in ``metric_defs``) to a hex color; ``GRADE_HEX`` colors 综合效率分
+definition (in ``metric_defs``) to a hex color for graded display
 bars by tier. No business logic lives here.
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ INFO_TINT_BORDER = "#263f66"     # 信息徽标暗蓝 1px 细描边
 SCROLL_THUMB = "#3a3a3c"
 SCROLL_THUMB_HOVER = "#5c5c60"
 
-# 效率榜项目视角三轴离散度须线 (min–max 区间条)
+# 三轴离散度须线 (min–max 区间条)——原效率榜视觉，现用于 LLM 报告图表。
 AXIS_SPREAD = "#4a5a6a"
 
 # 前景色与排版标尺 (Typography & Text)
@@ -125,17 +125,6 @@ VALUE_NEUTRAL = FG          # 数值默认 = 正文色（层级靠字重/等宽�
 # Per-row "best" marker (模型对比) — gold highlights the best value in each row
 VALUE_BEST = "#eab308"      # 璀璨金 — 该行最优值
 
-# 综合效率分 tier → bar/cell fill color (used by the ranking bar + trend dots).
-# 「良好」「低效」两档为暗底可读性提亮（原 #3655b5/#C7444A 对 PANEL_2 对比度 <2:1，
-# 8-9pt 小字看不清——档位色文字/色点同源此表，只动档位映射不动 ERROR/ACCENT 本体）。
-GRADE_HEX = {
-    "优秀": "#22c55e",
-    "良好": "#3b82f6",
-    "中等": "#eab308",
-    "待改进": "#f97316",
-    "低效": "#ef4444",
-}
-
 # Six-group framework — header background per group.
 GROUP_COLORS = {
     "G1": "#263238",        # 会话概况: 高级深蓝灰/Slate
@@ -143,7 +132,7 @@ GROUP_COLORS = {
     "G3": "#0e7490",        # 缓存效率: 活力青翠/Cyan-Teal (高通量轻快感)
     "G4": "#15803d",        # 代码产出与质量: 充盈翠绿/Emerald (代码创作生机)
     "G5": "#a15209",        # 成本分析: 温暖金褐/Amber-Bronze (商业与价值感)
-    "G6": "#7e22ce",        # 综合评分: 典雅皇家紫/Royal Purple (高阶智能)
+    "G6": "#7e22ce",        # 效率基准: 典雅皇家紫/Royal Purple (高阶智能)
     "G_NEUTRAL": "#263238",
 }
 
@@ -247,7 +236,7 @@ TOKEN_COLORS = {
 # 图表分类 palette（多列/多模型循环取色），与 TOKEN_COLORS 同族色。
 CHART_PALETTE = (ACCENT, SUCCESS, LEVEL_COMPOUND, WARNING, "#c586c0", "#56ADBC")
 SECTION_ACCENT = "#56ADBC"    # 弹窗内小节标题淡蓝/青
-BASELINE_ACCENT = LEVEL_COMPOUND   # 基准值黄（BaselinesPopup）
+BASELINE_ACCENT = LEVEL_COMPOUND   # 基准值黄（TCER/成本基准参考线）
 MEDAL_COLORS = (LEVEL_COMPOUND, "#a335ee", ACCENT)   # 排名奖牌 金/紫/蓝
 DANGER = ERROR                # 危险操作红（删除确认主按钮）
 DANGER_ACTIVE = "#a8353a"     # 危险按钮按下/悬停态
@@ -263,11 +252,6 @@ TREE_HEAD_PRESSED = CONTROL_BG  # 表头按下
 
 # 趋势叠加折线固定 palette（最多 4 条线）。
 OVERLAY_COLORS = (ACCENT, SUCCESS, WARNING, "#c586c0")
-# 趋势背景评级带填充（键 = SCORE_TIER_BANDS 评级名）。
-SCORE_BAND_FILL = {
-    "优秀": "#162816", "良好": "#162030", "中等": "#2e2814",
-    "待改进": "#2e1e14", "低效": "#2e1414",
-}
 # 仪表盘折线色 = GROUP_COLORS 各分类的「提亮同色相版」（展示局部色）。
 DASH_LINE_COLORS = {
     "G1": "#949494",   # 中性灰

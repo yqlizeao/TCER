@@ -6,7 +6,7 @@ explanation, semantic color level, and how to extract+format its value from a
 popup render from ``GROUPS``, so adding or renaming a metric is a one-line change
 here. No Tkinter dependency.
 
-Code keys stay abbreviated (``chr`` / ``score`` / ``ntcer`` …); only the ``name``
+Code keys stay abbreviated (``chr`` / ``tcer`` / ``cpe`` …); only the ``name``
 shown to users is full Chinese (TCER is the sole English abbreviation kept).
 """
 from __future__ import annotations
@@ -57,20 +57,6 @@ def _subgrouped(gid: str, name: str, subgroups: list[Subgroup]) -> Group:
 APPROX_KEYS = frozenset({"total_tokens"})
 
 
-def _tier_band_hint() -> str:
-    """评级带速览串（从 metrics.SCORE_TIER_BANDS 派生，避免与 config 漂移）。"""
-    bands = _metrics.SCORE_TIER_BANDS
-    parts: list[str] = []
-    for i, (name, lo) in enumerate(bands):
-        if i == 0:
-            parts.append(f"{name}>{lo:g}")
-        elif i == len(bands) - 1:
-            parts.append(f"{name}<{bands[i - 1][1]:g}")
-        else:
-            parts.append(f"{name}{lo:g}–{bands[i - 1][1]:g}")
-    return " · ".join(parts)
-
-
 GROUPS: list[Group] = [
     Group("G1", "会话概况", [
         Metric("turns", "请求数", "",
@@ -98,8 +84,6 @@ GROUPS: list[Group] = [
                "公式：相邻回合时间戳间隔的中位数（只统计 1–30 分钟的间隔）\n"
                "怎么看：你的「出手节奏」——间隔长说明每次回来都带着想清楚的新指令。\n"
                "说明：<1 分钟的连发与 >30 分钟的离开不计入。", "basic"),
-        Metric("user_msgs", "用户消息", "",
-               "你主动发送的消息条数，点击查看全部；与「请求数」对比可看交互密度（一次提问可触发多次 API 请求）。", "basic"),
         Metric("entrypoint", "启动方式", "",
                "会话启动入口：claude-vscode（VS Code 扩展）、claude-cli（命令行）等。", "basic"),
         Metric("memory_files", "项目记忆文件", "个",
@@ -354,7 +338,7 @@ GROUPS: list[Group] = [
                "Oh My Pi / Pi 逐响应累加美元。"
                "显著偏离 1.0 提示价表错价、漏 1h 缓存档溢价、或未匹配模型走了默认价。", "basic"),
     ]),
-    Group("G6", "综合评分", [
+    Group("G6", "效率基准", [
         Metric("tcer", "TCER", "行/百万",
                "核心指标：每烧 100 万 Token，AI 写出了多少行净代码——衡量「划不划算」。\n"
                "怎么看：越高越省；新功能通常 >50，参考中位数约 76.6；调试/重构天然偏低，正常。\n"
@@ -363,34 +347,14 @@ GROUPS: list[Group] = [
                "公式：会话末 1/3 回合的分段 TCER ÷ 首 1/3 回合的分段 TCER\n"
                "推荐：≥0.5；明显低于 0.5 说明上下文越拖越重、后期在空转\n"
                "说明：定位「长会话什么时候开始不划算」——衰减明显时收口新开一场往往更省；结合会话时间线里的压缩事件竖线看恢复情况。", "basic", "up"),
-        Metric("score", "综合效率分", "",
-               "0–100 的总分：把「产出效率 · 成本 · 质量」三件正交的事各自和参考线比、\n"
-               "按会话规模收缩后加权平均得来。分越高越好。\n"
-               f"怎么看：{_tier_band_hint()}。\n"
-               "三条轴：产出效率(每百万 token 的任务归一产出) · 成本(每千行花费，已含缓存省的钱) · 质量(少返工/少工具报错/先读后写；无质量信号时其权重重分给产出/成本轴)。\n"
-               "小会话会被拉向中间分，避免「写 5 行就登顶」；零净产会话（纯聊天/调研）不评分。", "compound", "up"),
-        Metric("tier", "评级", "",
-               "上面「综合效率分」对应的等级标签：优秀/良好/中等/待改进/低效，"
-               "颜色和排名页的条形图一致。", "basic"),
-        Metric("task_type", "任务类型", "",
-               "你这次主要在干啥：写新代码(创作)、改老代码(维护)、还是不写代码(调研/审查)。\n"
-               "选对很重要——下面的「归一化效率」靠它把不同任务拉到同一起跑线公平比。点下拉看三类区别(创作100% · 维护45% · 非编码20%)。", "compound"),
-        Metric("ttaf", "任务类型系数", "",
-               "不同任务天生产出的代码量不同：写新功能多、调试少。这是给当前类型的「难度折扣」(创作1.0 / 维护0.45 / 非编码0.2)。\n"
-               "怎么看：系数越小，说明这类任务产出代码本就少，不代表你效率差。\n"
-               "它只是「归一化效率」的中间量，一般不用单独盯着看。", "basic"),
-        Metric("ntcer", "归一化效率", "行/百万",
-               "把 TCER 按任务难度折扣还原后的效率，让「调试」和「写新功能」能公平比较。\n"
-               "怎么看：越高越好；跨任务类型比较时，看这个比看 TCER 更公平。\n"
-               "例：调试 TCER=30，但调试本就难，还原后 ≈75，其实不差。", "compound", "up"),
         Metric("bl_tcer", "TCER 基准", "行/百万",
-               "一条「参考线」，不是你的成绩——「综合效率分」拿你的 TCER 跟它比来打分。上方数值即当前生效基准（默认来自框架自带的 16 个样本会话）。\n"
-               "想改成「跟你自己的历史平均」比，可用本项目数据生成个人基准来替换。\n"
-               "生效优先级：逐项目基准 > 逐数据源基准（跨源公平比较用，「计算个人基准 → 按数据源」生成）> 全局。", "basic"),
+               "一条「参考线」，不是你的成绩——拿你的 TCER 跟它比即可粗判相对水平。上方数值即当前生效基准（默认来自框架自带的 16 个样本会话）。", "basic"),
         Metric("bl_cpe", "成本基准", "美元/千行",
-               "「综合效率分」里给每千行成本打分用的参考线，不是你的成绩。上方数值即当前生效基准（默认来自框架样本），可用个人基准替换（逐项目/逐数据源/全局，优先级同 TCER 基准）。", "basic"),
+               "每千行代码花费的参考线，不是你的成绩。上方数值即当前生效基准（默认来自框架样本），可用个人基准替换（逐项目/逐数据源/全局，优先级同 TCER 基准）。", "basic"),
     ]),
 ]
+
+ALL_KEYS = {m.key for group in GROUPS for m in group.metrics}
 
 
 # Non-numeric concept notes appended to the glossary popup.
@@ -404,10 +368,10 @@ CONCEPT_NOTES: list[tuple[str, str, str]] = [
      "added 会高估、deleted 会遗漏（Claude 的 originalFile 到达后会回溯修正）。"
      "Edit 不受影响（只看增量）。「盲写文件」计数是潜在高估的上界。", "basic"),
     ("如何提高效率",
-     "想提升 TCER/综合效率分？几个实用建议：①保持提示词稳定（提高缓存命中率）；"
+     "想提升 TCER？几个实用建议：①保持提示词稳定（提高缓存命中率）；"
      "②用 Edit 而非 Write 修改已有文件（更精确，返工率低）；"
      "③让 AI 先 Grep/Glob 搜索再动手（提高读写比）；"
-     "④选对任务类型（调试的 TCER 天然低于新功能，这很正常）。", "basic"),
+     "④长会话留意效率衰减比，必要时收口新开一场。", "basic"),
 ]
 
 
@@ -439,14 +403,6 @@ def _turns_display(u) -> str:
     return fmt.fmt_int(total)
 
 
-def _task_category_name(category_key: str | None) -> str | None:
-    """将任务大类 key 转换为中文名称"""
-    if not category_key:
-        return None
-    category_info = _metrics.TASK_CATEGORIES.get(category_key)
-    return category_info["name"] if category_info else category_key
-
-
 # ============================================================
 # Metric engine — the single source of truth for extraction + formatting.
 #
@@ -463,10 +419,10 @@ _SESSION_FMT: dict[str, str] = {
     # G1 — text / custom display (see _DISPLAY_EXTRACTORS), grade is plain text
     "subagent": "text", "turns": "text", "started": "text", "last_time": "text",
     "duration": "text", "active_duration": "text", "models": "text", "tools": "text", "entrypoint": "text",
-    "task_type": "text", "tier": "text", "cli_version": "text",
+    "cli_version": "text",
     "thread_source": "text", "approval_policy": "text",
     "sandbox_policy": "text", "reasoning_effort": "text",
-    "latency": "int", "user_msgs": "int",
+    "latency": "int",
     "user_gap_median": "float:0.0",
     # G2
     "total_tokens": "int", "input": "int", "output": "int",
@@ -502,10 +458,7 @@ _SESSION_FMT: dict[str, str] = {
     "cost": "money", "cost_per_mt": "money2", "cpe": "money",
     "turn_cost_share": "pct",
     # G6
-    "tcer": "float:0.0", "efficiency_decay": "float:0.00", "score": "float:0.0", "ttaf": "float:0.00",
-    "ntcer": "float:0.00",
-    "score_output_axis": "float:0.00", "score_cost_axis": "float:0.00",
-    "score_quality_axis": "float:0.00",
+    "tcer": "float:0.0", "efficiency_decay": "float:0.00",
     "bl_tcer": "float:0.00", "bl_cpe": "float:0.00",
 }
 
@@ -648,7 +601,6 @@ _DISPLAY_EXTRACTORS = {
     "approval_policy": lambda r: r.meta.approval_policy or "-",
     "sandbox_policy": lambda r: r.meta.sandbox_policy or r.meta.permission_profile or "-",
     "reasoning_effort": lambda r: r.meta.reasoning_effort or "-",
-    "task_type": lambda r: _task_category_name(r.task_type) or "-",
     "memory_files": lambda r: str(len(r.memory_files)) if r.memory_files is not None else "-",
     "image_inputs": lambda r: fmt.fmt_int(r.usage.image_count + r.usage.local_image_count),
     "compaction_cost": _compaction_cost_display,
@@ -766,9 +718,6 @@ def format_plot(key: str, raw: float, m: "Metric | None") -> str:
 
 
 # All keys referenced by GROUPS — used by tests to guard against drift
-# between the definitions and ``report_values``.
-ALL_KEYS = {m.key for group in GROUPS for m in group.metrics}
-
 # Flat key → Metric index across every group (session metrics; MODEL_GROUPS
 # appended below once defined).
 METRIC_BY_KEY: dict[str, Metric] = {m.key: m for group in GROUPS for m in group.metrics}
@@ -1013,39 +962,3 @@ def model_tip(key: str) -> str | None:
     sk = _MODEL_TIP_KEY.get(key)
     m = METRIC_BY_KEY.get(sk) if sk else None
     return f"{m.name}\n{m.tip}" if m else None
-
-
-# ============================================================
-# 综合效率分 v2 · 三正交轴分解（排名页 → 得分构成）.
-# Keys match export.score_decompose. Labels / formula / tip / 中性阈值 live here
-# (SSOT), so the ranking tab no longer defines its own. Each axis ∈[0,1]，
-# 0.5 = 与参考线持平（半饱和变换的中性点）。
-# ============================================================
-
-@dataclass(frozen=True)
-class ScoreAxis:
-    key: str        # matches a key from export.score_decompose (output/cost/quality)
-    name: str       # display label (产出效率 / 成本 / 质量)
-    formula: str    # short formula shown beside the bar
-    tip: str = ""   # plain-language explanation (hover), SSOT for the ranking tab
-
-
-SCORE_AXES: list[ScoreAxis] = [
-    ScoreAxis("output", "产出效率", "每百万token净产出",
-              "任务归一后，每百万 Token 写出的净代码行数，经半饱和映射到 0–1。\n"
-              "0.5 = 与参考线持平；越接近 1 越高产。是综合效率分权重最大的一轴。"),
-    ScoreAxis("cost", "成本", "每千行花费",
-              "每千行代码的花费（已含缓存省下的钱），越省成本轴越高。\n"
-              "0.5 = 与参考线持平；越接近 1 越省钱。缓存收益已计入这里，不再单列。"),
-    ScoreAxis("quality", "质量", "少返工/少报错/先读后写",
-              "与代码量无关的产出质量：少返工、少工具报错、先读后写。\n"
-              "0.5 附近为中性；越接近 1 说明写得越稳。无质量信号的会话按中性计。"),
-]
-
-# An axis ≥ this sits at/above the neutral baseline (good); below it drags the score down.
-SCORE_AXIS_NEUTRAL = 0.5
-
-
-def format_axis(val: float) -> str:
-    """Format a score-axis value (2 dp), matching the ranking tab."""
-    return f"{val:.2f}"

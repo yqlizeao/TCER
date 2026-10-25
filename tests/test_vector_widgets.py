@@ -273,11 +273,11 @@ def test_rounded_frame_and_activity_bar_pill_collapse(tk_root):
     bar = views.ActivityBar(top, ctrl)
     tk_root.update_idletasks()
 
-    # 默认展开态：宽度 148，胶囊文字标签已挂载
+    # 默认展开态：宽度 148，胶囊文字标签已挂载（6 页：效率榜已移除）
     assert bar._collapsed is False
     assert widgets.to_int(bar.frame.cget("width")) == views.ActivityBar._W_EXPANDED
     assert bar._brand_lbl.winfo_manager() == "pack"
-    assert len(bar._page_keys) == 7
+    assert len(bar._page_keys) == 6  # 效率榜页签已移除
 
     # 切换选中页签：高亮态切换至 PANEL_2 + BORDER
     bar.set_page_active(3)

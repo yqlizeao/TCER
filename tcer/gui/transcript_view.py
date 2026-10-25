@@ -27,7 +27,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 from tcer.core import tool_summary as S
 from tcer.core import transcript as T
@@ -46,6 +46,7 @@ from .widgets import (
     flat_button,
     get_rounded_rect_img,
     new_window,
+    show_error,
 )
 
 # --------------------------------------------------------------------------- #
@@ -1814,7 +1815,7 @@ class TranscriptWindow:
         try:
             Path(path).write_text(self._markdown(), encoding="utf-8")
         except OSError as e:
-            messagebox.showerror("导出失败", str(e), parent=self._win)
+            show_error(self._win, "导出失败", str(e))
             return
         self._flash_status(f"已导出：{Path(path).name}")
 

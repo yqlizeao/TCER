@@ -813,13 +813,13 @@ def test_term_import_load_from_archaeology_report_headless(tmp_path, monkeypatch
         assert "ghost-frame" in content
         assert "幽灵帧" in content
 
-        # 执行解析并导入（mock 弹窗族避免测试环境阻塞真 modal 窗口；
-        # _do_import 现含「AI 提案人裁决」导入前确认清单 askyesno）
-        from tkinter import messagebox
-        monkeypatch.setattr(messagebox, "showinfo", lambda *args, **kwargs: None)
-        monkeypatch.setattr(messagebox, "askyesno", lambda *args, **kwargs: True)
-        monkeypatch.setattr(messagebox, "showerror", lambda *args, **kwargs: None)
-        monkeypatch.setattr(messagebox, "showwarning", lambda *args, **kwargs: None)
+        # 执行解析并导入（stub 统一对话框族避免测试环境阻塞真 modal 窗口；
+        # _do_import 现含「AI 提案人裁决」导入前确认清单 ask_yes_no）
+        import tcer.gui.popups as _popups
+        monkeypatch.setattr(_popups, "show_info", lambda *args, **kwargs: None)
+        monkeypatch.setattr(_popups, "show_warning", lambda *args, **kwargs: None)
+        monkeypatch.setattr(_popups, "show_error", lambda *args, **kwargs: None)
+        monkeypatch.setattr(_popups, "ask_yes_no", lambda *args, **kwargs: True)
         popup._do_import()
         assert len(imported) == 1
 
