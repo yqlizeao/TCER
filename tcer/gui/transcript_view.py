@@ -37,7 +37,16 @@ from . import transcript_md as MD
 from .metric_defs import format_value
 from .platform import CLICK_CURSOR, FILE_MANAGER_NAME, bind_mousewheel, open_in_file_manager
 from .views import source_icon, ui_icon
-from .widgets import FlatMenu, RoundedPill, Tooltip, flat_button, get_rounded_rect_img, new_window
+from .widgets import (
+    FlatMenu,
+    RoundedPill,
+    SegmentedControl,
+    StatusBadge,
+    Tooltip,
+    flat_button,
+    get_rounded_rect_img,
+    new_window,
+)
 
 # --------------------------------------------------------------------------- #
 # 常量
@@ -1015,7 +1024,7 @@ class TranscriptWindow:
             bg=theme.TRANSCRIPT_ACTION_BG, hover_bg=theme.TRANSCRIPT_ACTION_HOVER)
         self._resume_menu_btn.pack(side="left", fill="y")
         self._nav_box = tk.Frame(row1, bg=theme.PANEL, padx=2, pady=1,
-                                 highlightthickness=1, highlightbackground=theme.BORDER)
+                                 highlightthickness=1, highlightbackground=theme.BORDER_SUBTLE)
         self._nav_box.pack(side="right", padx=(theme.PAD_M, 0))
         self._prev_btn = self._icon_btn(self._nav_box, "chevron-left", "上一个会话",
                                         lambda: self._step_session(-1), bg=theme.PANEL)
@@ -1028,13 +1037,15 @@ class TranscriptWindow:
         self._next_btn.pack(side="left")
         self._src_lbl = tk.Label(row1, bg=theme.PANEL_2)
         self._src_lbl.pack(side="left", padx=(0, theme.PAD_S))
+        self._proj_badge_box = tk.Frame(row1, bg=theme.PANEL_2)
+        self._proj_badge_box.pack(side="left", padx=(0, theme.PAD_S))
         self._title_full = ""
         self._title_font = tkfont.Font(font=theme.FONT_HEADING)
         self._title_lbl = tk.Label(row1, text="", bg=theme.PANEL_2, fg=theme.FG_WHITE,
                                    font=theme.FONT_HEADING, anchor="w", width=1)
         self._title_lbl.pack(side="left", fill="x", expand=True)
         self._title_lbl.bind("<Configure>", lambda _e: self._fit_title())
-        tk.Frame(hdr, bg=theme.BORDER, height=1).pack(fill="x")
+        tk.Frame(hdr, bg=theme.DIVIDER, height=1).pack(fill="x")
         # 第 2 行：左信息条 + 右工具组（对齐 cc-switch 两行页头；工具组先 pack，窄窗时
         # 只挤压信息条，按钮不被截断）
         row2 = tk.Frame(hdr, bg=theme.PANEL_2)
@@ -1045,23 +1056,26 @@ class TranscriptWindow:
         self._info.pack(side="left", fill="x", expand=True)
         self._reason_lbl = tk.Label(hdr, text="", bg=theme.PANEL_2, fg=theme.MUTED,
                                     font=theme.FONT_UI_SMALL, anchor="w")
-        tk.Frame(win, bg=theme.BORDER, height=1).pack(fill="x")
+        tk.Frame(win, bg=theme.DIVIDER, height=1).pack(fill="x")
 
         self._outline_btn = self._icon_btn(inner, "panel-right", "显示 / 隐藏对话目录",
                                            self._toggle_outline,
                                            bg=theme.CONTROL_BG if self._outline_on else theme.PANEL_2)
         self._outline_btn.pack(side="left", padx=(theme.PAD_M, theme.PAD_S))
-        seg = tk.Frame(inner, bg=theme.PANEL, padx=2, pady=2)
-        seg.pack(side="left", padx=(0, theme.PAD_XS))
         self._pills: dict = {}
-        for key, label in ((T.VIEW_ALL, "全部"), (T.VIEW_CONVERSATION, "对话"),
-                           (T.VIEW_CHANGES, "改动")):
-            p = RoundedPill(seg, text=label, width=48, height=22, radius=theme.RADIUS_S,
-                            fill=theme.PANEL, bg=theme.PANEL, fg=theme.MUTED,
-                            font=theme.FONT_UI_SMALL,
-                            command=lambda _p=None, k=key: self._set_view(k))
-            p.pack(side="left", padx=1)
-            self._pills[key] = p
+        self._view_seg = SegmentedControl(
+            inner,
+            [(T.VIEW_ALL, "全部"), (T.VIEW_CONVERSATION, "对话"), (T.VIEW_CHANGES, "改动")],
+            value=self._view,
+            on_change=self._set_view,
+            height=26,
+            bg=theme.PANEL_2,
+            track_fill=theme.PANEL,
+            active_fill=theme.CONTROL_BG,
+            outline=theme.BORDER_SUBTLE,
+            radius=theme.RADIUS_M,
+        )
+        self._view_seg.pack(side="left", padx=(0, theme.PAD_XS))
         self._refresh_pills()
         opt_on = self._expand_all or self._show_injected
         self._opt_btn = self._icon_btn(inner, "sliders", "显示选项", self._open_options_menu,
@@ -1169,7 +1183,7 @@ class TranscriptWindow:
         # 数据推断说明（非告警）：弱化显示；页头「N 条提示」保留醒目入口
         t.tag_configure("warn_msg", font=small, foreground=theme.MUTED, spacing3=pad_s)
         # 分轮线：一行带删除线的空格（1px 线）
-        t.tag_configure("divider", font=small, overstrike=True, overstrikefg=theme.BORDER,
+        t.tag_configure("divider", font=small, overstrike=True, overstrikefg=theme.DIVIDER,
                         foreground=bg, wrap="none", spacing1=theme.PAD_L,
                         spacing3=theme.PAD_L)
         # 提问气泡（每轮独立 qb:<n> 控制 lmargin1=lmargin2=box_left 与 rmargin，结合
@@ -1177,7 +1191,7 @@ class TranscriptWindow:
         t.tag_configure("q_gap_top", font=(ui[0], theme.PAD_M), spacing1=0, spacing3=0)
         t.tag_configure("q_meta", font=small, foreground=theme.MUTED, justify="right",
                         spacing1=2, spacing3=pad_xs)
-        t.tag_configure("q_line", spacing1=1, spacing2=2, spacing3=1, font=ui, wrap="none")
+        t.tag_configure("q_line", spacing1=1, spacing2=4, spacing3=1, font=ui, wrap="none")
         t.tag_configure("q_bub", foreground=theme.FG_WHITE, background=BUBBLE_BG)
         t.tag_configure("q_pad", font=(ui[0], 6), spacing1=0, spacing3=0, background=BUBBLE_BG)
         t.tag_configure("q_more", font=small, foreground=theme.CYAN, justify="right",
@@ -1201,7 +1215,7 @@ class TranscriptWindow:
                         background=theme.PANEL, lmargin1=IND, lmargin2=IND,
                         rmargin=theme.PAD_M, lmargincolor=bg, rmargincolor=bg,
                         spacing1=3, spacing3=3, wrap="none")
-        t.tag_configure("chg_sep", font=(ui[0], 1), overstrike=True, overstrikefg=theme.BORDER,
+        t.tag_configure("chg_sep", font=(ui[0], 1), overstrike=True, overstrikefg=theme.DIVIDER,
                         foreground=bg, lmargin1=IND, lmargin2=IND, rmargin=theme.PAD_M,
                         lmargincolor=bg, rmargincolor=bg, spacing1=0, spacing3=0, wrap="none")
         t.tag_configure("chg_path", foreground=theme.CODE_MINT)
@@ -1213,7 +1227,7 @@ class TranscriptWindow:
         t.tag_configure("tl_head", font=small, foreground=theme.MUTED,
                         lmargin1=IND, lmargin2=IND, lmargincolor=bg, rmargincolor=bg,
                         spacing1=pad_xs, spacing3=pad_xs)
-        t.tag_configure("tl_bold", font=theme.FONT_UI_SMALL_BOLD, foreground=theme.FG)
+        t.tag_configure("tl_bold", font=theme.FONT_UI_SMALL_BOLD, foreground=theme.MUTED)
         t.tag_configure("tl_err", foreground=theme.ERROR)
         t.tag_configure("tl_more", font=small, foreground=theme.MUTED,
                         lmargin1=IND + theme.PAD_L, lmargin2=IND + theme.PAD_L,
@@ -1282,7 +1296,7 @@ class TranscriptWindow:
         for sfx, base in (("", IND), ("_n", DETAIL_IND)):
             t.tag_configure(f"md_p{sfx}", font=ui, foreground=theme.FG, lmargin1=base,
                             lmargin2=base, lmargincolor=bg, rmargincolor=bg,
-                            spacing1=1, spacing2=2, spacing3=1, wrap="none")
+                            spacing1=1, spacing2=4, spacing3=1, wrap="none")
             for lv, f in ((1, theme.FONT_TITLE), (2, theme.FONT_HEADING),
                           (3, theme.FONT_UI_BOLD), (4, theme.FONT_UI_BOLD),
                           (5, theme.FONT_UI_BOLD), (6, theme.FONT_UI_BOLD)):
@@ -1297,20 +1311,20 @@ class TranscriptWindow:
                 self._li_lmargin2[f"md_oli{dp}{sfx}"] = lm_n
                 t.tag_configure(f"md_li{dp}{sfx}", font=ui, foreground=theme.FG, lmargin1=lm,
                                 lmargin2=lm_b, lmargincolor=bg, rmargincolor=bg,
-                                spacing1=1, spacing2=2, spacing3=1, wrap="none")
+                                spacing1=1, spacing2=4, spacing3=1, wrap="none")
                 t.tag_configure(f"md_li{dp}{sfx}_cont", font=ui, foreground=theme.FG,
                                 lmargin1=lm_b, lmargin2=lm_b, lmargincolor=bg, rmargincolor=bg,
-                                spacing1=1, spacing2=2, spacing3=1, wrap="none")
+                                spacing1=1, spacing2=4, spacing3=1, wrap="none")
                 t.tag_configure(f"md_oli{dp}{sfx}", font=ui, foreground=theme.FG, lmargin1=lm,
                                 lmargin2=lm_n, lmargincolor=bg, rmargincolor=bg,
-                                spacing1=1, spacing2=2, spacing3=1, wrap="none")
+                                spacing1=1, spacing2=4, spacing3=1, wrap="none")
                 t.tag_configure(f"md_oli{dp}{sfx}_cont", font=ui, foreground=theme.FG,
                                 lmargin1=lm_n, lmargin2=lm_n, lmargincolor=bg, rmargincolor=bg,
-                                spacing1=1, spacing2=2, spacing3=1, wrap="none")
+                                spacing1=1, spacing2=4, spacing3=1, wrap="none")
             t.tag_configure(f"md_quote{sfx}", font=italic, foreground=theme.MUTED,
                             lmargin1=base + theme.PAD_M, lmargin2=base + theme.PAD_M,
                             lmargincolor=bg, rmargincolor=bg,
-                            spacing1=1, spacing2=2, spacing3=1, wrap="none")
+                            spacing1=1, spacing2=4, spacing3=1, wrap="none")
             t.tag_configure(f"md_codeblock{sfx}", font=mono, foreground=theme.FG,
                             background=theme.TRANSCRIPT_CODE_BG, lmargin1=base + theme.PAD_S,
                             lmargin2=base + theme.PAD_S, rmargin=theme.PAD_M,
@@ -1320,7 +1334,7 @@ class TranscriptWindow:
                             lmargin1=base + theme.PAD_S, lmargin2=base + theme.PAD_S,
                             rmargin=theme.PAD_M, lmargincolor=bg, rmargincolor=bg,
                             spacing1=pad_xs, spacing3=pad_xs)
-            t.tag_configure(f"md_hr{sfx}", font=small, overstrike=True, overstrikefg=theme.BORDER,
+            t.tag_configure(f"md_hr{sfx}", font=small, overstrike=True, overstrikefg=theme.DIVIDER,
                             foreground=bg, wrap="none", lmargin1=base, lmargin2=base,
                             lmargincolor=bg, rmargincolor=bg,
                             spacing1=theme.PAD_M, spacing3=theme.PAD_M)
@@ -1345,14 +1359,14 @@ class TranscriptWindow:
                         background=theme.TRANSCRIPT_TABLE_ALT_BG, spacing1=0, spacing3=0)
         t.tag_configure("md_td_alt_inner", font=(ui[0], 2),
                         background=theme.TRANSCRIPT_TABLE_ALT_BG, spacing1=0, spacing3=0)
-        t.tag_configure("md_trule", font=(ui[0], 2), overstrike=True, overstrikefg=theme.BORDER,
+        t.tag_configure("md_trule", font=(ui[0], 2), overstrike=True, overstrikefg=theme.DIVIDER,
                         foreground=bg, spacing1=0, spacing3=0)
         # 无底色间距行（避免污染行内代码底色高度）
         t.tag_configure("md_gap", font=(ui[0], pad_s), spacing1=0, spacing3=0)
-        t.tag_configure("md_gap_h_top", font=(ui[0], 7), spacing1=0, spacing3=0)
-        t.tag_configure("md_gap_h_bot", font=(ui[0], 3), spacing1=0, spacing3=0)
-        t.tag_configure("md_gap_p", font=(ui[0], 5), spacing1=0, spacing3=0)
-        t.tag_configure("md_gap_li", font=(ui[0], 2), spacing1=0, spacing3=0)
+        t.tag_configure("md_gap_h_top", font=(ui[0], 9), spacing1=0, spacing3=0)
+        t.tag_configure("md_gap_h_bot", font=(ui[0], 4), spacing1=0, spacing3=0)
+        t.tag_configure("md_gap_p", font=(ui[0], 6), spacing1=0, spacing3=0)
+        t.tag_configure("md_gap_li", font=(ui[0], 3), spacing1=0, spacing3=0)
         t.tag_configure("md_wrap_gap", font=(ui[0], 2), spacing1=0, spacing3=0)
         t.tag_configure("md_code_more", font=small, foreground=theme.CYAN,
                         lmargin1=IND + theme.PAD_S, lmargin2=IND + theme.PAD_S,
@@ -1590,7 +1604,7 @@ class TranscriptWindow:
         w = font.measure(text) + (24 if icon is not None else 0) + 20
         p = RoundedPill(parent, text=text, icon=icon, width=w, height=22,
                         radius=theme.RADIUS_M, fill=theme.CONTROL_BG, bg=theme.PANEL_2,
-                        fg=theme.FG, font=fspec, command=command)
+                        fg=theme.FG, font=fspec, command=command, outline=theme.BORDER_SUBTLE)
         if tip:
             Tooltip(p, tip)
         return p
@@ -1599,9 +1613,17 @@ class TranscriptWindow:
         info = self._info
         for w in info.winfo_children():
             w.destroy()
+        for w in self._proj_badge_box.winfo_children():
+            w.destroy()
         self._reason_lbl.pack_forget()
         if tr is None:
             return
+        if tr.cwd:
+            proj_name = Path(tr.cwd).name or tr.cwd
+            if len(proj_name) > 20:
+                proj_name = proj_name[:18] + "…"
+            StatusBadge(self._proj_badge_box, text=proj_name, kind="neutral",
+                        bg=theme.PANEL_2, radius=theme.RADIUS_M).pack(side="left")
 
         def sep():
             tk.Label(info, text="·", bg=theme.PANEL_2, fg=theme.MUTED,
@@ -1798,6 +1820,8 @@ class TranscriptWindow:
 
     # ------------------------------------------------------------------ 视图 / 选项
     def _refresh_pills(self) -> None:
+        if hasattr(self, "_view_seg") and self._view_seg is not None:
+            self._view_seg.set(self._view, notify=False)
         for k, p in self._pills.items():
             on = k == self._view
             p.set_state(fill=theme.CONTROL_BG if on else theme.PANEL,

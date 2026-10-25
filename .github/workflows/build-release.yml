@@ -35,7 +35,34 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          # Python 3.14 官方 Windows / macOS 构建内置最新 Tcl/Tk 9.0.4 与标准库 compression.zstd
+          python-version: '3.14'
+
+      - name: Verify Python & Tcl/Tk runtime
+        run: |
+          python - <<'PY'
+          import sys, tkinter
+          tcl_ver = tkinter.Tcl().eval("info patchlevel")
+          print(f"Python {sys.version} | Tcl/Tk patchlevel: {tcl_ver} | TkVersion: {tkinter.TkVersion}")
+          # 三层圆角管线必须逐层实测，不能只测 SDF 编码器——SVG 层回归会静默
+          # 回退到低层，用户机器上才第一次跑到。CI（Tk 9.0.4）是 SVG 档的
+          # 唯一机器验证点。
+          from tcer.gui import widgets
+          png = widgets._render_sdf_png_bytes(48, 24, 6, "#232323", "#1e1e1e", "#303030", 1)
+          assert png.startswith(b"\x89PNG\r\n\x1a\n") and len(png) > 64
+          root = tkinter.Tk()
+          root.withdraw()
+          assert widgets._has_tk9_svg(root), "Tk 9 原生 SVG PhotoImage 探测失败"
+          img = widgets.get_rounded_rect_img(root, 64, 28, 8, "#232323", "#1e1e1e",
+                                             outline="#303030", outline_width=1)
+          assert img is not None and img.width() == 64 and img.height() == 28
+          cv = tkinter.Canvas(root, width=120, height=60, bg="#1e1e1e", highlightthickness=0)
+          widgets.draw_rounded_box(cv, 120, 60, 8, "#232323", "#1e1e1e",
+                                   outline="#303030", tag="ci_box")
+          assert cv.find_withtag("ci_box_tl"), "9-slice 四角贴图未绘制"
+          print(f"SVG tier OK (TkVersion={tkinter.TkVersion}) | 9-slice OK")
+          root.destroy()
+          PY
 
       - name: Stamp version from tag      # v1.2.3 -> tcer/__init__.py __version__="1.2.3"
         if: startsWith(github.ref, 'refs/tags/')
@@ -89,6 +116,16 @@ jobs:
               --add-data "tcer/config${{ matrix.sep }}tcer/config" \
               --add-data "tcer/gui/assets${{ matrix.sep }}tcer/gui/assets" \
               tcer/__main__.py
+          fi
+
+      - name: Verify PyInstaller bundle
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            test -x "dist/TCER.app/Contents/MacOS/TCER"
+            du -sh "dist/TCER.app"
+          else
+            test -s "dist/TCER.exe"
+            ls -lh "dist/TCER.exe"
           fi
 
       - name: Package asset              # 资产名含版本号：TCER-windows-x64-v1.5.2.exe / TCER-macos-arm64-v1.5.2.zip

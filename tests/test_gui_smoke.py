@@ -501,7 +501,7 @@ def test_ranking_decompose_uses_ssot_labels(root, reports):
     view.update(reports)
     kids = view._tree.get_children()
     assert kids, "排名表应有数据行"
-    # 会话视角由 set_view_mode 进入（点行只选中、不翻转视角）。
+    # 会话视角由控制器按选中驱动（set_view_mode 仅视图层入口）。
     view.set_view_mode("session", reports[0])
     root.update_idletasks()
 
@@ -518,8 +518,9 @@ def test_ranking_decompose_uses_ssot_labels(root, reports):
 
 
 def test_ranking_row_click_keeps_project_view(root, reports):
-    """点排名行不翻转视角：项目视角下点行 → 仍是项目视角（右栏保持项目洞察），
-    只把选中的 sid 通知控制器。视角切换单一入口 = 左上角分段控件。"""
+    """排名视图不自转视角：点行只把选中的 sid 通知控制器；视图层视角仍为项目
+    （控制器 mock 未驱动 set_view_mode）。应用层翻转由智能视角统一负责
+    （见 test_smart_view_follows_selection）。"""
     from tcer.gui.views import ScoreRankingView
 
     calls = []
@@ -539,7 +540,7 @@ def test_ranking_row_click_keeps_project_view(root, reports):
     view._on_tree_select()
     root.update_idletasks()
 
-    assert view._view_mode == "project", "点排名行不得翻转到会话视角"
+    assert view._view_mode == "project", "排名视图自身不得翻转视角（翻转在控制器）"
     assert calls, "点行应通知控制器选中 sid"
     texts = []
     _walk_labels(view._decomp_inner, texts)
@@ -557,7 +558,7 @@ def test_ranking_insights_section_renders(root, reports):
     view.update(reports)
     kids = view._tree.get_children()
     assert kids
-    # 会话视角由 set_view_mode 进入（点行只选中、不翻转视角）。
+    # 会话视角由控制器按选中驱动（set_view_mode 仅视图层入口）。
     view.set_view_mode("session", reports[0])
     root.update_idletasks()
 
@@ -599,8 +600,8 @@ def test_ranking_empty_state_shows_project_insights(root):
 
 
 def test_ranking_dual_view_switch(root, reports):
-    """排名页项目/会话双视角：视角只由 set_view_mode（左上角分段控件）切换。
-    点排名行只选中会话（触发 on_select_session），绝不翻转视角；程序化选中不触发回调。"""
+    """排名页项目/会话双视角：视图层视角只由 set_view_mode（控制器驱动）切换，
+    点排名行只通知 on_select_session（翻转与否由应用层智能视角决定）；程序化选中不触发回调。"""
     from tcer.gui.views import ScoreRankingView
 
     calls = []
@@ -631,14 +632,14 @@ def test_ranking_dual_view_switch(root, reports):
     root.update_idletasks()
     assert any("洞察与意见 (项目)" in t for t in texts())
     assert not view._tree.selection()
-    # 用户点排名行 → on_select_session 一次；视角保持项目（不翻转）。
+    # 用户点排名行 → on_select_session 一次；视图层视角保持项目（应用层另行驱动）。
     calls.clear()
     kids = view._tree.get_children()
     view._tree.selection_set(kids[1])
     view._on_tree_select()
     assert calls and calls[0][0] == "sess"
-    assert view._view_mode == "project", "点排名行不得翻转视角"
-    assert any("洞察与意见 (项目)" in t for t in texts()), "点行后右栏仍是项目视角"
+    assert view._view_mode == "project", "排名视图自身不得翻转视角"
+    assert any("洞察与意见 (项目)" in t for t in texts()), "控制器未驱动时右栏保持项目视角"
     # 程序化选中不触发回调
     calls.clear()
     view.set_view_mode("session", reports[2])
@@ -1219,6 +1220,107 @@ def test_on_analysis_bail_paths_reset_status():
     a2 = SimpleNamespace(project_ref=other)
     TcerGui._on_analysis(stub2, a2)
     assert reanalyzed == [True]
+
+
+def test_smart_view_follows_selection():
+    """智能视角：视角由当前选中唯一驱动，无独立切换开关。
+
+    - 选中会话 → 会话视角；取消选中（再点已选卡，sid=None）→ 项目视角。
+    - 会话视角下点当前项目卡 → 清会话选中回项目视角，且不重算（数据没变）。
+    - 无选中会话时点项目 → 保留「点项目 = 重算」语义（含右键「刷新此项目」）。
+    """
+    from types import SimpleNamespace
+    from tcer.gui.app import TcerGui
+
+    rean, refreshed = [], []
+    g = SimpleNamespace(
+        view_mode=tk.StringVar(value="project"),
+        activity_bar=SimpleNamespace(set_active=lambda m: None),
+        _selected_project_idx=None,
+        _selected_session_id=None,
+        session_col=SimpleNamespace(clear_selection=lambda: None),
+        llm_reports_view=SimpleNamespace(select_session_report=lambda sid: None),
+        _refresh_views=lambda *, full: refreshed.append(full),
+        _update_status_bar_metrics=lambda: None,
+    )
+    g._set_session_view = lambda sid: TcerGui._set_session_view(g, sid)
+    g.reanalyze = lambda: rean.append(True)
+
+    # 启动默认选首个项目（ProjectColumn.update → notify）→ 重算，视角保持项目
+    TcerGui.on_select_project(g, 0)
+    assert g._selected_project_idx == 0 and rean == [True]
+    assert g.view_mode.get() == "project" and g._selected_session_id is None
+
+    # 点会话 → 会话视角
+    TcerGui.on_select_session(g, "s1")
+    assert g.view_mode.get() == "session" and g._selected_session_id == "s1"
+    # 换选另一个会话 → 仍是会话视角（不重复翻转）
+    TcerGui.on_select_session(g, "s2")
+    assert g.view_mode.get() == "session"
+
+    # 再点当前项目卡 → 清选中回项目视角，数据没变不重算
+    TcerGui.on_select_project(g, 0)
+    assert g.view_mode.get() == "project" and g._selected_session_id is None
+    assert rean == [True]
+
+    # 无选中会话时再点同一项目 → 保留旧「点项目 = 重算」语义
+    TcerGui.on_select_project(g, 0)
+    assert rean == [True, True]
+
+
+def test_on_analysis_no_default_session_select():
+    """智能视角的回填契约：_on_analysis 不再默认选中第一个会话。
+
+    - 上一选中存活（同项目重分析）→ 延续选中与会话视角；
+    - 没保住（切项目 / 被过滤）→ 无选中 + 项目视角，绝不 select_first。
+    """
+    from types import SimpleNamespace
+    from tcer.gui.app import TcerGui
+
+    proj = SimpleNamespace(source="claude", key="p", config_root=None)
+    a = SimpleNamespace(
+        project_ref=proj,
+        reports=["r1", "r2"],
+        n_sessions=2,
+        aggregate=SimpleNamespace(usage=SimpleNamespace(per_model={})),
+    )
+
+    def _make_stub(select_by_sid_ret, prev_sid, mode):
+        first_calls = []
+        session_col = SimpleNamespace(
+            update=lambda reports, pinned=None, flagged=None: None,
+            select_by_sid=lambda sid, notify=False: select_by_sid_ret,
+            select_first=lambda notify=True: first_calls.append("first"),
+            _pending_select_sid=None,
+        )
+        g = SimpleNamespace(
+            _selected_project=lambda: proj,
+            filter=SimpleNamespace(set_status=lambda s: None,
+                                   get_params=lambda: {"task_type": "x"}),
+            _current=None,
+            _selected_session_id=prev_sid,
+            session_col=session_col,
+            _marks_for_current_project=lambda: (set(), set()),
+            _refresh_views=lambda *, full: None,
+            _update_status_bar_metrics=lambda: None,
+            view_mode=tk.StringVar(value=mode),
+        )
+        g._set_session_view = lambda sid: TcerGui._set_session_view(g, sid)
+        return g, first_calls
+
+    # 旧选中没保住 → 无选中 + 项目视角，不 select_first
+    g, first_calls = _make_stub(False, "gone", "session")
+    TcerGui._on_analysis(g, a)
+    assert first_calls == [], "不得默认选中第一个会话"
+    assert g._selected_session_id is None
+    assert g.view_mode.get() == "project"
+
+    # 旧选中存活 → 延续选中，保持会话视角
+    g2, first_calls2 = _make_stub(True, "keep", "session")
+    TcerGui._on_analysis(g2, a)
+    assert first_calls2 == []
+    assert g2._selected_session_id == "keep"
+    assert g2.view_mode.get() == "session"
 
 
 def test_trend_chart_without_pil(root, reports, monkeypatch):

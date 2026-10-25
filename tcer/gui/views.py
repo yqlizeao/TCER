@@ -59,7 +59,9 @@ _SCORE_SHORT = "效率分"                    # 窄列/徽标用简称
 _SCORE_TIP = metric_tip("score")          # 悬停完整解释
 from .widgets import (Card, CollapsibleSection, FlatMenu, FlowRow, entry_box, fit_label,
                       MetricCell, ScrollFrame, SelectableLabel, Tooltip, flat_button, WorkbenchTab,
-                      RoundedPill, RoundedSearchBox, RoundedKpiChip, get_rounded_rect_img, draw_rounded_rect_bg)
+                      RoundedPill, RoundedSearchBox, RoundedKpiChip, RoundedFrame, SurfaceCard,
+                      SegmentedControl, StatusBadge, ToggleSwitch, RoundedEntry,
+                      get_rounded_rect_img, draw_rounded_rect_bg, draw_rounded_box)
 from .platform import CLICK_CURSOR
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
@@ -787,44 +789,77 @@ class StatusBar:
     def set_metrics(self, text: str, icon=None) -> None:
         self._turns_item.set_tip(f"{text} · 点击查看时间线" if text else "会话时间线", text=text)
 class ActivityBar:
-    """VS Code 风格活动栏（44px 宽，停靠在主工作台最左侧）。
+    """OpenResearch 风格可折叠悬浮圆角侧栏导航（保留 Monokai Dimmed ACTIVITY_BG 调色板）。
 
-    上半部分：核心视角导航
-    - ui-project: 项目视角
-    - ui-session: 会话视角
-    - ui-layers: 全局项目聚合
-    下半部分：系统功能工具
-    - ui-tools: 实用工具菜单
-    - ui-sparkle: LLM 动力学/复盘设置
-    - ui-export: 导出菜单
+    支持两种宽度形态（点击右上角折叠图标一键切换，持久化于 ui_prefs['nav_collapsed']）：
+    - 展开态（148px）：圆角胶囊行「图标 + 中文名称」，选中态为圆角高亮胶囊 + 左侧短白条；
+    - 折叠态（50px）：紧凑纯图标导航栏，悬浮显示完整中文提示。
     """
+
+    _W_EXPANDED = 148
+    _W_COLLAPSED = 50
 
     def __init__(self, parent, controller) -> None:
         self.controller = controller
-        self.frame = tk.Frame(parent, bg=theme.ACTIVITY_BG, width=44)
+        prefs = getattr(controller, "_ui_prefs", None)
+        self._collapsed: bool = bool(prefs.get("nav_collapsed", False)) if isinstance(prefs, dict) else False
+        init_w = self._W_COLLAPSED if self._collapsed else self._W_EXPANDED
+
+        self.frame = tk.Frame(parent, bg=theme.BG, width=init_w)
         self.frame.pack(side="left", fill="y")
         self.frame.pack_propagate(False)
 
-        # 1px 右边框
-        border = tk.Frame(self.frame, bg=theme.BORDER, width=1)
-        border.pack(side="right", fill="y")
+        # 悬浮圆角导航舱（保留 Monokai ACTIVITY_BG #353535 底色 + 1px BORDER 细描边）
+        self._shell = RoundedFrame(
+            self.frame, fill=theme.ACTIVITY_BG, parent_bg=theme.BG,
+            outline=theme.BORDER, radius=theme.RADIUS_XL,
+        )
+        self._shell.pack(fill="both", expand=True, padx=(6, 2), pady=6)
 
-        inner = tk.Frame(self.frame, bg=theme.ACTIVITY_BG)
-        inner.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(self._shell, bg=theme.ACTIVITY_BG)
+        inner.pack(fill="both", expand=True, padx=4, pady=6)
+        self._inner = inner
+
+        # 顶部品牌与折叠控制行（对标 OpenResearch 左上角品牌 + 侧栏折叠按钮）
+        self._brand_row = tk.Frame(inner, bg=theme.ACTIVITY_BG, height=28)
+        self._brand_row.pack(fill="x", padx=2, pady=(0, 4))
+        self._brand_row.pack_propagate(False)
+
+        self._brand_dot = tk.Label(
+            self._brand_row, text="●", bg=theme.ACTIVITY_BG, fg=theme.ACCENT,
+            font=theme.FONT_UI_BOLD,
+        )
+        self._brand_lbl = tk.Label(
+            self._brand_row, text="TCER", bg=theme.ACTIVITY_BG, fg=theme.FG_WHITE,
+            font=theme.FONT_UI_BOLD, anchor="w",
+        )
+        _fold_icon = ui_icon(self._brand_row, "panel-right", opacity=0.85)
+        self._fold_btn = tk.Label(
+            self._brand_row,
+            image=_fold_icon if _fold_icon is not None else "",
+            text="" if _fold_icon is not None else "◧",
+            bg=theme.ACTIVITY_BG, fg=theme.MUTED, cursor=CLICK_CURSOR, padx=4,
+        )
+        self._fold_btn.image = _fold_icon
+        self._fold_btn.bind("<Button-1>", lambda _e: self.toggle_collapse())
+        self._fold_btn.bind("<Enter>", lambda _e: self._fold_btn.configure(bg=theme.ACTIVITY_HOVER_BG))
+        self._fold_btn.bind("<Leave>", lambda _e: self._fold_btn.configure(bg=theme.ACTIVITY_BG))
+        Tooltip(self._fold_btn, "展开 / 折叠导航栏")
 
         self._top_container = tk.Frame(inner, bg=theme.ACTIVITY_BG)
-        self._top_container.pack(side="top", fill="x", pady=4)
+        self._top_container.pack(side="top", fill="x", pady=2)
 
         self._bot_container = tk.Frame(inner, bg=theme.ACTIVITY_BG)
-        self._bot_container.pack(side="bottom", fill="x", pady=4)
+        self._bot_container.pack(side="bottom", fill="x", pady=2)
+        tk.Frame(self._bot_container, bg=theme.BORDER, height=1).pack(fill="x", padx=4, pady=(0, 4))
 
-        self._items: dict[str, tuple] = {}          # 全部项（hover 用）
-        self._nav_keys: set[str] = set()            # 视角组（切换侧栏内容）
+        self._items: dict[str, tuple] = {}          # 全部项（hover/paint 用）
+        self._nav_keys: set[str] = set()            # 视角组
         self._page_keys: set[str] = set()           # 页组（切换主区内容）
         self._active_key: str = "project"
         self._active_page: str | None = None
 
-        # 上半区：主视图页组（每图标切换主区一页）
+        # 上半区：主视图页组（图标 + 中文名称胶囊）
         for i, (label, icon_name) in enumerate((
                 ("指标看板", "dashboard"), ("模型对比", "model"), ("效率榜", "rank"),
                 ("趋势分析", "trend"), ("项目聚合", "layers"), ("LLM 报告", "sparkle"),
@@ -832,66 +867,91 @@ class ActivityBar:
             self._add_nav_item(f"page:{i}", icon_name, label,
                                lambda idx=i: self.controller._nb.select(idx))
 
-        # 下半区工具图标：先导出，最底为设置（标准 VS Code 齿轮在最底规范）
+        # 下半区工具组
         from tcer.core import upload_config
         if upload_config.upload_enabled():
-            self._add_tool_item("upload", "upload", "上传数据至团队后端", self._on_click_upload)
-        self._add_tool_item("export", "export", "导出数据与报告", self._on_click_export)
-        self._add_tool_item("settings", "settings", "设置", self._on_click_tools)
+            self._add_tool_item("upload", "upload", "上传数据", self._on_click_upload,
+                                tip="上传数据至团队后端")
+        self._add_tool_item("export", "export", "导出报告", self._on_click_export,
+                            tip="导出数据与报告")
+        self._add_tool_item("settings", "settings", "设置与工具", self._on_click_tools,
+                            tip="设置与分析工具")
+        self._apply_collapse_layout()
         self.set_page_active(0)
-    def _add_nav_item(self, key: str, icon_name: str, tip: str, command) -> None:
-        item = tk.Frame(self._top_container, bg=theme.ACTIVITY_BG, height=44, cursor=CLICK_CURSOR)
-        item.pack(fill="x", pady=2)
+
+    def toggle_collapse(self) -> None:
+        self._collapsed = not self._collapsed
+        prefs = getattr(self.controller, "_ui_prefs", None)
+        if isinstance(prefs, dict):
+            prefs["nav_collapsed"] = self._collapsed
+        self._apply_collapse_layout()
+        if self._active_page:
+            for k in self._page_keys:
+                self._paint(k, k == self._active_page)
+
+    def _apply_collapse_layout(self) -> None:
+        target_w = self._W_COLLAPSED if self._collapsed else self._W_EXPANDED
+        self.frame.configure(width=target_w)
+        if self._collapsed:
+            self._brand_dot.pack_forget()
+            self._brand_lbl.pack_forget()
+            self._fold_btn.pack(fill="both", expand=True)
+        else:
+            self._fold_btn.pack_forget()
+            self._brand_dot.pack(side="left", padx=(4, 4))
+            self._brand_lbl.pack(side="left")
+            self._fold_btn.pack(side="right", padx=(0, 2))
+        for _k, entry in self._items.items():
+            item, rail, lbl, txt_lbl = entry[0], entry[1], entry[2], entry[6]
+            if self._collapsed:
+                txt_lbl.pack_forget()
+                lbl.pack_configure(side="left", fill="both", expand=True, padx=0)
+            else:
+                lbl.pack_configure(side="left", fill="y", expand=False, padx=(8, 6))
+                txt_lbl.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            item._rf_on_configure()
+
+    def _make_pill_row(self, parent_box, key: str, icon_name: str, label_text: str,
+                       tip: str, on_click) -> None:
+        item = RoundedFrame(
+            parent_box, fill=theme.ACTIVITY_BG, parent_bg=theme.ACTIVITY_BG,
+            outline=None, radius=theme.RADIUS_M, height=34, cursor=CLICK_CURSOR,
+        )
+        item.pack(fill="x", padx=2, pady=1)
         item.pack_propagate(False)
 
-        rail = tk.Frame(item, bg=theme.ACTIVITY_BG, width=2)
-        rail.pack(side="left", fill="y")
+        rail = tk.Frame(item, bg=theme.ACTIVITY_BG, width=3)
+        rail.pack(side="left", fill="y", padx=(2, 0), pady=7)
         rail.pack_propagate(False)
 
-        img_active = ui_icon(item, icon_name, opacity=1.0, size=22)
-        img_dim = ui_icon(item, icon_name, opacity=0.65, size=22)
-        img_hov = ui_icon(item, icon_name, opacity=0.90, size=22)
+        img_active = ui_icon(item, icon_name, opacity=1.0, size=16)
+        img_dim = ui_icon(item, icon_name, opacity=0.72, size=16)
+        img_hov = ui_icon(item, icon_name, opacity=0.95, size=16)
 
         lbl = tk.Label(item, image=img_dim, bg=theme.ACTIVITY_BG, cursor=CLICK_CURSOR)
         lbl.image = img_dim
-        lbl.pack(fill="both", expand=True)
+        lbl.pack(side="left", fill="y", padx=(8, 6))
 
-        Tooltip(item, tip)
-        Tooltip(lbl, tip)
+        txt_lbl = tk.Label(
+            item, text=label_text, bg=theme.ACTIVITY_BG, fg=theme.FG,
+            font=theme.FONT_UI_SMALL, anchor="w", cursor=CLICK_CURSOR,
+        )
+        txt_lbl.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-        for w in (item, lbl):
-            w.bind("<Button-1>", lambda _e: command(), add="+")
+        for w in (item, lbl, txt_lbl):
+            Tooltip(w, tip)
+            w.bind("<Button-1>", lambda _e: on_click(item), add="+")
             w.bind("<Enter>", lambda _e, k=key: self._on_hover(k, True, _e), add="+")
             w.bind("<Leave>", lambda _e, k=key: self._on_hover(k, False, _e), add="+")
-        self._items[key] = (item, rail, lbl, img_active, img_dim, img_hov)
+
+        self._items[key] = (item, rail, lbl, img_active, img_dim, img_hov, txt_lbl)
+
+    def _add_nav_item(self, key: str, icon_name: str, tip: str, command) -> None:
+        self._make_pill_row(self._top_container, key, icon_name, tip, tip, lambda _it: command())
         (self._page_keys if key.startswith("page:") else self._nav_keys).add(key)
 
-    def _add_tool_item(self, key: str, icon_name: str, tip: str, command) -> None:
-        item = tk.Frame(self._bot_container, bg=theme.ACTIVITY_BG, height=40, cursor=CLICK_CURSOR)
-        item.pack(fill="x", pady=2)
-        item.pack_propagate(False)
-
-        rail = tk.Frame(item, bg=theme.ACTIVITY_BG, width=2)
-        rail.pack(side="left", fill="y")
-        rail.pack_propagate(False)
-
-
-        img_active = ui_icon(item, icon_name, opacity=1.0, size=22)
-        img_dim = ui_icon(item, icon_name, opacity=0.65, size=22)
-        img_hov = ui_icon(item, icon_name, opacity=0.90, size=22)
-
-        lbl = tk.Label(item, image=img_dim, bg=theme.ACTIVITY_BG, cursor=CLICK_CURSOR)
-        lbl.image = img_dim
-        lbl.pack(fill="both", expand=True)
-
-        Tooltip(item, tip)
-        Tooltip(lbl, tip)
-        for w in (item, lbl):
-            w.bind("<Button-1>", lambda _e: command(item), add="+")
-            w.bind("<Enter>", lambda _e, k=key: self._on_hover(k, True, _e), add="+")
-            w.bind("<Leave>", lambda _e, k=key: self._on_hover(k, False, _e), add="+")
-
-        self._items[key] = (item, rail, lbl, img_active, img_dim, img_hov)
+    def _add_tool_item(self, key: str, icon_name: str, label: str, command, *, tip: str = "") -> None:
+        self._make_pill_row(self._bot_container, key, icon_name, label, tip or label, command)
 
     def _on_hover(self, key: str, is_hover: bool, event=None) -> None:
         if key == self._active_key or key == self._active_page:
@@ -907,18 +967,19 @@ class ActivityBar:
                     curr = getattr(curr, "master", None)
             except Exception:
                 pass
-        item, rail, lbl, img_active, img_dim, img_hov = self._items[key]
-        if is_hover:
-            lbl.configure(image=img_hov)
-        else:
-            lbl.configure(image=img_dim)
+        item, rail, lbl, img_active, img_dim, img_hov, txt_lbl = self._items[key]
+        row_bg = theme.ACTIVITY_HOVER_BG if is_hover else theme.ACTIVITY_BG
+        item.set_surface(fill=row_bg, outline=None)
+        rail.configure(bg=row_bg)
+        lbl.configure(bg=row_bg, image=img_hov if is_hover else img_dim)
+        txt_lbl.configure(bg=row_bg, fg=theme.FG_WHITE if is_hover else theme.FG)
 
     def set_active(self, key: str) -> None:
         """视角组兼容桩（视角切换已移至侧栏顶栏）。"""
         self._active_key = key
 
     def set_page_active(self, idx: int) -> None:
-        """页组激活（原顶部页签栏）：idx 为主区页序号 0-5。"""
+        """页组激活（原顶部页签栏）：idx 为主区页序号 0-6。"""
         key = f"page:{idx}"
         if key not in self._items:
             return
@@ -927,9 +988,19 @@ class ActivityBar:
             self._paint(k, k == key)
 
     def _paint(self, key: str, active: bool) -> None:
-        item, rail, lbl, img_active, img_dim, img_hov = self._items[key]
-        rail.configure(bg=theme.FG_WHITE if active else theme.ACTIVITY_BG)
-        lbl.configure(bg=theme.ACTIVITY_BG, image=img_active if active else img_dim)
+        item, rail, lbl, img_active, img_dim, _img_hov, txt_lbl = self._items[key]
+        row_bg = theme.PANEL_2 if active else theme.ACTIVITY_BG
+        # 选中态只靠底色（PANEL_2）+ ACCENT 短柱 + 粗体字表达——BORDER 是纯结构
+        # token（style.md：只做结构分隔，永不表达状态），不得用作选中描边。
+        item.set_surface(fill=row_bg, outline=None)
+        rail.configure(bg=theme.ACCENT if active else row_bg)
+        lbl.configure(bg=row_bg, image=img_active if active else img_dim)
+        txt_lbl.configure(
+            bg=row_bg,
+            fg=theme.FG_WHITE if active else theme.FG,
+            font=theme.FONT_UI_SMALL_BOLD if active else theme.FONT_UI_SMALL,
+        )
+
     def _on_click_tools(self, widget) -> None:
         if hasattr(self.controller, "filter"):
             menu = FlatMenu(widget)
@@ -958,13 +1029,14 @@ class ActivityBar:
         """活动栏上传按钮 Frame，供成功气泡定位。"""
         it = self._items.get("upload")
         return it[0] if it else None
+
+
 class FilterBar:
     """Integrated filter and actions controller (Zero-waste panel integration)."""
 
     def __init__(self, parent, controller) -> None:
         self.controller = controller
         self.parent = parent
-        self.view_mode = controller.view_mode
 
         # 过滤状态
         self._task_display_names = {
@@ -1005,47 +1077,6 @@ class FilterBar:
         # 兼容状态 Label（底层状态通信用）
         self.status = tk.Label(parent, text="就绪", bg=theme.BG, fg=theme.SECTION_ACCENT)
 
-    def mount_view_switcher(self, parent_frame) -> None:
-        """在侧边栏顶栏挂载项目/会话视角切换圆角分段控件（取代原“资源管理器”文本）。"""
-        self._view_btns: dict[str, tk.Widget] = {}
-        self._view_pills: dict[str, tk.Widget] = {}
-        self._view_icon_lbls: dict[str, tk.Widget] = {}
-
-        seg_bg = tk.Frame(parent_frame, bg=theme.PANEL)
-        seg_bg.pack(side="left", padx=(0, 4))
-
-        _seg_icons = {
-            "project": ui_icon(seg_bg, "project"),
-            "session": ui_icon(seg_bg, "session"),
-        }
-        for label, val in [("项目", "project"), ("会话", "session")]:
-            def _click(_w=None, v=val):
-                self.controller.set_view_mode(v)
-
-            pill = RoundedPill(seg_bg, text=label, icon=_seg_icons.get(val),
-                               command=_click, width=58, height=22, radius=theme.RADIUS_M,
-                               bg=theme.PANEL)
-            pill.pack(side="left", padx=1)
-            self._view_pills[val] = pill
-            self._view_btns[val] = pill
-
-            tip = f"切换至{label}视角"
-            Tooltip(pill, tip)
-
-        self.update_view_btns()
-
-    def update_view_btns(self) -> None:
-        """根据当前 view_mode 刷新视角切换按钮高亮状态。"""
-        if not hasattr(self, "_view_btns") or not self._view_btns:
-            return
-        current = self.view_mode.get()
-        _sel_bg = {"session": theme.ACCENT, "project": theme.VIEW_PROJECT}
-        for val, pill in self._view_btns.items():
-            active = (val == current)
-            fill = _sel_bg.get(val, theme.ACCENT) if active else theme.CONTROL_BG
-            fg = theme.FG_WHITE if active else theme.MUTED
-            pill.set_state(fill=fill, fg=fg)
-
     def mount_sidebar(self, parent_frame) -> None:
         """挂载数据来源与时间下拉胶囊至侧边栏顶栏（带抗锯齿圆角）。"""
         # 1. 右侧：数据来源下拉胶囊
@@ -1063,7 +1094,7 @@ class FilterBar:
 
         self._src_capsule = RoundedPill(parent_frame, text=f"{self.source_var.get()} ▾",
                                         command=_on_src_click, width=58, height=22, radius=theme.RADIUS_M,
-                                        bg=theme.PANEL)
+                                        bg=theme.PANEL, outline=theme.BORDER_SUBTLE)
         self._src_capsule.pack(side="right", padx=(2, 4))
         self._src_lbl = self._src_capsule
         Tooltip(self._src_capsule, "切换会话数据来源 (全部 / Claude / Codex / OpenCode / Oh My Pi / Pi / Antigravity / WorkBuddy)")
@@ -1083,7 +1114,7 @@ class FilterBar:
         cur_disp = _disp_names.get(self._current_preset, "今天")
         self._time_capsule = RoundedPill(parent_frame, text=f"{cur_disp} ▾",
                                          command=_on_time_click, width=58, height=22, radius=theme.RADIUS_M,
-                                         bg=theme.PANEL)
+                                         bg=theme.PANEL, outline=theme.BORDER_SUBTLE)
         self._time_capsule.pack(side="right", padx=(2, 4))
         self._time_lbl = self._time_capsule
         Tooltip(self._time_capsule, "筛选会话时间范围 (今天 / 本周 / 本月 / 全部)")
@@ -1412,19 +1443,6 @@ class ProjectColumn:
                 image=ui_icon(self.container, "refresh"), compound="left",
             )
 
-            menu.add_separator()
-
-            menu.add_command(
-                label="项目视角",
-                command=lambda: self._select_and_view(idx, "project"),
-                image=ui_icon(self.container, "view-project"), compound="left",
-            )
-            menu.add_command(
-                label="会话视角",
-                command=lambda: self._select_and_view(idx, "session"),
-                image=ui_icon(self.container, "view-session"), compound="left",
-            )
-
         menu.add_separator()
 
         menu.add_command(
@@ -1446,17 +1464,11 @@ class ProjectColumn:
         menu.tk_popup(event.x_root, event.y_root)
 
     def _select_and_refresh(self, idx):
-        self._select(self._cards[idx], idx)
-
-    def _select_and_view(self, idx, mode):
-        already_selected = (self._selected is self._cards[idx])
-        if already_selected and self.controller._current:
-            # Data already loaded — just switch view mode and re-render
-            self.controller.view_mode.set(mode)
-            self.controller._on_view_change()
+        if self._selected is self._cards[idx]:
+            # 已选中项目：显式刷新入口直接重算（绕开 on_select_project 的
+            # 「会话视角下点当前项目 = 回项目视角不重算」快路径）。
+            self.controller.reanalyze()
         else:
-            # Need to load data first; switch mode, then select (triggers reanalyze)
-            self.controller.view_mode.set(mode)
             self._select(self._cards[idx], idx)
 
     def _open_in_explorer(self, project_dir):
@@ -1865,6 +1877,13 @@ class SessionColumn:
         return lbl
 
     def _select(self, card, sid, *, notify=True):
+        if (notify and card is self._selected
+                and sid == getattr(self.controller, "_selected_session_id", None)):
+            # 再次点击已选会话卡 = 取消选中 → 回项目汇总视角（智能视角的回程，
+            # 取代已移除的「项目/会话」切换开关）。
+            self.clear_selection()
+            self.controller.on_select_session(None)
+            return
         if self._selected is not None:
             self._selected.set_selected(False)
         self._selected = card
@@ -2083,14 +2102,6 @@ class SessionColumn:
             self._selected.set_selected(False)
         self._selected = None
 
-    def select_first(self, *, notify=True) -> str | None:
-        """Select the first session card (if any); return its sid."""
-        if not self._cards:
-            return None
-        sid = self._reports[0].meta.session_id or self._reports[0].meta.path.stem
-        self._select(self._cards[0], sid, notify=notify)
-        return sid
-
     def select_by_sid(self, sid: str, *, notify=True) -> bool:
         """Select the card whose session id matches ``sid``; return True if found."""
         for card, r in zip(self._cards, self._reports):
@@ -2167,26 +2178,29 @@ class MetricPanel:
             self._build_group(group)
 
     def _build_header_strip(self) -> None:
-        """34px 汇总条：会话标题、耗时/回合、支出、净增、综合效率分。"""
-        h = tk.Frame(self.container, bg=theme.BG, height=34)
-        h.pack(fill="x", padx=8, pady=(4, 2))
+        """圆角细描边汇总条：会话标题、耗时/回合、支出、净增、综合效率分。"""
+        h = RoundedFrame(
+            self.container, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L, height=38,
+        )
+        h.pack(fill="x", padx=8, pady=(6, 4))
         h.pack_propagate(False)
-        tk.Frame(h, bg=theme.BORDER, height=1).pack(side="bottom", fill="x")
 
-        self._h_title = tk.Label(h, text="待选会话", bg=theme.BG, fg=theme.FG,
+        self._h_title = tk.Label(h, text="待选会话", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
                                  font=theme.FONT_UI_BOLD)
-        self._h_title.pack(side="left", padx=(12, 8))
+        self._h_title.pack(side="left", padx=(12, 8), pady=6)
 
-        self._h_dur = tk.Label(h, text="耗时 -", bg=theme.BG, fg=theme.MUTED,
+        self._h_dur = tk.Label(h, text="耗时 -", bg=theme.SURFACE_CARD, fg=theme.MUTED,
                                font=theme.FONT_UI)
-        self._h_dur.pack(side="left", padx=theme.PAD_M)
+        self._h_dur.pack(side="left", padx=theme.PAD_M, pady=6)
 
         # 会话视角专属：打开会话记录阅读器（项目汇总视角无单一会话，隐藏）
         self._transcript_btn = RoundedPill(
             h, text="会话记录", icon=ui_icon(h, "outline"), width=88, height=22,
             radius=theme.RADIUS_S, fill=theme.CONTROL_BG, hover_fill=theme.HOVER_BG,
-            bg=theme.BG, fg=theme.FG, font=theme.FONT_UI_SMALL,
-            command=lambda _p=None: self.controller.show_transcript_for_rendered())
+            bg=theme.SURFACE_CARD, fg=theme.FG, font=theme.FONT_UI_SMALL,
+            command=lambda _p=None: self.controller.show_transcript_for_rendered(),
+            outline=theme.BORDER_SUBTLE)
         Tooltip(self._transcript_btn, "打开本会话的完整对话记录（提问 / 执行过程 / 回复）")
 
         # 右侧：会话/项目上下文与环境信息记录徽标（非点击按钮，专注记录关键信息）
@@ -2194,30 +2208,30 @@ class MetricPanel:
         self._mode_btn = RoundedPill(
             h, text="简要版", width=68, height=22, radius=theme.RADIUS_S,
             fill=theme.CONTROL_BG, hover_fill=theme.HOVER_BG,
-            bg=theme.BG, fg=theme.ACCENT, font=theme.FONT_UI_SMALL_BOLD,
-            command=self._toggle_view_density)
-        self._mode_btn.pack(side="right", padx=(3, 6))
+            bg=theme.SURFACE_CARD, fg=theme.ACCENT, font=theme.FONT_UI_SMALL_BOLD,
+            command=self._toggle_view_density, outline=theme.BORDER_SUBTLE)
+        self._mode_btn.pack(side="right", padx=(3, 8), pady=6)
         Tooltip(self._mode_btn, "点击切换：【简要版】仅展示有数据的指标；【完整版】展开全量指标槽位。")
 
         self._tag_time = RoundedPill(
             h, text="-", width=120, height=22, radius=theme.RADIUS_S,
-            fill=theme.CONTROL_BG, hover_fill=None, bg=theme.BG, fg=theme.MUTED,
-            font=theme.FONT_MONO, command=None)
-        self._tag_time.pack(side="right", padx=(3, 4))
+            fill=theme.CONTROL_BG, hover_fill=None, bg=theme.SURFACE_CARD, fg=theme.MUTED,
+            font=theme.FONT_MONO, command=None, outline=theme.BORDER_SUBTLE)
+        self._tag_time.pack(side="right", padx=(3, 4), pady=6)
         Tooltip(self._tag_time, "会话启动/完成时间")
 
         self._tag_task = RoundedPill(
             h, text="任务: -", width=95, height=22, radius=theme.RADIUS_S,
-            fill=theme.CONTROL_BG, hover_fill=None, bg=theme.BG, fg=theme.FG,
-            command=None)
-        self._tag_task.pack(side="right", padx=3)
+            fill=theme.CONTROL_BG, hover_fill=None, bg=theme.SURFACE_CARD, fg=theme.FG,
+            command=None, outline=theme.BORDER_SUBTLE)
+        self._tag_task.pack(side="right", padx=3, pady=6)
         Tooltip(self._tag_task, "任务类型（TTAF 归一化基准类别）")
 
         self._tag_meta = RoundedPill(
             h, text="", width=105, height=22, radius=theme.RADIUS_S,
-            fill=theme.CONTROL_BG, hover_fill=None, bg=theme.BG, fg=theme.MUTED,
-            command=None)
-        self._tag_meta.pack(side="right", padx=3)
+            fill=theme.CONTROL_BG, hover_fill=None, bg=theme.SURFACE_CARD, fg=theme.MUTED,
+            command=None, outline=theme.BORDER_SUBTLE)
+        self._tag_meta.pack(side="right", padx=3, pady=6)
         Tooltip(self._tag_meta, "环境信息（Git 分支 / 子代理折叠 / 推理档位）")
 
         # 保持旧属性与测试兼容别名
@@ -2230,47 +2244,41 @@ class MetricPanel:
         self._chips["_sum_prompt"] = (self._h_dur, self._h_dur)
         self._chips["_sum_agent"] = (self._h_title, self._h_title)
     def _build_group(self, group) -> None:
-        gframe = tk.Frame(self.container, bg=theme.BG)
-        gframe.pack(fill="x", padx=8, pady=(4, 2))
+        gframe = RoundedFrame(
+            self.container, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L,
+        )
+        gframe.pack(fill="x", padx=8, pady=(4, 4))
 
-        header_bg = theme.GROUP_COLORS.get(group.id, theme.PANEL_2)
+        accent_col = theme.GROUP_COLORS.get(group.id, theme.ACCENT)
+        header_bg = theme.SURFACE_CARD
         collapsed = False  # 全部分类（含 G4 代码产出与质量）默认展开
 
-        # 采用自绘抗锯齿圆角底 Canvas 替代生硬直角横梁
-        header = tk.Canvas(gframe, height=28, bg=theme.BG, highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
-        header.pack(fill="x")
+        header = tk.Frame(gframe, height=30, bg=header_bg, cursor=CLICK_CURSOR)
+        header.pack(fill="x", padx=8, pady=(5, 2))
+        header.pack_propagate(False)
 
-        def _redraw_hdr(_e=None, h=header, bg_col=header_bg):
-            w = h.winfo_width()
-            ht = h.winfo_height()
-            if w < 10 or ht < 10:
-                return
-            draw_rounded_rect_bg(h, w, ht, 6, bg_col, theme.BG, "hdr_bg")
-
-        header.bind("<Configure>", _redraw_hdr)
+        # 左侧分组宝石色短柱指示器（取代原先刺眼的全宽彩虹横条）
+        rail = tk.Frame(header, bg=accent_col, width=4)
+        rail.pack(side="left", fill="y", padx=(2, 6), pady=5)
 
         arrow_lbl = tk.Label(header, text=f"{'▸' if collapsed else '▾'} {group.name}",
-                             bg=header_bg, fg=theme.FG,
+                             bg=header_bg, fg=theme.FG_WHITE,
                              font=theme.FONT_UI_BOLD, anchor="w", cursor=CLICK_CURSOR)
-        header.create_window(8, 14, anchor="w", window=arrow_lbl, tags="arrow_win")
+        arrow_lbl.pack(side="left", fill="y")
 
         # 组头右侧摘要
-        s_lbl = tk.Label(header, text="", bg=header_bg, fg=theme.MUTED,
+        s_lbl = tk.Label(header, text=f"{len(group.metrics)} 项", bg=header_bg, fg=theme.MUTED,
                          font=theme.FONT_UI_SMALL, anchor="e", cursor=CLICK_CURSOR)
-        header.create_window(header.winfo_reqwidth() - 8, 14, anchor="e", window=s_lbl, tags="sum_win")
+        s_lbl.pack(side="right", padx=(0, 4))
 
-        def _reposition_sum(e, h=header):
-            h.coords("sum_win", e.width - 8, 14)
-        header.bind("<Configure>", _reposition_sum, add="+")
+        body = tk.Frame(gframe, bg=theme.SURFACE_CARD)
+        body.pack(fill="x", padx=6, pady=(0, 6))
 
-        body = tk.Frame(gframe, bg=theme.BG)
-        body.pack(fill="x", pady=(2, 0))
-
-        if group.subgroups:
-            for sg in group.subgroups:
-                self._build_metric_grid(sg.metrics, sub_label=sg.name, parent=body)
-        else:
-            self._build_metric_grid(group.metrics, parent=body)
+        # 小分类（基础/行为/质量）不再渲染标题行——组内平铺一张网格提高紧凑度；
+        # 子类结构仍保留在 metric_defs（HTML 报告口径不变），group.metrics 即
+        # 扁平序（_subgrouped 保证），直接整组一张网格。
+        self._build_metric_grid(group.metrics, parent=body)
 
         gs = _GroupState(name=group.name, arrow=arrow_lbl, body=body, collapsed=collapsed)
         self._groups.append(gs)
@@ -2281,16 +2289,9 @@ class MetricPanel:
         if collapsed:
             body.pack_forget()
 
-    def _build_metric_grid(self, metrics, sub_label: str | None = None,
-                           parent=None) -> None:
+    def _build_metric_grid(self, metrics, parent=None) -> None:
         parent = parent or self.container
-        if sub_label:
-            sub = tk.Frame(parent, bg=theme.PANEL, padx=8, pady=1)
-            sub.pack(fill="x", pady=(1, 0))
-            tk.Label(sub, text=f"· {sub_label}", bg=theme.PANEL, fg=theme.MUTED,
-                     font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-
-        grid = tk.Frame(parent, bg=theme.PANEL, padx=4, pady=2)
+        grid = tk.Frame(parent, bg=theme.SURFACE_CARD, padx=2, pady=2)
         grid.pack(fill="x", pady=(0, 0))
         cells: list[MetricCell] = []
         for i, metric in enumerate(metrics):
@@ -2423,7 +2424,7 @@ class MetricPanel:
         if gs.collapsed:
             gs.body.pack_forget()
         else:
-            gs.body.pack(fill="x")
+            gs.body.pack(fill="x", padx=6, pady=(0, 6))
 
     def _toggle_view_density(self) -> None:
         self._full_mode = not getattr(self, "_full_mode", False)
@@ -2824,14 +2825,13 @@ class ScoreRankingView:
                 # 事件会漏过守卫）→ 直接返回，避免重复 _draw_decompose 的 destroy 递归。
                 if report is self._current_report:
                     return
-                # 点行 = 仅选中该会话，不翻转视角（视角只由左上角分段控件切）。
-                # 会话视角下 → 右栏刷新为该会话构成；项目视角下 → 纯导航高亮，
-                # 右栏保持项目概览不变。
+                # 点行 = 选中该会话并通知控制器；智能视角下控制器随即翻转到
+                # 会话视角（视角写点在 TcerGui._set_session_view，本视图不自转）。
                 self._current_report = report
                 if self._view_mode == "session":
                     self._draw_decompose()
-                # 通知控制器同步选中的 sid（on_select_session 按当前 view_mode
-                # 决定是否刷新会话相关面板；不会强行翻转视角）。
+                # 通知控制器同步选中的 sid（on_select_session 按选中驱动视角与
+                # 会话相关面板刷新）。
                 if self._controller is not None:
                     sid = report.meta.session_id or report.meta.path.stem
                     self._controller.on_select_session(sid)
@@ -3420,24 +3420,28 @@ class ModelCompareView:
             self._build_group(group)
 
     def _build_header(self) -> None:
-        """Model summary（多模型时附成本占比条与模型卡片组）。"""
+        """Model summary（多模型时附成本占比条与圆角细描边模型卡片组）。"""
         from tcer.core import pricing
-        header = tk.Frame(self._container, bg=theme.PANEL_2, padx=10, pady=6)
-        header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text="模型对比", bg=theme.PANEL_2, fg=theme.FG,
+        header = RoundedFrame(
+            self._container, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L,
+        )
+        header.pack(fill="x", padx=6, pady=(4, 2))
+        hdr_row = tk.Frame(header, bg=theme.SURFACE_CARD)
+        hdr_row.pack(fill="x", padx=12, pady=(8, 6))
+        tk.Label(hdr_row, text="模型对比", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
                  font=theme.FONT_HEADING, anchor="w").pack(side="left")
         n_mod = len(self._models)
         subtitle = f"共 {n_mod} 个模型对比" if n_mod > 1 else "单模型深度表现"
-        tk.Label(header, text=f" · {subtitle}", bg=theme.PANEL_2, fg=theme.MUTED,
+        tk.Label(hdr_row, text=f" · {subtitle}", bg=theme.SURFACE_CARD, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL, anchor="w").pack(side="left")
 
         # Cost distribution bar：仅多模型时绘制（段色锚定各列，单模型是纯噪声）。
         total_cost = sum(mc.cost for mc in self._models)
         if total_cost > 0 and len(self._models) >= 2:
-            bar = tk.Frame(self._container, bg=theme.PANEL, padx=6, pady=4)
-            bar.pack(fill="x")
-            # 细条 + 段间 2px 缝，不在色块上压字（窄段字会糊）；段色与下方模型卡圆点一致
-            canvas = tk.Canvas(bar, bg=theme.PANEL, height=8, highlightthickness=0)
+            bar = tk.Frame(header, bg=theme.SURFACE_CARD, padx=12, pady=4)
+            bar.pack(fill="x", pady=(0, 4))
+            canvas = tk.Canvas(bar, bg=theme.SURFACE_CARD, height=8, highlightthickness=0)
             canvas.pack(fill="x")
 
             def draw_bar(_e=None):
@@ -3458,35 +3462,37 @@ class ModelCompareView:
             canvas.bind("<Configure>", draw_bar)
             canvas.after(10, draw_bar)
 
-        # Summary deck: elevated model cards
+        # Summary deck: elevated rounded model cards
         deck = tk.Frame(self._container, bg=theme.BG)
-        deck.pack(fill="x", pady=(4, 4))
+        deck.pack(fill="x", padx=2, pady=(4, 4))
         for j, mc in enumerate(self._models):
-            cell = tk.Frame(deck, bg=theme.PANEL_2, padx=12, pady=6)
+            cell = RoundedFrame(
+                deck, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L,
+            )
             cell.pack(side="left", fill="both", expand=True, padx=4)
 
-            row0 = tk.Frame(cell, bg=theme.PANEL_2)
-            row0.pack(fill="x")
+            row0 = tk.Frame(cell, bg=theme.SURFACE_CARD)
+            row0.pack(fill="x", padx=12, pady=(8, 2))
             if len(self._models) >= 2:
                 dot_color = theme.CHART_PALETTE[j % len(theme.CHART_PALETTE)]
-                tk.Label(row0, text="●", bg=theme.PANEL_2, fg=dot_color,
+                tk.Label(row0, text="●", bg=theme.SURFACE_CARD, fg=dot_color,
                          font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 4))
             v_name = pricing.vendor(mc.model_id)
             if v_name:
-                tk.Label(row0, text=v_name, bg=theme.VENDOR_BADGE_BG, fg=theme.VENDOR_BADGE_FG,
-                         font=theme.FONT_UI_SMALL_BOLD, padx=6, pady=1).pack(side="left", padx=(0, 8))
-            name_lbl = tk.Label(row0, text=mc.display_name, bg=theme.PANEL_2, fg=theme.FG_WHITE,
+                StatusBadge(row0, text=v_name, kind="info", bg=theme.SURFACE_CARD,
+                            height=20, radius=theme.RADIUS_S).pack(side="left", padx=(0, 8))
+            name_lbl = tk.Label(row0, text=mc.display_name, bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
                                 font=theme.FONT_VALUE, anchor="w")
             name_lbl.pack(side="left")
 
             cost_str = model_display(mc, "m_cost")
-            # cost_share 已是百分数（core 已 ×100）——走 SSOT 格式化，勿再 ×100
             share_str = (f" · 成本占比 {model_display(mc, 'm_cost_share')}"
                          if len(self._models) >= 2 else "")
             sub_lbl = tk.Label(cell, text=f"{cost_str} · {mc.session_count} 会话{share_str}",
-                               bg=theme.PANEL_2, fg=theme.MUTED,
+                               bg=theme.SURFACE_CARD, fg=theme.MUTED,
                                font=theme.FONT_UI_SMALL, anchor="w")
-            sub_lbl.pack(anchor="w", pady=(2, 0))
+            sub_lbl.pack(anchor="w", padx=12, pady=(0, 8))
 
             price_tip = _model_price_tip(mc)
             for w in (cell, row0, name_lbl, sub_lbl):
@@ -3495,31 +3501,32 @@ class ModelCompareView:
     def _build_group(self, group) -> None:
         """Build one per-model metric group from a metric_defs.Group (SSOT)."""
         collapsed = self._group_collapsed.get(group.id, False)
-        gframe = tk.Frame(self._container, bg=theme.BG)
-        gframe.pack(fill="x", pady=(4, 0))
+        gframe = RoundedFrame(
+            self._container, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L,
+        )
+        gframe.pack(fill="x", padx=6, pady=(4, 2))
 
-        # 宝石色映射
         GROUP_ACCENTS = {
-            "M_TOK": theme.GROUP_COLORS["G2"],   # 宝石蓝
-            "M_COST": theme.GROUP_COLORS["G5"],  # 琥珀金
-            "M_EFF": theme.GROUP_COLORS["G3"],   # 青碧绿
-            "M_QUAL": theme.GROUP_COLORS["G4"],  # 翡翠绿
+            "M_TOK": theme.GROUP_COLORS["G2"],
+            "M_COST": theme.GROUP_COLORS["G5"],
+            "M_EFF": theme.GROUP_COLORS["G3"],
+            "M_QUAL": theme.GROUP_COLORS["G4"],
         }
         accent_col = GROUP_ACCENTS.get(group.id, theme.ACCENT)
 
-        header_bg = theme.PANEL_2
-        header = tk.Frame(gframe, bg=header_bg, height=28, cursor=CLICK_CURSOR)
-        header.pack(fill="x")
+        header_bg = theme.SURFACE_CARD
+        header = tk.Frame(gframe, bg=header_bg, height=30, cursor=CLICK_CURSOR)
+        header.pack(fill="x", padx=8, pady=(5, 2))
         header.pack_propagate(False)
 
-        # 3px 宝石色左侧指示条
-        bar = tk.Frame(header, bg=accent_col, width=3)
-        bar.pack(side="left", fill="y")
+        bar = tk.Frame(header, bg=accent_col, width=4)
+        bar.pack(side="left", fill="y", padx=(2, 6), pady=5)
 
         arrow_lbl = tk.Label(header, text=f"{'▸' if collapsed else '▾'} {group.name}",
-                             bg=header_bg, fg=theme.FG,
+                             bg=header_bg, fg=theme.FG_WHITE,
                              font=theme.FONT_UI_BOLD, anchor="w", cursor=CLICK_CURSOR)
-        arrow_lbl.pack(side="left", fill="y", padx=(8, 6))
+        arrow_lbl.pack(side="left", fill="y")
 
         right_note = f"{len(group.metrics)} 项"
         if group.id == "M_QUAL" and any(
@@ -3531,10 +3538,10 @@ class ModelCompareView:
             else:
                 right_note = f"仅统计单模型独立会话 · {right_note}"
         tk.Label(header, text=right_note, bg=header_bg, fg=theme.MUTED,
-                 font=theme.FONT_UI_SMALL).pack(side="right", padx=10)
+                 font=theme.FONT_UI_SMALL).pack(side="right", padx=6)
 
         body = tk.Frame(gframe, bg=theme.PANEL)
-        body.pack(fill="x")
+        body.pack(fill="x", padx=6, pady=(0, 6))
 
         # 多模型时渲染专属表头（仅出现一次，不再每个分组重复罗列冗余模型名）
         if len(self._models) >= 2:
@@ -3655,7 +3662,7 @@ class ModelCompareView:
         if gs.collapsed:
             gs.body.pack_forget()
         else:
-            gs.body.pack(fill="x")
+            gs.body.pack(fill="x", padx=6, pady=(0, 6))
 def _format_model_description(extra: str) -> str:
     """Format description text into clean bullet items with non-breaking spaces.
 
@@ -3769,23 +3776,28 @@ class RealProjectsView:
         self._sort_col = "n"
         self._expanded: set[str] = set()
 
-        head = tk.Frame(parent, bg=theme.PANEL)
-        head.pack(fill="x", padx=theme.PAD_M, pady=(theme.PAD_S, 0))
-        _hi = ui_icon(head, "layers")
+        head = RoundedFrame(
+            parent, fill=theme.SURFACE_CARD, parent_bg=theme.PANEL,
+            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L,
+        )
+        head.pack(fill="x", padx=theme.PAD_M, pady=(theme.PAD_S, 2))
+        head_row = tk.Frame(head, bg=theme.SURFACE_CARD)
+        head_row.pack(fill="x", padx=10, pady=6)
+        _hi = ui_icon(head_row, "layers")
         if _hi is not None:
-            tk.Label(head, image=_hi, bg=theme.PANEL).pack(side="left")
-        tk.Label(head, text="项目聚合", bg=theme.PANEL, fg=theme.FG,
+            tk.Label(head_row, image=_hi, bg=theme.SURFACE_CARD).pack(side="left")
+        tk.Label(head_row, text="项目聚合", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
                  font=theme.FONT_UI_BOLD).pack(side="left", padx=(theme.PAD_S, 0))
-        tk.Label(head,
+        tk.Label(head_row,
                  text="同一工作目录的各 agent 项目卡自动合并（父子路径不合并）",
-                 bg=theme.PANEL, fg=theme.MUTED,
+                 bg=theme.SURFACE_CARD, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL).pack(side="left", padx=theme.PAD_M)
-        self._sort_btn = flat_button(head, "排序：总会话数", self._pop_sort,
-                                     image=ui_icon(head, "rank"),
+        self._sort_btn = flat_button(head_row, "排序：总会话数", self._pop_sort,
+                                     image=ui_icon(head_row, "rank"),
                                      compound="left")
         self._sort_btn.pack(side="right")
-        flat_button(head, "刷新", self._refresh,
-                    image=ui_icon(head, "refresh"), compound="left").pack(
+        flat_button(head_row, "刷新", self._refresh,
+                    image=ui_icon(head_row, "refresh"), compound="left").pack(
                         side="right", padx=(0, theme.PAD_S))
 
         self._hint = tk.Label(parent, text="首次进入自动扫描全部项目…",
@@ -6262,24 +6274,26 @@ class LlmReportsView:
         right = tk.Frame(paned, bg=theme.PANEL)
         paned.add(right, minsize=380)
 
-        # 右顶部：结构化元数据 Hero 卡片（明度阶分区，无边框）
-        self._header_card = tk.Frame(
-            right, bg=theme.PANEL_2, relief="flat")
+        # 右顶部：结构化元数据圆角细框 Hero 卡片
+        self._header_card = RoundedFrame(
+            right, fill=theme.SURFACE_CARD, parent_bg=theme.PANEL,
+            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L,
+        )
         self._header_card.pack(fill="x", padx=10, pady=(4, 6))
 
         # 卡片第一行：标题 + 操作按钮
-        top_row = tk.Frame(self._header_card, bg=theme.PANEL_2)
+        top_row = tk.Frame(self._header_card, bg=theme.SURFACE_CARD)
         top_row.pack(fill="x", padx=10, pady=(8, 4))
         self._title_lbl = tk.Label(
-            top_row, text="", bg=theme.PANEL_2, fg=theme.FG_WHITE,
+            top_row, text="", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
             font=(theme.FONT_CJK, 12, "bold"), anchor="w", justify="left")
         self._title_lbl.pack(side="left", fill="x", expand=True)
 
-        # 右侧操作区：复制与删除按钮（图标化，沉浸于 PANEL_2，悬浮高亮）
+        # 右侧操作区：复制与删除按钮
         _copy_icon = ui_icon(top_row, "copy")
         self._copy_btn = flat_button(
             top_row, "复制全文", self._copy_markdown,
-            image=_copy_icon, bg=theme.PANEL_2,
+            image=_copy_icon, bg=theme.SURFACE_CARD,
             padx=4, pady=2)
         self._copy_btn.pack(side="right", padx=(3, 0))
         self._copy_tip = Tooltip(self._copy_btn, "复制全文 Markdown（含遥测 JSON）")
@@ -6287,47 +6301,45 @@ class LlmReportsView:
         _del_icon = ui_icon(top_row, "trash")
         self._del_btn = flat_button(
             top_row, "删除", self._delete_selected,
-            image=_del_icon, bg=theme.PANEL_2,
+            image=_del_icon, bg=theme.SURFACE_CARD,
             padx=4, pady=2)
         self._del_btn.pack(side="right", padx=(3, 0))
         Tooltip(self._del_btn, "删除本条报告")
 
         # 卡片第二行：徽标与关键指标
-        self._badge_row = tk.Frame(self._header_card, bg=theme.PANEL_2)
+        self._badge_row = tk.Frame(self._header_card, bg=theme.SURFACE_CARD)
         self._badge_row.pack(fill="x", padx=10, pady=(0, 8))
 
         self._kind_badge = RoundedPill(
             self._badge_row, text="", width=95, height=22, radius=theme.RADIUS_S,
-            fill=theme.PANEL, hover_fill=None, bg=theme.PANEL_2, fg=theme.ACCENT,
-            command=None)
+            fill=theme.PANEL, hover_fill=None, bg=theme.SURFACE_CARD, fg=theme.ACCENT,
+            command=None, outline=theme.BORDER_SUBTLE)
         self._kind_badge.pack(side="left", padx=(0, 6))
 
-        # 元数据项：回归纯净排版流（去框化设计，杜绝截断与 Badge 视觉过载）
+        # 元数据项：回归纯净排版流
         self._source_badge = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            self._badge_row, text="", bg=theme.SURFACE_CARD, fg=theme.MUTED,
             font=theme.FONT_UI_SMALL)
         self._source_badge.pack(side="left", padx=(0, 4))
 
         self._model_badge = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.FG,
+            self._badge_row, text="", bg=theme.SURFACE_CARD, fg=theme.FG,
             font=theme.FONT_UI_SMALL)
         self._model_badge.pack(side="left", padx=(0, 4))
         self._model_tip = Tooltip(self._model_badge, "当前报告所用 LLM 模型")
 
         self._scope_badge = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            self._badge_row, text="", bg=theme.SURFACE_CARD, fg=theme.MUTED,
             font=theme.FONT_UI_SMALL)
         self._scope_badge.pack(side="left", padx=(0, 4))
 
         self._metrics_lbl = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            self._badge_row, text="", bg=theme.SURFACE_CARD, fg=theme.MUTED,
             font=theme.FONT_UI_SMALL)
         self._metrics_lbl.pack(side="left", padx=4)
 
-        # 审计校验徽标：机械检查 LLM 输出是否守住审计契约（缺小节/笼统表扬/
-        # 转折锚点不足）。旧报告无该字段时隐藏；警示列于 Tooltip。
         self._audit_badge = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            self._badge_row, text="", bg=theme.SURFACE_CARD, fg=theme.MUTED,
             font=theme.FONT_UI_SMALL, padx=6, pady=1)
         self._audit_tip = Tooltip(
             self._audit_badge,
@@ -6335,7 +6347,7 @@ class LlmReportsView:
             "· 缺少必备小节 / 含笼统表扬措辞 / 转折锚点不足时亮警示，\n"
             "  说明模型未完全遵守审计立场——相关结论请折扣采信。")
         self._time_lbl = tk.Label(
-            self._badge_row, text="", bg=theme.PANEL_2, fg=theme.MUTED,
+            self._badge_row, text="", bg=theme.SURFACE_CARD, fg=theme.MUTED,
             font=theme.FONT_UI_SMALL)
         self._time_lbl.pack(side="right", padx=(4, 0))
 
@@ -7939,31 +7951,31 @@ class TermbaseView:
             ).pack()
             return
 
-        # 头部控制栏
-        head = tk.Frame(self._edit_container, bg=theme.PANEL, padx=14, pady=10)
+        # 头部控制栏（大气留白页头 + 保存主按钮）
+        head = tk.Frame(self._edit_container, bg=theme.BG, padx=16, pady=12)
         head.pack(fill="x")
 
-        head_left = tk.Frame(head, bg=theme.PANEL)
+        head_left = tk.Frame(head, bg=theme.BG)
         head_left.pack(side="left", fill="x", expand=True)
 
         tk.Label(
             head_left,
-            text=f"编辑词条: {term.pref_label}",
-            bg=theme.PANEL,
+            text=f"编辑词条：{term.pref_label}",
+            bg=theme.BG,
             fg=theme.FG_WHITE,
-            font=theme.FONT_HEADING,
+            font=theme.FONT_TITLE,
         ).pack(anchor="w")
 
         self._save_status_lbl = tk.Label(
             head_left,
             text="",
-            bg=theme.PANEL,
+            bg=theme.BG,
             fg=theme.SUCCESS,
             font=theme.FONT_UI_SMALL,
         )
         self._save_status_lbl.pack(anchor="w", pady=(2, 0))
 
-        head_right = tk.Frame(head, bg=theme.PANEL)
+        head_right = tk.Frame(head, bg=theme.BG)
         head_right.pack(side="right")
 
         _save_icon = ui_icon(head_right, "save")
@@ -7973,78 +7985,81 @@ class TermbaseView:
             self._save_current_entry,
             image=_save_icon,
             compound="left",
-            bg=theme.CONTROL_BG,
-            fg=theme.FG_WHITE,
+            primary=True,
             padx=12,
             pady=4,
         )
         save_btn.pack(side="right")
         Tooltip(save_btn, "保存当前编辑的词条内容")
 
-        # 表单主体
-        body = tk.Frame(self._edit_container, bg=theme.BG, padx=14, pady=12)
+        from .widgets import RoundedEntry, SurfaceCard
+
+        # 表单主体（分组 SurfaceCard + RoundedEntry 圆角细框）
+        body = tk.Frame(self._edit_container, bg=theme.BG, padx=16, pady=4)
         body.pack(fill="both", expand=True)
 
         def make_entry(parent, label_text: str, default_val: str = "", width: int = 24):
-            f = tk.Frame(parent, bg=theme.BG)
+            p_bg = str(parent.cget("bg")) if hasattr(parent, "cget") else theme.SURFACE_CARD
+            f = tk.Frame(parent, bg=p_bg)
             f.pack(side="left", fill="x", expand=True, padx=(0, 8))
-            tk.Label(f, text=label_text, bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
+            tk.Label(f, text=label_text, bg=p_bg, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
                 anchor="w"
             )
-            ent = entry_box(f, font=theme.FONT_UI)
+            ent = RoundedEntry(f, font=theme.FONT_UI, bg=p_bg, fill=theme.CONTROL_BG, height=28)
             ent.insert(0, default_val)
-            ent.box.pack(fill="x", pady=(2, 0))
+            ent.pack(fill="x", pady=(2, 0))
             return ent
 
-        # Row 1: 主标签 / 标识 / 状态
-        r1 = tk.Frame(body, bg=theme.BG)
+        # 分组 1：基础属性与权威释义
+        base_card = SurfaceCard(body, title="基础属性与释义", bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+        base_card.pack(fill="x", pady=(0, 14))
+        c_base = base_card.body
+
+        r1 = tk.Frame(c_base, bg=theme.SURFACE_CARD)
         r1.pack(fill="x", pady=(0, theme.PAD_M))
         self._f_pref = make_entry(r1, "主标签（必填）", term.pref_label)
         self._f_slug = make_entry(r1, "标识（小写英文、数字、连字符）", term.slug)
 
-        # Status 下拉（项目惯例 ttk.Combobox；显示纯中文，保存时反查 key）
-        st_frame = tk.Frame(r1, bg=theme.BG)
-        st_frame.pack(side="left", padx=(0, theme.PAD_M), anchor="n")
-        tk.Label(st_frame, text="状态", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
+        st_frame = tk.Frame(r1, bg=theme.SURFACE_CARD)
+        st_frame.pack(side="left", padx=(0, theme.PAD_S), anchor="n")
+        tk.Label(st_frame, text="状态", bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
             anchor="w"
         )
         self._f_status = tk.StringVar(
             value=_STATUS_CN.get(term.status, _STATUS_CN["active"]))
         st_menu = ttk.Combobox(
-            st_frame, textvariable=self._f_status, state="readonly",
+            st_frame, textvariable=self._f_status, state="readonly", width=10,
             values=list(_STATUS_CN.values()))
-        st_menu.pack(pady=(2, 0), ipady=4)   # 与输入框（4px 内衬）同高
+        st_menu.pack(pady=(2, 0), ipady=3)
 
-        # Row 2: 英文名 / 概念层面 / 负责人
-        r2 = tk.Frame(body, bg=theme.BG)
+        r2 = tk.Frame(c_base, bg=theme.SURFACE_CARD)
         r2.pack(fill="x", pady=(0, theme.PAD_M))
         self._f_en = make_entry(r2, "英文名称", term.term_en)
 
-        mda_frame = tk.Frame(r2, bg=theme.BG)
+        mda_frame = tk.Frame(r2, bg=theme.SURFACE_CARD)
         mda_frame.pack(side="left", padx=(0, theme.PAD_M), anchor="n")
-        _mda_lbl = tk.Label(mda_frame, text="概念层面", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL)
+        _mda_lbl = tk.Label(mda_frame, text="概念层面", bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL)
         _mda_lbl.pack(anchor="w")
         Tooltip(_mda_lbl, "机制＝代码实现规则；动态＝实际运行行为；体验＝用户感受。不确定可留空")
         self._f_mda = tk.StringVar(
             value=_MDA_CN.get(term.mda_layer or "", _MDA_CN[""]))
         mda_menu = ttk.Combobox(
-            mda_frame, textvariable=self._f_mda, state="readonly",
+            mda_frame, textvariable=self._f_mda, state="readonly", width=12,
             values=list(_MDA_CN.values()))
-        mda_menu.pack(pady=(2, 0), ipady=4)
+        mda_menu.pack(pady=(2, 0), ipady=3)
 
         self._f_owner = make_entry(r2, "负责人", term.owner)
 
-        # Row 3: 别名
-        r3 = tk.Frame(body, bg=theme.BG)
+        r3 = tk.Frame(c_base, bg=theme.SURFACE_CARD)
         r3.pack(fill="x", pady=(0, theme.PAD_M))
         alt_str = ", ".join(term.alt_labels)
         self._f_alts = make_entry(r3, "别名与俗称（多个用逗号分隔）", alt_str)
 
-        # Row 4: 释义
-        r4 = tk.Frame(body, bg=theme.BG)
-        r4.pack(fill="x", pady=(0, theme.PAD_M + theme.PAD_XS))
+        base_card.add_divider()
+        r4 = tk.Frame(c_base, bg=theme.SURFACE_CARD)
+        r4.pack(fill="x")
         tk.Label(
-            r4, text="释义（必填）", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL
+            r4, text="权威释义（必填）", bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL
         ).pack(anchor="w")
         self._f_def = tk.Text(
             r4,
@@ -8054,87 +8069,74 @@ class TermbaseView:
             insertbackground=theme.FG,
             font=theme.FONT_UI,
             relief="flat",
-            padx=6,
+            padx=8,
             pady=6,
             highlightthickness=0,
         )
         self._f_def.insert("1.0", term.definition)
-        self._f_def.pack(fill="x", pady=(2, 0))
+        self._f_def.pack(fill="x", pady=(3, 0))
 
-        # Section: 各职能怎么理解它
-        r_rend = tk.Frame(body, bg=theme.BG)
-        r_rend.pack(fill="x", pady=(theme.PAD_S, theme.PAD_M + theme.PAD_XS))
-        _rend_lbl = tk.Label(
-            r_rend,
-            text="各职能怎么理解它",
-            bg=theme.BG,
-            fg=theme.FG_WHITE,
-            font=theme.FONT_UI_BOLD,
+        # 分组 2：各职能怎么理解它
+        rend_card = SurfaceCard(
+            body, title="各职能怎么理解它",
+            subtitle="不同职能语境下的对应表述，留空则沿用主释义",
+            bg=theme.SURFACE_CARD, parent_bg=theme.BG,
         )
-        _rend_lbl.pack(anchor="w", pady=(0, theme.PAD_S))
-        Tooltip(_rend_lbl, "同一条术语在不同职能语境下的说法；留空的职能在歧义检测中沿用主释义")
-
-        rend_grid = tk.Frame(r_rend, bg=theme.BG)
+        rend_card.pack(fill="x", pady=(0, 14))
+        rend_grid = tk.Frame(rend_card.body, bg=theme.SURFACE_CARD)
         rend_grid.pack(fill="x")
         for i, (rk, rlabel) in enumerate(ROLE_LABELS.items()):
             row_idx = i // 2
             col_idx = i % 2
-            cell = tk.Frame(rend_grid, bg=theme.BG)
+            cell = tk.Frame(rend_grid, bg=theme.SURFACE_CARD)
             cell.grid(row=row_idx, column=col_idx, sticky="ew",
                       padx=(0, theme.PAD_M), pady=(0, theme.PAD_S + theme.PAD_XS))
             rend_grid.columnconfigure(col_idx, weight=1)
 
             tk.Label(
-                cell, text=f"{rlabel}：", bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL
+                cell, text=f"{rlabel}：", bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL
             ).pack(anchor="w")
-            ent = entry_box(cell, font=theme.FONT_UI_SMALL)
+            ent = RoundedEntry(cell, font=theme.FONT_UI_SMALL, bg=theme.SURFACE_CARD,
+                               fill=theme.CONTROL_BG, height=26)
             ent.insert(0, term.renderings.get(rk, ""))
-            ent.box.pack(fill="x", pady=(2, 0))
+            ent.pack(fill="x", pady=(2, 0))
             self._rendering_entries[rk] = ent
 
-        # Section: 常见误解
-        r_misc = tk.Frame(body, bg=theme.BG)
-        r_misc.pack(fill="x", pady=(theme.PAD_S, theme.PAD_M + theme.PAD_XS))
-
-        misc_head = tk.Frame(r_misc, bg=theme.BG)
-        misc_head.pack(fill="x", pady=(0, theme.PAD_S))
-        _misc_lbl = tk.Label(
-            misc_head,
-            text="常见误解",
-            bg=theme.BG,
-            fg=theme.FG_WHITE,
-            font=theme.FONT_UI_BOLD,
+        # 分组 3：常见误解与备注
+        misc_card = SurfaceCard(
+            body, title="常见误解与备注",
+            subtitle="记录易混淆说法与真实边界，供歧义检测生成提醒",
+            bg=theme.SURFACE_CARD, parent_bg=theme.BG,
         )
-        _misc_lbl.pack(side="left")
-        Tooltip(_misc_lbl, "该词条容易被哪个职能误解成什么、真相是什么；歧义检测据此生成提醒")
+        misc_card.pack(fill="x", pady=(0, 12))
+        if misc_card.header_extra is not None:
+            flat_button(
+                misc_card.header_extra,
+                "添加一条误解",
+                self._add_misconception_row,
+                padx=8,
+                pady=2,
+            ).pack(side="right")
 
-        flat_button(
-            misc_head,
-            "添加一条误解",
-            self._add_misconception_row,
-            padx=6,
-            pady=1,
-        ).pack(side="right")
-
-        self._misc_container = tk.Frame(r_misc, bg=theme.BG)
+        self._misc_container = tk.Frame(misc_card.body, bg=theme.SURFACE_CARD)
         self._misc_container.pack(fill="x")
 
         for m in term.misconceptions:
             self._add_misconception_row(m)
 
-        # Row Notes
-        r_notes = tk.Frame(body, bg=theme.BG)
-        r_notes.pack(fill="x", pady=(theme.PAD_S, theme.PAD_M + theme.PAD_XS))
+        misc_card.add_divider()
+        r_notes = tk.Frame(misc_card.body, bg=theme.SURFACE_CARD)
+        r_notes.pack(fill="x")
         self._f_notes = make_entry(r_notes, "备注", term.notes)
 
         # 记录基线快照供防丢脏检查
         self._baseline_snapshot = self._get_form_snapshot()
 
     def _add_misconception_row(self, data: dict | None = None) -> None:
-        from .widgets import flat_button
+        from .widgets import RoundedEntry, flat_button
         from tcer.core.termbase import ROLE_LABELS, _ROLE_KEY_ALIASES
 
-        row_frame = tk.Frame(self._misc_container, bg=theme.PANEL, padx=8, pady=4)
+        row_frame = tk.Frame(self._misc_container, bg=theme.PANEL, padx=8, pady=5)
         row_frame.pack(fill="x", pady=(0, theme.PAD_S))
 
         # 职能下拉（纯中文显示，保存反查 key）
@@ -8153,17 +8155,19 @@ class TermbaseView:
         tk.Label(row_frame, text="误读以为：", bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
             side="left"
         )
-        wrong_ent = entry_box(row_frame, font=theme.FONT_UI_SMALL, width=22)
+        wrong_ent = RoundedEntry(row_frame, font=theme.FONT_UI_SMALL, width=18,
+                                 bg=theme.PANEL, fill=theme.CONTROL_BG, height=26)
         wrong_ent.insert(0, (data or {}).get("wrong", ""))
-        wrong_ent.box.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
+        wrong_ent.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
 
         # 澄清
         tk.Label(row_frame, text="实际是：", bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
             side="left"
         )
-        act_ent = entry_box(row_frame, font=theme.FONT_UI_SMALL, width=22)
+        act_ent = RoundedEntry(row_frame, font=theme.FONT_UI_SMALL, width=18,
+                               bg=theme.PANEL, fill=theme.CONTROL_BG, height=26)
         act_ent.insert(0, (data or {}).get("actual", ""))
-        act_ent.box.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
+        act_ent.pack(side="left", padx=(2, theme.PAD_S), fill="x", expand=True)
 
         # 删除行（小图标按钮，不用文本符号）
         del_btn = flat_button(

@@ -15,14 +15,18 @@ PAD_S = 4
 PAD_M = 8
 PAD_L = 12
 
-# 圆角 SSOT（借鉴 cc-switch control/panel 分档）：S=徽标/小控件，M=胶囊/分段按钮。
+# 圆角 SSOT（对标 OpenResearch / cc-switch 分档）：S=徽标/小控件，M=输入框/胶囊/按钮，L=分组卡片，XL=浮层容器。
 # 勿在组件里写死 radius=数字（tests/test_style_contract 守卫）。
 RADIUS_S = 4
-RADIUS_M = 5
+RADIUS_M = 6
+RADIUS_L = 8
+RADIUS_XL = 10
+RADIUS_FULL = 999
 
 # --- Monokai Dimmed 工作台表面明度标尺 (Surface Elevation) ---
-# 纪律：95% 面积收敛为 BG → PANEL → PANEL_2 → CONTROL 四级灰；强调色只给焦点/选中/状态。
+# 纪律：95% 面积收敛为 BG → SURFACE_CARD → PANEL → PANEL_2 → CONTROL 灰阶；强调色只给焦点/选中/状态。
 BG = "#1e1e1e"              # 主工作区/编辑器底色（活动栏同为全窗最暗列）
+SURFACE_CARD = "#232323"    # 圆角细描边分组卡片微抬升底色（介于 BG 与 PANEL 之间，对标 OpenResearch surface）
 PANEL = "#272727"           # 侧边栏资源管理器底色
 ACTIVITY_BG = "#353535"     # 左侧 44px 活动栏底色（Monokai Dimmed 官方 activityBar.background——亮柱是该主题特征，勿改成暗列）
 ACTIVITY_HOVER_BG = "#5a5a5a"  # 亮柱上的 hover（官方 hover=40% 白混合的保守近似；全局 HOVER_BG 在亮柱上不可辨）
@@ -32,6 +36,8 @@ SECTION_HEADER_BG = "#272727"  # 侧栏分组头底色（对齐 VS Code 官方�
 CONTROL_BG = "#3c3c3c"      # 输入框底色、下拉组件槽底色、分段控件底（官方 input 默认值 #3C3C3C——暗槽配亮组头是官方同构）
 CARD_HEADER_BG = "#353535"  # 卡片/区块头部略抬升底
 BORDER = "#3e3e42"          # 极细微结构分隔线 (sideBarSectionHeader.border)——只做结构分隔，永不表达状态
+BORDER_SUBTLE = "#303030"   # 圆角卡片/胶囊/输入框的 1px 柔和细描边（对标 OpenResearch #303030 hairline）
+DIVIDER = "#2b2b2e"         # 分组卡片与阅读器内部行间极淡 1px 分隔线
 BORDER_HOVER = "#505050"    # 弹窗图形选择框描边（Card 体系已退出边框状态表达，勿再新增用途）
 HOVER_BG = "#444444"        # 列表/按钮悬停底色（全局唯一 hover token）
 HOVER_ACCENT = "#3b82f6"    # 活力焦点蓝 hover
@@ -50,6 +56,10 @@ WARN_TINT_BG = "#3a2a1a"    # 警示提示条暗橙底 (配 WARNING 前景字)
 ERROR_TINT_BG = "#3a1a1a"   # 错误/吸引子警示卡片暗红底 (配 ERROR 前景字)
 SUCCESS_TINT_BG = "#14291c"  # 成功/通过提示暗绿底 (配 SUCCESS 前景字)
 INFO_TINT_BG = "#172338"     # 信息/说明提示暗蓝底 (配 ACCENT 前景字)
+WARN_TINT_BORDER = "#5c4018"     # 警示徽标暗橙 1px 细描边
+ERROR_TINT_BORDER = "#5c2326"    # 错误徽标暗红 1px 细描边
+SUCCESS_TINT_BORDER = "#224a30"  # 成功徽标暗绿 1px 细描边
+INFO_TINT_BORDER = "#263f66"     # 信息徽标暗蓝 1px 细描边
 
 # 滚动条极简细条
 SCROLL_THUMB = "#3a3a3c"

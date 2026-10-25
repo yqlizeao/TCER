@@ -64,16 +64,114 @@ FILE_MANAGER_NAME: str = {
 # ---------------------------------------------------------------------------
 # Mousewheel — three different conventions across OS/tk builds
 # ---------------------------------------------------------------------------
+def touchpad_dy_from_raw(raw) -> float:
+    """``<TouchpadScroll>`` %d 单值回退解码（Tk 9 真机打包格式无 8.6 可实证）。
+
+    - 多值列表 ``"{dx dy}"``：取第 2 项（部分 Tk 9 版本 %d 直接给像素对）；
+    - 裸 32 位整数：按 Windows WM_MOUSEWHEEL 打包惯例取**高** 16 位为垂直
+      分量（低 16 位为水平；符号 16 位补码）。
+    解不出垂直分量返回 0.0（调用方跳过）。
+    """
+    try:
+        parts = str(raw).replace("{", "").replace("}", "").split()
+        if len(parts) >= 2:
+            return float(parts[1])
+        val = int(float(parts[0])) if parts else 0
+    except (ValueError, TypeError):
+        return 0.0
+    dy16 = (val >> 16) & 0xFFFF  # 高 16 位 = 垂直（WM_MOUSEWHEEL 惯例）
+    if dy16 >= 0x8000:
+        dy16 -= 0x10000
+    return float(dy16)
+
+
 def bind_mousewheel(canvas, callback):
     """Bind mouse-wheel scrolling on *canvas*, calling ``callback(units)``.
 
+    On Tcl/Tk >= 9.0, also binds ``<TouchpadScroll>`` (TIP 684) with sub-unit
+    pixel accumulation for smooth two-finger touchpad scrolling, while keeping
+    full compatibility with Tcl/Tk 8.6.
+
+    ``<TouchpadScroll>`` 的 %d 打包格式在本机 Tk 8.6 上无法实证（该虚拟事件
+    仅 Tk 9 存在），解码按官方 API 优先逐级回退、不臆测打包方向：
+    1. ``tk::PreciseScrollDeltas``（Tk 9 官方解包器，gitk 同款用法）——Tcl 层
+       直接把 %D 转成 {dx dy} 像素对，垂直分量取第 2 项；
+    2. %d 本身即多值列表 "{dx dy}"——split 后取第 2 项；
+    3. 裸 32 位整数——按 Windows WM_MOUSEWHEEL 打包惯例取高 16 位为垂直增量
+       （低 16 位为水平；此支线无真机验证，仅供 Tk 9 早期/变体兜底）。
+
     Returns an *unbind* callable; invoke it on ``<Leave>`` to detach.
     """
+    import tkinter as _tk
+
+    if float(getattr(_tk, "TkVersion", 8.6)) >= 9.0:
+        accum = [0.0]
+        _cmd = f"tcer_tp_scroll_{id(canvas):x}"
+
+        def _feed(dy) -> None:
+            dy = float(dy)
+            if dy == 0:
+                return
+            accum[0] += -dy / 28.0
+            steps = int(accum[0])
+            if steps != 0:
+                accum[0] -= steps
+                callback(steps)
+
+        def _on_dxdy(dxdy) -> None:
+            # Tk 官方解包：传进来的是 "{dx dy}"（Python command 收到单个 list 参数）
+            try:
+                parts = str(dxdy).replace("{", "").replace("}", "").split()
+                _feed(parts[1])
+            except (ValueError, IndexError):
+                pass
+
+        def _on_raw(e) -> None:
+            dy = touchpad_dy_from_raw(getattr(e, "delta", 0))
+            if dy:
+                _feed(dy)
+
+        def _unbind_touchpad():
+            try:
+                canvas.unbind_all("<TouchpadScroll>")
+            except Exception:
+                pass
+            try:
+                canvas.tk.deletecommand(_cmd)
+            except Exception:
+                pass
+
+        bound = False
+        try:
+            has_deltas_proc = bool(
+                str(canvas.tk.eval("info commands tk::PreciseScrollDeltas")))
+        except Exception:
+            has_deltas_proc = False
+        if has_deltas_proc:
+            try:
+                # 官方 API 优先：%D 由 Tk 在 Tcl 层替换后经 PreciseScrollDeltas
+                # 解包，再路由回 Python command。字符串脚本必须绕过 Python 回调
+                # 包装（tkinter._bind 对字符串 func 原样透传）。
+                canvas.tk.createcommand(_cmd, _on_dxdy)
+                canvas.bind_all("<TouchpadScroll>",
+                                f"catch {{{_cmd} [tk::PreciseScrollDeltas %D]}}")
+                bound = True
+            except Exception:
+                bound = False
+        if not bound:
+            try:
+                canvas.bind_all("<TouchpadScroll>", _on_raw)
+            except Exception:
+                pass
+    else:
+        def _unbind_touchpad():
+            pass
+
     if PLATFORM == "darwin":
         # macOS tk: <MouseWheel>, delta is ±1 per notch
         handler = lambda e: callback(int(-e.delta))
         canvas.bind_all("<MouseWheel>", handler)
-        return lambda: canvas.unbind_all("<MouseWheel>")
+        return lambda: (canvas.unbind_all("<MouseWheel>"), _unbind_touchpad())
 
     if PLATFORM == "linux":
         # X11/Wayland: Button-4 = scroll up, Button-5 = scroll down.
@@ -86,12 +184,13 @@ def bind_mousewheel(canvas, callback):
         canvas.bind_all("<Button-4>", _on_up)
         canvas.bind_all("<Button-5>", _on_down)
         return lambda: (canvas.unbind_all("<Button-4>"),
-                        canvas.unbind_all("<Button-5>"))
+                        canvas.unbind_all("<Button-5>"),
+                        _unbind_touchpad())
 
     # Windows: <MouseWheel>, delta is ±120 per notch
     handler = lambda e: callback(int(-e.delta / 120))
     canvas.bind_all("<MouseWheel>", handler)
-    return lambda: canvas.unbind_all("<MouseWheel>")
+    return lambda: (canvas.unbind_all("<MouseWheel>"), _unbind_touchpad())
 
 
 # ---------------------------------------------------------------------------

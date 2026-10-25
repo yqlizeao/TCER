@@ -67,6 +67,10 @@ TCER 全面重构为 VS Code 标准四区工作台架构（**顶部页签栏已�
 | `CONTROL_BG` | `#3c3c3c` | 输入框底色、下拉组件槽底色（官方 input 默认值 #3C3C3C） |
 | `CARD_HEADER_BG` | `#353535` | 卡片 / 区块头部略抬升底色 |
 | `BORDER` | `#3e3e42` | 极细微结构分隔线——**只做结构分隔，永不表达状态** |
+| `BORDER_SUBTLE` | `#303030` | 分组卡片、状态胶囊、分段控件与输入框常态 1px 抗锯齿细描边 |
+| `SURFACE_CARD` | `#232323` | 分组圆角卡片与胶囊静置表面色（介于 `BG #1e1e1e` 与 `PANEL #272727` 之间，实现无噪微抬升） |
+| `DIVIDER` | `#2b2b2e` | 卡片内行间 / 气泡与阅读器章节 1px 极弱分隔线 |
+| `RADIUS_S/M/L/XL/FULL` | `4/6/8/10/999` | 圆角半径阶梯 SSOT（小徽标 4px / 按钮与输入框 6px / 分组卡片 8px / 大容器 10px / 全胶囊 999px） |
 | `BORDER_HOVER` | `#505050` | 弹窗图形选择框描边（Card 体系已退出，勿再新增用途） |
 | `HOVER_BG` | `#444444` | 列表 / 按钮悬停底色（**全局唯一 hover token**） |
 | `SEL_ROW_BG` | `#1e293b` | 非聚焦选中底色 |
@@ -127,6 +131,17 @@ TCER 全面重构为 VS Code 标准四区工作台架构（**顶部页签栏已�
 - **折叠箭头全 GUI 统一细箭头 `▾`（展开）/ `▸`（折叠）**——deck 头 / 组头 / 洞察分组 / 无数据 expander / charts 组头一律同款（排序箭头 `▼/▲` 与左右指示 `◀/▶` 是另一语义体系，不混用）；
 - 左侧折叠箭头，中间标题，右侧数量/操作徽标胶囊；
 - 内容容器平滑展开/折叠，完美兼容旧版 `CollapsibleSection` 调用。
+
+### OpenResearch 级三层抗锯齿圆角矢量引擎与 5 大基础组件（2026-10 升级）
+- **三层自适应圆角贴图管线（`get_rounded_rect_img` / `get_rounded_caps` / `get_rounded_corners` / `draw_rounded_box`）**：
+  1. **Tier 1（Tcl/Tk 9.0+ 原生 SVG）**：探测 `tk.TkVersion >= 9.0` 时通过 `tk.PhotoImage(data=svg_bytes, format="svg")` 硬件级抗锯齿光栅化；
+  2. **Tier 2（Pillow 2× LANCZOS）**：开发机装有 PIL 时超采样缩放；
+  3. **Tier 3（纯标准库 SDF 抗锯齿 PNG 编码器 `_render_sdf_png_bytes`）**：基于有向距离场（Signed Distance Field）亚像素边缘积分 + `zlib`/`struct` 内存直出 PNG 字节流，确保在无 PIL 的 Tcl/Tk 8.6 与 9.0 上同样具备丝滑抗锯齿圆角与 1px 细描边，彻底消灭 1-bit 硬切锯齿。
+- **`SurfaceCard`（9-slice 分组圆角细描边卡片）**：外部清爽粗体小节标题 + `SURFACE_CARD (#232323)` 圆角容器 + `1px BORDER_SUBTLE (#303030)` 抗锯齿描边 + `add_divider()` 内部 `1px DIVIDER (#2b2b2e)` 细分割线，缩放时四角贴图零重分配。
+- **`SegmentedControl`（分段切换胶囊槽）**：`PANEL` 圆角凹槽 + `1px BORDER_SUBTLE` 描边 + 内部高亮滑块，统一用于会话阅读器「全部 / 对话 / 改动」与弹窗分段切换。
+- **`ToggleSwitch`（36×20px 抗锯齿拨杆开关）**：绑定 `tk.BooleanVar`，开启态 `ACCENT` 蓝轨 + 纯白圆钮，关闭态 `CONTROL_BG` + `BORDER_SUBTLE` 细框。
+- **`StatusBadge`（语义状态徽标胶囊）**：支持 `neutral / success / warning / error / info` 五种微光暗底 + `1px *_TINT_BORDER` 同色相细描边 + 可选状态圆点。
+- **`RoundedEntry`（圆角细描边单行输入框）**：`tk.Frame` 包装 `tk.Canvas` 9-slice 圆角底 + 内嵌无边框 `tk.Entry`，常态 `1px BORDER_SUBTLE`，持焦平滑切换为 `1px ACCENT`，内置轻量占位提示且绝不污染 `.get()` 返回值。
 
 ### 交互反馈（2026-09-16 体验轮）
 - **Tooltip 300ms hover 延迟**（= VS Code `workbench.hover.delay` 默认）——立即弹出在扫读列表时闪烁；点击目标 widget 即隐；

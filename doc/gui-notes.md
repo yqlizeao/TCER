@@ -42,6 +42,15 @@
 
 - 趋势页新「相关」pill = `CorrMatrixChart`（N×N Pearson r，正=ACCENT 深浅/负=WARNING 深浅，点格下钻散点图自动设轴）；仪表盘右键格子换指标（`ui_prefs['dashboard_metrics']` 持久化，重启恢复）；会话卡片摘要行（左主模型短名、右成本金额纯文本；无评级徽标）；SessionColumn 卡片只建一次、搜索/红旗过滤走 pack 复用（~600ms→~1ms），构建分批 after(1)（勿用 after_idle——update_idletasks 会把 idle 批全部同步跑完）。切项目走页签惰性渲染（`app._refresh_views/_render_tab`：只画当前页签，其余标脏、`<<NotebookTabChanged>>` 补渲染）。`SelectableLabel` 自适应高度合并结算（类级待测队列 + 单定时器；tkinter 的 after 回调注册在调度 widget 名下、widget 销毁则定时器失效——须锚定 toplevel 并自愈，见 widgets.py 注释）——逐实例 update_idletasks 曾让效率榜一次刷新卡 2s；时间线弹窗点击回合展开明细 + CHR 虚线/累计净增行/压缩竖线叠加，另含「收敛诊断」双视图（左轴累计净增 × 右轴累计成本剪刀差 + 重试循环横带/最贵回合▼/缓存失效×标记；数据由弹窗调 `metrics.turn_cost_analysis`/`retry_loop_metrics` 现算——两函数返回逐回合序列 `turn_costs`/`cache_invalidation_turns`/`spans`，`compute()` 挂载点与 `SessionReport` 不挂序列，避免 CSV/HTML 护栏连带；非 Claude 源无 `turn_net_locs` 时净增线降级不画）；会话对比顶部叠加雷达 + 逐回合曲线；项目总览气泡散点（X=成本 Y=TCER 气泡=Token，点击选表行）；HTML 项目报告选节导出（`render_project_html(sections=...)`，`HtmlSectionsPopup`）。
 
+<a id="smart-view"></a>
+### 智能项目/会话视角（选中驱动，无切换开关）
+
+- **视角 = 当前选中**：有选中会话 ⇔ 会话视角；否则项目视角。唯一写点 `app.TcerGui._set_session_view(sid)`（同步 activity_bar 兼容桩）；「项目/会话」分段控件与项目右键「项目视角/会话视角」均已移除，`FilterBar` 不再持有 `view_mode`。
+- **丝滑回程两条**：①再点已选会话卡 = 取消选中回项目汇总（`SessionColumn._select` 识别，`on_select_session(None)`）；②会话视角下点当前项目卡 = 清选中回项目视角，**不重算**（数据没变）。无选中会话时点项目保留「点项目 = 重算」旧语义——右键「刷新此项目」走这条入口，勿改成纯切换。
+- **不自动选第一个会话**：`_on_analysis` 只在「同项目重分析且上一选中会话仍可见（或处于分批构建待选 `_pending_select_sid`）」时延续选中（会话视角保持）；否则 `_set_session_view(None)` 落回项目视角。`_clear_analysis_view` 同步复位视角，保证「sid=None ⇔ 项目视角」不变量处处成立。
+- **选中来源全走同一入口**：会话卡 / 效率榜排名行 / 趋势图定位均触发 `on_select_session`；各消费方（`_render_metrics`/`_update_ranking_view`/`_update_model_compare`/状态栏徽标/「会话记录」按钮）沿用 `mode == "session" and _selected_session_id` 双条件守卫，不变量下行为自洽。
+- **指标看板小分类平铺**：`MetricPanel._build_group` 不再按 `group.subgroups` 渲染「· 基础/行为/质量」标题行，G4 整组一张网格（`group.metrics` 即 `_subgrouped` 保证的扁平序）。子类结构保留在 `metric_defs`（HTML 报告 `html_report.py` 仍按子类分节），勿在看板重新加回小分类行。
+
 <a id="real-projects"></a>
 ### 原 #37 真实项目聚合页签（v1.7.1，「项目聚合」）
 
@@ -142,4 +151,13 @@
 - **`selection_set` 的 `<<TreeviewSelect>>` 依赖事件循环**，程序化选择后须显式调 `_on_select()`。
 - **抗锯齿 `_aa_layer` 的 16 档 alpha 量化勿删**（107ms → 23ms/层）；相图缩放用 `_aa_layer_flat` 矢量绘制 + 16ms 节流。
 - **`cget()` 返回值进算术/比较前必须经 `str()` / `to_int()`（`widgets.to_int`）归一**：CI 打包版（GitHub Actions 的 Python 3.11 冻结 tkinter）下部分选项返回 `Tcl_Obj` 包装而非 int/str，`int()` 直接 TypeError、`.split()`/`in`/`==` 静默失配——v2.0.0 exe 因此启动即崩（11 处调用点，2026-10-23）。源码 3.14 运行不复现，`winfo_*` 系列两环境均为 int 无需包装（1.9.9 同源 CI 构建大量 winfo 算术未炸可证）。回归测试用 `_FakeTclObj`（无 `__int__`、仅 `__str__`）模拟该形态，无需装 3.11。**发版前务必本机跑一次 CI 产出的 exe**——源码 launch.bat 冒烟覆盖不了冻结 Tcl/Tk 的行为差异。
+- **继承 `tk.Widget` / `tk.Canvas` 时的命名冲突铁律（2026-10 踩坑）**：
+  - ① `tkinter.BaseWidget._w` 存放底层 Tcl 控件路径名（如 `".!frame.!canvas"`），`tkinter.Misc._options` 是内部选项构造器方法——自定义子类**严禁**使用 `self._w` 或 `self._options` 作为宽高或选项列表属性名（应命名为 `self._width_px` / `self._items`），否则在 `super().__init__` 或后续 `tk.call` 时会直接触发 `TclError: invalid command name` 或 `TypeError: 'list' object is not callable`；
+  - ② 需要代理 `tk.Entry` 的 `.delete(first, last)` 与 `.insert(index, s)` 接口的复合输入控件（如 `RoundedEntry`）**必须继承 `tk.Frame`**（内部持 `self._canvas = tk.Canvas(self)`），绝不能直接继承 `tk.Canvas`——否则 `draw_rounded_box` 内部调 `canvas.delete(tag)` 会被子类重写的 `Entry.delete` 拦截并抛出 `TclError: bad entry index`。
+- **Tcl/Tk 8.6 与 9.0.4 双轨兼容**：CPython 3.14.7+ 官方安装包与 CI 构建产物升级为 Tcl/Tk 9.0.4（原生 `<TouchpadScroll>` 高精度触控板事件与原生 SVG `tk.PhotoImage`），而本地 Python 3.11–3.14.6 仍可能是 Tcl/Tk 8.6.15；`platform.bind_mousewheel` 按 `tk.TkVersion >= 9.0` 动态加绑 `<TouchpadScroll>`，`widgets.get_rounded_rect_img` 通过三层管线（Tk 9.0 SVG → PIL → 纯标准库 SDF PNG）保证双端零依赖一致渲染。
+- **重写 `configure`/`cget` 必须保住 Tk 四种调用形契约**（RoundedFrame / StatusBadge / RoundedKpiChip 经 `widgets._opt_info`/`_config_dict` 统一实现，2026-10 补）：①单键查询 `configure("bg")` 返回 `(key, dbName, dbClass, default, current)` 5 元组（消费方经 `[4]` 取值，裸字符串直接 TypeError）；②dict 形 `configure({"bg": x})` 必须生效（禁止静默丢弃或漏拦虚拟选项）；③无参 `configure()` 返回选项枚举 dict；④`cget("bg")` 返回**构造时父底色**（稳定值）——悬停填充、KINDS 胶囊面这类「画出来的颜色」不是画布 bg，返回它们会误导读父底色的调用方。
+- **`SurfaceCard` 不偷换 bg**：曾有 `bg==BG → SURFACE_CARD` 的静默重写特判，调用方以为画 BG 底被换色——特判已删，全部调用点显式传 `bg=theme.SURFACE_CARD, parent_bg=theme.BG`，勿再加回任何参数偷换。
+- **Variable trace 必须随 widget 销毁解除**：`ToggleSwitch`/`SegmentedControl`/`RoundedEntry` 的 `trace_add` 在 `<Destroy>` 里 `trace_remove`（各组件 `_release_var_trace`，判 `e.widget is self` 防「<Destroy> 对后代销毁逐个冒泡」误触发）。tk Variable 以 `PY_VARn` 活在解释器级，不解除则闭包把整棵已销毁控件子树钉在内存里，弹窗每开一次漏一棵。
+- **`<TouchpadScroll>` 解码勿臆测打包方向**：本地 Tk 8.6 无法实证该虚拟事件的 %d 格式，`platform.bind_mousewheel` 按「官方 API 优先」三级回退：`tk::PreciseScrollDeltas`（Tcl 层字符串脚本绑定 + `%D` 替换，gitk 同款）→ %d 多值列表 → 裸 32 位按 WM_MOUSEWHEEL 惯例取**高** 16 位（曾错取低 16 位，垂直滚动会落在水平分量上）。解码纯函数 `touchpad_dy_from_raw` 有离线单测；真机触控板首验仍要等 Tk 9.0.4 打包版。
+
 

@@ -27,7 +27,7 @@ from tcer.core.paths import (
 from tcer.core.reader import discover_jsonl
 from . import html_report, popups, theme, views
 from .views import ScoreRankingView, FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
-from .widgets import Tooltip, flat_button
+from .widgets import RoundedFrame, Tooltip, flat_button
 
 # 发布版(PyInstaller 打包,sys.frozen=True)默认开启「启动时自动检查更新」;
 # 源码运行(python -m tcer,frozen 不存在)默认关闭——开发者无需每次启动查更新。
@@ -274,6 +274,7 @@ class TcerGui:
                 "check_update_on_start": self._ui_prefs.get("check_update_on_start", False),
                 "pinned_sessions": self._pinned_keys,
                 "flagged_sessions": self._flagged_keys,
+                "nav_collapsed": getattr(self.activity_bar, "_collapsed", False),
             })
             ui_prefs.save(self._ui_prefs)
         except Exception:
@@ -294,13 +295,18 @@ class TcerGui:
                                sashwidth=4, opaqueresize=False)
         paned.pack(side="left", fill="both", expand=True)
 
-        # 左侧全高侧边栏 (Primary Sidebar，通顶) — 紧凑索引，突出右侧主体展示
-        sidebar = tk.Frame(paned, bg=theme.PANEL)
-        paned.add(sidebar, minsize=180, width=240)
+        # 左侧全高侧边栏 (Primary Sidebar，悬浮圆角细边框卡片)
+        sidebar_wrap = tk.Frame(paned, bg=theme.BG)
+        paned.add(sidebar_wrap, minsize=180, width=240)
+        sidebar = RoundedFrame(
+            sidebar_wrap, fill=theme.PANEL, parent_bg=theme.BG,
+            outline=theme.BORDER, radius=theme.RADIUS_XL,
+        )
+        sidebar.pack(fill="both", expand=True, padx=(2, 4), pady=6)
 
         # 侧栏顶部标题条
         sb_head = tk.Frame(sidebar, bg=theme.PANEL, height=28)
-        sb_head.pack(fill="x", padx=6, pady=(4, 2))
+        sb_head.pack(fill="x", padx=8, pady=(6, 2))
         sb_head.pack_propagate(False)
         rf_btn = flat_button(sb_head, "", self.refresh_projects,
                              image=views.ui_icon(sb_head, "refresh"), padx=3, pady=2)
@@ -309,12 +315,10 @@ class TcerGui:
 
         # 数据来源与时间预设胶囊挂载在侧栏顶部标题条
         self.filter.mount_sidebar(sb_head)
-        # 挂载项目/会话视角切换按钮（取代原“资源管理器”文本）
-        self.filter.mount_view_switcher(sb_head)
 
         self.sidebar_paned = tk.PanedWindow(sidebar, orient="vertical", bg=theme.PANEL,
                                             sashwidth=4, opaqueresize=False)
-        self.sidebar_paned.pack(fill="both", expand=True)
+        self.sidebar_paned.pack(fill="both", expand=True, padx=4, pady=(0, 6))
 
         proj_pane = tk.Frame(self.sidebar_paned, bg=theme.PANEL)
         self.sidebar_paned.add(proj_pane, minsize=120)
@@ -431,6 +435,7 @@ class TcerGui:
         self._current = None
         self._selected_session_id = None
         self._rendered_report = None
+        self._set_session_view(None)
         self.session_col.update([])
         self.ranking_view.update([])
         self.trend_chart.update([])
@@ -440,8 +445,21 @@ class TcerGui:
             self.status_bar.clear_badges()
 
     def on_select_project(self, idx: int) -> None:
+        """点项目卡：切项目重算；会话视角下再点当前项目 = 回项目汇总视角
+        （只清选中不重算——数据没变）。无选中会话时保留「点项目 = 重算」的
+        旧语义（右键「刷新此项目」走这条入口）。"""
+        proj_changed = (idx != self._selected_project_idx)
         self._selected_project_idx = idx
-        self.reanalyze()
+        if self._selected_session_id is not None:
+            self._selected_session_id = None
+            self.session_col.clear_selection()
+            self._set_session_view(None)
+            self._refresh_views(full=False)
+            self._update_status_bar_metrics()
+            if proj_changed:
+                self.reanalyze()
+        else:
+            self.reanalyze()
 
     def _selected_project(self):
         if self._selected_project_idx is None or self._selected_project_idx >= len(self._projects):
@@ -623,14 +641,14 @@ class TcerGui:
         self._selected_session_id = None
         _pinned, _flagged = self._marks_for_current_project()
         self.session_col.update(a.reports, pinned=_pinned, flagged=_flagged)
-        # Preserve the prior selection across the refresh when it survived
-        # (e.g. a reanalyze triggered indirectly by a date-filter FocusOut
-        # firing as a popup closes); otherwise default to the most recent.
+        # 智能视角：点项目 = 项目汇总视角，不再默认选中第一个会话。上一选中
+        # 仅在同项目重分析（如日期 FocusOut 触发）且该会话仍可见时延续（会话
+        # 视角保持）；没保住（切项目 / 被过滤）→ 落回项目视角。
         if prev_sid and (self.session_col.select_by_sid(prev_sid, notify=False)
                          or getattr(self.session_col, "_pending_select_sid", None) == prev_sid):
             self._selected_session_id = prev_sid
-        elif a.reports:
-            self._selected_session_id = self.session_col.select_first(notify=False)
+        else:
+            self._set_session_view(None)
         # 按页签惰性渲染：切项目只画当前看得见的页签（四视图全画要 ~600ms），
         # 其余标记待渲染，用户切过去时经 <<NotebookTabChanged>> 补上。
         self._refresh_views(full=True)
@@ -651,17 +669,17 @@ class TcerGui:
         self._update_status_bar_metrics()
 
     # --------------------------------------------------------------- sessions / view
-    def on_select_session(self, sid: str) -> None:
-        """选中某会话（中栏卡片 / 效率榜排名行触发）。
+    def on_select_session(self, sid: str | None) -> None:
+        """选中某会话（中栏卡片 / 效率榜排名行 / 趋势图定位触发）。
 
-        不翻转视角——视角切换只由左上角分段控件负责。会话视角下刷新会话相关面板；
-        项目视角下仅记录选中。
+        智能视角：选中会话 = 会话视角；``sid=None``（再点已选卡取消选中）
+        = 回项目汇总视角。视角唯一写点是 _set_session_view，无独立切换开关。
         """
         self._selected_session_id = sid
-        if self.view_mode.get() == "session":
-            self._refresh_views(full=False)
+        self._set_session_view(sid)
+        self._refresh_views(full=False)
         self._update_status_bar_metrics()
-        if hasattr(self, "llm_reports_view"):
+        if sid and hasattr(self, "llm_reports_view"):
             self.llm_reports_view.select_session_report(sid)
     # --------------------------------------------------------------- session marks
     def _session_mark_key(self, sid):
@@ -753,21 +771,19 @@ class TcerGui:
             self.refresh_projects()
         self.filter.set_status(f"已删除会话 · 移除 {len(removed)} 项磁盘对象")
 
-    def set_view_mode(self, mode: str) -> None:
-        """切换视角 (project / session)。"""
-        if self.view_mode.get() != mode:
-            self.view_mode.set(mode)
-            if hasattr(self, "activity_bar"):
-                self.activity_bar.set_active(mode)
-            self._on_view_change()
+    def _set_session_view(self, sid: str | None) -> bool:
+        """视角唯一写点：有选中会话 = 会话视角，否则项目视角。
 
-    def _on_view_change(self) -> None:
-        self._refresh_views(full=False)
-        self._update_status_bar_metrics()
+        返回是否发生翻转。原先的「项目/会话」分段开关已移除——视角完全由
+        当前选中驱动（点项目=项目视角，点会话=会话视角，再点已选卡=回项目）。
+        """
+        mode = "session" if sid else "project"
+        if self.view_mode.get() == mode:
+            return False
+        self.view_mode.set(mode)
         if hasattr(self, "activity_bar"):
-            self.activity_bar.set_active(self.view_mode.get())
-        if hasattr(self, "filter") and hasattr(self.filter, "update_view_btns"):
-            self.filter.update_view_btns()
+            self.activity_bar.set_active(mode)
+        return True
     # --------------------------------------------------------------- 页签惰性渲染
     def _refresh_views(self, *, full: bool) -> None:
         """四个页签全部标脏，只立即渲染当前页签（其余切到时补）。

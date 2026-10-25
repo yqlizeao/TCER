@@ -13,7 +13,17 @@ from tcer.core import format as fmt
 from . import theme
 from .platform import CLICK_CURSOR
 from .metric_defs import GROUPS
-from .widgets import ScrollFrame, SelectableLabel, Tooltip, flat_button, new_window as _new_window
+from .widgets import (
+    RoundedEntry,
+    RoundedFrame,
+    ScrollFrame,
+    SelectableLabel,
+    StatusBadge,
+    SurfaceCard,
+    Tooltip,
+    flat_button,
+    new_window as _new_window,
+)
 
 
 class SessionComparePopup:
@@ -46,10 +56,13 @@ class SessionComparePopup:
         self._by_label = dict(zip(self._labels, self._reports))
 
         win = _new_window(parent, "会话对比", "1040x680")
-        bar = tk.Frame(win, bg=theme.BG, padx=10, pady=8)
-        bar.pack(fill="x")
-        tk.Label(bar, text="会话对比", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING).pack(side="left", padx=(0, 12))
+        top_card = RoundedFrame(win, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                                outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        top_card.pack(fill="x", padx=10, pady=(10, 6))
+        bar = tk.Frame(top_card, bg=theme.SURFACE_CARD, padx=10, pady=6)
+        bar.pack(fill="x", padx=4, pady=2)
+        tk.Label(bar, text="会话对比", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE).pack(side="left", padx=(0, 12))
 
         # 默认选择：优先当前选中会话，其余按列表顺序补齐
         order = list(range(len(self._reports)))
@@ -108,10 +121,11 @@ class SessionComparePopup:
         from .metric_defs import METRIC_BY_KEY
         from .popups import RadarPopup
 
-        card = tk.Frame(self._container, bg=theme.PANEL, padx=6, pady=6)
-        card.pack(fill="x", pady=(0, 6))
-        canvas = tk.Canvas(card, bg=theme.PANEL, highlightthickness=0, height=280)
-        canvas.pack(fill="x")
+        card = RoundedFrame(self._container, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        card.pack(fill="x", padx=2, pady=(0, 8))
+        canvas = tk.Canvas(card, bg=theme.SURFACE_CARD, highlightthickness=0, height=280)
+        canvas.pack(fill="x", padx=8, pady=8)
         self._ov_canvas = canvas
 
         # ---- 左：叠加雷达（RadarPopup 同款绝对刻度归一，多边形叠加）----
@@ -186,28 +200,34 @@ class SessionComparePopup:
         if not rows:
             return
 
-        header = tk.Frame(self._container, bg=theme.GROUP_COLORS[group.id],
-                          padx=6, pady=3)
-        header.pack(fill="x", pady=(1, 0))
-        tk.Label(header, text=f"▼ {group.name}",
-                 bg=theme.GROUP_COLORS[group.id], fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
+        g_col = theme.GROUP_COLORS[group.id]
+        card = RoundedFrame(self._container, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        card.pack(fill="x", padx=2, pady=(0, 8))
 
-        grid = tk.Frame(self._container, bg=theme.PANEL, padx=4, pady=4)
-        grid.pack(fill="x", pady=(0, 1))
-        tk.Label(grid, text="", bg=theme.PANEL, width=16).grid(row=0, column=0)
+        header = tk.Frame(card, bg=theme.SURFACE_CARD, padx=10, pady=5)
+        header.pack(fill="x", padx=4, pady=(4, 0))
+        tk.Frame(header, bg=g_col, width=4).pack(side="left", fill="y", padx=(0, 8), pady=1)
+        tk.Label(header, text=group.name,
+                 bg=theme.SURFACE_CARD, fg=theme.FG,
+                 font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
+        tk.Frame(card, bg=theme.DIVIDER, height=1).pack(fill="x", padx=12, pady=(2, 2))
+
+        grid = tk.Frame(card, bg=theme.SURFACE_CARD, padx=10, pady=6)
+        grid.pack(fill="x", padx=4, pady=(0, 4))
+        tk.Label(grid, text="", bg=theme.SURFACE_CARD, width=16).grid(row=0, column=0)
         for j, r in enumerate(sel):
             color = self._COL_COLORS[j % len(self._COL_COLORS)]
             title = (r.meta.title or r.meta.session_id or r.meta.path.stem)[:22]
-            tk.Label(grid, text=title, bg=theme.PANEL, fg=color,
+            tk.Label(grid, text=title, bg=theme.SURFACE_CARD, fg=color,
                      font=theme.FONT_UI_SMALL_BOLD, anchor="e").grid(
                          row=0, column=j + 1, sticky="e", padx=2)
 
         for i, (metric, vals) in enumerate(rows):
-            name_lbl = tk.Label(grid, text=metric.name, bg=theme.PANEL,
+            name_lbl = tk.Label(grid, text=metric.name, bg=theme.SURFACE_CARD,
                                 fg=theme.LEVEL_COLORS.get(metric.level, theme.FG),
                                 font=theme.FONT_UI_SMALL, anchor="w")
-            name_lbl.grid(row=i + 1, column=0, sticky="w")
+            name_lbl.grid(row=i + 1, column=0, sticky="w", pady=1)
             if metric.tip:
                 Tooltip(name_lbl, f"{metric.name}\n{metric.tip}")
 
@@ -228,9 +248,9 @@ class SessionComparePopup:
                 fg = row_colors.get(j, theme.VALUE_NEUTRAL)
                 if val == self._unsupported:
                     fg = theme.MUTED
-                tk.Label(grid, text=val, bg=theme.PANEL, fg=fg,
+                tk.Label(grid, text=val, bg=theme.SURFACE_CARD, fg=fg,
                          font=theme.FONT_VALUE, anchor="e").grid(
-                             row=i + 1, column=j + 1, sticky="e", padx=2)
+                             row=i + 1, column=j + 1, sticky="e", padx=2, pady=1)
 
         for j in range(len(sel) + 1):
             grid.grid_columnconfigure(j, weight=1)
@@ -324,16 +344,19 @@ class SessionTimelinePopup:
         import queue as _queue
         self._ui_queue: _queue.Queue = _queue.Queue()
         self._poll_ui_queue()
-        head = tk.Frame(win, bg=theme.BG, padx=10, pady=6)
-        head.pack(fill="x")
-        tk.Label(head, text="会话时间线", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING).pack(side="left")
+        head_card = RoundedFrame(win, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                                 outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        head_card.pack(fill="x", padx=10, pady=(10, 6))
+        head = tk.Frame(head_card, bg=theme.SURFACE_CARD, padx=10, pady=6)
+        head.pack(fill="x", padx=4, pady=2)
+        tk.Label(head, text="会话时间线", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE).pack(side="left")
         n_dur = sum(1 for t in self._stats if t.duration_ms is not None)
         self._subtitle = tk.Label(
-            head, text=self._subtitle_text(n_dur), bg=theme.BG,
+            head, text=self._subtitle_text(n_dur), bg=theme.SURFACE_CARD,
             fg=theme.MUTED, font=theme.FONT_UI_SMALL)
         self._subtitle.pack(side="left", padx=10)
-        self._view_bar = tk.Frame(head, bg=theme.BG)
+        self._view_bar = tk.Frame(head, bg=theme.SURFACE_CARD)
         self._view_bar.pack(side="left", padx=(4, 0))
         self._render_view_buttons()
         # LLM 解读按钮常驻（未配置点击弹提示引导去工具栏「LLM…」配置；
@@ -351,7 +374,7 @@ class SessionTimelinePopup:
         self._dyn_btn.pack(side="left", padx=(4, 0))
         Tooltip(self._dyn_btn, "生成专属《相空间收敛动力学报告》"
                                 "（含收敛过程相图与能力雷达，作为单独报告入库）")
-        self._legend = tk.Frame(head, bg=theme.BG)
+        self._legend = tk.Frame(head, bg=theme.SURFACE_CARD)
         self._legend.pack(side="right")
         self._render_legend()
 
@@ -408,9 +431,9 @@ class SessionTimelinePopup:
                        ("▼", theme.ERROR, "最贵回合"),
                        ("┆", theme.MUTED, "压缩")]
         for sym, color, label in entries:
-            tk.Label(self._legend, text=sym, bg=theme.BG, fg=color,
+            tk.Label(self._legend, text=sym, bg=theme.SURFACE_CARD, fg=color,
                      font=theme.FONT_UI_SMALL).pack(side="left")
-            tk.Label(self._legend, text=label, bg=theme.BG, fg=theme.MUTED,
+            tk.Label(self._legend, text=label, bg=theme.SURFACE_CARD, fg=theme.MUTED,
                      font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 6))
 
     def _draw(self) -> None:
@@ -1167,14 +1190,17 @@ class ProjectOverviewPopup:
         total_cost = sum(a.aggregate.cost or 0 for _, a in rows)
         total_tok = sum(a.aggregate.usage.total for _, a in rows)
         total_net = sum(a.aggregate.net_loc or 0 for _, a in rows)
-        head = tk.Frame(win, bg=theme.BG, padx=10, pady=8)
-        head.pack(fill="x")
-        tk.Label(head, text="项目总览", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING).pack(side="left")
+        head_card = RoundedFrame(win, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                                 outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        head_card.pack(fill="x", padx=10, pady=(10, 6))
+        head = tk.Frame(head_card, bg=theme.SURFACE_CARD, padx=10, pady=6)
+        head.pack(fill="x", padx=4, pady=2)
+        tk.Label(head, text="项目总览", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE).pack(side="left")
         tk.Label(head,
                  text=f"{len(rows)} 个项目 · {total_tok:,} Token · "
                       f"{fmt.fmt_money(total_cost)} · 净增 {total_net:,} 行 · 点击表头排序",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
+                 bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
                      side="left", padx=12)
         from .views import ui_icon
         flat_button(head, "导出 HTML", self._export_html,
@@ -1196,14 +1222,12 @@ class ProjectOverviewPopup:
                 "churn": agg.churn_ratio,
             })
 
-        frame = tk.Frame(win, bg=theme.BG)
-        frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        cols = [c[0] for c in self._COLS]
-        # 气泡散点（X=成本，Y=TCER，气泡=总 Token，颜色=来源）：「哪个项目花钱
-        # 多产出低」一眼可见；悬停显示项目名，点击选中表中对应行。
-        self._bubble = tk.Canvas(win, bg=theme.PANEL, highlightthickness=0,
+        bubble_card = RoundedFrame(win, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                                   outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        bubble_card.pack(fill="x", padx=10, pady=(0, 6))
+        self._bubble = tk.Canvas(bubble_card, bg=theme.SURFACE_CARD, highlightthickness=0,
                                  height=210)
-        self._bubble.pack(fill="x", padx=10, pady=(0, 6))
+        self._bubble.pack(fill="x", padx=8, pady=6)
         self._bubbles: list[tuple[float, float, float, dict]] = []
         self._bubble.bind("<Configure>", lambda e: self._draw_bubbles())
         self._bubble.bind("<Motion>", self._bubble_motion)
@@ -1211,6 +1235,13 @@ class ProjectOverviewPopup:
         self._bubble.bind("<Button-1>", self._bubble_click)
         from .charts import _ChartTooltip
         self._tip = _ChartTooltip(self._bubble)
+
+        table_card = RoundedFrame(win, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                                  outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        table_card.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        frame = tk.Frame(table_card, bg=theme.SURFACE_CARD)
+        frame.pack(fill="both", expand=True, padx=6, pady=6)
+        cols = [c[0] for c in self._COLS]
         self.tree = ttk.Treeview(frame, columns=cols, show="headings",
                                  selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -1363,8 +1394,10 @@ class ToolSequencePopup:
     def __init__(self, parent, usage, suffix: str = "") -> None:
         ops = list(usage.tool_ops)
         win = _new_window(parent, f"工具序列{suffix}", "1040x680")
-        tk.Label(win, text="工具序列（相邻调用转移）", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=8).pack()
+        top = tk.Frame(win, bg=theme.BG)
+        top.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(top, text="工具序列（相邻调用转移）", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
 
         if len(ops) < 2:
             tk.Label(win, text="工具调用不足，无法分析序列。", bg=theme.BG,
@@ -1378,6 +1411,7 @@ class ToolSequencePopup:
 
         # 模式信号摘要
         n_pairs = len(ops) - 1
+        StatusBadge(top, text=f"共 {n_pairs} 次相邻转移", kind="info", dot=True, bg=theme.BG).pack(side="right")
         edit_edit = sum(c for (a, b), c in bigrams.items()
                         if (a, b) in (("Edit", "Edit"), ("Write", "Write")))
         bash_bash = bigrams.get(("Bash", "Bash"), 0)
@@ -1385,45 +1419,49 @@ class ToolSequencePopup:
                         if a in ("Read", "Grep", "Glob") and b in ("Edit", "Write", "MultiEdit"))
         edit_verify = sum(c for (a, b), c in bigrams.items()
                           if a in ("Edit", "Write", "MultiEdit") and b in ("Bash", "PowerShell"))
-        summary = tk.Frame(win, bg=theme.PANEL, padx=10, pady=6)
-        summary.pack(fill="x", padx=10)
+        sum_card = SurfaceCard(win, bg=theme.SURFACE_CARD, parent_bg=theme.BG, title="工作流模式信号", pad_x=14, pad_y=10)
+        sum_card.pack(fill="x", padx=14, pady=(0, 8))
+        summary = sum_card.body
         for label, val, color in (
             ("读/搜→改（健康）", read_edit, theme.SUCCESS),
             ("改→验（健康）", edit_verify, theme.SUCCESS),
             ("盲改连击 Edit→Edit", edit_edit, theme.ERROR if edit_edit else theme.MUTED),
             ("试错循环 Bash→Bash", bash_bash, theme.WARNING if bash_bash else theme.MUTED),
         ):
-            row = tk.Frame(summary, bg=theme.PANEL)
-            row.pack(fill="x")
-            tk.Label(row, text=label, bg=theme.PANEL, fg=theme.FG,
+            row = tk.Frame(summary, bg=theme.SURFACE_CARD)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=label, bg=theme.SURFACE_CARD, fg=theme.FG,
                      font=theme.FONT_UI, anchor="w").pack(side="left")
             tk.Label(row, text=f"{val}（{val / n_pairs * 100:.0f}%）",
-                     bg=theme.PANEL, fg=color, font=theme.FONT_VALUE,
+                     bg=theme.SURFACE_CARD, fg=color, font=theme.FONT_VALUE,
                      anchor="e").pack(side="right")
 
         # Top 转移条形
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        sf = ScrollFrame(win, bg=theme.BG)
+        sf.canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         inner = sf.inner
-        top = sorted(bigrams.items(), key=lambda kv: -kv[1])[:20]
-        max_c = top[0][1] if top else 1
-        for (a, b), cnt in top:
+        list_card = SurfaceCard(inner, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=14, pad_y=10)
+        list_card.pack(fill="x", padx=2, pady=4)
+        lc_body = list_card.body
+        top_items = sorted(bigrams.items(), key=lambda kv: -kv[1])[:20]
+        max_c = top_items[0][1] if top_items else 1
+        for (a, b), cnt in top_items:
             color = (theme.SUCCESS if (a, b) in self._GOOD
                      else theme.ERROR if (a, b) in self._BAD
                      else theme.ACCENT)
-            row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            row = tk.Frame(lc_body, bg=theme.SURFACE_CARD, pady=2)
             row.pack(fill="x")
-            tk.Label(row, text=f"{a} → {b}", bg=theme.PANEL, fg=theme.FG,
+            tk.Label(row, text=f"{a} → {b}", bg=theme.SURFACE_CARD, fg=theme.FG,
                      font=theme.FONT_MONO, width=28, anchor="w").pack(side="left")
             bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=10, width=220)
             bar_bg.pack(side="left", fill="x", expand=True, padx=6)
             bar_bg.pack_propagate(False)
             tk.Frame(bar_bg, bg=color, height=10).place(
                 relx=0, rely=0, relwidth=cnt / max_c, relheight=1.0)
-            tk.Label(row, text=str(cnt), bg=theme.PANEL, fg=theme.MUTED,
+            tk.Label(row, text=str(cnt), bg=theme.SURFACE_CARD, fg=theme.MUTED,
                      font=theme.FONT_MONO, width=6, anchor="e").pack(side="right")
-        tk.Label(inner, text=f"共 {n_pairs} 次相邻转移 · 显示 Top {len(top)}",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+        tk.Label(lc_body, text=f"共 {n_pairs} 次相邻转移 · 显示 Top {len(top_items)}",
+                 bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
                  pady=6).pack()
 
 
@@ -1439,14 +1477,16 @@ class ProjectProfilePopup:
         from tcer.core import analyze as _analyze
 
         win = _new_window(parent, "项目画像", "1040x680")
-        head = tk.Frame(win, bg=theme.BG, padx=10, pady=8)
-        head.pack(fill="x")
-        tk.Label(head, text="项目画像", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING).pack(side="left")
+        head_card = RoundedFrame(win, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                                 outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        head_card.pack(fill="x", padx=10, pady=(10, 6))
+        head = tk.Frame(head_card, bg=theme.SURFACE_CARD, padx=10, pady=6)
+        head.pack(fill="x", padx=4, pady=2)
+        tk.Label(head, text="项目画像", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE).pack(side="left")
         n = analysis.n_sessions
-        tk.Label(head, text=f"{n} 个会话 · 跨会话聚合 · 纯会话数据推导",
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL
-                 ).pack(side="left", padx=12)
+        StatusBadge(head, text=f"{n} 个会话 · 跨会话聚合 · 纯会话数据推导",
+                    kind="info", dot=True, bg=theme.SURFACE_CARD).pack(side="right")
 
         sf = ScrollFrame(win, bg=theme.BG)
         sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -1454,17 +1494,17 @@ class ProjectProfilePopup:
 
         # ---- ① 跨会话热点文件 ----
         hot = _analyze.file_hotspots(analysis.reports, top_n=15)
-        self._section(body, "G4", "跨会话热点文件",
-                      "被反复回访的文件 = 注意力/复杂度热点；「返工会话」列 = "
-                      "该文件在其中进入高返工（编辑 ≥3 次）的会话数。")
+        sec1 = self._section(body, "G4", "跨会话热点文件",
+                             "被反复回访的文件 = 注意力/复杂度热点；「返工会话」列 = "
+                             "该文件在其中进入高返工（编辑 ≥3 次）的会话数。")
         if hot:
-            grid = tk.Frame(body, bg=theme.PANEL, padx=6, pady=4)
-            grid.pack(fill="x")
+            grid = tk.Frame(sec1, bg=theme.SURFACE_CARD, padx=8, pady=4)
+            grid.pack(fill="x", padx=4, pady=(0, 6))
             for col, (txt, w, anchor) in enumerate((
                     ("文件", 46, "w"), ("会话数", 10, "e"),
                     ("操作数", 10, "e"), ("返工会话", 12, "e"),
                     ("最近触达", 18, "e"))):
-                tk.Label(grid, text=txt, bg=theme.PANEL, fg=theme.MUTED,
+                tk.Label(grid, text=txt, bg=theme.SURFACE_CARD, fg=theme.MUTED,
                          font=theme.FONT_UI_SMALL_BOLD, width=w, anchor=anchor
                          ).grid(row=0, column=col, padx=2)
             for i, e in enumerate(hot, start=1):
@@ -1474,64 +1514,70 @@ class ProjectProfilePopup:
                         (e["path"], 46, "w"), (str(e["sessions"]), 10, "e"),
                         (str(e["ops"]), 10, "e"), (str(e["churn_sessions"]), 12, "e"),
                         (last, 18, "e"))):
-                    tk.Label(grid, text=txt, bg=theme.PANEL,
+                    tk.Label(grid, text=txt, bg=theme.SURFACE_CARD,
                              fg=theme.FG if col == 0 else theme.MUTED,
                              font=theme.FONT_UI_SMALL, width=w, anchor=anchor,
                              justify="left").grid(row=i, column=col, padx=2,
                                                   sticky="w" if col == 0 else "e")
         else:
-            self._empty(body, "（无涉及文件数据）")
+            self._empty(sec1, "（无涉及文件数据）")
 
         # ---- ② 模型混用策略 ----
         ms = _analyze.model_switch_stats(analysis.reports)
-        self._section(body, "G1", "模型混用策略",
-                      "会话内切换模型的方向：贵→便宜 = 委派执行（省），"
-                      "便宜→贵 = 升级救援（救场）。混用 vs 单模型会话对比。")
-        card = tk.Frame(body, bg=theme.PANEL, padx=8, pady=6)
-        card.pack(fill="x")
+        sec2 = self._section(body, "G1", "模型混用策略",
+                             "会话内切换模型的方向：贵→便宜 = 委派执行（省），"
+                             "便宜→贵 = 升级救援（救场）。混用 vs 单模型会话对比。")
+        card = tk.Frame(sec2, bg=theme.SURFACE_CARD, padx=10, pady=6)
+        card.pack(fill="x", padx=4, pady=(0, 6))
         txt = (f"单模型会话 {ms['single_model_sessions']} · 混用会话 "
                f"{ms['switch_sessions']} · 切换 {ms['switch_count']} 次\n"
                f"委派（贵→便宜）{ms['delegations']} 次 · "
                f"升级救援（便宜→贵）{ms['escalations']} 次")
-        tk.Label(card, text=txt, bg=theme.PANEL, fg=theme.FG,
+        tk.Label(card, text=txt, bg=theme.SURFACE_CARD, fg=theme.FG,
                  font=theme.FONT_UI, justify="left").pack(anchor="w")
 
         # ---- ③ 技能 / 子代理 / MCP 复用 ----
         tp = _analyze.tool_profile(analysis.reports)
-        self._section(body, "G4", "技能 · 子代理 · MCP 复用",
-                      "高频技能可固化进 CLAUDE.md 工作流；MCP 服务器按调用次数"
-                      "排序（五源通用，技能/子代理仅 Claude 源）。")
+        sec3 = self._section(body, "G4", "技能 · 子代理 · MCP 复用",
+                             "高频技能可固化进 CLAUDE.md 工作流；MCP 服务器按调用次数"
+                             "排序（五源通用，技能/子代理仅 Claude 源）。")
         for title, items, note in (
                 ("技能", tp["skills"], f"（{tp['skills_sessions']} 个会话在用）"),
                 ("子代理", tp["agents"], ""),
                 ("MCP 服务器", tp["mcp"], f"（{tp['mcp_sessions']} 个会话在用）")):
-            row = tk.Frame(body, bg=theme.PANEL, padx=8, pady=3)
-            row.pack(fill="x")
-            tk.Label(row, text=f"{title}{note}", bg=theme.PANEL, fg=theme.MUTED,
+            row = tk.Frame(sec3, bg=theme.SURFACE_CARD, padx=10, pady=3)
+            row.pack(fill="x", padx=4, pady=(0, 4))
+            tk.Label(row, text=f"{title}{note}", bg=theme.SURFACE_CARD, fg=theme.MUTED,
                      font=theme.FONT_UI_SMALL_BOLD, width=10, anchor="w"
                      ).pack(side="left")
             if items:
                 chips = "  ·  ".join(f"{k} ×{v}" for k, v in items[:8])
                 more = f"  …等 {len(items)} 项" if len(items) > 8 else ""
-                tk.Label(row, text=chips + more, bg=theme.PANEL, fg=theme.FG,
+                tk.Label(row, text=chips + more, bg=theme.SURFACE_CARD, fg=theme.FG,
                          font=theme.FONT_UI_SMALL, anchor="w", justify="left"
                          ).pack(side="left", fill="x", expand=True)
             else:
-                tk.Label(row, text="（无）", bg=theme.PANEL, fg=theme.MUTED,
+                tk.Label(row, text="（无）", bg=theme.SURFACE_CARD, fg=theme.MUTED,
                          font=theme.FONT_UI_SMALL).pack(side="left")
 
-    def _section(self, parent, gid, title, note) -> None:
+    def _section(self, parent, gid, title, note) -> RoundedFrame:
         gc = theme.GROUP_COLORS[gid]
-        header = tk.Frame(parent, bg=gc, padx=6, pady=3)
-        header.pack(fill="x", pady=(8, 0))
-        tk.Label(header, text=f"▼ {title}", bg=gc, fg=theme.FG,
-                 font=theme.FONT_UI_SMALL_BOLD, anchor="w").pack(side="left")
-        tk.Label(header, text=note, bg=gc, fg=theme.MUTED,
+        sec = RoundedFrame(parent, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                           outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        sec.pack(fill="x", padx=2, pady=(0, 8))
+        header = tk.Frame(sec, bg=theme.SURFACE_CARD, padx=10, pady=5)
+        header.pack(fill="x", padx=4, pady=(4, 0))
+        tk.Frame(header, bg=gc, width=4).pack(side="left", fill="y", padx=(0, 8), pady=1)
+        tk.Label(header, text=title, bg=theme.SURFACE_CARD, fg=theme.FG,
+                 font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
+        tk.Label(header, text=note, bg=theme.SURFACE_CARD, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL, anchor="w").pack(side="left", padx=10)
+        tk.Frame(sec, bg=theme.DIVIDER, height=1).pack(fill="x", padx=12, pady=(2, 2))
+        return sec
 
     def _empty(self, parent, text) -> None:
-        tk.Label(parent, text=text, bg=theme.PANEL, fg=theme.MUTED,
-                 font=theme.FONT_UI_SMALL, pady=8).pack(fill="x")
+        tk.Label(parent, text=text, bg=theme.SURFACE_CARD, fg=theme.MUTED,
+                 font=theme.FONT_UI_SMALL, pady=8).pack(fill="x", padx=8, pady=(0, 6))
 
 
 class CrossSourceModelsPopup:
@@ -1560,14 +1606,17 @@ class CrossSourceModelsPopup:
 
         win = _new_window(parent, "同模型跨源对照", "1040x680")
         n_cells = sum(len(m["sources"]) for m in models)
-        head = tk.Frame(win, bg=theme.BG, padx=10, pady=8)
-        head.pack(fill="x")
-        tk.Label(head, text="同模型跨源对照", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING).pack(side="left")
+        head_card = RoundedFrame(win, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                                 outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        head_card.pack(fill="x", padx=10, pady=(10, 6))
+        head = tk.Frame(head_card, bg=theme.SURFACE_CARD, padx=10, pady=6)
+        head.pack(fill="x", padx=4, pady=2)
+        tk.Label(head, text="同模型跨源对照", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE).pack(side="left")
         tk.Label(head,
                  text=(f"{len(models)} 个模型 · {n_cells} 个对照格 · "
                        "同一个模型在不同 agent 里的会话级中位数 · 仅统计有产出会话"),
-                 bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
+                 bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(
                      side="left", padx=12)
 
         if not models:
@@ -1578,8 +1627,11 @@ class CrossSourceModelsPopup:
                      justify="left", pady=24).pack()
             return
 
-        frame = tk.Frame(win, bg=theme.BG)
-        frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        table_card = RoundedFrame(win, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                                  outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        table_card.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        frame = tk.Frame(table_card, bg=theme.SURFACE_CARD)
+        frame.pack(fill="both", expand=True, padx=6, pady=6)
         cols = [c[0] for c in self._COLS]
         self.tree = ttk.Treeview(frame, columns=cols, show="tree headings")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -1653,8 +1705,11 @@ class WeeklyReportPopup:
         # 1. 窗口创建（居中暗色窗口，深色沉浸标题栏，Esc 键快速关闭）
         self.win = _new_window(parent, "生成研发周报", "980x720")
 
-        top_card = tk.Frame(self.win, bg=theme.PANEL, padx=16, pady=12)
-        top_card.pack(fill="x", padx=12, pady=(10, 8))
+        top_wrap = RoundedFrame(self.win, fill=theme.PANEL, parent_bg=theme.BG,
+                                outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        top_wrap.pack(fill="x", padx=12, pady=(10, 8))
+        top_card = tk.Frame(top_wrap, bg=theme.PANEL, padx=16, pady=12)
+        top_card.pack(fill="x", padx=4, pady=4)
 
         # 2.1 第一行：Header 标题栏与主操作按钮
         head_row = tk.Frame(top_card, bg=theme.PANEL)
@@ -1796,9 +1851,12 @@ class WeeklyReportPopup:
                 Tooltip(btn, "纯本地规则确定性聚合，免任何网络与 Token 消耗")
             self._engine_btns[e_val] = btn
 
-        # 3. 中间正文阅读区
-        body_frame = tk.Frame(self.win, bg=theme.PANEL)
-        body_frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        # 3. 中间正文阅读区（圆角细边框卡片）
+        body_wrap = RoundedFrame(self.win, fill=theme.PANEL, parent_bg=theme.BG,
+                                 outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        body_wrap.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        body_frame = tk.Frame(body_wrap, bg=theme.PANEL)
+        body_frame.pack(fill="both", expand=True, padx=6, pady=6)
 
         vsb = ttk.Scrollbar(body_frame, orient="vertical")
         self.text_widget = tk.Text(

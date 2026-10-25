@@ -191,11 +191,10 @@ class CheckRow:
 
 
 class AccordionSection:
-    """Monokai Dimmed 手风琴折叠区块。
+    """圆角细描边手风琴折叠卡片（基于 RoundedFrame 9-slice 抗锯齿容器）。
 
-    表头高度固定 28px，底色 theme.CARD_HEADER_BG / theme.ACTIVITY_BG (#353535)；
-    左侧折叠箭头（▾ / ▸），中间标题，右侧数量/操作胶囊；
-    content 容器自动展开/折叠。
+    表头高度 30px，左侧 3px 胶囊色标 + 折叠箭头（▾ / ▸）+ 标题 + 右侧徽标；
+    展开态下表头与内容以 1px DIVIDER 分隔，完美兼容旧版 CollapsibleSection。
     """
 
     def __init__(self, parent, title: str, color: str | None = None, *,
@@ -207,26 +206,28 @@ class AccordionSection:
         self._collapsed = not default_open
         self._on_toggle = on_toggle
         self._color = color or theme.CARD_HEADER_BG
-        self._header_bg = theme.PANEL_2
-        rail_col = color if (color and color not in (theme.CARD_HEADER_BG, theme.BG)) else theme.BORDER
+        self._header_bg = theme.SURFACE_CARD
+        rail_col = color if (color and color not in (theme.CARD_HEADER_BG, theme.BG)) else theme.ACCENT
 
-        self.frame = tk.Frame(parent, bg=theme.BG)
-        self.frame.pack(fill="both" if expand else "x", expand=expand)
+        p_bg = str(parent.cget("bg")) if hasattr(parent, "cget") else theme.BG
+        self.frame = RoundedFrame(parent, fill=theme.SURFACE_CARD, parent_bg=p_bg,
+                                  outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        self.frame.pack(fill="both" if expand else "x", expand=expand, padx=4, pady=3)
 
-        # 26px 固定高度手风琴表头
-        self.header = tk.Frame(self.frame, bg=self._header_bg, height=26, cursor=CLICK_CURSOR)
-        self.header.pack(fill="x", pady=(1, 0))
+        # 28px 圆角内衬手风琴表头
+        self.header = tk.Frame(self.frame, bg=self._header_bg, height=28, cursor=CLICK_CURSOR)
+        self.header.pack(fill="x", padx=6, pady=(4, 4 if self._collapsed else 2))
         self.header.pack_propagate(False)
 
-        # 3px 左侧强调色条
+        # 3px 左侧强调色短柱
         self.rail = tk.Frame(self.header, bg=rail_col, width=3)
-        self.rail.pack(side="left", fill="y")
+        self.rail.pack(side="left", fill="y", padx=(2, 4), pady=5)
         self.rail.pack_propagate(False)
 
         arrow_char = "▾" if default_open else "▸"
         self._arrow = tk.Label(self.header, text=arrow_char, bg=self._header_bg, fg=theme.FG_WHITE,
-                               font=theme.FONT_UI_BOLD, cursor=CLICK_CURSOR, padx=4)
-        self._arrow.pack(side="left", padx=(2, 2))
+                               font=theme.FONT_UI_BOLD, cursor=CLICK_CURSOR, padx=2)
+        self._arrow.pack(side="left", padx=(0, 2))
 
         self._title_lbl = tk.Label(self.header, text=title, bg=self._header_bg, fg=theme.FG_WHITE,
                                    font=theme.FONT_UI_BOLD, anchor="w", cursor=CLICK_CURSOR)
@@ -235,11 +236,13 @@ class AccordionSection:
         self._badge_lbl = tk.Label(self.header, text=badge, bg=self._header_bg, fg=theme.MUTED,
                                    font=theme.FONT_UI_SMALL, anchor="e", cursor=CLICK_CURSOR)
         if badge:
-            self._badge_lbl.pack(side="right", padx=(0, 8))
+            self._badge_lbl.pack(side="right", padx=(0, 6))
 
-        self.content = tk.Frame(self.frame, bg=theme.BG)
+        self._divider = tk.Frame(self.frame, bg=theme.DIVIDER, height=1)
+        self.content = tk.Frame(self.frame, bg=theme.SURFACE_CARD)
         if default_open:
-            self.content.pack(fill="both" if expand else "x", expand=expand)
+            self._divider.pack(fill="x", padx=6, pady=(0, 2))
+            self.content.pack(fill="both" if expand else "x", expand=expand, padx=6, pady=(0, 6))
 
         for w in (self.header, self._arrow, self._title_lbl, self._badge_lbl):
             w.bind("<Button-1>", lambda e: self.toggle(), add="+")
@@ -257,7 +260,7 @@ class AccordionSection:
                     curr = getattr(curr, "master", None)
             except Exception:
                 pass
-        bg = theme.HOVER_BG if is_hover else self._header_bg
+        bg = theme.PANEL_2 if is_hover else self._header_bg
         self.header.configure(bg=bg)
         self._arrow.configure(bg=bg)
         self._title_lbl.configure(bg=bg)
@@ -272,7 +275,7 @@ class AccordionSection:
         self._badge = badge
         self._badge_lbl.configure(text=badge)
         if badge and not self._badge_lbl.winfo_ismapped():
-            self._badge_lbl.pack(side="right", padx=(0, 8))
+            self._badge_lbl.pack(side="right", padx=(0, 6))
         elif not badge and self._badge_lbl.winfo_ismapped():
             self._badge_lbl.pack_forget()
 
@@ -281,10 +284,14 @@ class AccordionSection:
         arrow_char = "▸" if self._collapsed else "▾"
         self._arrow.configure(text=arrow_char)
         if self._collapsed:
+            self._divider.pack_forget()
             self.content.pack_forget()
+            self.header.pack_configure(pady=(4, 4))
         else:
+            self.header.pack_configure(pady=(4, 2))
+            self._divider.pack(fill="x", padx=6, pady=(0, 2), after=self.header)
             self.content.pack(fill="both" if self._expand else "x",
-                              expand=self._expand, after=self.header)
+                              expand=self._expand, padx=6, pady=(0, 6), after=self._divider)
         if self._on_toggle:
             self._on_toggle(not self._collapsed)
 
@@ -432,7 +439,8 @@ class Card:
     """
 
     def __init__(self, parent, on_click, on_right_click=None,
-                 bg: str = theme.PANEL_2, padx: int = 4, pady: int = 2, radius: int = 5) -> None:
+                 bg: str = theme.PANEL_2, padx: int = 4, pady: int = 2,
+                 radius: int = theme.RADIUS_M) -> None:
         self._bg = bg
         self._parent_bg = str(parent.cget("bg")) if hasattr(parent, "cget") else theme.PANEL
         self._on_click = on_click
@@ -611,7 +619,12 @@ class MetricCell:
                  approx: bool = False) -> None:
         self.metric = metric
         self._approx = approx
-        self.frame = tk.Frame(parent, bg=theme.PANEL, padx=8, pady=4)  # 与 deck chip 同节奏（8px 网格）
+        p_bg = str(parent.cget("bg")) if hasattr(parent, "cget") else theme.SURFACE_CARD
+        self.frame = RoundedFrame(
+            parent, fill=theme.PANEL, parent_bg=p_bg,
+            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_M,
+            cursor=CLICK_CURSOR if on_click else "arrow",
+        )
         color = theme.LEVEL_COLORS.get(metric.level, theme.LEVEL_BASIC)
         title_text = f"{metric.name}（{metric.unit}）" if metric.unit else metric.name
         # 标题按指标层级着色（core/compound 黄色信号等）；此前算了没用、恒灰
@@ -619,13 +632,13 @@ class MetricCell:
         # 指标名是用户主扫读对象：9pt（8pt 黄/白小字在暗底可读性差）
         self.title = tk.Label(self.frame, text=title_text, bg=theme.PANEL, fg=title_fg,
                               font=theme.FONT_UI, anchor="w")
-        self.title.pack(anchor="w")
+        self.title.pack(anchor="w", padx=10, pady=(6, 0))
 
         self.var = tk.StringVar(value="-")
         value_fg = theme.VALUE_NEUTRAL
         if approx:
             row = tk.Frame(self.frame, bg=theme.PANEL)
-            row.pack(anchor="w", pady=(1, 0))
+            row.pack(anchor="w", padx=10, pady=(1, 6))
             self.value = tk.Label(row, textvariable=self.var, bg=theme.PANEL,
                                   fg=value_fg, font=theme.FONT_VALUE, anchor="w")
             self.value.pack(side="left")
@@ -636,21 +649,24 @@ class MetricCell:
         else:
             self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
                                   fg=value_fg, font=theme.FONT_VALUE, anchor="w")
-            self.value.pack(anchor="w", pady=(1, 0))
+            self.value.pack(anchor="w", padx=10, pady=(1, 6))
             self.approx_lbl = None
             widgets = (self.frame, self.title, self.value)
 
         if on_click:
             self.value.config(cursor=CLICK_CURSOR)
             self.title.config(cursor=CLICK_CURSOR)
+            self.frame.bind("<Button-1>", lambda e: on_click())
             self.value.bind("<Button-1>", lambda e: on_click())
             self.title.bind("<Button-1>", lambda e: on_click())
 
             def _on_enter(_e):
                 self.title.configure(fg=theme.ACCENT)
+                self.frame.set_surface(outline=theme.ACCENT)
 
             def _on_leave(_e):
                 self.title.configure(fg=color)
+                self.frame.set_surface(outline=theme.BORDER_SUBTLE)
 
             for _w in (self.frame, self.title, self.value):
                 _w.bind("<Enter>", _on_enter, add="+")
@@ -1258,38 +1274,231 @@ class WorkbenchTab(tk.Frame):
 
 
 _ROUNDED_IMG_CACHE: dict[tuple, object] = {}
-
-
 _ROUNDED_CAPS_CACHE: dict[tuple, tuple[object, object]] = {}
+_ROUNDED_CORNERS_CACHE: dict[tuple, tuple[object, object, object, object]] = {}
+_TK9_SVG_SUPPORT: dict[int, bool] = {}
+
+# 测试开关：供单测验证 Tk 9.0 原生 SVG / Pillow / 纯标准库 SDF PNG 三级回退链
+_ALLOW_TK9_SVG: bool = True
+_ALLOW_PIL: bool = True
+
+
+def _parse_hex_rgb(color: str) -> tuple[int, int, int]:
+    """将主题色串解析为 (R, G, B) 整数元组（不写裸 hex 字面量以守样式契约）。"""
+    s = str(color).strip().lstrip("#")
+    if len(s) == 3:
+        return (int(s[0] * 2, 16), int(s[1] * 2, 16), int(s[2] * 2, 16))
+    if len(s) >= 6:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    return (30, 30, 30)
+
+
+def _encode_rgb_png(w: int, h: int, rows: list[bytes]) -> bytes:
+    """纯标准库（struct + zlib）编码 8-bit RGB PNG 字节流。"""
+    import struct
+    import zlib
+
+    raw = b"".join(b"\x00" + r for r in rows)
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(raw, 6)) + _chunk(b"IEND", b"")
+
+
+def _render_sdf_rgb_rows(w: int, h: int, r: int, fill: str, bg: str,
+                         outline: str | None = None, outline_width: int = 1) -> list[bytes]:
+    """基于有向距离场（Signed Distance Field）生成亚像素抗锯齿圆角矩形 RGB 行缓冲。
+
+    纯标准库 math 实现，直边保持 1px 绝对锐利，四角圆弧做平滑覆盖率混合，
+    在无 Pillow 环境或 PyInstaller 单文件构建下依然呈现细腻圆角与 1px 细描边。
+    """
+    import math
+
+    w = max(1, int(w))
+    h = max(1, int(h))
+    rad = float(max(0, min(int(r), w // 2, h // 2)))
+    ow = float(max(0, int(outline_width))) if outline else 0.0
+
+    fr, fg_c, fb = _parse_hex_rgb(fill)
+    br, bg_c, bb = _parse_hex_rgb(bg)
+    or_, og, ob = _parse_hex_rgb(outline) if outline else (fr, fg_c, fb)
+
+    fill_px = bytes((fr, fg_c, fb))
+    out_px = bytes((or_, og, ob))
+
+    cx = w * 0.5
+    cy = h * 0.5
+    bx = cx - rad
+    by = cy - rad
+    margin = int(math.ceil(rad + ow + 1.0))
+    has_fast_mid = w > 2 * margin + 2
+
+    rows: list[bytes] = []
+    for y in range(h):
+        py = y + 0.5
+        qy = abs(py - cy) - by
+        # 中段纯直边快速通道：省去逐像素距离计算
+        if qy <= -(ow + 1.0) and has_fast_mid:
+            ow_i = int(round(ow))
+            mid_len = w - 2 * ow_i
+            if ow_i > 0:
+                rows.append(out_px * ow_i + fill_px * mid_len + out_px * ow_i)
+            else:
+                rows.append(fill_px * w)
+            continue
+
+        row_ba = bytearray(w * 3)
+        x = 0
+        while x < w:
+            if has_fast_mid and margin <= x < w - margin and qy <= 0.0:
+                span = (w - margin) - x
+                # 顶/底直边中段：同一 y 上 d 恒为 qy - rad
+                d_mid = qy - rad
+                cov_out = 0.0 if d_mid >= 0.5 else (1.0 if d_mid <= -0.5 else 0.5 - d_mid)
+                if ow > 0.0:
+                    d_in = d_mid + ow
+                    cov_in = 0.0 if d_in >= 0.5 else (1.0 if d_in <= -0.5 else 0.5 - d_in)
+                    sr = or_ + (fr - or_) * cov_in
+                    sg = og + (fg_c - og) * cov_in
+                    sb = ob + (fb - ob) * cov_in
+                else:
+                    sr, sg, sb = fr, fg_c, fb
+                pr = int(br + (sr - br) * cov_out + 0.5)
+                pg = int(bg_c + (sg - bg_c) * cov_out + 0.5)
+                pb = int(bb + (sb - bb) * cov_out + 0.5)
+                px_bytes = bytes((max(0, min(255, pr)), max(0, min(255, pg)), max(0, min(255, pb))))
+                row_ba[x * 3:(x + span) * 3] = px_bytes * span
+                x += span
+                continue
+
+            px = x + 0.5
+            qx = abs(px - cx) - bx
+            ox = qx if qx > 0.0 else 0.0
+            oy = qy if qy > 0.0 else 0.0
+            outside = math.hypot(ox, oy)
+            inside = min(max(qx, qy), 0.0)
+            d = outside + inside - rad
+
+            if d >= 0.5:
+                pr, pg, pb = br, bg_c, bb
+            else:
+                cov_out = 1.0 if d <= -0.5 else (0.5 - d)
+                if ow > 0.0:
+                    d_in = d + ow
+                    cov_in = 0.0 if d_in >= 0.5 else (1.0 if d_in <= -0.5 else (0.5 - d_in))
+                    sr = or_ + (fr - or_) * cov_in
+                    sg = og + (fg_c - og) * cov_in
+                    sb = ob + (fb - ob) * cov_in
+                else:
+                    sr, sg, sb = float(fr), float(fg_c), float(fb)
+                if cov_out >= 1.0:
+                    pr, pg, pb = int(sr + 0.5), int(sg + 0.5), int(sb + 0.5)
+                else:
+                    pr = int(br + (sr - br) * cov_out + 0.5)
+                    pg = int(bg_c + (sg - bg_c) * cov_out + 0.5)
+                    pb = int(bb + (sb - bb) * cov_out + 0.5)
+            idx = x * 3
+            row_ba[idx] = max(0, min(255, pr))
+            row_ba[idx + 1] = max(0, min(255, pg))
+            row_ba[idx + 2] = max(0, min(255, pb))
+            x += 1
+        rows.append(bytes(row_ba))
+    return rows
+
+
+def _render_sdf_png_bytes(w: int, h: int, r: int, fill: str, bg: str,
+                          outline: str | None = None, outline_width: int = 1) -> bytes:
+    """生成纯标准库 SDF 抗锯齿圆角矩形 PNG 字节流。"""
+    rows = _render_sdf_rgb_rows(w, h, r, fill, bg, outline, outline_width)
+    return _encode_rgb_png(max(1, int(w)), max(1, int(h)), rows)
+
+
+def _has_tk9_svg(master) -> bool:
+    """探测当前 Tk 解释器是否原生支持 Tk 9.0 SVG PhotoImage 光栅化。"""
+    if not _ALLOW_TK9_SVG:
+        return False
+    if float(getattr(tk, "TkVersion", 8.6)) < 9.0:
+        return False
+    tk_id = id(getattr(master, "tk", None))
+    if tk_id in _TK9_SVG_SUPPORT:
+        return _TK9_SVG_SUPPORT[tk_id]
+    try:
+        probe = b'<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>'
+        img = tk.PhotoImage(data=probe, format="svg", master=master)
+        _ = img.width()
+        _TK9_SVG_SUPPORT[tk_id] = True
+    except Exception:
+        _TK9_SVG_SUPPORT[tk_id] = False
+    return _TK9_SVG_SUPPORT[tk_id]
+
+
+def _render_tk9_svg_photo(master, w: int, h: int, r: int, fill: str, bg: str,
+                          outline: str | None = None, outline_width: int = 1):
+    """使用 Tk 9.0 内置 NanoSVG 引擎直接矢量渲染圆角矩形与细描边。"""
+    w = max(1, int(w))
+    h = max(1, int(h))
+    rad = max(0, min(int(r), w // 2, h // 2))
+    if outline and outline_width > 0:
+        sw = float(outline_width)
+        ins = sw * 0.5
+        rw = max(0.0, w - sw)
+        rh = max(0.0, h - sw)
+        rr = max(0.0, rad - ins)
+        rect_svg = (
+            f'<rect x="{ins:.2f}" y="{ins:.2f}" width="{rw:.2f}" height="{rh:.2f}" '
+            f'rx="{rr:.2f}" ry="{rr:.2f}" fill="{fill}" stroke="{outline}" stroke-width="{sw:.2f}"/>'
+        )
+    else:
+        rect_svg = f'<rect x="0" y="0" width="{w}" height="{h}" rx="{rad}" ry="{rad}" fill="{fill}"/>'
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
+        f'<rect width="{w}" height="{h}" fill="{bg}"/>{rect_svg}</svg>'
+    )
+    return tk.PhotoImage(data=svg.encode("utf-8"), format="svg", master=master)
 
 
 def get_rounded_caps(master, h: int, r: int, fill: str, parent_bg: str):
     """生成并缓存左右圆角端头切片（宽度为 2*r，高度为 h）。
 
     端头切片尺寸仅依赖 (h, r, fill, parent_bg)，与容器实际像素宽度完全解耦。
-    一次生成终生复用，无论宽度如何拖拽调整，PIL 计算与内存分配恒为 0。
+    支持 Pillow 2x 超采样与纯标准库 SDF PNG 双引擎回退，无第三方库也不退化为直角。
     """
+    h = max(2, int(h))
+    r = max(1, int(r))
     tk_id = id(getattr(master, "tk", None))
-    key = (tk_id, h, r, fill, parent_bg)
+    key = (tk_id, h, r, fill, parent_bg, _ALLOW_PIL)
     if key in _ROUNDED_CAPS_CACHE:
         return _ROUNDED_CAPS_CACHE[key]
-    try:
-        from PIL import Image, ImageDraw, ImageTk
-    except ImportError:
-        return None, None
-    ss = 2
     cap_w = max(1, 2 * r)
-    W, H, R = max(1, 4 * r * ss), max(1, h * ss), max(1, r * ss)
-    im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill)
-    im = im.resize((4 * r, h), Image.Resampling.LANCZOS)
-    left_im = im.crop((0, 0, cap_w, h))
-    right_im = im.crop((4 * r - cap_w, 0, 4 * r, h))
-    left_photo = ImageTk.PhotoImage(left_im, master=master)
-    right_photo = ImageTk.PhotoImage(right_im, master=master)
-    _ROUNDED_CAPS_CACHE[key] = (left_photo, right_photo)
-    return left_photo, right_photo
+    full_w = max(2, 4 * r)
+    if _ALLOW_PIL:
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+            ss = 2
+            W, H, R = max(1, full_w * ss), max(1, h * ss), max(1, r * ss)
+            im = Image.new("RGB", (W, H), parent_bg)
+            d = ImageDraw.Draw(im)
+            d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill)
+            im = im.resize((full_w, h), Image.Resampling.LANCZOS)
+            left_photo = ImageTk.PhotoImage(im.crop((0, 0, cap_w, h)), master=master)
+            right_photo = ImageTk.PhotoImage(im.crop((full_w - cap_w, 0, full_w, h)), master=master)
+            _ROUNDED_CAPS_CACHE[key] = (left_photo, right_photo)
+            return left_photo, right_photo
+        except Exception:
+            pass
+    try:
+        rows = _render_sdf_rgb_rows(full_w, h, r, fill, parent_bg)
+        left_rows = [row[:cap_w * 3] for row in rows]
+        right_rows = [row[(full_w - cap_w) * 3:] for row in rows]
+        left_photo = tk.PhotoImage(data=_encode_rgb_png(cap_w, h, left_rows), format="png", master=master)
+        right_photo = tk.PhotoImage(data=_encode_rgb_png(cap_w, h, right_rows), format="png", master=master)
+        _ROUNDED_CAPS_CACHE[key] = (left_photo, right_photo)
+        return left_photo, right_photo
+    except Exception:
+        return None, None
 
 
 def draw_rounded_rect_bg(canvas: tk.Canvas, w: int, h: int, r: int, fill: str, parent_bg: str, tag: str = "bg") -> None:
@@ -1346,32 +1555,256 @@ def draw_rounded_rect_bg(canvas: tk.Canvas, w: int, h: int, r: int, fill: str, p
 
 def get_rounded_rect_img(master, w: int, h: int, r: int, fill: str, bg: str,
                          outline: str | None = None, outline_width: int = 1):
-    """生成并缓存 2x 超采样抗锯齿圆角矩形背景图。"""
+    """生成并缓存抗锯齿圆角矩形贴图（三级自适应管线：Tk 9.0 SVG → PIL 2x → 纯标准库 SDF PNG）。"""
+    w = max(1, int(w))
+    h = max(1, int(h))
+    r = max(0, int(r))
     tk_id = id(getattr(master, "tk", None))
-    key = (tk_id, w, h, r, fill, bg, outline, outline_width)
+    key = (tk_id, w, h, r, fill, bg, outline, outline_width, _ALLOW_TK9_SVG, _ALLOW_PIL)
     if key in _ROUNDED_IMG_CACHE:
         return _ROUNDED_IMG_CACHE[key]
-    if len(_ROUNDED_IMG_CACHE) > 256:
-        # LRU/剪枝防膨胀
-        for k in list(_ROUNDED_IMG_CACHE.keys())[:128]:
+    if len(_ROUNDED_IMG_CACHE) > 384:
+        for k in list(_ROUNDED_IMG_CACHE.keys())[:192]:
             _ROUNDED_IMG_CACHE.pop(k, None)
+
+    if _has_tk9_svg(master):
+        try:
+            photo = _render_tk9_svg_photo(master, w, h, r, fill, bg, outline, outline_width)
+            _ROUNDED_IMG_CACHE[key] = photo
+            return photo
+        except Exception:
+            pass
+
+    if _ALLOW_PIL:
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+            ss = 2
+            W, H, R = max(1, w * ss), max(1, h * ss), max(0, min(r, w // 2, h // 2) * ss)
+            im = Image.new("RGB", (W, H), bg)
+            d = ImageDraw.Draw(im)
+            if outline and outline_width > 0:
+                d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill,
+                                    outline=outline, width=outline_width * ss)
+            else:
+                d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill)
+            im = im.resize((w, h), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(im, master=master)
+            _ROUNDED_IMG_CACHE[key] = photo
+            return photo
+        except Exception:
+            pass
+
     try:
-        from PIL import Image, ImageDraw, ImageTk
-    except ImportError:
+        png_bytes = _render_sdf_png_bytes(w, h, r, fill, bg, outline, outline_width)
+        photo = tk.PhotoImage(data=png_bytes, format="png", master=master)
+        _ROUNDED_IMG_CACHE[key] = photo
+        return photo
+    except Exception:
         return None
-    ss = 2
-    W, H, R = max(1, w * ss), max(1, h * ss), max(1, r * ss)
-    im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    if outline:
-        d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill,
-                            outline=outline, width=outline_width * ss)
-    else:
-        d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill)
-    im = im.resize((w, h), Image.Resampling.LANCZOS)
-    photo = ImageTk.PhotoImage(im, master=master)
-    _ROUNDED_IMG_CACHE[key] = photo
-    return photo
+
+
+def get_rounded_corners(master, r: int, fill: str, parent_bg: str,
+                        outline: str | None = None, outline_width: int = 1):
+    """生成并缓存 9-slice 圆角容器的四个角切片 (tl, tr, bl, br)，每块尺寸 cs×cs。"""
+    r = max(1, int(r))
+    cs = max(3, r + 2)
+    tk_id = id(getattr(master, "tk", None))
+    key = (tk_id, cs, r, fill, parent_bg, outline, outline_width, _ALLOW_PIL)
+    if key in _ROUNDED_CORNERS_CACHE:
+        return cs, _ROUNDED_CORNERS_CACHE[key]
+
+    S = 2 * cs + 6
+    if _ALLOW_PIL:
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+            ss = 2
+            W, H, R = S * ss, S * ss, r * ss
+            im = Image.new("RGB", (W, H), parent_bg)
+            d = ImageDraw.Draw(im)
+            if outline and outline_width > 0:
+                d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill,
+                                    outline=outline, width=outline_width * ss)
+            else:
+                d.rounded_rectangle((0, 0, W - 1, H - 1), radius=R, fill=fill)
+            im = im.resize((S, S), Image.Resampling.LANCZOS)
+            quads = (
+                ImageTk.PhotoImage(im.crop((0, 0, cs, cs)), master=master),
+                ImageTk.PhotoImage(im.crop((S - cs, 0, S, cs)), master=master),
+                ImageTk.PhotoImage(im.crop((0, S - cs, cs, S)), master=master),
+                ImageTk.PhotoImage(im.crop((S - cs, S - cs, S, S)), master=master),
+            )
+            _ROUNDED_CORNERS_CACHE[key] = quads
+            return cs, quads
+        except Exception:
+            pass
+
+    try:
+        rows = _render_sdf_rgb_rows(S, S, r, fill, parent_bg, outline, outline_width)
+        tl_rows = [row[:cs * 3] for row in rows[:cs]]
+        tr_rows = [row[(S - cs) * 3:] for row in rows[:cs]]
+        bl_rows = [row[:cs * 3] for row in rows[S - cs:]]
+        br_rows = [row[(S - cs) * 3:] for row in rows[S - cs:]]
+        quads = (
+            tk.PhotoImage(data=_encode_rgb_png(cs, cs, tl_rows), format="png", master=master),
+            tk.PhotoImage(data=_encode_rgb_png(cs, cs, tr_rows), format="png", master=master),
+            tk.PhotoImage(data=_encode_rgb_png(cs, cs, bl_rows), format="png", master=master),
+            tk.PhotoImage(data=_encode_rgb_png(cs, cs, br_rows), format="png", master=master),
+        )
+        _ROUNDED_CORNERS_CACHE[key] = quads
+        return cs, quads
+    except Exception:
+        return cs, None
+
+
+def draw_rounded_box(canvas: tk.Canvas, w: int, h: int, r: int, fill: str, parent_bg: str,
+                     outline: str | None = None, outline_width: int = 1, tag: str = "box_bg") -> None:
+    """9-slice 圆角细描边容器绘制器：支持任意宽高动态伸缩且缩放时 0 贴图重分配。"""
+    if w < 8 or h < 8:
+        return
+    cs, quads = get_rounded_corners(canvas, max(1, r), fill, parent_bg, outline, outline_width)
+    if quads is None or w < 2 * cs + 2 or h < 2 * cs + 2:
+        canvas.delete(tag)
+        img = get_rounded_rect_img(canvas, w, h, r, fill, parent_bg, outline, outline_width)
+        if img is not None:
+            setattr(canvas, f"_{tag}_full_img", img)
+            canvas.create_image(0, 0, anchor="nw", image=img, tags=tag)
+        else:
+            canvas.create_rectangle(0, 0, w, h, fill=fill, outline=outline or "", tags=tag)
+        canvas.tag_lower(tag)
+        setattr(canvas, f"_{tag}_9state", None)
+        return
+
+    tl, tr, bl, br = quads
+    ow = max(0, int(outline_width)) if outline else 0
+    curr_state = (cs, r, fill, parent_bg, outline, ow)
+    last_state = getattr(canvas, f"_{tag}_9state", None)
+
+    if last_state == curr_state and canvas.find_withtag(f"{tag}_tl"):
+        canvas.coords(f"{tag}_tr", w - cs, 0)
+        canvas.coords(f"{tag}_bl", 0, h - cs)
+        canvas.coords(f"{tag}_br", w - cs, h - cs)
+        canvas.coords(f"{tag}_fc", cs, ow, w - cs, h - ow)
+        canvas.coords(f"{tag}_fl", ow, cs, cs, h - cs)
+        canvas.coords(f"{tag}_fr", w - cs, cs, w - ow, h - cs)
+        if ow > 0:
+            canvas.coords(f"{tag}_bt", cs, 0, w - cs, ow)
+            canvas.coords(f"{tag}_bb", cs, h - ow, w - cs, h)
+            canvas.coords(f"{tag}_blf", 0, cs, ow, h - cs)
+            canvas.coords(f"{tag}_brt", w - ow, cs, w, h - cs)
+        return
+
+    canvas.delete(tag)
+    setattr(canvas, f"_{tag}_quads_ref", quads)
+    canvas.create_rectangle(cs, ow, w - cs, h - ow, fill=fill, outline="", tags=(tag, f"{tag}_fc"))
+    canvas.create_rectangle(ow, cs, cs, h - cs, fill=fill, outline="", tags=(tag, f"{tag}_fl"))
+    canvas.create_rectangle(w - cs, cs, w - ow, h - cs, fill=fill, outline="", tags=(tag, f"{tag}_fr"))
+    if ow > 0 and outline:
+        canvas.create_rectangle(cs, 0, w - cs, ow, fill=outline, outline="", tags=(tag, f"{tag}_bt"))
+        canvas.create_rectangle(cs, h - ow, w - cs, h, fill=outline, outline="", tags=(tag, f"{tag}_bb"))
+        canvas.create_rectangle(0, cs, ow, h - cs, fill=outline, outline="", tags=(tag, f"{tag}_blf"))
+        canvas.create_rectangle(w - ow, cs, w, h - cs, fill=outline, outline="", tags=(tag, f"{tag}_brt"))
+    canvas.create_image(0, 0, anchor="nw", image=tl, tags=(tag, f"{tag}_tl"))
+    canvas.create_image(w - cs, 0, anchor="nw", image=tr, tags=(tag, f"{tag}_tr"))
+    canvas.create_image(0, h - cs, anchor="nw", image=bl, tags=(tag, f"{tag}_bl"))
+    canvas.create_image(w - cs, h - cs, anchor="nw", image=br, tags=(tag, f"{tag}_br"))
+    canvas.tag_lower(tag)
+    setattr(canvas, f"_{tag}_9state", curr_state)
+
+
+def _opt_info(key: str, value) -> tuple:
+    """Tk configure(key) 查询形契约：返回 5 元组
+    ``(key, dbName, dbClass, defaultValue, currentValue)``。
+
+    仓库惯例经 ``w.configure("bg")[4]``（或 ``str()``）取当前值——裸字符串
+    会让 ``[4]`` 直接 TypeError（doc/gui-notes.md cget 铁律）。虚拟选项的
+    dbName/dbClass/default 无真实资源库对应，填惯例近似值即可（消费方只读
+    [0] 与 [4]）。"""
+    cap = key[0].upper() + key[1:]
+    return (key, key, cap, "", value)
+
+
+def _config_dict(super_cfg: dict, overrides: dict) -> dict:
+    """无参 ``configure()`` 枚举形契约：以 Tk 原生选项表为底，覆盖虚拟选项。"""
+    cfg = dict(super_cfg)
+    for k, v in overrides.items():
+        cfg[k] = v
+        if k == "bg" and "background" in cfg:
+            cfg["background"] = v
+        elif k == "background" and "bg" in cfg:
+            cfg["bg"] = v
+    return cfg
+
+
+class RoundedFrame(tk.Canvas):
+    """原生支持 pack/grid 几何管理的 9-slice 抗锯齿圆角细描边容器。
+
+    作为子控件的直接父容器（子控件 pack/grid 时留出 >=4px 外边距即可露出四角圆弧与 1px 描边），
+    零 create_window 嵌套，100% 兼容 winfo_manager()、自适应宽高与滚轮事件冒泡。
+    """
+
+    def __init__(self, parent, *, fill: str = theme.SURFACE_CARD,
+                 bg: str | None = None, parent_bg: str | None = None,
+                 outline: str | None = theme.BORDER_SUBTLE,
+                 outline_width: int = 1,
+                 radius: int = theme.RADIUS_L, **kw) -> None:
+        kw.pop("padx", None)
+        kw.pop("pady", None)
+        p_bg = parent_bg if parent_bg is not None else (
+            bg if bg is not None else (str(parent.cget("bg")) if hasattr(parent, "cget") else theme.BG)
+        )
+        super().__init__(parent, bg=p_bg, highlightthickness=0, bd=0, **kw)
+        self._rf_fill = fill
+        self._rf_parent_bg = p_bg
+        self._rf_outline = outline
+        self._rf_outline_w = outline_width
+        self._rf_radius = radius
+        self.bind("<Configure>", self._rf_on_configure, add="+")
+
+    def _rf_on_configure(self, event=None) -> None:
+        w = event.width if event is not None else max(self.winfo_width(), self.winfo_reqwidth())
+        h = event.height if event is not None else max(self.winfo_height(), self.winfo_reqheight())
+        if w >= 8 and h >= 8:
+            draw_rounded_box(
+                self, w, h, self._rf_radius, self._rf_fill, self._rf_parent_bg,
+                outline=self._rf_outline, outline_width=self._rf_outline_w, tag="rf_bg"
+            )
+
+    def set_surface(self, *, fill: str | None = None, outline: str | None = ...) -> None:
+        if fill is not None:
+            self._rf_fill = fill
+        if outline is not ...:
+            self._rf_outline = outline
+        self._rf_on_configure()
+
+    def cget(self, key: str):
+        if key in ("bg", "background"):
+            return self._rf_fill
+        return super().cget(key)
+
+    def configure(self, cnf=None, **kw):
+        # 四种调用形全兼容：dict / kwargs / 单键查询（返回 5 元组）/ 无参枚举
+        if isinstance(cnf, dict):
+            kw = {**cnf, **kw}
+            cnf = None
+        if isinstance(cnf, str):
+            if cnf in ("bg", "background"):
+                return _opt_info("background", self._rf_fill)
+            if cnf == "outline":
+                return _opt_info("outline", self._rf_outline)
+            return super().configure(cnf)
+        if "bg" in kw or "background" in kw:
+            self._rf_fill = str(kw.pop("bg", kw.pop("background", self._rf_fill)))
+            self._rf_on_configure()
+        if "outline" in kw:
+            self._rf_outline = kw.pop("outline")
+            self._rf_on_configure()
+        if kw:
+            return super().configure(**kw)
+        return _config_dict(super().configure(), {
+            "bg": _opt_info("background", self._rf_fill),
+        })
+
+    config = configure
 
 
 _FIT_FONTS: dict = {}
@@ -1491,12 +1924,13 @@ class FlowRow(tk.Frame):
 
 
 class RoundedPill(tk.Canvas):
-    """带抗锯齿圆角的胶囊按钮/标签：自绘圆角底，支持图标与文字。"""
+    """带抗锯齿圆角的胶囊按钮/标签：自绘圆角底，支持图标、细描边与文字。"""
 
     def __init__(self, parent, text: str = "", icon=None, command=None, *,
-                 width: int = 76, height: int = 22, radius: int = 5,
+                 width: int = 76, height: int = 22, radius: int = theme.RADIUS_M,
                  fill: str = theme.CONTROL_BG, hover_fill: str = theme.HOVER_BG,
                  bg: str = theme.PANEL, fg: str = theme.FG,
+                 outline: str | None = None,
                  font=theme.FONT_UI_SMALL, **kw) -> None:
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0, cursor=CLICK_CURSOR if command else "arrow", **kw)
@@ -1508,6 +1942,7 @@ class RoundedPill(tk.Canvas):
         self._hover_fill = hover_fill
         self._bg_col = bg
         self._fg = fg
+        self._outline = outline
         self._font = font
         self._text = text
         self._icon = icon
@@ -1618,7 +2053,8 @@ class RoundedPill(tk.Canvas):
     def _redraw(self) -> None:
         self.delete("all")
         self._img = get_rounded_rect_img(self, self._width_px, self._height_px,
-                                          self._radius, self._fill, self._bg_col)
+                                          self._radius, self._fill, self._bg_col,
+                                          outline=self._outline)
         if self._img is not None:
             self.create_image(0, 0, anchor="nw", image=self._img)
         else:
@@ -1637,11 +2073,12 @@ class RoundedPill(tk.Canvas):
                              text=self._text, fill=self._fg, font=self._font)
 
 class RoundedSearchBox(tk.Canvas):
-    """带抗锯齿圆角的搜索框：底板为圆角底，内嵌搜索图标与扁平 Entry。"""
+    """带抗锯齿圆角与焦点细描边的搜索框：底板为圆角底，内嵌搜索图标与扁平 Entry。"""
 
-    def __init__(self, parent, textvariable, *, width: int = 110, height: int = 22,
-                 radius: int = 5, fill: str = theme.CONTROL_BG,
+    def __init__(self, parent, textvariable, *, width: int = 110, height: int = 24,
+                 radius: int = theme.RADIUS_M, fill: str = theme.CONTROL_BG,
                  bg: str = theme.SECTION_HEADER_BG, fg: str = theme.FG,
+                 outline: str | None = theme.BORDER_SUBTLE,
                  icon=None, **kw) -> None:
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0, **kw)
@@ -1651,6 +2088,8 @@ class RoundedSearchBox(tk.Canvas):
         self._fill = fill
         self._bg_col = bg
         self._fg = fg
+        self._outline = outline
+        self._focused = False
         self._icon = icon
 
         self.entry = tk.Entry(self, textvariable=textvariable, bg=fill, fg=fg,
@@ -1661,9 +2100,21 @@ class RoundedSearchBox(tk.Canvas):
             self.entry.delete(0, "end")
             return "break"
         self.entry.bind("<Escape>", _clear)
+        self.entry.bind("<FocusIn>", self._on_focus_in, add="+")
+        self.entry.bind("<FocusOut>", self._on_focus_out, add="+")
         self.bind("<Button-1>", lambda _e: self.entry.focus_set())
         self.bind("<Configure>", self._on_configure)
         self._redraw()
+
+    def _on_focus_in(self, _e=None) -> None:
+        if not self._focused:
+            self._focused = True
+            self._redraw()
+
+    def _on_focus_out(self, _e=None) -> None:
+        if self._focused:
+            self._focused = False
+            self._redraw()
 
     def _on_configure(self, event) -> None:
         if event.width > 20 and event.width != self._width_px:
@@ -1673,19 +2124,17 @@ class RoundedSearchBox(tk.Canvas):
     def _redraw(self) -> None:
         self.delete("bg")
         self.delete("icon")
-        self._img = get_rounded_rect_img(self, self._width_px, self._height_px,
-                                          self._radius, self._fill, self._bg_col)
-        if self._img is not None:
-            self.create_image(0, 0, anchor="nw", image=self._img, tags="bg")
-        else:
-            self.create_rectangle(0, 0, self._width_px, self._height_px, fill=self._fill, outline="", tags="bg")
+        cur_outline = theme.ACCENT if self._focused else self._outline
+        draw_rounded_box(self, self._width_px, self._height_px,
+                         self._radius, self._fill, self._bg_col,
+                         outline=cur_outline, tag="bg")
         self.tag_lower("bg")
         x_entry = 8
         if self._icon:
             self.create_image(6, self._height_px // 2, anchor="w", image=self._icon, tags="icon")
             ico_w = getattr(self._icon, "width", lambda: 16)()
             x_entry = 6 + ico_w + 4
-        entry_w = self._width_px - x_entry - 6
+        entry_w = max(12, self._width_px - x_entry - 6)
         if not self.find_withtag("entry_win"):
             self.create_window(x_entry, self._height_px // 2, anchor="w",
                                window=self.entry, width=entry_w, tags="entry_win")
@@ -1696,11 +2145,12 @@ class RoundedSearchBox(tk.Canvas):
         self.tag_bind("icon", "<Button-1>", lambda _e: self.entry.focus_set())
 
 class RoundedKpiChip(tk.Canvas):
-    """带抗锯齿圆角的头部 KPI 徽标胶囊：标签灰度小字 + 数值粗体，支持悬停提亮与点击回调。"""
+    """带抗锯齿圆角与 1px 细描边的头部 KPI 徽标胶囊：标签灰度小字 + 数值粗体，支持悬停提亮与点击回调。"""
 
     def __init__(self, parent, label: str, value: str = "-", *, command=None,
-                 tip: str = "", width: int = 95, height: int = 24, radius: int = 5,
-                 fill: str = theme.CONTROL_BG, hover_fill: str = theme.HOVER_BG,
+                 tip: str = "", width: int = 95, height: int = 24, radius: int = theme.RADIUS_M,
+                 fill: str = theme.SURFACE_CARD, hover_fill: str = theme.HOVER_BG,
+                 outline: str | None = theme.BORDER_SUBTLE,
                  bg: str = theme.BG, fg: str = theme.FG, **kw) -> None:
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0,
@@ -1711,6 +2161,7 @@ class RoundedKpiChip(tk.Canvas):
         self._fill = fill
         self._normal_fill = fill
         self._hover_fill = hover_fill
+        self._outline = outline
         self._bg_col = bg
         self._fg = fg
         self._label = label
@@ -1735,7 +2186,7 @@ class RoundedKpiChip(tk.Canvas):
 
     def cget(self, attr: str):
         if attr in ("bg", "background"):
-            return self._fill
+            return self._bg_col  # 稳定父底色（_fill 随 hover 变化，不是画布 bg）
         if attr in ("fg", "foreground"):
             return self._fg
         if attr == "text":
@@ -1743,15 +2194,29 @@ class RoundedKpiChip(tk.Canvas):
         return super().cget(attr)
 
     def configure(self, cnf=None, **kw):
-        if cnf == "text":
-            return f"{self._value} {self._extra}".strip()
+        if isinstance(cnf, dict):
+            kw = {**cnf, **kw}
+            cnf = None
+        if isinstance(cnf, str):
+            if cnf == "text":
+                return _opt_info("text", f"{self._value} {self._extra}".strip())
+            if cnf in ("fg", "foreground"):
+                return _opt_info("foreground", self._fg)
+            if cnf in ("bg", "background"):
+                return _opt_info("background", self._bg_col)
+            return super().configure(cnf)
         if "text" in kw:
             self._value = kw.pop("text")
         if "fg" in kw:
             self._fg = kw.pop("fg")
         self._redraw()
         if kw:
-            super().configure(**kw)
+            return super().configure(**kw)
+        return _config_dict(super().configure(), {
+            "text": _opt_info("text", f"{self._value} {self._extra}".strip()),
+            "fg": _opt_info("foreground", self._fg),
+            "bg": _opt_info("background", self._bg_col),
+        })
 
     config = configure
 
@@ -1767,7 +2232,8 @@ class RoundedKpiChip(tk.Canvas):
     def _redraw(self) -> None:
         self.delete("all")
         self._img = get_rounded_rect_img(self, self._width_px, self._height_px,
-                                          self._radius, self._fill, self._bg_col)
+                                          self._radius, self._fill, self._bg_col,
+                                          outline=self._outline)
         if self._img is not None:
             self.create_image(0, 0, anchor="nw", image=self._img)
         else:
@@ -1778,6 +2244,675 @@ class RoundedKpiChip(tk.Canvas):
         val_full = f"{self._value} {self._extra}".strip()
         self.create_text(self._width_px - 8, self._height_px // 2, text=val_full,
                          fill=self._fg, font=theme.FONT_VALUE, anchor="e")
+
+
+class StatusBadge(tk.Canvas):
+    """圆角细描边状态徽标胶囊（对标 OpenResearch 状态签：暗色微光底 + 1px 同色相细框 + 高清语义字）。"""
+
+    KINDS: dict[str, tuple[str, str, str]] = {
+        "neutral": (theme.SURFACE_CARD, theme.BORDER_SUBTLE, theme.MUTED),
+        "success": (theme.SUCCESS_TINT_BG, theme.SUCCESS_TINT_BORDER, theme.SUCCESS),
+        "warning": (theme.WARN_TINT_BG, theme.WARN_TINT_BORDER, theme.WARNING),
+        "error": (theme.ERROR_TINT_BG, theme.ERROR_TINT_BORDER, theme.ERROR),
+        "info": (theme.INFO_TINT_BG, theme.INFO_TINT_BORDER, theme.VENDOR_BADGE_FG),
+    }
+
+    def __init__(self, parent, text: str = "", *, kind: str = "neutral",
+                 tone: str | None = None,
+                 dot: bool = False, height: int = 22, padx: int = 9,
+                 radius: int = theme.RADIUS_FULL, bg: str | None = None,
+                 font=theme.FONT_UI_SMALL, command=None, tip: str = "", **kw) -> None:
+        eff_kind = tone if tone is not None else kind
+        p_bg = bg if bg is not None else (str(parent.cget("bg")) if hasattr(parent, "cget") else theme.BG)
+        super().__init__(parent, width=20, height=height, bg=p_bg,
+                         highlightthickness=0, bd=0,
+                         cursor=CLICK_CURSOR if command else "arrow", **kw)
+        self._bg_col = p_bg
+        self._text = text
+        self._kind = eff_kind if eff_kind in self.KINDS else "neutral"
+        self._dot = dot
+        self._height_px = height
+        self._padx = padx
+        self._radius = radius
+        self._font = font
+        self._custom_fg: str | None = None
+        self._command = command
+        if command:
+            self.bind("<Button-1>", lambda _e: command())
+        if tip:
+            Tooltip(self, tip)
+        self._redraw()
+
+    def set_status(self, text: str, *, kind: str | None = None, dot: bool | None = None) -> None:
+        self._text = text
+        if kind is not None and kind in self.KINDS:
+            self._kind = kind
+            self._custom_fg = None
+        if dot is not None:
+            self._dot = dot
+        self._redraw()
+
+    def cget(self, attr: str):
+        if attr == "text":
+            return self._text
+        if attr in ("fg", "foreground"):
+            return self._custom_fg or self.KINDS[self._kind][2]
+        if attr in ("bg", "background"):
+            return self._bg_col  # 构造时的父底色（KINDS 色是画出来的胶囊面，不是画布底）
+        return super().cget(attr)
+
+    def configure(self, cnf=None, **kw):
+        if isinstance(cnf, dict):
+            kw = {**cnf, **kw}
+            cnf = None
+        if isinstance(cnf, str):
+            if cnf == "text":
+                return _opt_info("text", self._text)
+            if cnf in ("fg", "foreground"):
+                return _opt_info("foreground", self._custom_fg or self.KINDS[self._kind][2])
+            if cnf in ("bg", "background"):
+                return _opt_info("background", self._bg_col)
+            return super().configure(cnf)
+        if "text" in kw:
+            self._text = str(kw.pop("text"))
+        if "kind" in kw:
+            k = str(kw.pop("kind"))
+            if k in self.KINDS:
+                self._kind = k
+                self._custom_fg = None
+        if "fg" in kw or "foreground" in kw:
+            fg_v = str(kw.pop("fg", kw.pop("foreground", "")))
+            self._custom_fg = fg_v
+            if fg_v == theme.ERROR:
+                self._kind = "error"
+            elif fg_v == theme.SUCCESS:
+                self._kind = "success"
+            elif fg_v == theme.WARNING:
+                self._kind = "warning"
+            elif fg_v in (theme.ACCENT, theme.VENDOR_BADGE_FG):
+                self._kind = "info"
+            elif fg_v == theme.MUTED:
+                self._kind = "neutral"
+        if "bg" in kw or "background" in kw:
+            self._bg_col = str(kw.pop("bg", kw.pop("background", self._bg_col)))
+        self._redraw()
+        if kw:
+            return super().configure(**kw)
+        return _config_dict(super().configure(), {
+            "text": _opt_info("text", self._text),
+            "fg": _opt_info("foreground", self._custom_fg or self.KINDS[self._kind][2]),
+            "bg": _opt_info("background", self._bg_col),
+        })
+
+    config = configure
+
+    def _redraw(self) -> None:
+        import tkinter.font as tkfont
+
+        self.delete("all")
+        if not self._text:
+            super().configure(width=1)
+            return
+        fill, border, kind_fg = self.KINDS[self._kind]
+        fg = self._custom_fg or kind_fg
+        txt_w = tkfont.Font(font=self._font).measure(self._text)
+        dot_extra = 11 if self._dot else 0
+        w = max(24, txt_w + dot_extra + self._padx * 2)
+        h = self._height_px
+        super().configure(width=w, height=h)
+        self._img = get_rounded_rect_img(self, w, h, min(self._radius, h // 2),
+                                         fill, self._bg_col, outline=border)
+        if self._img is not None:
+            self.create_image(0, 0, anchor="nw", image=self._img)
+        x = self._padx
+        if self._dot:
+            self._dot_img = get_rounded_rect_img(self, 6, 6, 3, fg, fill)
+            if self._dot_img is not None:
+                self.create_image(x, (h - 6) // 2, anchor="nw", image=self._dot_img)
+            x += 11
+        self.create_text(x, h // 2, anchor="w", text=self._text, fill=fg, font=self._font)
+
+
+class ToggleSwitch(tk.Canvas):
+    """36x20px 平滑抗锯齿拨杆开关（绑定 BooleanVar，支持点击与悬停微光）。"""
+
+    def __init__(self, parent, variable: tk.BooleanVar, on_toggle=None, *,
+                 command=None,
+                 width: int = 36, height: int = 20, bg: str | None = None,
+                 on_fill: str = theme.ACCENT, off_fill: str = theme.CONTROL_BG,
+                 outline: str | None = theme.BORDER_SUBTLE,
+                 tooltip: str | None = None, **kw) -> None:
+        p_bg = bg if bg is not None else (str(parent.cget("bg")) if hasattr(parent, "cget") else theme.SURFACE_CARD)
+        super().__init__(parent, width=width, height=height, bg=p_bg,
+                         highlightthickness=0, bd=0, cursor=CLICK_CURSOR, **kw)
+        self.var = variable
+        self._on_toggle = on_toggle if on_toggle is not None else command
+        self._width_px = width
+        self._height_px = height
+        self._bg_col = p_bg
+        self._on_fill = on_fill
+        self._off_fill = off_fill
+        self._outline = outline
+        self._hovered = False
+        self._disabled = False
+
+        self.bind("<Button-1>", lambda _e: self.click())
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        if tooltip:
+            Tooltip(self, tooltip)
+        self._trace_id = None
+        self._attach_var_trace()
+        # tk Variable 以 PY_VARn 活在解释器级，widget 销毁后 trace 闭包仍强引用
+        # 整棵子树（弹窗反复开关 = 累积泄漏）——销毁时显式解除。
+        self.bind("<Destroy>", self._release_var_trace, add="+")
+        self._redraw()
+
+    def _attach_var_trace(self) -> None:
+        try:
+            self._trace_id = self.var.trace_add("write", lambda *_: self._safe_redraw())
+        except Exception:
+            self._trace_id = None
+
+    def _release_var_trace(self, e=None) -> None:
+        # <Destroy> 对每个后代销毁都冒泡触发，只响应自身那次
+        if e is not None and e.widget is not self:
+            return
+        if getattr(self, "_trace_id", None) is not None:
+            try:
+                self.var.trace_remove("write", self._trace_id)
+            except Exception:
+                pass
+            self._trace_id = None
+
+    def get(self) -> bool:
+        return bool(self.var.get())
+
+    def set(self, val: bool) -> None:
+        self.var.set(bool(val))
+        self._redraw()
+
+    def configure(self, cnf=None, **kw):
+        if isinstance(cnf, dict):
+            kw = {**cnf, **kw}
+        if "state" in kw:
+            st = str(kw.pop("state"))
+            self._disabled = (st == "disabled")
+            super().configure(cursor="arrow" if self._disabled else CLICK_CURSOR)
+            self._redraw()
+        if kw:
+            return super().configure(**kw)
+        return None
+
+    config = configure
+
+    def _safe_redraw(self) -> None:
+        try:
+            if self.winfo_exists():
+                self._redraw()
+        except tk.TclError:
+            pass
+
+    def click(self) -> None:
+        if self._disabled:
+            return
+        self.var.set(not bool(self.var.get()))
+        self._redraw()
+        if self._on_toggle:
+            self._on_toggle()
+
+    toggle = click
+
+    def _draw(self) -> None:
+        self._redraw()
+
+    def _on_enter(self, _e=None) -> None:
+        self._hovered = True
+        self._redraw()
+
+    def _on_leave(self, _e=None) -> None:
+        self._hovered = False
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        on = bool(self.var.get())
+        if on:
+            track = theme.HOVER_ACCENT if self._hovered else self._on_fill
+            border = None
+            knob_col = theme.FG_WHITE
+        else:
+            track = theme.HOVER_BG if self._hovered else self._off_fill
+            border = self._outline
+            knob_col = theme.FG_WHITE if self._hovered else theme.FG
+
+        self._track_img = get_rounded_rect_img(
+            self, self._width_px, self._height_px, self._height_px // 2, track, self._bg_col, outline=border
+        )
+        if self._track_img is not None:
+            self.create_image(0, 0, anchor="nw", image=self._track_img)
+
+        pad = 3
+        kd = max(6, self._height_px - 2 * pad)
+        kx = (self._width_px - pad - kd) if on else pad
+        self._knob_img = get_rounded_rect_img(self, kd, kd, kd // 2, knob_col, track)
+        if self._knob_img is not None:
+            self.create_image(kx, pad, anchor="nw", image=self._knob_img)
+
+
+class SegmentedControl(tk.Canvas):
+    """圆角分段胶囊切换器（对标 OpenResearch 主题/视图切换：细描边底槽 + 凸起圆角激活滑块）。"""
+
+    def __init__(self, parent, options: list[tuple[str, str]],
+                 variable: tk.StringVar | None = None, *,
+                 value: str | None = None, on_change=None,
+                 height: int = 26, pad: int = 2, item_padx: int = 11,
+                 bg: str | None = None, track_fill: str = theme.PANEL,
+                 active_fill: str = theme.CONTROL_BG,
+                 active_fg: str = theme.FG_WHITE, inactive_fg: str = theme.MUTED,
+                 outline: str | None = theme.BORDER_SUBTLE,
+                 radius: int = theme.RADIUS_M,
+                 font=theme.FONT_UI_SMALL, **kw) -> None:
+        import tkinter.font as tkfont
+
+        p_bg = bg if bg is not None else (str(parent.cget("bg")) if hasattr(parent, "cget") else theme.SURFACE_CARD)
+        self._items = list(options)
+        self._var = variable
+        self._on_change = on_change
+        self._height_px = height
+        self._pad = pad
+        self._item_padx = item_padx
+        self._bg_col = p_bg
+        self._track_fill = track_fill
+        self._active_fill = active_fill
+        self._active_fg = active_fg
+        self._inactive_fg = inactive_fg
+        self._outline = outline
+        self._radius = radius
+        self._font = font
+        self._hover_idx: int | None = None
+
+        init_val = variable.get() if variable is not None else (value if value is not None else (options[0][0] if options else ""))
+        valid_keys = {k for k, _ in self._items}
+        if init_val not in valid_keys and self._items:
+            init_val = self._items[0][0]
+        self._value = init_val
+
+        f_meas = tkfont.Font(font=font)
+        bold_spec = (font[0], font[1], "bold") if len(font) == 2 else font
+        self._active_font = bold_spec
+        f_bold = tkfont.Font(font=bold_spec)
+        self._seg_widths = [max(f_meas.measure(lbl), f_bold.measure(lbl)) + 2 * item_padx for _, lbl in self._items]
+        total_w = max(24, sum(self._seg_widths) + 2 * pad)
+
+        super().__init__(parent, width=total_w, height=height, bg=p_bg,
+                         highlightthickness=0, bd=0, cursor=CLICK_CURSOR, **kw)
+        self._width_px = total_w
+        self._seg_bounds: list[tuple[int, int]] = []
+
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Motion>", self._on_motion)
+        self.bind("<Leave>", self._on_leave)
+        self._var_trace_id = None
+        self._attach_var_trace()
+        # 同 ToggleSwitch：Variable 活在解释器级，销毁时解除 trace 防泄漏
+        self.bind("<Destroy>", self._release_var_trace, add="+")
+        self._redraw()
+
+    def _attach_var_trace(self) -> None:
+        if self._var is None:
+            return
+        try:
+            self._var_trace_id = self._var.trace_add("write", lambda *_: self._sync_from_var())
+        except Exception:
+            self._var_trace_id = None
+
+    def _release_var_trace(self, e=None) -> None:
+        if e is not None and e.widget is not self:
+            return
+        if getattr(self, "_var_trace_id", None) is not None:
+            try:
+                self._var.trace_remove("write", self._var_trace_id)
+            except Exception:
+                pass
+            self._var_trace_id = None
+
+    def get(self) -> str:
+        return self._var.get() if self._var is not None else self._value
+
+    def set(self, val: str, *, notify: bool = False) -> None:
+        if val == self._value and (self._var is None or self._var.get() == val):
+            return
+        self._value = val
+        if self._var is not None and self._var.get() != val:
+            self._var.set(val)
+        self._redraw()
+        if notify and self._on_change:
+            self._on_change(val)
+
+    def _sync_from_var(self) -> None:
+        if self._var is None:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+            v = self._var.get()
+            if v != self._value:
+                self._value = v
+                self._redraw()
+        except tk.TclError:
+            pass
+
+    def _idx_at(self, x: int) -> int | None:
+        for i, (x0, x1) in enumerate(self._seg_bounds):
+            if x0 <= x < x1:
+                return i
+        return None
+
+    def _on_motion(self, event) -> None:
+        idx = self._idx_at(event.x)
+        if idx != self._hover_idx:
+            self._hover_idx = idx
+            self._redraw()
+
+    def _on_leave(self, _event=None) -> None:
+        if self._hover_idx is not None:
+            self._hover_idx = None
+            self._redraw()
+
+    def _on_click(self, event) -> None:
+        idx = self._idx_at(event.x)
+        if idx is None or idx >= len(self._items):
+            return
+        key = self._items[idx][0]
+        if key == self.get():
+            return
+        self._value = key
+        if self._var is not None and self._var.get() != key:
+            self._var.set(key)
+        self._redraw()
+        if self._on_change:
+            self._on_change(key)
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        self._track_img = get_rounded_rect_img(
+            self, self._width_px, self._height_px, self._radius, self._track_fill, self._bg_col, outline=self._outline
+        )
+        if self._track_img is not None:
+            self.create_image(0, 0, anchor="nw", image=self._track_img)
+
+        cur = self.get()
+        inner_h = max(10, self._height_px - 2 * self._pad)
+        inner_r = max(2, self._radius - 1)
+        x = self._pad
+        self._seg_bounds = []
+        self._pill_imgs = []
+        for i, ((key, lbl), sw) in enumerate(zip(self._items, self._seg_widths)):
+            x0, x1 = x, x + sw
+            self._seg_bounds.append((x0, x1))
+            is_act = (key == cur)
+            is_hov = (i == self._hover_idx and not is_act)
+            if is_act or is_hov:
+                p_fill = self._active_fill if is_act else theme.HOVER_BG
+                p_img = get_rounded_rect_img(self, sw, inner_h, inner_r, p_fill, self._track_fill)
+                if p_img is not None:
+                    self._pill_imgs.append(p_img)
+                    self.create_image(x0, self._pad, anchor="nw", image=p_img)
+            fg = self._active_fg if is_act else (theme.FG if is_hov else self._inactive_fg)
+            fnt = self._active_font if is_act else self._font
+            self.create_text((x0 + x1) // 2, self._height_px // 2, anchor="center",
+                             text=lbl, fill=fg, font=fnt)
+            x = x1
+
+
+class RoundedEntry(tk.Frame):
+    """圆角细描边单行输入框：常态 1px BORDER_SUBTLE，持焦切换为 1px ACCENT，兼容 tk.Entry 常用接口。"""
+
+    def __init__(self, parent, *, textvariable: tk.StringVar | None = None,
+                 width: int | None = None, height: int = 30,
+                 bg: str | None = None, fill: str = theme.CONTROL_BG,
+                 fg: str = theme.FG, font=theme.FONT_UI,
+                 radius: int = theme.RADIUS_M,
+                 placeholder: str = "", show: str = "", **kw) -> None:
+        import tkinter.font as tkfont
+
+        p_bg = bg if bg is not None else (str(parent.cget("bg")) if hasattr(parent, "cget") else theme.SURFACE_CARD)
+        char_w = tkfont.Font(font=font).measure("0")
+        px_w = max(80, int(width * char_w + 20)) if width is not None else 180
+        super().__init__(parent, bg=p_bg, highlightthickness=0, bd=0, **kw)
+        self._width_px = px_w
+        self._height_px = height
+        self._bg_col = p_bg
+        self._fill = fill
+        self._fg = fg
+        self._radius = radius
+        self._focused = False
+        self._placeholder = placeholder
+        self._var = textvariable
+        self.box = self
+
+        self._canvas = tk.Canvas(self, width=px_w, height=height, bg=p_bg,
+                                 highlightthickness=0, bd=0, cursor="xterm")
+        self._canvas.pack(fill="both", expand=True)
+
+        ent_kw: dict = {
+            "bg": fill,
+            "fg": fg,
+            "insertbackground": fg,
+            "relief": "flat",
+            "bd": 0,
+            "highlightthickness": 0,
+            "font": font,
+        }
+        if textvariable is not None:
+            ent_kw["textvariable"] = textvariable
+        if show:
+            ent_kw["show"] = show
+        self.entry = tk.Entry(self._canvas, **ent_kw)
+
+        self._ph_lbl: tk.Label | None = None
+        if placeholder:
+            self._ph_lbl = tk.Label(self._canvas, text=placeholder, bg=fill, fg=theme.MUTED,
+                                    font=font, anchor="w", cursor="xterm")
+            self._ph_lbl.bind("<Button-1>", lambda _e: self.entry.focus_set())
+
+        self.entry.bind("<FocusIn>", self._on_focus_in, add="+")
+        self.entry.bind("<FocusOut>", self._on_focus_out, add="+")
+        self.entry.bind("<KeyRelease>", lambda _e: self._sync_placeholder(), add="+")
+        self._var_trace_id = None
+        self._attach_var_trace()
+        # 同 ToggleSwitch：Variable 活在解释器级，销毁时解除 trace 防泄漏
+        self.bind("<Destroy>", self._release_var_trace, add="+")
+        self._canvas.bind("<Button-1>", lambda _e: self.entry.focus_set())
+        self._canvas.bind("<Configure>", self._on_configure)
+        self._redraw()
+        self._sync_placeholder()
+
+    def _attach_var_trace(self) -> None:
+        if self._var is None:
+            return
+        try:
+            self._var_trace_id = self._var.trace_add("write", lambda *_: self._sync_placeholder())
+        except Exception:
+            self._var_trace_id = None
+
+    def _release_var_trace(self, e=None) -> None:
+        if e is not None and e.widget is not self:
+            return
+        if getattr(self, "_var_trace_id", None) is not None:
+            try:
+                self._var.trace_remove("write", self._var_trace_id)
+            except Exception:
+                pass
+            self._var_trace_id = None
+
+    def _on_focus_in(self, _e=None) -> None:
+        self._focused = True
+        self._redraw()
+        self._sync_placeholder()
+
+    def _on_focus_out(self, _e=None) -> None:
+        self._focused = False
+        self._redraw()
+        self._sync_placeholder()
+
+    def _sync_placeholder(self) -> None:
+        if self._ph_lbl is None:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+            empty = (self.entry.get() == "")
+            if empty and not self._focused:
+                self._ph_lbl.place(x=10, rely=0.5, anchor="w")
+            else:
+                self._ph_lbl.place_forget()
+        except tk.TclError:
+            pass
+
+    def _on_configure(self, event) -> None:
+        if event.width > 16 and event.width != self._width_px:
+            self._width_px = event.width
+            self._redraw()
+
+    def _redraw(self) -> None:
+        outline = theme.ACCENT if self._focused else theme.BORDER_SUBTLE
+        draw_rounded_box(self._canvas, self._width_px, self._height_px, self._radius, self._fill, self._bg_col,
+                         outline=outline, tag="re_bg")
+        self._canvas.tag_lower("re_bg")
+        ew = max(12, self._width_px - 20)
+        if not self._canvas.find_withtag("re_win"):
+            self._canvas.create_window(10, self._height_px // 2, anchor="w", window=self.entry, width=ew, tags="re_win")
+        else:
+            self._canvas.coords("re_win", 10, self._height_px // 2)
+            self._canvas.itemconfigure("re_win", width=ew)
+        self._canvas.tag_bind("re_bg", "<Button-1>", lambda _e: self.entry.focus_set())
+
+    # 透明代理 tk.Entry 常用读写接口，无缝替换裸 Entry / entry_box
+    def get(self) -> str:
+        return self.entry.get()
+
+    def insert(self, index, string: str) -> None:
+        self.entry.insert(index, string)
+        self._sync_placeholder()
+
+    def delete(self, first, last=None) -> None:
+        self.entry.delete(first, last)
+        self._sync_placeholder()
+
+    def focus_set(self) -> None:
+        self.entry.focus_set()
+
+    def icursor(self, index) -> None:
+        self.entry.icursor(index)
+
+    def selection_range(self, start, end) -> None:
+        self.entry.selection_range(start, end)
+
+    def select_range(self, start, end) -> None:
+        self.entry.select_range(start, end)
+
+    def bind(self, sequence=None, func=None, add=None):
+        if sequence and (sequence.startswith("<Key") or sequence in ("<Return>", "<FocusIn>", "<FocusOut>")):
+            return self.entry.bind(sequence, func, add)
+        return super().bind(sequence, func, add)
+
+
+class SurfaceCard(tk.Frame):
+    """分组圆角细描边卡片（对标 OpenResearch 设置分组：外部清爽小节标题 + 9-slice 1px BORDER_SUBTLE 容器）。"""
+
+    def __init__(self, parent, title: str = "", *, subtitle: str = "",
+                 bg: str = theme.SURFACE_CARD, parent_bg: str | None = None,
+                 outline: str | None = theme.BORDER_SUBTLE,
+                 radius: int = theme.RADIUS_L,
+                 padx: int = 14, pady: int = 12,
+                 pad_x: int | None = None, pad_y: int | None = None) -> None:
+        # 不再静默改写 bg：调用方传什么画什么（曾有 bg==BG → SURFACE_CARD 的
+        # 偷换特判，调用方以为在画 BG 底时被换色，已全部调用点显式化）。
+        p_bg = parent_bg if parent_bg is not None else (str(parent.cget("bg")) if hasattr(parent, "cget") else theme.BG)
+        super().__init__(parent, bg=p_bg)
+        self.surface_bg = bg
+        self._parent_bg = p_bg
+        self._outline = outline
+        self._radius = radius
+        self._padx = pad_x if pad_x is not None else padx
+        self._pady = pad_y if pad_y is not None else pady
+
+        self.header_row: tk.Frame | None = None
+        self.header_extra: tk.Frame | None = None
+        self.title_lbl: tk.Label | None = None
+        if title or subtitle:
+            self.header_row = tk.Frame(self, bg=p_bg)
+            self.header_row.pack(fill="x", pady=(0, 6))
+            self.header_extra = tk.Frame(self.header_row, bg=p_bg)
+            self.header_extra.pack(side="right")
+            if title:
+                self.title_lbl = tk.Label(self.header_row, text=title, bg=p_bg,
+                                          fg=theme.FG_WHITE, font=theme.FONT_HEADING, anchor="w")
+                self.title_lbl.pack(side="left")
+            if subtitle:
+                tk.Label(self.header_row, text=subtitle, bg=p_bg,
+                         fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w").pack(side="left", padx=(8, 0))
+
+        self.canvas = tk.Canvas(self, bg=p_bg, height=2 * pady + 16, highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.body = tk.Frame(self.canvas, bg=bg)
+        self._body_win = self.canvas.create_window(padx, pady, window=self.body, anchor="nw")
+
+        self.body.bind("<Configure>", self._on_body_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+    def _on_body_configure(self, _event=None) -> None:
+        req_h = max(2 * self._radius + 6, self.body.winfo_reqheight() + 2 * self._pady)
+        if to_int(self.canvas.cget("height")) != req_h:
+            self.canvas.configure(height=req_h)
+        w = self.canvas.winfo_width()
+        if w >= 12:
+            draw_rounded_box(self.canvas, w, req_h, self._radius, self.surface_bg,
+                             self._parent_bg, outline=self._outline, tag="sc_bg")
+
+    def _on_canvas_configure(self, event) -> None:
+        w, h = event.width, event.height
+        if w < 12 or h < 12:
+            return
+        bw = max(1, w - 2 * self._padx)
+        if getattr(self, "_last_bw", None) != bw:
+            self._last_bw = bw
+            self.canvas.itemconfigure(self._body_win, width=bw)
+        draw_rounded_box(self.canvas, w, h, self._radius, self.surface_bg,
+                         self._parent_bg, outline=self._outline, tag="sc_bg")
+
+    def add_row(self, title: str, subtitle: str = "", *, tip: str = "", pady: int = 6) -> tk.Frame:
+        """声明式添加左文案说明 + 右对齐控件槽的标准设置行，返回右侧控件父容器。"""
+        row = tk.Frame(self.body, bg=self.surface_bg)
+        row.pack(fill="x", pady=pady)
+        right = tk.Frame(row, bg=self.surface_bg)
+        right.pack(side="right", padx=(12, 0))
+        left = tk.Frame(row, bg=self.surface_bg)
+        left.pack(side="left", fill="x", expand=True)
+        t_lbl = tk.Label(left, text=title, bg=self.surface_bg, fg=theme.FG,
+                         font=theme.FONT_UI, anchor="w", justify="left")
+        t_lbl.pack(fill="x", anchor="w")
+        s_lbl = None
+        if subtitle:
+            s_lbl = tk.Label(left, text=subtitle, bg=self.surface_bg, fg=theme.MUTED,
+                             font=theme.FONT_UI_SMALL, anchor="w", justify="left", wraplength=420)
+            s_lbl.pack(fill="x", anchor="w", pady=(2, 0))
+            left.bind("<Configure>", lambda e, lb=s_lbl: lb.configure(wraplength=max(120, e.width - 4)), add="+")
+        if tip:
+            Tooltip(t_lbl, tip)
+            if s_lbl is not None:
+                Tooltip(s_lbl, tip)
+        right.row = row  # type: ignore[attr-defined]
+        right.title_lbl = t_lbl  # type: ignore[attr-defined]
+        return right
+
+    def add_divider(self, pady: int = 6) -> tk.Frame:
+        """插入 1px 极淡行间分隔线。"""
+        sep = tk.Frame(self.body, bg=theme.DIVIDER, height=1)
+        sep.pack(fill="x", pady=pady)
+        return sep
 
 
 def new_window(parent, title, size, bg=theme.BG):
@@ -1883,48 +3018,42 @@ class ModalShell:
         self.win.bind("<Map>", lambda e: apply_dark_titlebar(self.win), add="+")
         self.win.bind("<Escape>", lambda _e: self.close())
 
-        # 1. 顶部 Header (40px)
-        self.header = tk.Frame(self.win, bg=theme.ACTIVITY_BG, height=40)
-        self.header.pack(fill="x")
-        self.header.pack_propagate(False)
+        # 1. 顶部大气留白页头（与画布同底色，去除旧版厚重灰顶条与冗余关闭钮，靠标题栏 × 与 Esc 关闭）
+        self.header = tk.Frame(self.win, bg=bg)
+        self.header.pack(fill="x", padx=theme.PAD_L + 4, pady=(theme.PAD_L + 2, theme.PAD_M))
 
-        title_box = tk.Frame(self.header, bg=theme.ACTIVITY_BG)
-        title_box.pack(side="left", fill="both", expand=True, padx=theme.PAD_L)
+        self.header_extra = tk.Frame(self.header, bg=bg)
+        self.header_extra.pack(side="right")
 
-        self.title_lbl = tk.Label(title_box, text=title, bg=theme.ACTIVITY_BG,
-                                  fg=theme.FG_WHITE, font=(theme.FONT_CJK, 11, "bold"), anchor="w")
+        title_box = tk.Frame(self.header, bg=bg)
+        title_box.pack(side="left", fill="x", expand=True)
+
+        self.title_lbl = tk.Label(title_box, text=title, bg=bg,
+                                  fg=theme.FG_WHITE, font=theme.FONT_TITLE, anchor="w")
+        self.title_lbl.pack(side="top", anchor="w")
         if subtitle:
-            self.title_lbl.pack(side="top", anchor="w", pady=(3, 0))
-            self.sub_lbl = tk.Label(title_box, text=subtitle, bg=theme.ACTIVITY_BG,
+            self.sub_lbl = tk.Label(title_box, text=subtitle, bg=bg,
                                     fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-            self.sub_lbl.pack(side="top", anchor="w", pady=(0, 2))
+            self.sub_lbl.pack(side="top", anchor="w", pady=(2, 0))
         else:
-            self.title_lbl.pack(side="left", fill="both", expand=True)
             self.sub_lbl = None
 
-        close_btn = tk.Label(self.header, text=" ✕ ", bg=theme.ACTIVITY_BG,
-                             fg=theme.MUTED, font=theme.FONT_UI_BOLD, cursor=CLICK_CURSOR)
-        close_btn.pack(side="right", padx=theme.PAD_M)
-        close_btn.bind("<Button-1>", lambda _e: self.close())
-        close_btn.bind("<Enter>", lambda _e: close_btn.configure(fg=theme.FG_WHITE, bg=theme.HOVER_BG))
-        close_btn.bind("<Leave>", lambda _e: close_btn.configure(fg=theme.MUTED, bg=theme.ACTIVITY_BG))
-
-        tk.Frame(self.win, bg=theme.BORDER, height=1).pack(fill="x")
+        tk.Frame(self.win, bg=theme.DIVIDER, height=1).pack(fill="x", padx=theme.PAD_L + 4)
 
         # 2. 底部 Action Bar (可选)
         if with_action_bar:
-            self.action_bar = tk.Frame(self.win, bg=theme.PANEL, height=40)
+            self.action_bar = tk.Frame(self.win, bg=bg, height=44)
             self.action_bar.pack(side="bottom", fill="x")
             self.action_bar.pack_propagate(False)
-            tk.Frame(self.action_bar, bg=theme.BORDER, height=1).pack(side="top", fill="x")
-            self.action_inner = tk.Frame(self.action_bar, bg=theme.PANEL)
-            self.action_inner.pack(fill="both", expand=True, padx=theme.PAD_L, pady=theme.PAD_S)
+            tk.Frame(self.action_bar, bg=theme.DIVIDER, height=1).pack(side="top", fill="x", padx=theme.PAD_L + 4)
+            self.action_inner = tk.Frame(self.action_bar, bg=bg)
+            self.action_inner.pack(fill="both", expand=True, padx=theme.PAD_L + 4, pady=theme.PAD_S)
         else:
             self.action_bar = None
             self.action_inner = None
 
         # 3. 中部 Content 容器
-        self.content = tk.Frame(self.win, bg=bg, padx=theme.PAD_L, pady=theme.PAD_L)
+        self.content = tk.Frame(self.win, bg=bg, padx=theme.PAD_L + 4, pady=theme.PAD_L)
         self.content.pack(fill="both", expand=True)
 
     def close(self) -> None:

@@ -14,7 +14,21 @@ from tcer.core import format as fmt
 from tcer.core import metrics
 from . import theme
 from .metric_defs import METRIC_BY_KEY
-from .widgets import CheckRow, ScrollFrame, SelectableLabel, Tooltip, flat_button, new_window
+from .widgets import (
+    CheckRow,
+    ProgressBarWidget,
+    RoundedEntry,
+    RoundedFrame,
+    ScrollFrame,
+    SegmentedControl,
+    SelectableLabel,
+    StatusBadge,
+    SurfaceCard,
+    ToggleSwitch,
+    Tooltip,
+    flat_button,
+    new_window,
+)
 from .platform import CLICK_CURSOR
 
 
@@ -42,73 +56,84 @@ class UpdatePopup:
         self._controller = controller
         self._current = current_version
         self._release = release
-        win = _new_window(parent, "检查更新", "520x360")
+        win = _new_window(parent, "检查更新", "540x400")
         self._win = win
         win.grab_release()  # 非模态:不阻塞主界面(检查更新是辅助动作)
 
-        tk.Label(win, text="检查更新", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
+        hdr = tk.Frame(win, bg=theme.BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 8))
+        tk.Label(hdr, text="检查更新", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
+        self._badge = StatusBadge(hdr, text="检查中", kind="neutral", dot=True, bg=theme.BG)
+        self._badge.pack(side="right")
 
         body = tk.Frame(win, bg=theme.BG)
         self._body = body
-        body.pack(fill="both", expand=True, padx=12)
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
         if release is None:
-            # 检查失败——给 Releases 页兜底
-            SelectableLabel(body, text="检查失败:无法连接 GitHub。", bg=theme.BG,
-                            fg=theme.WARNING, font=theme.FONT_UI,
-                            justify="left").pack(fill="x", pady=(4, 2))
-            SelectableLabel(body, text=f"当前版本:v{current_version}", bg=theme.BG,
-                            fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(fill="x")
+            self._badge.set_status("连接失败", kind="warning", dot=True)
+            err_card = SurfaceCard(body, bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+            err_card.pack(fill="x", pady=(2, 0))
+            SelectableLabel(err_card.body, text="检查失败：无法连接 GitHub Releases。",
+                            bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI,
+                            justify="left").pack(fill="x", pady=(0, 4))
+            SelectableLabel(err_card.body, text=f"当前版本：v{current_version}",
+                            bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(fill="x")
             url = f"https://github.com/{update_check.GITHUB_REPO}/releases"
             flat_button(body, "前往 Releases 页", primary=True,
-                        command=lambda: webbrowser.open(url)
-                        ).pack(anchor="w", pady=(12, 0))
+                        command=lambda: webbrowser.open(url),
+                        padx=theme.PAD_L, pady=theme.PAD_S).pack(anchor="w", pady=(12, 0))
             return
 
-        # 有结果:新版 / 已是最新,都展示该 release 的发布说明
         newer = update_check.is_newer(release["tag"], current_version)
+        ver_card = SurfaceCard(body, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pady=10)
+        ver_card.pack(fill="x", pady=(2, 0))
+        ver_row = tk.Frame(ver_card.body, bg=theme.SURFACE_CARD)
+        ver_row.pack(fill="x")
+
         if newer:
-            tk.Label(body, text="● 发现新版本", bg=theme.BG, fg=theme.SUCCESS,
-                     font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(4, 2))
-            SelectableLabel(body,
-                            text=f"当前 v{current_version}   →   最新 {release['tag']}",
-                            bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(fill="x")
-        else:
-            tk.Label(body, text="● 已是最新版本", bg=theme.BG, fg=theme.SUCCESS,
-                     font=theme.FONT_UI_BOLD).pack(anchor="w", pady=(4, 2))
-            SelectableLabel(body, text=f"当前版本 v{current_version}(已是最新)",
-                            bg=theme.BG, fg=theme.FG, font=theme.FONT_UI).pack(fill="x")
-        if newer:
-            # 按钮(立即更新 / 前往下载)置于发布说明**之前**:长文本会撑高滚动区,
-            # 按钮放后面易被挤出可视行被裁;放顶部始终可见。
+            self._badge.set_status("发现新版本", kind="success", dot=True)
             from tcer.core import updater
             can_self = (controller is not None and getattr(sys, "frozen", False)
                         and updater.asset_for_current_platform(release) is not None)
             if can_self:
                 self._update_btn = flat_button(
-                    body, "立即更新", primary=True,
+                    ver_row, "立即更新", primary=True,
                     command=lambda: controller.start_self_update(release, self),
                     padx=theme.PAD_L, pady=theme.PAD_S)
-                self._update_btn.pack(anchor="w", pady=(8, 0))
+                self._update_btn.pack(side="right", padx=(10, 0))
             else:
-                flat_button(body, "前往下载", primary=True,
-                            command=lambda: webbrowser.open(release.get("url") or "")
-                            ).pack(anchor="w", pady=(8, 0))
-        # 下载进度文字:按钮下方、发布说明上方(初始空,下载时由 set_progress 填字)
+                flat_button(ver_row, "前往下载", primary=True,
+                            command=lambda: webbrowser.open(release.get("url") or ""),
+                            padx=theme.PAD_L, pady=theme.PAD_S).pack(side="right", padx=(10, 0))
+            SelectableLabel(ver_row,
+                            text=f"当前 v{current_version}   →   最新 {release['tag']}",
+                            bg=theme.SURFACE_CARD, fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD
+                            ).pack(side="left", fill="x", expand=True)
+        else:
+            self._badge.set_status("已是最新版本", kind="success", dot=True)
+            SelectableLabel(ver_row, text=f"当前版本 v{current_version}（已是最新）",
+                            bg=theme.SURFACE_CARD, fg=theme.FG, font=theme.FONT_UI
+                            ).pack(side="left", fill="x", expand=True)
+
+        # 下载进度文字：常驻在版本卡下方、发布说明上方
         self._progress = tk.Label(body, text="", bg=theme.BG, fg=theme.MUTED,
-                                  font=theme.FONT_UI_SMALL, wraplength=400, justify="left")
+                                  font=theme.FONT_UI_SMALL, wraplength=480, justify="left")
         self._progress.pack(anchor="w", pady=(4, 0))
-        # 发布说明(已清理 markdown):纯文本展示在进度下方
+
         notes = update_check.render_notes(release.get("notes") or "")
         if notes:
-            sf = ScrollFrame(body, bg=theme.PANEL)
-            sf.canvas.pack(fill="both", expand=True, pady=(8, 0))
+            tk.Label(body, text="发布说明", bg=theme.BG, fg=theme.FG_WHITE,
+                     font=theme.FONT_UI_BOLD, anchor="w").pack(fill="x", pady=(6, 4))
+            notes_wrap = tk.Frame(body, bg=theme.BG)
+            notes_wrap.pack(fill="both", expand=True)
+            sf = ScrollFrame(notes_wrap, bg=theme.SURFACE_CARD)
             if len(notes) > self._NOTES_LIMIT:
                 notes = notes[:self._NOTES_LIMIT].rstrip() + "\n…"
-            SelectableLabel(sf.inner, text=notes, bg=theme.PANEL, fg=theme.FG,
+            SelectableLabel(sf.inner, text=notes, bg=theme.SURFACE_CARD, fg=theme.FG,
                             font=theme.FONT_UI_SMALL,
-                            justify="left").pack(fill="x")
+                            justify="left").pack(fill="x", padx=12, pady=10)
         # 无底部「关闭」按钮:标题栏 × 即可关闭
 
     def set_progress(self, text):
@@ -142,97 +167,104 @@ class SessionDetailPopup:
         r = report
         u = r.usage
         sid = (r.meta.session_id or r.meta.path.stem)[:16]
-        win = _new_window(parent, f"会话详情 · {sid}…", "740x540")
-        tk.Label(win, text="会话详情", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
+        win = _new_window(parent, f"会话详情 · {sid}…", "740x560")
+        self._win = win
 
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        total_cost = metrics_mod.cost_usd(u)
+        hdr = tk.Frame(win, bg=theme.BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 8))
+        StatusBadge(hdr, text=f"{u.total:,} Token · {fmt.fmt_money(total_cost)}",
+                    kind="info", bg=theme.BG).pack(side="right", padx=(10, 0))
+        tk.Label(hdr, text="会话详情", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
+
+        body_wrap = tk.Frame(win, bg=theme.BG)
+        body_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        sf = ScrollFrame(body_wrap, bg=theme.BG)
         inner = sf.inner
 
-        # Summary header
-        total_cost = metrics_mod.cost_usd(u)
-        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        head.pack(fill="x", pady=10)
-        tk.Label(head, text=f"{r.meta.title or '(无标题)'} · {fmt.models_label(u)}",
-                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD).pack()
-        tk.Label(head, text=f"{u.total:,} Token · {fmt.fmt_money(total_cost)}",
-                 bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI).pack()
+        # 1. 基本信息圆角卡片
+        meta_card = SurfaceCard(inner, title="基本信息", subtitle=fmt.models_label(u),
+                                bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+        meta_card.pack(fill="x", padx=(0, 6), pady=(2, 12))
 
-        # Metadata card
-        def meta_row(key, val):
-            row = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=2)
-            row.pack(fill="x")
-            tk.Label(row, text=key, bg=theme.PANEL, fg=theme.MUTED, width=10,
-                     anchor="w", font=theme.FONT_UI).pack(side="left")
-            SelectableLabel(row, text=str(val), bg=theme.PANEL, fg=theme.FG,
+        SelectableLabel(meta_card.body, text=r.meta.title or "(无标题)",
+                        bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
+                        font=theme.FONT_UI_BOLD, justify="left").pack(fill="x", pady=(0, 4))
+        meta_card.add_divider(pady=6)
+
+        meta_items = [
+            ("会话 ID", r.meta.session_id or "(无)"),
+            ("工作目录", r.meta.cwd or "(未知)"),
+            ("开始时间", fmt.fmt_dt(u.started_at, fmt.FMT_SECOND)),
+            ("结束时间", fmt.fmt_dt(u.ended_at, fmt.FMT_SECOND)),
+        ]
+        for idx_m, (key, val) in enumerate(meta_items):
+            if idx_m > 0:
+                meta_card.add_divider(pady=4)
+            row = tk.Frame(meta_card.body, bg=theme.SURFACE_CARD)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=key, bg=theme.SURFACE_CARD, fg=theme.MUTED, width=10,
+                     anchor="w", font=theme.FONT_UI_SMALL).pack(side="left")
+            SelectableLabel(row, text=str(val), bg=theme.SURFACE_CARD, fg=theme.FG,
                             font=theme.FONT_UI,
                             justify="left").pack(side="left", fill="x", expand=True)
 
-        tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-        meta_row("会话 ID", r.meta.session_id or "(无)")
-        meta_row("工作目录", r.meta.cwd or "(未知)")
-        meta_row("开始", fmt.fmt_dt(u.started_at, fmt.FMT_SECOND))
-        meta_row("结束", fmt.fmt_dt(u.ended_at, fmt.FMT_SECOND))
-
-        # Per-model cost section
+        # 2. 逐模型成本圆角卡片
         _SKIP = {"<synthetic>", ""}
         per_model = {k: v for k, v in u.per_model.items() if k not in _SKIP and k}
 
         if per_model:
-            # Section header
-            tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
-            sec = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=4)
-            sec.pack(fill="x")
-            tk.Label(sec, text="逐模型成本", bg=theme.PANEL, fg=theme.SECTION_ACCENT,
-                     font=theme.FONT_UI_BOLD).pack(anchor="w")
+            cost_card = SurfaceCard(inner, title="逐模型成本",
+                                    subtitle=f"共 {len(per_model)} 个模型参与",
+                                    bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+            cost_card.pack(fill="x", padx=(0, 6), pady=(0, 12))
 
-            # Build sorted items
             cost_items = []
             for m, bucket in per_model.items():
                 cost = metrics_mod.cost_usd(bucket, model=m)
-                tok = bucket.input_tokens + bucket.output_tokens + bucket.cache_creation_input_tokens + bucket.cache_read_input_tokens
+                tok = (bucket.input_tokens + bucket.output_tokens
+                       + bucket.cache_creation_input_tokens + bucket.cache_read_input_tokens)
                 cost_items.append((m, cost, tok))
             cost_items.sort(key=lambda x: x[1], reverse=True)
             max_cost = cost_items[0][1] if cost_items else 1
 
-            for m, cost, tok in cost_items:
+            for idx_c, (m, cost, tok) in enumerate(cost_items):
+                if idx_c > 0:
+                    cost_card.add_divider(pady=8)
                 pct = cost / total_cost * 100 if total_cost else 0
                 name = model_label(m) if m else "(未记录)"
 
-                tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-                hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
-                hdr.pack(fill="x")
-                tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
+                m_hdr = tk.Frame(cost_card.body, bg=theme.SURFACE_CARD)
+                m_hdr.pack(fill="x")
+                tk.Label(m_hdr, text=name, bg=theme.SURFACE_CARD, fg=theme.FG_WHITE, anchor="w",
                          font=theme.FONT_VALUE).pack(side="left")
-                tk.Label(hdr, text=f"{fmt.fmt_money(cost)}（{pct:.1f}%）",
-                         bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+                tk.Label(m_hdr, text=f"{fmt.fmt_money(cost)}（{pct:.1f}%）",
+                         bg=theme.SURFACE_CARD, fg=theme.FG, anchor="e",
                          font=theme.FONT_MONO).pack(side="right")
 
-                bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
-                bar_frame.pack(fill="x")
-                bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=8)
+                bar_wrap = tk.Frame(cost_card.body, bg=theme.SURFACE_CARD, pady=4)
+                bar_wrap.pack(fill="x")
+                bar_bg = tk.Frame(bar_wrap, bg=theme.CONTROL_BG, height=6)
                 bar_bg.pack(fill="x")
-                if max_cost > 0:
-                    tk.Frame(bar_bg, bg=self._COST_COLOR, height=8).place(
-                        relx=0, rely=0, relwidth=cost / max_cost, relheight=1.0)
+                if max_cost > 0 and cost > 0:
+                    tk.Frame(bar_bg, bg=self._COST_COLOR, height=6).place(
+                        relx=0, rely=0, relwidth=min(1.0, cost / max_cost), relheight=1.0)
 
-                det = tk.Frame(inner, bg=theme.PANEL, padx=12, pady=4)
-                det.pack(fill="x")
-                tk.Label(det, text=f"Token {tok:,}",
-                         bg=theme.PANEL, fg=theme.MUTED,
-                         font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
+                tk.Label(cost_card.body, text=f"Token {tok:,}",
+                         bg=theme.SURFACE_CARD, fg=theme.MUTED,
+                         font=theme.FONT_UI_SMALL, anchor="w").pack(anchor="w")
 
-        # Warning for unseen writes
+        # 3. 未见文件写入提示卡
         if r.unseen_writes:
-            tk.Frame(inner, bg=theme.PANEL, height=10).pack(fill="x")
-            warn = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=6)
-            warn.pack(fill="x")
-            SelectableLabel(warn,
-                            text=f"⚠ {r.unseen_writes} 个「未见文件的 Write」（LOC 假设为新文件，"
-                                 "若覆写已有文件会高估 added）",
-                            bg=theme.PANEL, fg=theme.WARNING, justify="left",
-                            font=theme.FONT_UI).pack(fill="x")
+            warn_card = SurfaceCard(inner, bg=theme.WARN_TINT_BG, parent_bg=theme.BG,
+                                    outline=theme.WARN_TINT_BORDER, pady=10)
+            warn_card.pack(fill="x", padx=(0, 6), pady=(0, 8))
+            SelectableLabel(warn_card.body,
+                            text=f"注意：{r.unseen_writes} 个「未见文件的写入」（LOC 假定为新文件，"
+                                 "若覆写已有文件可能高估新增行）",
+                            bg=theme.WARN_TINT_BG, fg=theme.WARNING, justify="left",
+                            font=theme.FONT_UI_SMALL).pack(fill="x")
 
 
 class ToolCallsPopup:
@@ -245,49 +277,53 @@ class ToolCallsPopup:
 
     def __init__(self, parent, usage, title_suffix: str = "") -> None:
         win = _new_window(parent, f"工具调用统计{title_suffix}", "740x540")
-        tk.Label(win, text="工具调用详情", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
-        tk.Label(win, text="Claude Code 在此会话中调用的工具及次数", bg=theme.BG,
-                 fg=theme.MUTED, font=theme.FONT_UI, pady=5).pack()
+        top = tk.Frame(win, bg=theme.BG)
+        top.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(top, text="工具调用详情", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
+        tk.Label(top, text="在此会话中调用的工具及次数", bg=theme.BG,
+                 fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left", padx=10, pady=(4, 0))
 
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        sf = ScrollFrame(win, bg=theme.BG)
+        sf.canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         inner = sf.inner
 
         tc = usage.tool_calls
         if not tc:
-            tk.Label(inner, text="未调用任何工具", bg=theme.PANEL, fg=theme.MUTED,
+            tk.Label(inner, text="未调用任何工具", bg=theme.BG, fg=theme.MUTED,
                      font=theme.FONT_UI, pady=40).pack()
         else:
             total = sum(tc.values())
             total_errs = usage.tool_errors
-            # Summary header
-            head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-            head.pack(fill="x", pady=10)
             summary = f"总计 {total} 次调用 · {len(tc)} 种工具"
             if total_errs:
                 summary += f" · {total_errs} 次错误"
-            tk.Label(head, text=summary, bg=theme.CARD_HEADER_BG,
-                     fg=theme.ERROR if total_errs else theme.SUCCESS,
-                     font=theme.FONT_UI_BOLD).pack()
+            StatusBadge(
+                top, text=summary,
+                kind="error" if total_errs else "success",
+                dot=True, bg=theme.BG,
+            ).pack(side="right")
 
-            for name, count in sorted(tc.items(), key=lambda x: x[1], reverse=True):
+            list_card = SurfaceCard(inner, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=14, pad_y=10)
+            list_card.pack(fill="x", padx=4, pady=6)
+            card_body = list_card.body
+
+            for idx, (name, count) in enumerate(sorted(tc.items(), key=lambda x: x[1], reverse=True)):
+                if idx > 0:
+                    list_card.add_divider(pady=6)
                 pct = count / total * 100 if total else 0
                 errs = usage.tool_errors_by_tool.get(name, 0)
                 ok = count - errs
 
-                # --- Header row: tool name + count ---
-                tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
-                hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                hdr = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
                 hdr.pack(fill="x")
-                tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
+                tk.Label(hdr, text=name, bg=theme.SURFACE_CARD, fg=theme.FG, anchor="w",
                          font=theme.FONT_VALUE).pack(side="left")
                 tk.Label(hdr, text=f"{count} 次（{pct:.1f}%）",
-                         bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+                         bg=theme.SURFACE_CARD, fg=theme.MUTED, anchor="e",
                          font=theme.FONT_MONO).pack(side="right")
 
-                # --- Stacked bar (relwidth-based, resize-safe) ---
-                bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                bar_frame = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
                 bar_frame.pack(fill="x")
                 bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=10)
                 bar_bg.pack(fill="x")
@@ -299,15 +335,14 @@ class ToolCallsPopup:
                         tk.Frame(bar_bg, bg=self._COLORS["error"], height=10).place(
                             relx=ok / count, rely=0, relwidth=errs / count, relheight=1.0)
 
-                # --- Detail line ---
-                det = tk.Frame(inner, bg=theme.PANEL, padx=12, pady=4)
+                det = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
                 det.pack(fill="x")
                 tk.Label(det, text=f"成功 {ok} 次",
-                         bg=theme.PANEL, fg=self._COLORS["success"],
-                         font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
+                         bg=theme.SURFACE_CARD, fg=self._COLORS["success"],
+                         font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=(0, 8))
                 if errs:
                     tk.Label(det, text=f"错误 {errs} 次（{errs/count*100:.0f}%）",
-                             bg=theme.PANEL, fg=self._COLORS["error"],
+                             bg=theme.SURFACE_CARD, fg=self._COLORS["error"],
                              font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
 
 
@@ -338,13 +373,15 @@ class ModelsPopup:
         from tcer.core.pricing import label as model_label
 
         win = _new_window(parent, f"模型使用详情{title_suffix}", "740x540")
-        tk.Label(win, text="模型使用详情", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
-        tk.Label(win, text="各模型的 Token 用量、成本及四类 Token 构成", bg=theme.BG,
-                 fg=theme.MUTED, font=theme.FONT_UI, pady=5).pack()
+        top = tk.Frame(win, bg=theme.BG)
+        top.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(top, text="模型使用详情", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
+        tk.Label(top, text="各模型的 Token 用量、成本及四类 Token 构成", bg=theme.BG,
+                 fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left", padx=10, pady=(4, 0))
 
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        sf = ScrollFrame(win, bg=theme.BG)
+        sf.canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         inner = sf.inner
 
         per_model = usage.per_model
@@ -353,7 +390,7 @@ class ModelsPopup:
                      if k not in self._SKIP_MODELS and k}
 
         if not per_model:
-            tk.Label(inner, text="无逐模型数据", bg=theme.PANEL, fg=theme.MUTED,
+            tk.Label(inner, text="无逐模型数据", bg=theme.BG, fg=theme.MUTED,
                      font=theme.FONT_UI, pady=40).pack()
         else:
             total_tokens = sum(
@@ -365,15 +402,15 @@ class ModelsPopup:
             from tcer.core import pricing as pricing_mod
             unmatched = metrics_mod.unmatched_pricing_models(usage)
 
-            # Summary header
-            head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-            head.pack(fill="x", pady=10)
-            tk.Label(head, text=f"总计 {total_tokens:,} Token · {fmt_money(total_cost)} · "
-                                f"{len(per_model)} 个模型",
-                     bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+            StatusBadge(
+                top,
+                text=f"总计 {total_tokens:,} Token · {fmt_money(total_cost)} · {len(per_model)} 个模型",
+                kind="success", dot=True, bg=theme.BG,
+            ).pack(side="right")
             if unmatched:
-                warn = tk.Frame(inner, bg=theme.WARN_TINT_BG, padx=10, pady=6)
-                warn.pack(fill="x", pady=(0, 4))
+                warn = RoundedFrame(inner, fill=theme.WARN_TINT_BG, parent_bg=theme.BG,
+                                    outline=theme.WARNING, radius=theme.RADIUS_M)
+                warn.pack(fill="x", padx=4, pady=(4, 4))
                 names = "、".join(pricing_mod.label(m) for m in unmatched[:6])
                 more = f" 等 {len(unmatched)} 个" if len(unmatched) > 6 else ""
                 SelectableLabel(
@@ -382,9 +419,8 @@ class ModelsPopup:
                          f"成本可能偏差；可在 tcer/config/model_pricing.json 补充条目。",
                     bg=theme.WARN_TINT_BG, fg=theme.WARNING,
                     font=theme.FONT_UI, justify="left",
-                ).pack(fill="x")
+                ).pack(fill="x", padx=10, pady=6)
 
-            # Per-model blocks sorted by token count descending
             items = []
             for model_id, mu in per_model.items():
                 model_total = mu.input_tokens + mu.cache_creation_input_tokens + \
@@ -393,28 +429,31 @@ class ModelsPopup:
                 items.append((model_id, mu, model_total, cost))
             items.sort(key=lambda x: x[2], reverse=True)
 
-            for model_id, mu, tok, cost in items:
+            list_card = SurfaceCard(inner, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=14, pad_y=10)
+            list_card.pack(fill="x", padx=4, pady=6)
+            card_body = list_card.body
+
+            for idx, (model_id, mu, tok, cost) in enumerate(items):
+                if idx > 0:
+                    list_card.add_divider(pady=6)
                 pct = tok / total_tokens * 100 if total_tokens else 0
                 name = model_label(model_id) if model_id else "(未记录)"
                 on_default = model_id in unmatched
 
-                # --- Header row: model name + total + cost ---
-                tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
-                hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                hdr = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
                 hdr.pack(fill="x")
                 title = f"{name} · 默认价" if on_default else name
-                tk.Label(hdr, text=title, bg=theme.PANEL,
+                tk.Label(hdr, text=title, bg=theme.SURFACE_CARD,
                          fg=theme.WARNING if on_default else theme.FG,
                          anchor="w", font=theme.FONT_VALUE).pack(side="left")
                 tk.Label(hdr, text=f"{tok:,} Token · {fmt_money(cost)}（{pct:.1f}%）",
-                         bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+                         bg=theme.SURFACE_CARD, fg=theme.MUTED, anchor="e",
                          font=theme.FONT_MONO).pack(side="right")
 
-                # --- Stacked bar (relwidth-based, resize-safe) ---
                 vals = [mu.input_tokens, mu.output_tokens,
                         mu.cache_creation_input_tokens, mu.cache_read_input_tokens]
                 keys = ["input", "output", "cache_creation", "cache_read"]
-                bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+                bar_frame = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
                 bar_frame.pack(fill="x")
                 bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=10)
                 bar_bg.pack(fill="x")
@@ -427,17 +466,15 @@ class ModelsPopup:
                             seg.place(relx=relx, rely=0, relwidth=rw, relheight=1.0)
                             relx += rw
 
-                # --- Detail line: 4 types with color (compact) ---
-                det = tk.Frame(inner, bg=theme.PANEL, padx=12, pady=4)
+                det = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
                 det.pack(fill="x")
                 for v, k in zip(vals, keys):
                     sub_pct = v / tok * 100 if tok else 0
-                    # Abbreviate cache_read to save horizontal space
                     label_text = f"{self._LABELS[k]} {v:,}（{sub_pct:.0f}%）"
                     lbl = tk.Label(det, text=label_text,
-                                   bg=theme.PANEL, fg=self._COLORS[k],
+                                   bg=theme.SURFACE_CARD, fg=self._COLORS[k],
                                    font=(theme.FONT_MONO_NAME, 8), anchor="w")
-                    lbl.pack(side="left", padx=8)
+                    lbl.pack(side="left", padx=(0, 12))
 
 
 class CostBreakdownPopup:
@@ -453,13 +490,15 @@ class CostBreakdownPopup:
         from tcer.core.pricing import label as model_label
 
         win = _new_window(parent, f"成本明细{title_suffix}", "740x540")
-        tk.Label(win, text="成本明细", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
-        tk.Label(win, text="各模型成本、Token 效率（每美元 Token 数）", bg=theme.BG,
-                 fg=theme.MUTED, font=theme.FONT_UI, pady=5).pack()
+        top = tk.Frame(win, bg=theme.BG)
+        top.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(top, text="成本明细", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
+        tk.Label(top, text="各模型成本、Token 效率（每美元 Token 数）", bg=theme.BG,
+                 fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left", padx=10, pady=(4, 0))
 
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        sf = ScrollFrame(win, bg=theme.BG)
+        sf.canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         inner = sf.inner
 
         per_model = usage.per_model
@@ -467,7 +506,7 @@ class CostBreakdownPopup:
         per_model = {k: v for k, v in per_model.items() if k not in _SKIP and k}
 
         if not per_model:
-            tk.Label(inner, text="无逐模型数据", bg=theme.PANEL, fg=theme.MUTED,
+            tk.Label(inner, text="无逐模型数据", bg=theme.BG, fg=theme.MUTED,
                      font=theme.FONT_UI, pady=40).pack()
             return
 
@@ -492,40 +531,42 @@ class CostBreakdownPopup:
         # Sort display by cost descending
         items.sort(key=lambda x: x[1], reverse=True)
 
-        # Summary header
-        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        head.pack(fill="x", pady=10)
-        tk.Label(head, text=f"总计 {fmt_money(total_cost)} · {len(per_model)} 个模型",
-                 bg=theme.CARD_HEADER_BG, fg=self._COLOR, font=theme.FONT_UI_BOLD).pack()
+        StatusBadge(
+            top, text=f"总计 {fmt_money(total_cost)} · {len(per_model)} 个模型",
+            kind="warning", dot=True, bg=theme.BG,
+        ).pack(side="right")
         if unmatched:
-            warn = tk.Frame(inner, bg=theme.WARN_TINT_BG, padx=10, pady=6)
-            warn.pack(fill="x", pady=(0, 4))
+            warn = RoundedFrame(inner, fill=theme.WARN_TINT_BG, parent_bg=theme.BG,
+                                outline=theme.WARNING, radius=theme.RADIUS_M)
+            warn.pack(fill="x", padx=4, pady=(4, 4))
             SelectableLabel(
                 warn,
                 text=f"⚠ {len(unmatched)} 个模型未在价表中，成本按默认 list 价估算（见各行「默认价」标记）。",
                 bg=theme.WARN_TINT_BG, fg=theme.WARNING, font=theme.FONT_UI, justify="left",
-            ).pack(fill="x")
+            ).pack(fill="x", padx=10, pady=6)
 
         max_cost = items[0][1] if items else 1
+        list_card = SurfaceCard(inner, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=14, pad_y=10)
+        list_card.pack(fill="x", padx=4, pady=6)
+        card_body = list_card.body
 
-        for model_id, cost, tok, tpd in items:
+        for idx, (model_id, cost, tok, tpd) in enumerate(items):
+            if idx > 0:
+                list_card.add_divider(pady=6)
             pct = cost / total_cost * 100 if total_cost else 0
             name = model_label(model_id) if model_id else "(未记录)"
             if model_id in unmatched:
                 name = f"{name} · 默认价"
 
-            # Header row
-            tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
-            hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            hdr = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
             hdr.pack(fill="x")
-            tk.Label(hdr, text=name, bg=theme.PANEL, fg=theme.FG, anchor="w",
+            tk.Label(hdr, text=name, bg=theme.SURFACE_CARD, fg=theme.FG, anchor="w",
                      font=theme.FONT_VALUE).pack(side="left")
             tk.Label(hdr, text=f"{fmt_money(cost)}（{pct:.1f}%）",
-                     bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+                     bg=theme.SURFACE_CARD, fg=theme.MUTED, anchor="e",
                      font=theme.FONT_MONO).pack(side="right")
 
-            # Cost bar
-            bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            bar_frame = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
             bar_frame.pack(fill="x")
             bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=10)
             bar_bg.pack(fill="x")
@@ -533,12 +574,11 @@ class CostBreakdownPopup:
                 tk.Frame(bar_bg, bg=self._COLOR, height=10).place(
                     relx=0, rely=0, relwidth=cost / max_cost, relheight=1.0)
 
-            # Detail line: tokens + cost-effectiveness + medal
-            det = tk.Frame(inner, bg=theme.PANEL, padx=12, pady=4)
+            det = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
             det.pack(fill="x")
             tk.Label(det, text=f"Token {tok:,}",
-                     bg=theme.PANEL, fg=theme.MUTED,
-                     font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
+                     bg=theme.SURFACE_CARD, fg=theme.MUTED,
+                     font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=(0, 8))
             if tpd == float("inf"):
                 eff_text = "效率 ∞（免费）"
                 eff_color = theme.SUCCESS
@@ -547,7 +587,7 @@ class CostBreakdownPopup:
                 rank = medal_map.get(model_id)
                 eff_color = self._MEDAL[rank] if rank is not None else theme.MUTED
             tk.Label(det, text=eff_text,
-                     bg=theme.PANEL, fg=eff_color,
+                     bg=theme.SURFACE_CARD, fg=eff_color,
                      font=(theme.FONT_MONO_NAME, 8), anchor="w").pack(side="left", padx=8)
 
 
@@ -579,72 +619,83 @@ class BaselinesPopup:
         self._on_apply = on_apply
         self._result = None  # 最近一次计算结果（用于应用）
 
-        win = _new_window(parent, "计算个人基准", "740x540")
+        win = _new_window(parent, "计算个人基准", "740x560")
         self._win = win
-        tk.Label(win, text="计算个人基准", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING).pack(pady=(8, 4))
 
-        # -- 操作按钮：紧跟标题下方（上下排列）--
-        btn_bar = tk.Frame(win, bg=theme.BG)
-        btn_bar.pack(fill="x", padx=10, pady=(0, 6))
-        self._calc_btn = flat_button(btn_bar, "开始校准", self._do_compute,
-                                     primary=True, padx=theme.PAD_L)
-        self._calc_btn.pack(fill="x", pady=(0, 4))
+        hdr = tk.Frame(win, bg=theme.BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 8))
+        btn_bar = tk.Frame(hdr, bg=theme.BG)
+        btn_bar.pack(side="right")
         self._apply_btn = flat_button(btn_bar, "应用为基准", self._do_apply,
-                                      padx=theme.PAD_L)
-        self._apply_btn.pack(fill="x")
+                                      padx=theme.PAD_L, pady=theme.PAD_S)
+        self._apply_btn.pack(side="right", padx=(6, 0))
+        self._calc_btn = flat_button(btn_bar, "开始校准", self._do_compute,
+                                     primary=True, padx=theme.PAD_L, pady=theme.PAD_S)
+        self._calc_btn.pack(side="right")
         self._set_apply_enabled(False)
+        tk.Label(hdr, text="计算个人基准", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
 
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        body_wrap = tk.Frame(win, bg=theme.BG)
+        body_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        sf = ScrollFrame(body_wrap, bg=theme.BG)
         inner = sf.inner
         self._inner = inner
 
-        # -- 模式选择（醒目分区标题 + 上下堆叠可点行）--
-        self._section_header(inner, "计算范围")
+        # -- 1. 校准配置卡片（对标 OpenResearch 分组设置卡） --
+        cfg_card = SurfaceCard(inner, title="校准设置",
+                               subtitle="始终基于全部历史会话，不受顶栏时间筛选影响",
+                               bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+        cfg_card.pack(fill="x", padx=(0, 6), pady=(2, 14))
+
         self._mode = tk.StringVar(value="all")
         self._mode_rows: dict[str, CheckRow] = {}
-        for val, text, hint in [
-            ("all", "基于全部会话", "跨所有项目汇总一个统一基准"),
-            ("per_proj", "逐项目分别校准", "为每个项目单独生成基准"),
-            ("per_source", "按数据源分别校准", "跨源公平比较：每个 agent 用自己的中位水平做基准"),
-        ]:
-            var = tk.BooleanVar(value=(val == "all"))
-            row = CheckRow(inner, text, var, on_toggle=lambda v=val: self._pick_mode(v),
-                           hint=hint)
-            self._mode_rows[val] = row
+        r_mode = cfg_card.add_row(
+            "计算范围",
+            "全部会话汇总统一基准；逐项目独立校准；或按数据源分别校准以实现跨源公平比较",
+        )
+        self._mode_seg = SegmentedControl(
+            r_mode,
+            [("all", "全部会话"), ("per_proj", "逐项目"), ("per_source", "按数据源")],
+            variable=self._mode,
+            on_change=self._pick_mode,
+            bg=theme.SURFACE_CARD,
+        )
+        self._mode_seg.pack(side="right")
 
-        # -- 计算选项（醒目分区标题）--
-        self._section_header(inner, "计算选项")
+        cfg_card.add_divider()
+
         self._filter_outliers = tk.BooleanVar(value=True)
-        CheckRow(inner, "忽略近零产出的离群会话", self._filter_outliers,
-                 hint=f"净增行 < {metrics.MIN_BASELINE_NET_LOC} 的会话会失真",
-                 tooltip="例如「10 行改动花 $17」这类会话，每千行成本被放大到失真，"
-                         "计入会拉偏成本基准。默认忽略。")
+        r_out = cfg_card.add_row(
+            "忽略近零产出的离群会话",
+            f"自动剔除净增行 < {metrics.MIN_BASELINE_NET_LOC} 的会话，防止极小改动放大每千行成本拉偏基准",
+        )
+        ToggleSwitch(r_out, self._filter_outliers, bg=theme.SURFACE_CARD).pack(side="right")
 
-        # 计算方法：中位数（抗离群）/ 平均数（对全体敏感），单选
+        cfg_card.add_divider()
+
         self._method = tk.StringVar(value="median")
         self._method_rows: dict[str, CheckRow] = {}
-        for val, text, hint in [
-            ("median", "用中位数", "取中间值，不受个别极端会话影响（推荐）"),
-            ("mean", "用平均数", "全体会话的算术平均，对高/低值都敏感"),
-        ]:
-            var = tk.BooleanVar(value=(val == "median"))
-            row = CheckRow(inner, text, var, on_toggle=lambda v=val: self._pick_method(v),
-                           hint=hint)
-            self._method_rows[val] = row
+        r_meth = cfg_card.add_row(
+            "统计方法",
+            "中位数抗个别极端会话干扰（推荐）；平均数对全体高低值均敏感",
+        )
+        self._method_seg = SegmentedControl(
+            r_meth,
+            [("median", "中位数"), ("mean", "平均数")],
+            variable=self._method,
+            on_change=self._pick_method,
+            bg=theme.SURFACE_CARD,
+        )
+        self._method_seg.pack(side="right")
 
-        SelectableLabel(inner, text="基准与筛选时间范围无关，始终基于全部历史会话。",
-                        bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                        justify="left").pack(fill="x", padx=10, pady=(8, 2))
-
-        # -- 结果区（校准后填充）--
-        self._section_header(inner, "校准结果")
-        self._result_frame = tk.Frame(inner, bg=theme.PANEL)
-        self._result_frame.pack(fill="x", pady=(2, 0))
-        tk.Label(self._result_frame, text="点上方「开始校准」计算基准。",
-                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
-                 anchor="w").pack(anchor="w", padx=10, pady=6)
+        # -- 2. 结果区（校准后填充）--
+        res_card = SurfaceCard(inner, title="校准结果", bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+        res_card.pack(fill="x", padx=(0, 6), pady=(0, 8))
+        self._result_frame = res_card.body
+        tk.Label(self._result_frame, text="点击右上角「开始校准」计算你的个人效率基准。",
+                 bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI,
+                 anchor="w").pack(anchor="w", pady=4)
 
         self._pick_mode("all")
 
@@ -707,8 +758,8 @@ class BaselinesPopup:
         self._clear_results()
         self._result = None
         self._set_apply_enabled(False)
-        tk.Label(self._result_frame, text="校准中…", bg=theme.PANEL,
-                 fg=theme.MUTED, font=theme.FONT_UI).pack(anchor="w", padx=10, pady=8)
+        tk.Label(self._result_frame, text="正在扫描并校准历史会话…", bg=theme.SURFACE_CARD,
+                 fg=theme.MUTED, font=theme.FONT_UI).pack(anchor="w", pady=6)
         try:
             self._calc_btn.config(state="disabled")
         except tk.TclError:
@@ -737,59 +788,63 @@ class BaselinesPopup:
         values = result.get("values")
         if values is None:
             SelectableLabel(self._result_frame, text=result.get("msg", "样本不足，无法计算基准。"),
-                            bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
-                            justify="left").pack(fill="x", padx=10, pady=8)
+                            bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI,
+                            justify="left").pack(fill="x", pady=4)
             return
-        head = tk.Frame(self._result_frame, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        head.pack(fill="x", pady=(6, 0))
+        head = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
+        head.pack(fill="x", pady=(0, 6))
+        StatusBadge(head, text=f"{result.get('n', 0)} 个会话", kind="info",
+                    bg=theme.SURFACE_CARD).pack(side="right")
         tk.Label(head, text=f"基于 {result.get('n', 0)} 个会话计算 · {note}".rstrip(" ·"),
-                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD,
-                 wraplength=420, justify="left").pack(anchor="w")
+                 bg=theme.SURFACE_CARD, fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
+                 wraplength=460, justify="left").pack(side="left", anchor="w")
         current = {"tcer": metrics.TCER_BASELINE, "cpe": metrics.CPE_BASELINE}
-        for key in ("tcer", "cpe"):
+        for idx_k, key in enumerate(("tcer", "cpe")):
+            tk.Frame(self._result_frame, bg=theme.DIVIDER, height=1).pack(fill="x", pady=6)
             self._value_card(self._result_frame, key, values[key], current.get(key))
         self._set_apply_enabled(True)
 
     def _render_per_project(self, result: dict) -> None:
         note = result.get("note") or ""
-        # per_project 现为**有序列表**，含全部项目（样本不足者 values=None）。
         per = result.get("per_project") or []
         if not per:
             SelectableLabel(self._result_frame, text=result.get("msg", "没有可用于计算的项目。"),
-                            bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
-                            justify="left").pack(fill="x", padx=10, pady=8)
+                            bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI,
+                            justify="left").pack(fill="x", pady=4)
             return
         n_ok = sum(1 for it in per if it.get("values"))
-        head = tk.Frame(self._result_frame, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        head.pack(fill="x", pady=(2, 0))
-        tk.Label(head, text=f"共 {len(per)} 个项目 · {n_ok} 个可校准 · {note}".rstrip(" ·"),
-                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD,
-                 wraplength=440, justify="left").pack(anchor="w")
+        head = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
+        head.pack(fill="x", pady=(0, 6))
+        StatusBadge(head, text=f"{n_ok}/{len(per)} 可校准", kind="success" if n_ok else "warning",
+                    bg=theme.SURFACE_CARD).pack(side="right")
+        tk.Label(head, text=f"共 {len(per)} 个项目 · {note}".rstrip(" ·"),
+                 bg=theme.SURFACE_CARD, fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
+                 wraplength=440, justify="left").pack(side="left", anchor="w")
         for info in per:
             vals = info.get("values")
             ok = bool(vals)
-            tk.Frame(self._result_frame, bg=theme.PANEL, height=6).pack(fill="x")
-            title = tk.Frame(self._result_frame, bg=theme.PANEL)
-            title.pack(fill="x", padx=10)
+            tk.Frame(self._result_frame, bg=theme.DIVIDER, height=1).pack(fill="x", pady=6)
+            title = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
+            title.pack(fill="x")
             tk.Label(title, text=info.get("label", info.get("uid", "")),
-                     bg=theme.PANEL, fg=theme.FG if ok else theme.MUTED,
+                     bg=theme.SURFACE_CARD, fg=theme.FG if ok else theme.MUTED,
                      font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
-            tk.Label(title, text=f"{info.get('n', 0)} 会话", bg=theme.PANEL,
+            tk.Label(title, text=f"{info.get('n', 0)} 会话", bg=theme.SURFACE_CARD,
                      fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e").pack(side="right")
             if ok:
-                line = tk.Frame(self._result_frame, bg=theme.PANEL)
-                line.pack(fill="x", padx=10)
+                line = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
+                line.pack(fill="x", pady=(2, 0))
                 tk.Label(line, text=f"{self._metric_short('tcer')} {vals.get('tcer', 0):.2f}",
-                         bg=theme.PANEL, fg=self._COLOR, font=theme.FONT_MONO,
+                         bg=theme.SURFACE_CARD, fg=self._COLOR, font=theme.FONT_MONO,
                          anchor="w").pack(side="left")
                 tk.Label(line, text=f"{self._metric_short('cpe')} {vals.get('cpe', 0):.2f}",
-                         bg=theme.PANEL, fg=self._COLOR, font=theme.FONT_MONO,
+                         bg=theme.SURFACE_CARD, fg=self._COLOR, font=theme.FONT_MONO,
                          anchor="e").pack(side="right")
             else:
                 SelectableLabel(self._result_frame,
                                 text=info.get("reason", "样本不足，跳过"),
-                                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI
-                                ).pack(fill="x", padx=10)
+                                bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI_SMALL
+                                ).pack(fill="x", pady=(2, 0))
         if n_ok:
             self._set_apply_enabled(True)
 
@@ -798,69 +853,70 @@ class BaselinesPopup:
         per = result.get("per_source") or []
         if not per:
             SelectableLabel(self._result_frame, text=result.get("msg", "没有可用于计算的会话。"),
-                            bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI,
-                            justify="left").pack(fill="x", padx=10, pady=8)
+                            bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI,
+                            justify="left").pack(fill="x", pady=4)
             return
         n_ok = sum(1 for it in per if it.get("values"))
-        head = tk.Frame(self._result_frame, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        head.pack(fill="x", pady=(2, 0))
+        head = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
+        head.pack(fill="x", pady=(0, 4))
+        StatusBadge(head, text=f"{n_ok}/{len(per)} 可校准", kind="success" if n_ok else "warning",
+                    bg=theme.SURFACE_CARD).pack(side="right")
         tk.Label(head,
-                 text=f"共 {len(per)} 个数据源 · {n_ok} 个可校准 · {note}".rstrip(" ·"),
-                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI_BOLD,
-                 wraplength=440, justify="left").pack(anchor="w")
+                 text=f"共 {len(per)} 个数据源 · {note}".rstrip(" ·"),
+                 bg=theme.SURFACE_CARD, fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
+                 wraplength=440, justify="left").pack(side="left", anchor="w")
         SelectableLabel(self._result_frame,
                         text="逐源基准写入后，各源分数回到「相对该源自己的中位水平」——"
                              "跨源比较才公平；不写入则所有源共用全局基准。",
-                        bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                        justify="left").pack(fill="x", padx=10, pady=(4, 0))
+                        bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(fill="x", pady=(2, 4))
         for info in per:
             vals = info.get("values")
             ok = bool(vals)
-            tk.Frame(self._result_frame, bg=theme.PANEL, height=6).pack(fill="x")
-            title = tk.Frame(self._result_frame, bg=theme.PANEL)
-            title.pack(fill="x", padx=10)
+            tk.Frame(self._result_frame, bg=theme.DIVIDER, height=1).pack(fill="x", pady=6)
+            title = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
+            title.pack(fill="x")
             tk.Label(title, text=info.get("label", info.get("source", "")),
-                     bg=theme.PANEL, fg=theme.FG if ok else theme.MUTED,
+                     bg=theme.SURFACE_CARD, fg=theme.FG if ok else theme.MUTED,
                      font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
-            tk.Label(title, text=f"{info.get('n', 0)} 会话", bg=theme.PANEL,
+            tk.Label(title, text=f"{info.get('n', 0)} 会话", bg=theme.SURFACE_CARD,
                      fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e").pack(side="right")
             if ok:
-                line = tk.Frame(self._result_frame, bg=theme.PANEL)
-                line.pack(fill="x", padx=10)
+                line = tk.Frame(self._result_frame, bg=theme.SURFACE_CARD)
+                line.pack(fill="x", pady=(2, 0))
                 tk.Label(line, text=f"{self._metric_short('tcer')} {vals.get('tcer', 0):.2f}",
-                         bg=theme.PANEL, fg=self._COLOR, font=theme.FONT_MONO,
+                         bg=theme.SURFACE_CARD, fg=self._COLOR, font=theme.FONT_MONO,
                          anchor="w").pack(side="left")
                 tk.Label(line, text=f"{self._metric_short('cpe')} {vals.get('cpe', 0):.2f}",
-                         bg=theme.PANEL, fg=self._COLOR, font=theme.FONT_MONO,
+                         bg=theme.SURFACE_CARD, fg=self._COLOR, font=theme.FONT_MONO,
                          anchor="e").pack(side="right")
             else:
                 SelectableLabel(self._result_frame,
                                 text=info.get("reason", "样本不足，跳过"),
-                                bg=theme.PANEL, fg=theme.WARNING, font=theme.FONT_UI
-                                ).pack(fill="x", padx=10)
+                                bg=theme.SURFACE_CARD, fg=theme.WARNING, font=theme.FONT_UI_SMALL
+                                ).pack(fill="x", pady=(2, 0))
         if n_ok:
             self._set_apply_enabled(True)
 
     def _value_card(self, parent, key, val, cur) -> None:
-        tk.Frame(parent, bg=theme.PANEL, height=6).pack(fill="x")
-        card = tk.Frame(parent, bg=theme.PANEL, padx=10, pady=8)
+        card = tk.Frame(parent, bg=theme.SURFACE_CARD)
         card.pack(fill="x")
-        hdr = tk.Frame(card, bg=theme.PANEL)
+        hdr = tk.Frame(card, bg=theme.SURFACE_CARD)
         hdr.pack(fill="x")
-        tk.Label(hdr, text=self._metric_label(key), bg=theme.PANEL, fg=theme.FG,
+        tk.Label(hdr, text=self._metric_label(key), bg=theme.SURFACE_CARD, fg=theme.FG,
                  anchor="w", font=theme.FONT_VALUE).pack(side="left")
-        tk.Label(hdr, text=f"{val:.3f}", bg=theme.PANEL, fg=self._COLOR,
+        tk.Label(hdr, text=f"{val:.3f}", bg=theme.SURFACE_CARD, fg=self._COLOR,
                  anchor="e", font=theme.FONT_MONO).pack(side="right")
         if cur:
             diff_pct = (val - cur) / cur * 100
             better = diff_pct < 0 if key == "cpe" else diff_pct > 0
-            diff_fg = theme.SUCCESS if better else theme.ERROR
-            cmp_row = tk.Frame(card, bg=theme.PANEL)
-            cmp_row.pack(fill="x")
-            tk.Label(cmp_row, text=f"中位数 · 当前基准 {cur:.3f}", bg=theme.PANEL,
-                     fg=theme.MUTED, font=(theme.FONT_MONO_NAME, 8)).pack(side="left")
-            tk.Label(cmp_row, text=f"{diff_pct:+.1f}%", bg=theme.PANEL, fg=diff_fg,
-                     font=(theme.FONT_MONO_NAME, 8, "bold")).pack(side="right")
+            cmp_row = tk.Frame(card, bg=theme.SURFACE_CARD)
+            cmp_row.pack(fill="x", pady=(3, 0))
+            tk.Label(cmp_row, text=f"当前基准 {cur:.3f}", bg=theme.SURFACE_CARD,
+                     fg=theme.MUTED, font=theme.FONT_UI_SMALL).pack(side="left")
+            StatusBadge(cmp_row, text=f"{diff_pct:+.1f}%",
+                        kind="success" if better else "error",
+                        height=20, padx=7, bg=theme.SURFACE_CARD).pack(side="right")
 
     def _do_apply(self) -> None:
         if not self._result:
@@ -892,57 +948,79 @@ class HtmlSectionsPopup:
 
     def __init__(self, parent, on_ok) -> None:
         from .html_report import PROJECT_SECTIONS, _SECTION_LABELS
-        win = _new_window(parent, "HTML 报告章节", "520x360")
-        tk.Label(win, text="选择要包含的章节", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
+        win = _new_window(parent, "HTML 报告章节", "540x430")
+        self._win = win
 
-        inner = tk.Frame(win, bg=theme.PANEL)
-        inner.pack(fill="both", expand=True, padx=10, pady=5)
-        card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=10)
-        card.pack(fill="x")
-        vars_ = {}
-        for key in PROJECT_SECTIONS:
-            v = tk.BooleanVar(value=True)
-            vars_[key] = v
-            CheckRow(card, _SECTION_LABELS.get(key, key), v)
+        hdr = tk.Frame(win, bg=theme.BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 8))
+        tk.Label(hdr, text="HTML 报告章节", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
 
         btn_bar = tk.Frame(win, bg=theme.BG)
-        btn_bar.pack(pady=8)
+        btn_bar.pack(side="bottom", fill="x", padx=16, pady=(6, 12))
         flat_button(btn_bar, "继续导出",
                     lambda: (on_ok([k for k, v in vars_.items() if v.get()]),
                              win.destroy()),
-                    primary=True, padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
+                    primary=True, padx=theme.PAD_L, pady=theme.PAD_S).pack(side="right")
         flat_button(btn_bar, "取消", win.destroy,
-                    padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
+                    padx=theme.PAD_L, pady=theme.PAD_S).pack(side="right", padx=(0, 8))
+
+        body_wrap = tk.Frame(win, bg=theme.BG)
+        body_wrap.pack(fill="both", expand=True, padx=16, pady=(0, 4))
+        sf = ScrollFrame(body_wrap, bg=theme.BG)
+        card = SurfaceCard(sf.inner, title="导出范围", subtitle="默认包含全部章节",
+                           bg=theme.SURFACE_CARD, parent_bg=theme.BG, pady=8)
+        card.pack(fill="x", padx=(0, 6), pady=(2, 6))
+        vars_ = {}
+        for idx_s, key in enumerate(PROJECT_SECTIONS):
+            if idx_s > 0:
+                card.add_divider(pady=4)
+            v = tk.BooleanVar(value=True)
+            vars_[key] = v
+            r_slot = card.add_row(_SECTION_LABELS.get(key, key), pady=3)
+            sw = ToggleSwitch(r_slot, v, bg=theme.SURFACE_CARD)
+            sw.pack(side="right")
+            r_slot.row.configure(cursor=CLICK_CURSOR)
+            r_slot.title_lbl.configure(cursor=CLICK_CURSOR)
+            r_slot.row.bind("<Button-1>", lambda _e, s=sw: s.click())
+            r_slot.title_lbl.bind("<Button-1>", lambda _e, s=sw: s.click())
 
 
 class AdvancedPopup:
     """高级选项 — 跳过 LOC 开关（产品定位：只分析会话数据，无仓库扫描项）。"""
 
     def __init__(self, parent, no_loc: bool, on_apply) -> None:
-        win = _new_window(parent, "高级选项", "520x360")
-        tk.Label(win, text="高级选项", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
+        win = _new_window(parent, "高级选项", "540x320")
+        self._win = win
 
-        inner = tk.Frame(win, bg=theme.PANEL)
-        inner.pack(fill="both", expand=True, padx=10, pady=10)
-
-        card = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=10)
-        card.pack(fill="x")
-        no_loc_var = tk.BooleanVar(value=no_loc)
-        CheckRow(card, "跳过 LOC（仅 Token 指标，不算 TCER/CPE/综合效率分）", no_loc_var)
-        SelectableLabel(card,
-                        text="全部指标均来自会话数据回放；TCER 不读取真实仓库、不依赖 git。",
-                        bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                        justify="left").pack(fill="x", pady=(6, 0))
+        hdr = tk.Frame(win, bg=theme.BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 8))
+        tk.Label(hdr, text="高级选项", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
 
         btn_bar = tk.Frame(win, bg=theme.BG)
-        btn_bar.pack(pady=8)
+        btn_bar.pack(side="bottom", fill="x", padx=16, pady=(6, 12))
+        no_loc_var = tk.BooleanVar(value=no_loc)
         flat_button(btn_bar, "应用并重算",
                     lambda: (on_apply(no_loc_var.get()), win.destroy()),
-                    primary=True, padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
+                    primary=True, padx=theme.PAD_L, pady=theme.PAD_S).pack(side="right")
         flat_button(btn_bar, "取消", win.destroy,
-                    padx=theme.PAD_L).pack(side="left", padx=theme.PAD_S)
+                    padx=theme.PAD_L, pady=theme.PAD_S).pack(side="right", padx=(0, 8))
+
+        body = tk.Frame(win, bg=theme.BG)
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 4))
+        card = SurfaceCard(body, title="计算策略", bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+        card.pack(fill="x", pady=(2, 0))
+        r_slot = card.add_row(
+            "跳过代码行数回放（跳过 LOC）",
+            "仅统计 Token 与成本指标，不计算 TCER、千行代码成本与综合效率分",
+        )
+        ToggleSwitch(r_slot, no_loc_var, bg=theme.SURFACE_CARD).pack(side="right")
+        card.add_divider()
+        SelectableLabel(card.body,
+                        text="全部指标均来自本地会话数据离线回放；TCER 不读取真实代码仓库、不依赖 git。",
+                        bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(fill="x")
 
 
 class UserMsgsPopup:
@@ -961,27 +1039,25 @@ class UserMsgsPopup:
         total = sum(len(msgs) for _, msgs in groups)
         total_chars = sum(len(m) for _, msgs in groups for m in msgs)
         win = _new_window(parent, "用户消息", "740x540")
-        tk.Label(win, text="用户消息", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=10).pack()
+        top = tk.Frame(win, bg=theme.BG)
+        top.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(top, text="用户消息", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
 
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        sf = ScrollFrame(win, bg=theme.BG)
+        sf.canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         inner = sf.inner
 
         if not total:
-            tk.Label(inner, text="未记录到用户消息", bg=theme.PANEL, fg=theme.MUTED,
+            tk.Label(inner, text="未记录到用户消息", bg=theme.BG, fg=theme.MUTED,
                      font=theme.FONT_UI, pady=40).pack()
             return
 
-        # Summary header
-        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        head.pack(fill="x", pady=10)
         summary = f"共 {total} 条消息 · {total_chars:,} 字符"
         grouped = len(groups) > 1 or (len(groups) == 1 and groups[0][0] is not None)
         if grouped:
             summary += f" · {len(groups)} 个会话"
-        tk.Label(head, text=summary, bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS,
-                 font=theme.FONT_UI_BOLD).pack()
+        StatusBadge(top, text=summary, kind="success", dot=True, bg=theme.BG).pack(side="right")
 
         idx = 0
         for label, msgs in groups:
@@ -999,7 +1075,7 @@ class UserMsgsPopup:
         return [(None, list(messages))]
 
     def _session_bar(self, parent, label: str, count: int) -> None:
-        bar = tk.Frame(parent, bg=theme.BG, padx=10, pady=5)
+        bar = tk.Frame(parent, bg=theme.BG, padx=6, pady=4)
         bar.pack(fill="x", pady=(10, 2))
         tk.Label(bar, text=label, bg=theme.BG, fg=self._ACCENT,
                  font=theme.FONT_UI_BOLD, anchor="w").pack(side="left")
@@ -1007,18 +1083,19 @@ class UserMsgsPopup:
                  font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
 
     def _msg_card(self, parent, idx: int, txt: str) -> None:
-        card = tk.Frame(parent, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        card.pack(fill="x", pady=4)
-        hdr = tk.Frame(card, bg=theme.CARD_HEADER_BG)
-        hdr.pack(fill="x")
+        card = RoundedFrame(parent, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        card.pack(fill="x", padx=4, pady=4)
+        hdr = tk.Frame(card, bg=theme.SURFACE_CARD)
+        hdr.pack(fill="x", padx=12, pady=(8, 2))
         badge = tk.Label(hdr, text=f"#{idx}", bg=self._ACCENT, fg=theme.FG_WHITE,
                          font=(theme.FONT_MONO_NAME, 8, "bold"), padx=6, pady=1)
         badge.pack(side="left")
-        tk.Label(hdr, text=f"{len(txt)} 字符", bg=theme.CARD_HEADER_BG, fg=theme.MUTED,
+        tk.Label(hdr, text=f"{len(txt)} 字符", bg=theme.SURFACE_CARD, fg=theme.MUTED,
                  font=(theme.FONT_MONO_NAME, 8)).pack(side="right")
-        SelectableLabel(card, text=txt, bg=theme.CARD_HEADER_BG, fg=theme.FG,
+        SelectableLabel(card, text=txt, bg=theme.SURFACE_CARD, fg=theme.FG,
                         font=theme.FONT_UI, justify="left",
-                        width=60).pack(fill="x", pady=(4, 0))
+                        width=60).pack(fill="x", padx=12, pady=(4, 8))
 
 
 class FilesTouchedPopup:
@@ -1047,25 +1124,26 @@ class FilesTouchedPopup:
     def __init__(self, parent, details: dict[str, int],
                  searched: dict[str, int] | None = None) -> None:
         win = _new_window(parent, "涉及文件", "740x540")
-        tk.Label(win, text=f"涉及文件（共 {len(details)} 个）", bg=theme.BG,
-                 fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
+        top = tk.Frame(win, bg=theme.BG)
+        top.pack(fill="x", padx=16, pady=(14, 4))
+        tk.Label(top, text=f"涉及文件（共 {len(details)} 个）", bg=theme.BG,
+                 fg=theme.FG_WHITE, font=theme.FONT_TITLE, anchor="w").pack(side="left")
         SelectableLabel(win, text="会话中被读取、写入或编辑过的文件及操作次数。",
-                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
-                        justify="left").pack(fill="x")
+                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(fill="x", padx=16, pady=(0, 6))
 
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        sf = ScrollFrame(win, bg=theme.BG)
+        sf.canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         inner = sf.inner
 
         sorted_items = sorted(details.items(), key=lambda x: x[1], reverse=True)
         total_ops = sum(details.values())
         max_cnt = sorted_items[0][1] if sorted_items else 1
 
-        # Summary header
-        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        head.pack(fill="x", pady=10)
-        tk.Label(head, text=f"共 {len(details)} 个文件 · 合计 {total_ops} 次操作",
-                 bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
+        StatusBadge(
+            top, text=f"共 {len(details)} 个文件 · 合计 {total_ops} 次操作",
+            kind="success", dot=True, bg=theme.BG,
+        ).pack(side="right")
 
         # 目录热度：按父目录聚合操作次数（哪个模块最烫）。
         dir_counts: dict[str, int] = {}
@@ -1076,86 +1154,83 @@ class FilesTouchedPopup:
             dir_counts[parent] = dir_counts.get(parent, 0) + cnt
         top_dirs = sorted(dir_counts.items(), key=lambda x: -x[1])[:6]
         if len(dir_counts) > 1:
-            sec = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=4)
-            sec.pack(fill="x")
-            tk.Label(sec, text="目录热度", bg=theme.PANEL, fg=theme.SECTION_ACCENT,
-                     font=theme.FONT_UI_BOLD).pack(anchor="w")
+            dir_card = SurfaceCard(inner, bg=theme.SURFACE_CARD, parent_bg=theme.BG, title="目录热度", pad_x=12, pad_y=8)
+            dir_card.pack(fill="x", padx=4, pady=(4, 4))
             max_dir = top_dirs[0][1]
             for d, cnt in top_dirs:
                 d_disp = d if len(d) < 50 else "…" + d[-47:]
-                row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=1)
+                row = tk.Frame(dir_card.body, bg=theme.SURFACE_CARD, pady=1)
                 row.pack(fill="x")
-                SelectableLabel(row, text=d_disp, bg=theme.PANEL, fg=theme.MUTED,
+                SelectableLabel(row, text=d_disp, bg=theme.SURFACE_CARD, fg=theme.MUTED,
                                 font=(theme.FONT_MONO_NAME, 8),
                                 width=48).pack(side="left")
                 bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=6)
                 bar_bg.pack(side="left", fill="x", expand=True, padx=4)
                 tk.Frame(bar_bg, bg=theme.WARNING, height=6).place(
                     relx=0, rely=0, relwidth=cnt / max_dir, relheight=1.0)
-                tk.Label(row, text=str(cnt), bg=theme.PANEL, fg=theme.MUTED,
+                tk.Label(row, text=str(cnt), bg=theme.SURFACE_CARD, fg=theme.MUTED,
                          font=(theme.FONT_MONO_NAME, 8), width=5,
                          anchor="e").pack(side="right")
-            tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
 
         # 搜索足迹：被 Grep/Glob 扫过的路径（含目录）——AI 的探索范围，与上方
         # 「文件列表」（真实读/写/改的文件）分开，避免把搜索目录误当文件计数。
         if searched:
             top_searched = sorted(searched.items(), key=lambda x: -x[1])[:8]
-            sec = tk.Frame(inner, bg=theme.PANEL, padx=10, pady=4)
-            sec.pack(fill="x")
-            tk.Label(sec, text=f"搜索足迹（{len(searched)} 处）",
-                     bg=theme.PANEL, fg=theme.SECTION_ACCENT,
-                     font=theme.FONT_UI_BOLD).pack(anchor="w")
-            SelectableLabel(sec, text="Grep/Glob 扫过的路径及次数，反映探索范围（不计入涉及文件）。",
-                            bg=theme.PANEL, fg=theme.MUTED,
-                            font=theme.FONT_UI_SMALL,
-                            justify="left").pack(fill="x")
+            s_card = SurfaceCard(
+                inner, bg=theme.BG, title=f"搜索足迹（{len(searched)} 处）",
+                subtitle="Grep/Glob 扫过的路径及次数，反映探索范围（不计入涉及文件）。",
+                pad_x=12, pad_y=8,
+            )
+            s_card.pack(fill="x", padx=4, pady=(4, 4))
             max_s = top_searched[0][1]
             for p, cnt in top_searched:
                 p_disp = p.replace("\\", "/")
                 p_disp = p_disp if len(p_disp) < 50 else "…" + p_disp[-47:]
-                row = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=1)
+                row = tk.Frame(s_card.body, bg=theme.SURFACE_CARD, pady=1)
                 row.pack(fill="x")
-                SelectableLabel(row, text=p_disp, bg=theme.PANEL, fg=theme.MUTED,
+                SelectableLabel(row, text=p_disp, bg=theme.SURFACE_CARD, fg=theme.MUTED,
                                 font=(theme.FONT_MONO_NAME, 8),
                                 width=48).pack(side="left")
                 bar_bg = tk.Frame(row, bg=theme.CONTROL_BG, height=6)
                 bar_bg.pack(side="left", fill="x", expand=True, padx=4)
                 tk.Frame(bar_bg, bg=theme.SECTION_ACCENT, height=6).place(
                     relx=0, rely=0, relwidth=cnt / max_s, relheight=1.0)
-                tk.Label(row, text=str(cnt), bg=theme.PANEL, fg=theme.MUTED,
+                tk.Label(row, text=str(cnt), bg=theme.SURFACE_CARD, fg=theme.MUTED,
                          font=(theme.FONT_MONO_NAME, 8), width=5,
                          anchor="e").pack(side="right")
-            tk.Frame(inner, bg=theme.PANEL, height=8).pack(fill="x")
+
+        files_card = SurfaceCard(inner, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=12, pad_y=8)
+        files_card.pack(fill="x", padx=4, pady=(4, 6))
+        fc_body = files_card.body
 
         # 分类图例（代码/测试/文档三色）
-        legend = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+        legend = tk.Frame(fc_body, bg=theme.SURFACE_CARD, pady=2)
         legend.pack(fill="x")
         for color, name in ((self._COLOR_CODE, "代码"), (self._COLOR_TEST, "测试"),
                             (self._COLOR_DOC, "文档")):
             sw = tk.Frame(legend, bg=color, width=10, height=10)
             sw.pack(side="left", padx=(0, 3))
             sw.pack_propagate(False)
-            tk.Label(legend, text=name, bg=theme.PANEL, fg=theme.MUTED,
+            tk.Label(legend, text=name, bg=theme.SURFACE_CARD, fg=theme.MUTED,
                      font=theme.FONT_UI_SMALL).pack(side="left", padx=(0, 12))
 
         for fp, cnt in sorted_items:
             display = fp if len(fp) < 55 else "…" + fp[-52:]
             color, kind = self._file_kind(fp)
 
-            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-            hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            tk.Frame(fc_body, bg=theme.SURFACE_CARD, height=6).pack(fill="x")
+            hdr = tk.Frame(fc_body, bg=theme.SURFACE_CARD, pady=2)
             hdr.pack(fill="x")
             # 类别标记（彩色小方块）+ 文件名
             sw = tk.Frame(hdr, bg=color, width=8, height=8)
             sw.pack(side="left", padx=(0, 5))
             sw.pack_propagate(False)
-            SelectableLabel(hdr, text=display, bg=theme.PANEL, fg=theme.FG,
+            SelectableLabel(hdr, text=display, bg=theme.SURFACE_CARD, fg=theme.FG,
                             font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
-            tk.Label(hdr, text=f"{cnt} 次", bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+            tk.Label(hdr, text=f"{cnt} 次", bg=theme.SURFACE_CARD, fg=theme.MUTED, anchor="e",
                      font=theme.FONT_MONO).pack(side="right")
 
-            bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            bar_frame = tk.Frame(fc_body, bg=theme.SURFACE_CARD, pady=2)
             bar_frame.pack(fill="x")
             bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=8)
             bar_bg.pack(fill="x")
@@ -1176,42 +1251,43 @@ class MemoryFilesPopup:
 
         count = len(files)
         win = _new_window(parent, "项目记忆文件", "740x540")
-        tk.Label(win, text=f"项目记忆文件（{count} 个）", bg=theme.BG,
-                 fg=theme.FG, font=theme.FONT_HEADING, pady=10).pack()
-        SelectableLabel(win, text=f"路径：{memory_dir}",
-                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
-                        justify="left").pack(fill="x")
+        top = tk.Frame(win, bg=theme.BG)
+        top.pack(fill="x", padx=16, pady=(14, 4))
+        tk.Label(top, text=f"项目记忆文件（{count} 个）", bg=theme.BG,
+                 fg=theme.FG_WHITE, font=theme.FONT_TITLE, anchor="w").pack(side="left")
+        StatusBadge(top, text=f"共 {count} 个文件 · memory/", kind="success", dot=True, bg=theme.BG).pack(side="right")
 
-        # 按钮栏：打开目录（居中）
-        btn_bar = tk.Frame(win, bg=theme.BG)
-        btn_bar.pack(fill="x", padx=10, pady=(4, 8))
+        sub = tk.Frame(win, bg=theme.BG)
+        sub.pack(fill="x", padx=16, pady=(0, 8))
         from .views import ui_icon
-        flat_button(btn_bar, f"在{FILE_MANAGER_NAME}中打开目录",
+        flat_button(sub, f"在{FILE_MANAGER_NAME}中打开目录",
                     lambda: open_in_file_manager(memory_dir),
-                    padx=theme.PAD_L, image=ui_icon(btn_bar, "folder"),
-                    compound="left").pack(anchor="center")
+                    padx=theme.PAD_M, image=ui_icon(sub, "folder"),
+                    compound="left").pack(side="right")
+        SelectableLabel(sub, text=f"路径：{memory_dir}",
+                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                        justify="left").pack(side="left", fill="x", expand=True)
 
-        sf = ScrollFrame(win, bg=theme.PANEL)
-        sf.canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        sf = ScrollFrame(win, bg=theme.BG)
+        sf.canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         inner = sf.inner
 
-        # Summary header
-        head = tk.Frame(inner, bg=theme.CARD_HEADER_BG, padx=10, pady=8)
-        head.pack(fill="x", pady=10)
-        tk.Label(head, text=f"共 {count} 个文件 · memory/",
-                 bg=theme.CARD_HEADER_BG, fg=theme.SUCCESS, font=theme.FONT_UI_BOLD).pack()
-
         if count == 0:
-            tk.Label(inner, text="该目录下暂无记忆文件", bg=theme.PANEL,
+            tk.Label(inner, text="该目录下暂无记忆文件", bg=theme.BG,
                      fg=theme.MUTED, font=theme.FONT_UI, pady=30).pack()
             return
 
-        # 按文件名排序
         from pathlib import Path as PPath
         sorted_files = sorted(files, key=lambda f: PPath(f).name)
         max_size = max((PPath(f).stat().st_size for f in sorted_files if PPath(f).exists()), default=1)
 
-        for fp in sorted_files:
+        list_card = SurfaceCard(inner, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=14, pad_y=10)
+        list_card.pack(fill="x", padx=4, pady=6)
+        card_body = list_card.body
+
+        for idx, fp in enumerate(sorted_files):
+            if idx > 0:
+                list_card.add_divider(pady=6)
             p = PPath(fp)
             name = p.name
             try:
@@ -1219,17 +1295,15 @@ class MemoryFilesPopup:
             except OSError:
                 size = 0
 
-            # 卡片（与 FilesTouchedPopup 同结构）
-            tk.Frame(inner, bg=theme.PANEL, height=6).pack(fill="x")
-            hdr = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            hdr = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
             hdr.pack(fill="x")
-            SelectableLabel(hdr, text=name, bg=theme.PANEL, fg=theme.FG,
+            SelectableLabel(hdr, text=name, bg=theme.SURFACE_CARD, fg=theme.FG,
                             font=theme.FONT_MONO).pack(side="left", fill="x", expand=True)
             size_txt = f"{size:,} B" if size < 1024 else f"{size / 1024:.1f} KB"
-            tk.Label(hdr, text=size_txt, bg=theme.PANEL, fg=theme.MUTED, anchor="e",
+            tk.Label(hdr, text=size_txt, bg=theme.SURFACE_CARD, fg=theme.MUTED, anchor="e",
                      font=theme.FONT_MONO).pack(side="right")
 
-            bar_frame = tk.Frame(inner, bg=theme.PANEL, padx=8, pady=2)
+            bar_frame = tk.Frame(card_body, bg=theme.SURFACE_CARD, pady=2)
             bar_frame.pack(fill="x")
             bar_bg = tk.Frame(bar_frame, bg=theme.CONTROL_BG, height=8)
             bar_bg.pack(fill="x")
@@ -1282,21 +1356,22 @@ class RadarPopup:
         sid = (report.meta.session_id or report.meta.path.stem)[:16]
         win = _new_window(parent, f"效率雷达 · {sid}…", "520x560")
         win.bind("<Escape>", lambda e: win.destroy())  # 无显式关闭按钮,Esc 兜底
-        tk.Label(win, text="六维效率雷达", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=8).pack()
+        top = tk.Frame(win, bg=theme.BG)
+        top.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(top, text="六维效率雷达", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
 
-        # Summary header — 综合效率分 string straight from the SSOT (matches 指标分类).
-        head = tk.Frame(win, bg=theme.CARD_HEADER_BG, padx=10, pady=6)
-        head.pack(fill="x", padx=10, pady=(0, 4))
         tier_ = report.tier or "-"
         score_val = metric_display(report, "score")
-        tk.Label(head, text=f"{report.meta.title or sid}  效率分 {score_val}  评级 {tier_}",
-                 bg=theme.CARD_HEADER_BG, fg=theme.FG, font=theme.FONT_UI).pack()
+        StatusBadge(top, text=f"效率分 {score_val} · 评级 {tier_}", kind="info", dot=True, bg=theme.BG).pack(side="right")
+
+        card = SurfaceCard(win, bg=theme.SURFACE_CARD, parent_bg=theme.BG, subtitle=report.meta.title or sid, pad_x=10, pad_y=8)
+        card.pack(padx=14, pady=6)
 
         # Radar canvas
-        canvas = tk.Canvas(win, bg=theme.PANEL, highlightthickness=0,
+        canvas = tk.Canvas(card.body, bg=theme.SURFACE_CARD, highlightthickness=0,
                            width=400, height=400)
-        canvas.pack(padx=16, pady=8)
+        canvas.pack(padx=8, pady=4)
 
         # Normalize each axis to 0-1 using absolute scales; label + value from SSOT.
         axis_data = []
@@ -1321,7 +1396,7 @@ class RadarPopup:
                 pts.extend([px, py])
             canvas.create_polygon(pts, outline=theme.BORDER, fill="", dash=(2, 3))
         canvas.create_text(cx + R * 0.52, cy - 4, text="50%",
-                           fill="#444444", font=theme.FONT_MONO)
+                           fill=theme.MUTED, font=theme.FONT_MONO)
 
         # Axes + labels
         for ai, (key, label, value_text, norm) in enumerate(axis_data):
@@ -1395,24 +1470,27 @@ class ConfirmDeletePopup:
 
         # 标题行：警告图标 + 标题
         head = tk.Frame(win, bg=theme.BG)
-        head.pack(fill="x", padx=20, pady=(18, 6))
+        head.pack(fill="x", padx=20, pady=(18, 8))
+        StatusBadge(head, text="高危操作", kind="error", dot=True, bg=theme.BG).pack(side="right")
         tk.Label(head, text="⚠", bg=theme.BG, fg=self._DANGER,
                  font=(theme.FONT_MONO_NAME, 18, "bold")).pack(side="left", padx=(0, 8))
-        tk.Label(head, text="删除会话", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING).pack(side="left")
+        tk.Label(head, text="删除会话", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE).pack(side="left")
 
-        body = tk.Frame(win, bg=theme.BG)
-        body.pack(fill="both", expand=True, padx=20)
+        card = SurfaceCard(win, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=16, pad_y=14)
+        card.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+        body = card.body
         disp_title = title if len(title) <= 36 else title[:36] + "…"
         SelectableLabel(body, text=f"将永久删除本地会话“{disp_title}”",
-                        bg=theme.BG, fg=theme.FG, font=theme.FONT_UI,
+                        bg=theme.SURFACE_CARD, fg=theme.FG, font=theme.FONT_UI,
                         justify="left").pack(fill="x", pady=(2, 0))
         SelectableLabel(body, text=f"Session ID: {session_id}",
-                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_MONO,
-                        justify="left").pack(fill="x", pady=(2, 0))
+                        bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_MONO,
+                        justify="left").pack(fill="x", pady=(4, 0))
+        card.add_divider(pady=8)
         SelectableLabel(body, text="将一并删除其 subagent 与 tool-results 数据，此操作不可恢复。",
-                        bg=theme.BG, fg=theme.MUTED, font=theme.FONT_UI,
-                        justify="left").pack(fill="x", pady=(12, 0))
+                        bg=theme.SURFACE_CARD, fg=theme.MUTED, font=theme.FONT_UI,
+                        justify="left").pack(fill="x")
 
         # 按钮行（右对齐）
         btn_bar = tk.Frame(win, bg=theme.BG)
@@ -1457,91 +1535,100 @@ class UploadDialog:
         self._projects = projects
         self._default_url = str(config.get("default_url") or "")
 
-        win = _new_window(parent, "上传到 TCER Server", "760x580")
+        win = _new_window(parent, "上传到 TCER Server", "760x620")
         self._win = win
-        tk.Label(win, text="上传到 TCER Server", bg=theme.BG, fg=theme.FG,
-                 font=theme.FONT_HEADING, pady=8).pack(side="top", fill="x")
+
+        hdr = tk.Frame(win, bg=theme.BG)
+        hdr.pack(side="top", fill="x", padx=16, pady=(14, 8))
+        self._hdr_badge = StatusBadge(hdr, text="已就绪", kind="info", dot=True, bg=theme.BG)
+        self._hdr_badge.pack(side="right")
+        tk.Label(hdr, text="上传到 TCER Server", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
 
         # 底部操作区与状态行先 pack 在底部，确保任何高度下都固定可见
         action = tk.Frame(win, bg=theme.BG)
-        action.pack(side="bottom", fill="x", padx=16, pady=(4, 8))
+        action.pack(side="bottom", fill="x", padx=16, pady=(6, 12))
+        self._action_frame = action
+        tk.Frame(action, bg=theme.DIVIDER, height=1).pack(fill="x", pady=(0, 8))
 
-        # -- 上传按钮前的自动上传勾选框 --
+        act_row = tk.Frame(action, bg=theme.BG)
+        act_row.pack(fill="x")
+
+        self._upload_btn = tk.Button(  # style-exempt: style.md §3 豁免：UploadDialog
+            act_row, text="立即上传", command=self._do_upload, bg=theme.ACCENT,
+            fg=theme.FG_WHITE, relief="flat", padx=20, pady=6, font=theme.FONT_UI_BOLD,
+            cursor=CLICK_CURSOR)
+        self._upload_btn.pack(side="right", padx=(12, 0))
+
         self._auto_upload_var = tk.BooleanVar(value=bool(config.get("auto_upload", False)))
-        auto_row = tk.Frame(action, bg=theme.BG, cursor=CLICK_CURSOR)
-        auto_row.pack(fill="x", pady=(0, 6))
-        self._auto_box, toggle_auto = self._create_checkbox_widget(
-            auto_row, self._auto_upload_var, on_toggle=self._on_toggle_auto_upload)
-        self._auto_box.pack(side="left", padx=(0, 6))
+        auto_row = tk.Frame(act_row, bg=theme.BG, cursor=CLICK_CURSOR)
+        auto_row.pack(side="left", fill="x", expand=True)
+        self._auto_box = ToggleSwitch(
+            auto_row, self._auto_upload_var, on_toggle=self._on_toggle_auto_upload, bg=theme.BG)
+        self._auto_box.pack(side="left", padx=(0, 8))
         self._auto_chk = self._auto_box  # 兼容别名
         auto_lbl = tk.Label(
             auto_row, text="每小时自动检查并上传新会话（保持当前所选列表与详情设置）",
             bg=theme.BG, fg=theme.FG, font=theme.FONT_UI, anchor="w",
             cursor=CLICK_CURSOR)
         auto_lbl.pack(side="left")
-        auto_row.bind("<Button-1>", toggle_auto)
-        auto_lbl.bind("<Button-1>", toggle_auto)
-        Tooltip(auto_row, "勾选后客户端将在后台按照记录的上传时间戳，每小时自动检查所选项目是否有新会话，并自动上传")
-
-        self._upload_btn = tk.Button(  # style-exempt: style.md §3 豁免：UploadDialog
-            action, text="立即上传", command=self._do_upload, bg=theme.ACCENT,
-            fg=theme.FG_WHITE, relief="flat", padx=16, pady=6, font=theme.FONT_UI_BOLD,
-            cursor=CLICK_CURSOR)
-        self._upload_btn.pack(fill="x")
+        auto_row.bind("<Button-1>", lambda _e: self._auto_box.click())
+        auto_lbl.bind("<Button-1>", lambda _e: self._auto_box.click())
+        Tooltip(auto_row, "开启后客户端将在后台按照记录的上传时间戳，每小时自动检查所选项目是否有新会话并自动上传")
 
         # -- 状态行 --
         self._status = tk.Label(win, text="", bg=theme.BG, fg=theme.MUTED,
-                                font=theme.FONT_UI, wraplength=520, justify="left")
-        self._status.pack(side="bottom", fill="x", padx=12, pady=(2, 2))
+                                font=theme.FONT_UI_SMALL, wraplength=680, justify="left")
+        self._status.pack(side="bottom", fill="x", padx=16, pady=(2, 0))
 
         # -- 中间可滚动表单区 --
-        sf = ScrollFrame(win, bg=theme.PANEL)
+        body_wrap = tk.Frame(win, bg=theme.BG)
+        body_wrap.pack(side="top", fill="both", expand=True, padx=16, pady=(0, 4))
+        sf = ScrollFrame(body_wrap, bg=theme.BG)
         self._sf = sf  # 供 _fit_window 读取表单实际高度
-        sf.canvas.pack_forget()
-        sf.canvas.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 4))
         inner = sf.inner
 
-        # -- 上传目标卡片（可编辑）：服务器地址 / Auth Token / 是否含明细 --
-        cfg_card = self._card(inner, "上传目标（留空则用默认；改动点「立即上传」或勾选自动上传时保存）")
+        # -- 1. 上传目标卡片（对标 OpenResearch 圆角细描边卡片） --
+        cfg_card_wrap = SurfaceCard(
+            inner, title="上传目标",
+            subtitle="留空则用默认服务地址；点「立即上传」或开启自动上传时保存",
+            bg=theme.SURFACE_CARD, parent_bg=theme.BG,
+        )
+        cfg_card_wrap.pack(fill="x", padx=(0, 6), pady=(2, 14))
+        cfg_card = cfg_card_wrap.body
+
         self._url_var = tk.StringVar(value=str(config.get("url") or ""))
         self._token_var = tk.StringVar(value=str(config.get("auth_token") or ""))
         self._detail_var = tk.BooleanVar(value=bool(config.get("detail")))
         self._labeled_entry(cfg_card, "服务器地址", self._url_var,
-                            placeholder=f"默认 {self._default_url}")
-        self._labeled_entry(cfg_card, "Auth Token", self._token_var,
+                            placeholder=f"默认 {self._default_url}" if self._default_url else "https://...")
+        self._labeled_entry(cfg_card, "访问令牌", self._token_var,
                             placeholder="留空 = 匿名上传")
 
-        detail_row = tk.Frame(cfg_card, bg=theme.PANEL, cursor=CLICK_CURSOR)
-        detail_row.pack(fill="x", pady=(4, 0))
-        self._detail_box, toggle_detail = self._create_checkbox_widget(
-            detail_row, self._detail_var, on_toggle=self._on_detail_toggle)
-        self._detail_box.pack(side="left", padx=(0, 6))
-        detail_lbl = tk.Label(
-            detail_row, text="附带每会话明细（完整对话）",
-            bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI, anchor="w",
-            cursor=CLICK_CURSOR)
-        detail_lbl.pack(side="left")
-        detail_row.bind("<Button-1>", toggle_detail)
-        detail_lbl.bind("<Button-1>", toggle_detail)
+        cfg_card_wrap.add_divider()
+        r_det = cfg_card_wrap.add_row("附带每会话明细", "同时上传完整对话供服务端回看")
+        self._detail_box = ToggleSwitch(r_det, self._detail_var, on_toggle=self._on_detail_toggle,
+                                        bg=theme.SURFACE_CARD)
+        self._detail_box.pack(side="right")
 
-        # 团队概念分析授权（server 端 concepts 模块，doc/concept-alignment-server.md §8.2）：
-        # 与「附带明细」分开——同意把对话传上去回看 ≠ 同意纳入团队分析。仅实名 + 带明细时生效。
+        cfg_card_wrap.add_divider()
         self._consent_var = tk.BooleanVar(value=bool(config.get("semantic_consent")))
-        consent_row = tk.Frame(cfg_card, bg=theme.PANEL, cursor=CLICK_CURSOR)
-        consent_row.pack(fill="x", pady=(4, 0))
-        self._consent_box, toggle_consent = self._create_checkbox_widget(
-            consent_row, self._consent_var, on_toggle=self._on_detail_toggle)
-        self._consent_box.pack(side="left", padx=(0, 6))
-        consent_lbl = tk.Label(
-            consent_row, text="允许团队概念分析（统计术语用法，不参与效率评分；需填 Auth Token 且附带明细）",
-            bg=theme.PANEL, fg=theme.FG, font=theme.FONT_UI, anchor="w",
-            cursor=CLICK_CURSOR, wraplength=600, justify="left")
-        consent_lbl.pack(side="left", fill="x", expand=True)
-        consent_row.bind("<Button-1>", toggle_consent)
-        consent_lbl.bind("<Button-1>", toggle_consent)
+        r_con = cfg_card_wrap.add_row(
+            "允许团队概念分析",
+            "统计团队术语用法，不参与效率评分；需填访问令牌且附带每会话明细时生效",
+        )
+        self._consent_box = ToggleSwitch(r_con, self._consent_var, on_toggle=self._on_detail_toggle,
+                                         bg=theme.SURFACE_CARD)
+        self._consent_box.pack(side="right")
 
-        # -- 项目选择卡（按目录分组显示，同目录多个 agent 集中排布，默认收起紧凑展示） --
-        card3 = self._card(inner, "项目选择（按工作目录分组，默认收起；可展开查看与选择各 Agent）")
+        # -- 2. 项目选择卡 --
+        card3_wrap = SurfaceCard(
+            inner, title="项目选择",
+            subtitle="按真实工作目录分组，默认收起；右键目录可隐藏",
+            bg=theme.SURFACE_CARD, parent_bg=theme.BG,
+        )
+        card3_wrap.pack(fill="x", padx=(0, 6), pady=(0, 8))
+        card3 = card3_wrap.body
 
         # 构建分组数据与预选
         self._groups = self._build_groups(projects)
@@ -1561,8 +1648,8 @@ class UploadDialog:
             self._proj_vars[uid] = tk.BooleanVar(value=(uid in preselect))
 
         # 顶部工具栏（全选、清空、全部展开、全部收起、显示隐藏、已选计数）
-        sel_btn_row = tk.Frame(card3, bg=theme.PANEL)
-        sel_btn_row.pack(fill="x", pady=(0, 6))
+        sel_btn_row = tk.Frame(card3, bg=theme.SURFACE_CARD)
+        sel_btn_row.pack(fill="x", pady=(0, 8))
         tk.Button(sel_btn_row, text="全选",  # style-exempt: style.md §3 豁免：UploadDialog
                   command=self._select_all,
                   bg=theme.PANEL_2, fg=theme.FG, relief="flat", padx=8,
@@ -1586,7 +1673,7 @@ class UploadDialog:
             font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
         self._show_hidden_btn.pack(side="left", padx=(0, 8))
 
-        self._count_lbl = tk.Label(sel_btn_row, text="", bg=theme.PANEL, fg=theme.MUTED,
+        self._count_lbl = tk.Label(sel_btn_row, text="", bg=theme.SURFACE_CARD, fg=theme.MUTED,
                                    font=theme.FONT_UI_SMALL)
         self._count_lbl.pack(side="left")
 
@@ -1957,6 +2044,12 @@ class UploadDialog:
         selected = sum(1 for v in self._proj_vars.values() if v.get())
         total = len(self._proj_vars)
         self._count_lbl.config(text=f"已选 {selected} / 共 {total} 个 agent")
+        if hasattr(self, "_hdr_badge") and self._hdr_badge.winfo_exists():
+            self._hdr_badge.set_status(
+                f"已选 {selected}/{total}",
+                kind="success" if selected > 0 else "neutral",
+                dot=True,
+            )
         self._refresh_group_counts()
     def _on_item_check(self) -> None:
         self._update_count()
@@ -2007,18 +2100,15 @@ class UploadDialog:
         return card
 
     def _labeled_entry(self, card, label: str, var, *, placeholder: str = "") -> None:
-        """一行「标签 + 深色输入框」，风格与顶栏日期输入框一致（highlight 边框）。"""
-        row = tk.Frame(card, bg=theme.PANEL)
-        row.pack(fill="x", pady=(2, 2))
-        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
+        """一行「标签 + 圆角细描边输入框」（对标 OpenResearch 表单输入）。"""
+        bg_c = str(card.cget("bg")) if hasattr(card, "cget") else theme.SURFACE_CARD
+        row = tk.Frame(card, bg=bg_c)
+        row.pack(fill="x", pady=(3, 3))
+        tk.Label(row, text=label, bg=bg_c, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL, width=11, anchor="w").pack(side="left")
-        e = tk.Entry(row, textvariable=var, bg=theme.PANEL_2, fg=theme.FG,
-                     insertbackground=theme.FG, relief="flat", highlightthickness=1,
-                     highlightbackground=theme.BORDER, highlightcolor=theme.ACCENT,
-                     font=theme.FONT_UI)
-        e.pack(side="left", fill="x", expand=True)
-        if placeholder:
-            Tooltip(e, placeholder)
+        ent = RoundedEntry(row, textvariable=var, bg=bg_c, fill=theme.CONTROL_BG,
+                           height=30, placeholder=placeholder)
+        ent.pack(side="left", fill="x", expand=True)
 
     def _fit_window(self) -> None:
         """按表单实际高度收紧窗口，消除底部留白。封顶 720 防过高。"""
@@ -2026,11 +2116,10 @@ class UploadDialog:
         win.update_idletasks()
         canv = self._sf.canvas
         inner_h = self._sf.inner.winfo_reqheight()
-        top = canv.winfo_y()
+        top = canv.master.winfo_y() if canv.master is not win else canv.winfo_y()
         status_h = self._status.winfo_reqheight() + 2
-        action_h = next((w.winfo_reqheight() for w in win.winfo_children()
-                         if isinstance(w, tk.Frame) and w is not canv), 0)
-        win_h = max(420, min(top + inner_h + status_h + action_h + 20, 720))
+        action_h = self._action_frame.winfo_reqheight() if hasattr(self, "_action_frame") else 52
+        win_h = max(440, min(top + inner_h + status_h + action_h + 24, 720))
         cur_h = win.winfo_height()
         adj = (cur_h - win_h) // 2 if cur_h > 200 else 0
         cur_w = win.winfo_width() if win.winfo_width() > 300 else 760
@@ -2172,245 +2261,199 @@ class LlmConfigPopup:
         self._llm_prefs = llm_prefs
         self._on_save = on_save
 
-        win = _new_window(parent, "LLM 设置", "540x480")
+        win = _new_window(parent, "LLM 设置", "580x560")
         self._win = win
         import queue as _queue
         self._ui_queue: _queue.Queue = _queue.Queue()
         self._poll_ui_queue()
-        tk.Label(win, text="LLM 语义解读", bg=theme.BG, fg=theme.FG_WHITE,
-                 font=theme.FONT_HEADING, pady=10).pack(side="top", fill="x")
+
+        hdr = tk.Frame(win, bg=theme.BG)
+        hdr.pack(side="top", fill="x", padx=16, pady=(14, 8))
+        has_cfg = bool((config.get("base_url") or "").strip() and (config.get("model") or "").strip())
+        self._conn_badge = StatusBadge(
+            hdr, text="已配置" if has_cfg else "未配置",
+            kind="success" if has_cfg else "neutral", dot=True, bg=theme.BG,
+        )
+        self._conn_badge.pack(side="right")
+        tk.Label(hdr, text="LLM 语义解读", bg=theme.BG, fg=theme.FG_WHITE,
+                 font=theme.FONT_TITLE, anchor="w").pack(side="left")
 
         # 底部操作栏先行 pack(side="bottom")，确保中间滚动区获得准确剩余高度
         action = tk.Frame(win, bg=theme.BG)
-        action.pack(side="bottom", fill="x", padx=16, pady=(4, 10))
+        action.pack(side="bottom", fill="x", padx=16, pady=(4, 12))
         self._action_frame = action
-        self._test_btn = flat_button(action, "测试连接", self._do_test)
+        tk.Frame(action, bg=theme.DIVIDER, height=1).pack(fill="x", pady=(0, 8))
+        self._test_btn = flat_button(action, "测试连接", self._do_test, padx=theme.PAD_L, pady=theme.PAD_S)
         self._test_btn.pack(side="left")
-        flat_button(action, "保存", self._do_save, primary=True).pack(side="right")
+        flat_button(action, "保存设置", self._do_save, primary=True,
+                    padx=theme.PAD_L, pady=theme.PAD_S).pack(side="right")
 
         self._status = tk.Label(win, text="", bg=theme.BG, fg=theme.MUTED,
-                                font=theme.FONT_UI, wraplength=440, justify="left")
-        self._status.pack(side="bottom", fill="x", padx=12, pady=(0, 2))
+                                font=theme.FONT_UI_SMALL, wraplength=520, justify="left")
+        self._status.pack(side="bottom", fill="x", padx=16, pady=(0, 2))
 
         # 中间内容滚动容器：独立 body_frame 容纳 ScrollFrame
         body_frame = tk.Frame(win, bg=theme.BG)
-        body_frame.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 4))
+        body_frame.pack(side="top", fill="both", expand=True, padx=16, pady=(0, 4))
         sf = ScrollFrame(body_frame, bg=theme.BG)
         self._sf = sf
         inner = sf.inner
-        svc = self._card(inner, "服务（OpenAI-compatible 端点）")
+
+        # 1. 通用 LLM 服务分组卡片
+        svc_card = SurfaceCard(inner, title="通用解读服务", subtitle="兼容 OpenAI 接口规范",
+                               bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+        svc_card.pack(fill="x", padx=(0, 6), pady=(2, 14))
         self._url_var = tk.StringVar(value=str(config.get("base_url") or ""))
         self._key_var = tk.StringVar(value=str(config.get("api_key") or ""))
         self._model_var = tk.StringVar(value=str(config.get("model") or ""))
         self._labeled_entry(
-            svc, "服务地址", self._url_var,
-            placeholder="http://localhost:11434/v1 或 https://api.x.ai/v1（可省略 /v1）")
+            svc_card.body, "服务地址", self._url_var,
+            placeholder="http://localhost:11434/v1 或 https://api.x.ai/v1")
         self._labeled_entry(
-            svc, "API Key", self._key_var,
+            svc_card.body, "API Key", self._key_var,
             placeholder="留空 = 无鉴权（本地 Ollama）；明文存本机")
         self._labeled_entry(
-            svc, "模型", self._model_var,
+            svc_card.body, "模型名称", self._model_var,
             placeholder="如 qwen3:8b / claude-sonnet-5")
 
-        # TypeSafe Jev (System One) 判定卡片（与通用 LLM 结构一致）
-        ts_card = self._card(inner, "TypeSafe（Jev System One 判定服务）")
+        # 2. TypeSafe Jev (System One) 判定卡片
+        ts_card = SurfaceCard(inner, title="TypeSafe 判定服务", subtitle="Jev System One 引擎",
+                              bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+        ts_card.pack(fill="x", padx=(0, 6), pady=(0, 14))
         self._typesafe_url_var = tk.StringVar(value=str(config.get("typesafe_base_url") or "https://api.typesafe.ai"))
         self._typesafe_key_var = tk.StringVar(value=str(config.get("typesafe_key") or ""))
         self._typesafe_model_var = tk.StringVar(value=str(config.get("typesafe_model") or "jev-latest"))
 
         self._labeled_entry(
-            ts_card, "服务地址", self._typesafe_url_var,
-            placeholder="默认 https://api.typesafe.ai（可省略 /v1）")
+            ts_card.body, "服务地址", self._typesafe_url_var,
+            placeholder="默认 https://api.typesafe.ai")
         self._labeled_entry(
-            ts_card, "API Key", self._typesafe_key_var,
+            ts_card.body, "API Key", self._typesafe_key_var,
             placeholder="留空 = 未启用；明文存本机")
         self._labeled_entry(
-            ts_card, "模型", self._typesafe_model_var,
-            placeholder="默认 jev-latest（或 jev-preview）")
+            ts_card.body, "模型名称", self._typesafe_model_var,
+            placeholder="默认 jev-latest")
 
-        scope_card = self._card(inner, "数据出境范围（可多选）")
+        # 3. 数据出境范围（圆角卡片 + 右侧 ToggleSwitch 拨杆）
+        scope_card = SurfaceCard(inner, title="数据出境范围", subtitle="可多选，每次请求前仍会弹窗确认",
+                                 bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+        scope_card.pack(fill="x", padx=(0, 6), pady=(0, 14))
         stored_scopes = set(self._llm_prefs.normalize_scopes(
             config.get("scopes") if "scopes" in config else config.get("scope")))
         self._scope_vars: dict[str, tk.BooleanVar] = {}
         self._scope_var = tk.StringVar(
             value=self._llm_prefs.scopes_summary(list(stored_scopes)))
-        for s in ("metrics", "dialog", "tools"):
+        for idx_sc, s in enumerate(("metrics", "dialog", "tools")):
+            if idx_sc > 0:
+                scope_card.add_divider()
             var = tk.BooleanVar(value=(s in stored_scopes))
             self._scope_vars[s] = var
+            r_slot = scope_card.add_row(
+                self._llm_prefs.SCOPE_LABELS[s],
+                self._llm_prefs.SCOPE_DESCRIPTIONS[s],
+            )
+            sw = ToggleSwitch(r_slot, var, on_toggle=self._on_scope_changed, bg=theme.SURFACE_CARD)
+            sw.pack(side="right")
+            for w_elem in (r_slot.row, r_slot.title_lbl):
+                w_elem.configure(cursor=CLICK_CURSOR)
+                w_elem.bind("<Button-1>", lambda _e, t=sw: t.click())
 
-            # 独立条目卡片：轻量抬升底色 + 边框 + 左右两列排版
-            item = tk.Frame(scope_card, bg=theme.PANEL_2, relief="flat",
-                            highlightthickness=1, highlightbackground=theme.BORDER,
-                            padx=10, pady=8, cursor=CLICK_CURSOR)
-            item.pack(fill="x", pady=(0, 6))
-
-            # 左列：自定义复选框（纯白对勾 + 强调色底色，彻底消除 Windows 灰色模糊暗纹）
-            cb_canvas = tk.Canvas(item, width=16, height=16, bg=theme.PANEL_2,
-                                  highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
-            def _draw_cb(_c=cb_canvas, _v=var):
-                _c.delete("all")
-                if _v.get():
-                    _c.create_rectangle(1, 1, 15, 15, outline=theme.ACCENT,
-                                       fill=theme.ACCENT, width=1)
-                    _c.create_line(4, 8, 7, 11, 12, 4, fill=theme.FG_WHITE, width=2,
-                                   capstyle="round", joinstyle="round")
-                else:
-                    _c.create_rectangle(1, 1, 15, 15, outline=theme.BORDER_HOVER,
-                                       fill=theme.BG, width=1)
-            _draw_cb()
-            var.trace_add("write", lambda *_, c=cb_canvas, v=var: _draw_cb(c, v))
-            cb_canvas.pack(side="left", anchor="nw", padx=(0, 8), pady=(2, 0))
-            # 右列：独立的文本容器，使标题与描述绝对物理左对齐
-            text_col = tk.Frame(item, bg=theme.PANEL_2, cursor=CLICK_CURSOR)
-            text_col.pack(side="left", fill="both", expand=True)
-
-            title_lbl = tk.Label(
-                text_col, text=self._llm_prefs.SCOPE_LABELS[s],
-                bg=theme.PANEL_2, fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
-                anchor="w", justify="left", cursor=CLICK_CURSOR)
-            title_lbl.pack(fill="x")
-
-            desc_lbl = tk.Label(
-                text_col, text=self._llm_prefs.SCOPE_DESCRIPTIONS[s],
-                bg=theme.PANEL_2, fg=theme.MUTED, font=theme.FONT_UI_SMALL,
-                wraplength=380, anchor="w", justify="left", cursor=CLICK_CURSOR)
-            desc_lbl.pack(fill="x", pady=(2, 0))
-
-            # 交互增强：点击条目卡片任意区域均可直接切换勾选状态
-            def _make_toggle(target_var=var):
-                def _toggle(_event=None):
-                    target_var.set(not target_var.get())
-                    self._on_scope_changed()
-                return _toggle
-
-            toggle_fn = _make_toggle(var)
-            for w_elem in (item, cb_canvas, text_col, title_lbl, desc_lbl):
-                w_elem.bind("<Button-1>", toggle_fn)
-
-            # 悬停轻微高亮反馈
-            def _make_hover(target_frame=item):
-                def _enter(_e):
-                    try:
-                        target_frame.config(highlightbackground=theme.BORDER_HOVER)
-                    except tk.TclError:
-                        pass
-                def _leave(e):
-                    if e is not None:
-                        try:
-                            under = e.widget.winfo_containing(e.x_root, e.y_root)
-                            curr = under
-                            while curr is not None:
-                                if curr == target_frame:
-                                    return
-                                curr = getattr(curr, "master", None)
-                        except Exception:
-                            pass
-                    try:
-                        target_frame.config(highlightbackground=theme.BORDER)
-                    except tk.TclError:
-                        pass
-                return _enter, _leave
-
-            _hover_enter, _hover_leave = _make_hover(item)
-            for w_elem in (item, cb_canvas, text_col, title_lbl, desc_lbl):
-                w_elem.bind("<Enter>", _hover_enter)
-                w_elem.bind("<Leave>", _hover_leave)
-
-        # 过程数据供给档：控制 read_dialogue 纳入的工具结果深度与逐回合时序密度。
-        # 单选条目（点击整卡切换；选中态强调色边框 + 圆点）。
-        detail_card = self._card(inner, "过程数据供给量（影响 prompt 规模与 token 消耗）")
+        # 4. 过程数据供给档（卡片右上角 SegmentedControl + 行级详情说明双向同步）
+        detail_card = SurfaceCard(inner, title="过程数据供给量",
+                                  subtitle="影响提示词规模与 Token 消耗",
+                                  bg=theme.SURFACE_CARD, parent_bg=theme.BG)
+        detail_card.pack(fill="x", padx=(0, 6), pady=(0, 8))
         cur_detail = self._llm_prefs.normalize_dialog_detail(config.get("dialog_detail"))
         self._detail_var = tk.StringVar(value=cur_detail)
         self._detail_items: dict[str, tk.Frame] = {}
+        self._detail_dot_drawers: dict = {}
 
         def _paint_detail(d_key: str) -> None:
             frame = self._detail_items.get(d_key)
             if frame is not None and frame.winfo_exists():
-                # 选中态：强调色边框并加粗（子元素底色固定，避免半选视觉残影）
                 on = self._detail_var.get() == d_key
-                frame.config(highlightbackground=(
-                    theme.ACCENT if on else theme.BORDER),
-                    highlightthickness=2 if on else 1)
+                row_bg = theme.PANEL if on else theme.SURFACE_CARD
+                frame.config(bg=row_bg)
+                for ch in frame.winfo_children():
+                    try:
+                        ch.config(bg=row_bg)
+                    except tk.TclError:
+                        pass
+                    if isinstance(ch, tk.Frame):
+                        for sub in ch.winfo_children():
+                            try:
+                                sub.config(bg=row_bg)
+                            except tk.TclError:
+                                pass
 
         def _pick_detail(d_key: str) -> None:
-            self._detail_var.set(d_key)
+            if self._detail_var.get() != d_key:
+                self._detail_var.set(d_key)
             for k in self._detail_items:
                 _paint_detail(k)
+            for fn in self._detail_dot_drawers.values():
+                fn()
 
-        for d_key, (d_label, d_tip) in self._llm_prefs.DIALOG_DETAIL_LABELS.items():
-            d_item = tk.Frame(detail_card, bg=theme.PANEL, relief="flat",
-                              highlightthickness=1, highlightbackground=theme.BORDER,
-                              padx=10, pady=7, cursor=CLICK_CURSOR)
-            d_item.pack(fill="x", pady=(0, 5))
-            dot = tk.Canvas(d_item, width=14, height=14, bg=theme.PANEL,
+        if detail_card.header_extra is not None:
+            seg_opts = [(k, v[0]) for k, v in self._llm_prefs.DIALOG_DETAIL_LABELS.items()]
+            SegmentedControl(
+                detail_card.header_extra, seg_opts, variable=self._detail_var,
+                on_change=_pick_detail, height=24, item_padx=9, bg=theme.BG,
+            ).pack(side="right")
+
+        for idx_d, (d_key, (d_label, d_tip)) in enumerate(self._llm_prefs.DIALOG_DETAIL_LABELS.items()):
+            if idx_d > 0:
+                detail_card.add_divider(pady=4)
+            d_item = tk.Frame(detail_card.body, bg=theme.SURFACE_CARD, padx=8, pady=6, cursor=CLICK_CURSOR)
+            d_item.pack(fill="x")
+            dot = tk.Canvas(d_item, width=16, height=16, bg=theme.SURFACE_CARD,
                             highlightthickness=0, bd=0, cursor=CLICK_CURSOR)
             dot.pack(side="left", padx=(0, 8))
-            txt_col = tk.Frame(d_item, bg=theme.PANEL, cursor=CLICK_CURSOR)
+            txt_col = tk.Frame(d_item, bg=theme.SURFACE_CARD, cursor=CLICK_CURSOR)
             txt_col.pack(side="left", fill="both", expand=True)
-            # 点击绑定必须覆盖 Label 本身——Label 在条目上层遮挡容器，漏绑即
-            # 「点了没反应」（曾因此报「完整」无法选中：描述长、Label 占满整行）。
-            lbl_title = tk.Label(txt_col, text=d_label, bg=theme.PANEL,
+            lbl_title = tk.Label(txt_col, text=d_label, bg=theme.SURFACE_CARD,
                                  fg=theme.FG_WHITE, font=theme.FONT_UI_BOLD,
                                  anchor="w", cursor=CLICK_CURSOR)
             lbl_title.pack(fill="x")
-            lbl_desc = tk.Label(txt_col, text=d_tip, bg=theme.PANEL, fg=theme.MUTED,
-                                font=theme.FONT_UI_SMALL, wraplength=360, anchor="w",
+            lbl_desc = tk.Label(txt_col, text=d_tip, bg=theme.SURFACE_CARD, fg=theme.MUTED,
+                                font=theme.FONT_UI_SMALL, wraplength=440, anchor="w",
                                 justify="left", cursor=CLICK_CURSOR)
-            lbl_desc.pack(fill="x")
+            lbl_desc.pack(fill="x", pady=(2, 0))
             self._detail_items[d_key] = d_item
 
             def _draw_dot(_c=dot, _k=d_key):
                 _c.delete("all")
                 on = self._detail_var.get() == _k
                 outline = theme.ACCENT if on else theme.BORDER_HOVER
-                _c.create_oval(2, 2, 12, 12, outline=outline, width=1)
+                _c.create_oval(2, 2, 14, 14, outline=outline, width=1)
                 if on:
-                    _c.create_oval(5, 5, 9, 9, fill=theme.ACCENT, outline="")
+                    _c.create_oval(5, 5, 11, 11, fill=theme.ACCENT, outline="")
 
-            self._detail_dot_drawers = getattr(self, "_detail_dot_drawers", {})
             self._detail_dot_drawers[d_key] = _draw_dot
 
             def _make_pick(k=d_key):
-                return (lambda _e=None: (_pick_detail(k),
-                                         [fn() for fn in
-                                          self._detail_dot_drawers.values()]))
+                return lambda _e=None: _pick_detail(k)
+
             pick = _make_pick(d_key)
             for w_el in (d_item, dot, txt_col, lbl_title, lbl_desc):
                 w_el.bind("<Button-1>", pick)
-        # 初始选中态绘制
-        for fn in self._detail_dot_drawers.values():
-            fn()
-        for k in self._detail_items:
-            _paint_detail(k)
+
+        self._detail_var.trace_add("write", lambda *_: _pick_detail(self._detail_var.get()))
+        _pick_detail(cur_detail)
 
         win.bind("<Escape>", lambda e: win.destroy())
         self._fit_window()
 
-    # -- small builders（UploadDialog 同款）--
-    def _card(self, inner, title: str) -> tk.Frame:
-        wrap = tk.Frame(inner, bg=theme.PANEL, highlightthickness=1,
-                        highlightbackground=theme.BORDER)
-        wrap.pack(fill="x", padx=2, pady=(0, 10))
-        head = tk.Frame(wrap, bg=theme.CARD_HEADER_BG, padx=12, pady=6)
-        head.pack(fill="x")
-        tk.Label(head, text=title, bg=theme.CARD_HEADER_BG, fg=theme.FG_WHITE,
-                 font=theme.FONT_UI_BOLD).pack(anchor="w")
-        card = tk.Frame(wrap, bg=theme.PANEL, padx=12, pady=10)
-        card.pack(fill="x")
-        return card
-
+    # -- small builders --
     def _labeled_entry(self, card, label: str, var, *, placeholder: str = "") -> None:
-        row = tk.Frame(card, bg=theme.PANEL)
+        bg_c = str(card.cget("bg")) if hasattr(card, "cget") else theme.SURFACE_CARD
+        row = tk.Frame(card, bg=bg_c)
         row.pack(fill="x", pady=(3, 3))
-        tk.Label(row, text=label, bg=theme.PANEL, fg=theme.MUTED,
+        tk.Label(row, text=label, bg=bg_c, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL, width=10, anchor="w").pack(side="left")
-        e = tk.Entry(row, textvariable=var, bg=theme.PANEL_2, fg=theme.FG,
-                     insertbackground=theme.FG, relief="flat", highlightthickness=1,
-                     highlightbackground=theme.BORDER, highlightcolor=theme.ACCENT,
-                     font=theme.FONT_UI)
-        e.pack(side="left", fill="x", expand=True, ipady=3)
-        if placeholder:
-            Tooltip(e, placeholder)
+        ent = RoundedEntry(row, textvariable=var, bg=bg_c, fill=theme.CONTROL_BG,
+                           height=30, placeholder=placeholder)
+        ent.pack(side="left", fill="x", expand=True)
 
     def _fit_window(self) -> None:
         win = self._win
@@ -2515,6 +2558,9 @@ class LlmConfigPopup:
             if not self._win.winfo_exists():
                 return
             self._test_btn.config(state="normal", text="测试连接")
+            if hasattr(self, "_conn_badge") and self._conn_badge.winfo_exists():
+                self._conn_badge.set_status("连接正常" if ok else "连接异常",
+                                            kind="success" if ok else "error", dot=True)
             self.set_status(msg, error=not ok)
         except tk.TclError:
             pass
@@ -2538,6 +2584,10 @@ class LlmConfigPopup:
                             error=True)
             return
         self._on_save(**cfg)
+        if hasattr(self, "_conn_badge") and self._conn_badge.winfo_exists():
+            has_c = bool(cfg["base_url"] and cfg["model"])
+            self._conn_badge.set_status("已配置" if has_c else "未配置",
+                                        kind="success" if has_c else "neutral", dot=True)
         status_msg = "已保存配置"
         if cfg["typesafe_key"]:
             status_msg += f"（TypeSafe {cfg['typesafe_model']} 已就绪）"
@@ -2571,40 +2621,33 @@ class TermLookupPopup:
 
         # 头部
         header = tk.Frame(win, bg=theme.BG)
-        header.pack(fill="x", padx=16, pady=(12, 6))
+        header.pack(fill="x", padx=16, pady=(14, 6))
+        StatusBadge(
+            header, text="本地匹配优先 · Jev 语义兜底",
+            kind="info", dot=True, bg=theme.BG,
+        ).pack(side="right")
         tk.Label(
             header,
             text="术语反向查询",
             bg=theme.BG,
-            fg=theme.FG,
-            font=theme.FONT_HEADING,
+            fg=theme.FG_WHITE,
+            font=theme.FONT_TITLE,
         ).pack(side="left")
-        tk.Label(
-            header,
-            text="本地匹配优先 · 支持 Jev 语义兜底",
-            bg=theme.BG,
-            fg=theme.MUTED,
-            font=theme.FONT_UI_SMALL,
-        ).pack(side="left", padx=10, pady=(4, 0))
 
-        # 搜索输入行
-        search_frame = tk.Frame(win, bg=theme.BG)
-        search_frame.pack(fill="x", padx=16, pady=6)
+        # 搜索输入行（圆角卡片 + RoundedEntry）
+        search_card = SurfaceCard(win, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=12, pad_y=10)
+        search_card.pack(fill="x", padx=16, pady=(0, 8))
+        search_frame = tk.Frame(search_card.body, bg=theme.SURFACE_CARD)
+        search_frame.pack(fill="x")
 
         self._query_var = tk.StringVar(value=initial_query)
-        self._entry = tk.Entry(
+        self._entry = RoundedEntry(
             search_frame,
             textvariable=self._query_var,
-            bg=theme.CONTROL_BG,
-            fg=theme.FG,
-            insertbackground=theme.FG,
-            font=theme.FONT_UI,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=theme.BORDER,
-            highlightcolor=theme.ACCENT,
+            bg=theme.SURFACE_CARD,
+            fill=theme.CONTROL_BG,
         )
-        self._entry.pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 8))
+        self._entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._entry.bind("<Return>", lambda _e: self.do_search())
 
         self._btn_search = flat_button(
@@ -2617,17 +2660,17 @@ class TermLookupPopup:
 
         # 状态行
         self._status_lbl = tk.Label(
-            win,
+            search_card.body,
             text="输入研发黑话、缩写或概念别名（按回车执行查询）",
-            bg=theme.BG,
+            bg=theme.SURFACE_CARD,
             fg=theme.MUTED,
             font=theme.FONT_UI_SMALL,
             anchor="w",
         )
-        self._status_lbl.pack(fill="x", padx=18, pady=(0, 6))
+        self._status_lbl.pack(fill="x", pady=(6, 0))
 
         # 滚动结果展示区
-        self._sf = ScrollFrame(win, bg=theme.PANEL)
+        self._sf = ScrollFrame(win, bg=theme.BG)
         self._sf.canvas.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
         if initial_query:
@@ -2832,17 +2875,18 @@ class TermLookupPopup:
     def _render_term_card(self, parent, term) -> None:
         from tcer.core.termbase import MDA_LAYERS, ROLE_LABELS, STATUS_LABELS
 
-        card = tk.Frame(parent, bg=theme.BG, bd=1, relief="solid")
-        card.pack(fill="x", pady=6, padx=6)
+        card = RoundedFrame(parent, fill=theme.SURFACE_CARD, parent_bg=theme.BG,
+                            outline=theme.BORDER_SUBTLE, radius=theme.RADIUS_L)
+        card.pack(fill="x", pady=6, padx=4)
 
-        head_row = tk.Frame(card, bg=theme.BG)
+        head_row = tk.Frame(card, bg=theme.SURFACE_CARD)
         head_row.pack(fill="x", padx=14, pady=(10, 4))
 
         en_part = f"（{term.term_en}）" if term.term_en else ""
         tk.Label(
             head_row,
             text=f"{term.pref_label}{en_part}",
-            bg=theme.BG,
+            bg=theme.SURFACE_CARD,
             fg=theme.FG,
             font=theme.FONT_HEADING,
         ).pack(side="left")
@@ -2875,7 +2919,7 @@ class TermLookupPopup:
         tk.Label(
             card,
             text=meta_str,
-            bg=theme.BG,
+            bg=theme.SURFACE_CARD,
             fg=theme.MUTED,
             font=theme.FONT_UI_SMALL,
         ).pack(anchor="w", padx=14, pady=(0, 8))
@@ -2884,7 +2928,7 @@ class TermLookupPopup:
             tk.Label(
                 card,
                 text=f"标准定义:\n{term.definition}",
-                bg=theme.BG,
+                bg=theme.SURFACE_CARD,
                 fg=theme.FG,
                 font=theme.FONT_UI,
                 wraplength=580,
@@ -2895,7 +2939,7 @@ class TermLookupPopup:
             tk.Label(
                 card,
                 text=f"别名 / 黑话: {'、'.join(term.alt_labels)}",
-                bg=theme.BG,
+                bg=theme.SURFACE_CARD,
                 fg=theme.MUTED,
                 font=theme.FONT_UI_SMALL,
             ).pack(anchor="w", padx=14, pady=(0, 6))
@@ -2904,7 +2948,7 @@ class TermLookupPopup:
             tk.Label(
                 card,
                 text="各职能理解:",
-                bg=theme.BG,
+                bg=theme.SURFACE_CARD,
                 fg=theme.ACCENT,
                 font=theme.FONT_UI_BOLD,
             ).pack(anchor="w", padx=14, pady=(6, 2))
@@ -2913,7 +2957,7 @@ class TermLookupPopup:
                 tk.Label(
                     card,
                     text=f"• {rcn}: {term.renderings[rk]}",
-                    bg=theme.BG,
+                    bg=theme.SURFACE_CARD,
                     fg=theme.FG,
                     font=theme.FONT_UI_SMALL,
                     wraplength=560,
@@ -2924,7 +2968,7 @@ class TermLookupPopup:
             tk.Label(
                 card,
                 text="常见误解防范:",
-                bg=theme.BG,
+                bg=theme.SURFACE_CARD,
                 fg=theme.WARNING,
                 font=theme.FONT_UI_BOLD,
             ).pack(anchor="w", padx=14, pady=(8, 2))
@@ -2935,14 +2979,14 @@ class TermLookupPopup:
                 tk.Label(
                     card,
                     text=f"• {rcn}: 以为「{wrong}」→ 实际「{actual}」",
-                    bg=theme.BG,
+                    bg=theme.SURFACE_CARD,
                     fg=theme.FG,
                     font=theme.FONT_UI_SMALL,
                     wraplength=560,
                     justify="left",
                 ).pack(anchor="w", padx=20, pady=(0, 2))
 
-        tk.Frame(card, height=8, bg=theme.BG).pack()
+        tk.Frame(card, height=8, bg=theme.SURFACE_CARD).pack()
 
 
 class AmbiguityDetectPopup:
@@ -2968,52 +3012,48 @@ class AmbiguityDetectPopup:
         self._poll_ui_queue()
 
         # 头部说明
-        head = tk.Frame(self._win, bg=theme.PANEL, padx=14, pady=10)
+        head = tk.Frame(self._win, bg=theme.BG, padx=16, pady=12)
         head.pack(fill="x")
+        top_row = tk.Frame(head, bg=theme.BG)
+        top_row.pack(fill="x")
+        StatusBadge(top_row, text="D3 探针 · 跨职能误读检测", kind="info", dot=True, bg=theme.BG).pack(side="right")
         tk.Label(
-            head,
+            top_row,
             text="需求文本术语歧义探测",
-            bg=theme.PANEL,
-            fg=theme.FG,
-            font=theme.FONT_HEADING,
-        ).pack(anchor="w")
+            bg=theme.BG,
+            fg=theme.FG_WHITE,
+            font=theme.FONT_TITLE,
+        ).pack(side="left")
         tk.Label(
             head,
             text="输入需求文本，自动匹配库内概念并触发跨职能误读探针；识别潜伏的理解偏差与沟通灰色地带。",
-            bg=theme.PANEL,
+            bg=theme.BG,
             fg=theme.MUTED,
             font=theme.FONT_UI_SMALL,
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(anchor="w", pady=(4, 0))
 
-        # 输入区域
-        input_frame = tk.Frame(self._win, bg=theme.BG, padx=14, pady=8)
-        input_frame.pack(fill="x")
-
-        tk.Label(
-            input_frame,
-            text="待检测文本（需求文档、任务描述或用户提示词）：",
-            bg=theme.BG,
-            fg=theme.FG,
-            font=theme.FONT_UI_BOLD,
-        ).pack(anchor="w", pady=(0, 4))
+        # 输入区域（圆角卡片）
+        in_card = SurfaceCard(self._win, bg=theme.SURFACE_CARD, parent_bg=theme.BG, title="待检测文本（需求文档、任务描述或用户提示词）", pad_x=14, pad_y=10)
+        in_card.pack(fill="x", padx=16, pady=(0, 8))
+        input_frame = in_card.body
 
         self._text_box = tk.Text(
             input_frame,
             height=6,
-            bg=theme.PANEL_2,
+            bg=theme.CONTROL_BG,
             fg=theme.FG,
             insertbackground=theme.FG,
             font=theme.FONT_MONO,
             relief="flat",
-            padx=6,
+            padx=8,
             pady=6,
         )
         self._text_box.pack(fill="x")
         if initial_text:
             self._text_box.insert("1.0", initial_text)
 
-        btn_bar = tk.Frame(input_frame, bg=theme.BG)
-        btn_bar.pack(fill="x", pady=(6, 0))
+        btn_bar = tk.Frame(input_frame, bg=theme.SURFACE_CARD)
+        btn_bar.pack(fill="x", pady=(8, 0))
 
         self._run_btn = flat_button(
             btn_bar,
@@ -3029,17 +3069,17 @@ class AmbiguityDetectPopup:
         self._status_lbl = tk.Label(
             btn_bar,
             text="",
-            bg=theme.BG,
+            bg=theme.SURFACE_CARD,
             fg=theme.MUTED,
             font=theme.FONT_UI_SMALL,
         )
         self._status_lbl.pack(side="left", padx=10)
 
         # 结果展示区
-        res_frame = tk.Frame(self._win, bg=theme.BG, padx=14, pady=4)
-        res_frame.pack(fill="both", expand=True)
+        res_card = SurfaceCard(self._win, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=6, pad_y=6)
+        res_card.pack(fill="both", expand=True, padx=16, pady=(0, 14))
 
-        self._scroll = ScrollFrame(res_frame, bg=theme.PANEL)
+        self._scroll = ScrollFrame(res_card.body, bg=theme.SURFACE_CARD)
         self._content = self._scroll.inner
 
         self._render_placeholder("点击「开始歧义探测」运行检测")
@@ -3275,29 +3315,33 @@ class TermImportPopup:
         self.on_imported = on_imported
         self._win = new_window(parent, "导入词条 JSON 片段", "620x500")
 
-        head = tk.Frame(self._win, bg=theme.PANEL, padx=14, pady=10)
+        head = tk.Frame(self._win, bg=theme.BG, padx=16, pady=12)
         head.pack(fill="x")
+        top_row = tk.Frame(head, bg=theme.BG)
+        top_row.pack(fill="x")
+        StatusBadge(top_row, text="JSON 批量导入", kind="info", dot=True, bg=theme.BG).pack(side="right")
         tk.Label(
-            head,
+            top_row,
             text="导入词条 JSON 片段",
-            bg=theme.PANEL,
-            fg=theme.FG,
-            font=theme.FONT_HEADING,
-        ).pack(anchor="w")
+            bg=theme.BG,
+            fg=theme.FG_WHITE,
+            font=theme.FONT_TITLE,
+        ).pack(side="left")
         tk.Label(
             head,
             text="粘贴符合规范的 JSON 词条代码块（来自术语考古报告或团队共享）：",
-            bg=theme.PANEL,
+            bg=theme.BG,
             fg=theme.MUTED,
             font=theme.FONT_UI_SMALL,
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(anchor="w", pady=(4, 0))
 
-        body = tk.Frame(self._win, bg=theme.BG, padx=14, pady=8)
-        body.pack(fill="both", expand=True)
+        card = SurfaceCard(self._win, bg=theme.SURFACE_CARD, parent_bg=theme.BG, pad_x=10, pad_y=10)
+        card.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        body = card.body
 
         self._text = tk.Text(
             body,
-            bg=theme.PANEL_2,
+            bg=theme.CONTROL_BG,
             fg=theme.FG,
             insertbackground=theme.FG,
             font=theme.FONT_MONO,
@@ -3307,7 +3351,7 @@ class TermImportPopup:
         )
         self._text.pack(fill="both", expand=True)
 
-        bot = tk.Frame(self._win, bg=theme.PANEL, padx=14, pady=8)
+        bot = tk.Frame(self._win, bg=theme.BG, padx=16, pady=10)
         bot.pack(fill="x")
 
         from .views import ui_icon
