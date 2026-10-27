@@ -14,7 +14,14 @@ from .platform import PLATFORM, CLICK_CURSOR
 
 
 class Tooltip:
-    """Lightweight hover tooltip for any widget (stdlib only)."""
+    """Lightweight hover tooltip for any widget (stdlib only).
+
+    全局同一时刻只显示一个（``_active``）：嵌套部件各挂一个 Tooltip 时，指针跨过
+    重合边界会让父子同时收到 <Enter>（父为 NotifyVirtual，且指针仍在其内、
+    收不到 <Leave>），否则会叠出两三个错位浮窗。
+    """
+
+    _active: "Tooltip | None" = None
 
     def __init__(self, widget, text: str) -> None:
         self.widget = widget
@@ -68,7 +75,11 @@ class Tooltip:
                 return
         except tk.TclError:
             return
+        prev = Tooltip._active
+        if prev is not None and prev is not self:
+            prev._hide()
         self.tip = tk.Toplevel(self.widget)
+        Tooltip._active = self
         self.tip.wm_overrideredirect(True)
         self.tip.configure(bg=theme.BORDER)  # 外层露 1px 作边框（深色主题）
         lbl = tk.Label(self.tip, text=self.text, justify="left",
@@ -99,8 +110,13 @@ class Tooltip:
 
     def _hide(self, _event=None) -> None:
         self._cancel_pending()
+        if Tooltip._active is self:
+            Tooltip._active = None
         if self.tip:
-            self.tip.destroy()
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
             self.tip = None
 
 

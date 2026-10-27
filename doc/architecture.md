@@ -150,6 +150,11 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 
 - 非 Claude 各源（Codex/OpenCode/omp/pi/antigravity/workbuddy）共用 `analyze._analyze_source_project` 骨架 + `_SourceAdapter` 钩子（resolve/sessions/read_meta/usage_of/loc_of/session_key），file_cache key 构造在钩子内（omp/Codex 必须并入子代理文件签名，否则子代理追写后折叠结果不失效）。新增数据源 = 写一个 adapter。共享小工具在 `core/parse_util`（as_int/first_str）。
 
+<a id="coverage-audit"></a>
+### 覆盖与守恒审计（`core/coverage.py`，2026-10-27）
+
+闭环审计用同一套解析逻辑重算，只能证明自洽；格式漂移时解析器静默跳过、自洽检查照样全绿（agy 并行调用漏计 490 次即此类）。覆盖审计补这一块：直接 `json.loads` 原始行（不经 reader）普查每个维度的实际取值，逐项对照登记表——**已处理** / **已知忽略（必须写理由）** / **未知**；计价相关字段另有取值白名单（白名单外 = **取值异常**）。守恒检查：结果↔调用、有用量行↔message.id、快照输入只增、`iterations` 单项、子代理↔父会话、reader 工具调用数↔独立计数（warn 失败判 FAIL；进行中会话的未完成调用、请求↔回复差额等如实列为 info）。上游升级出现新类型/新字段 → 报告点名「未知」并给首见文件:行号，处理后登记入表、提升 `CLAUDE_CENSUS_VERSION`。反向测试 `tests/test_coverage.py` 逐类构造破损数据断言被抓到。目前仅 Claude；其余源按同一模式补登记表。
+
 <a id="guard-tests"></a>
 ### 原 #22 护栏测试
 

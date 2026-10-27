@@ -375,7 +375,11 @@ def test_newer_tool_arg_names_and_mcp(tmp_path: Path):
     for i, (name, args) in enumerate(calls):
         cur.execute(
             "INSERT INTO steps VALUES (?,?,?,?,?)",
-            (i, 15, 3, _make_timestamp_meta(1700000000 + i), _make_tool_call_step_bytes(f"c{i}", name, args)),
+            (2 * i, 15, 3, _make_timestamp_meta(1700000000 + i), _make_tool_call_step_bytes(f"c{i}", name, args)),
+        )
+        cur.execute(
+            "INSERT INTO steps VALUES (?,?,?,?,?)",
+            (2 * i + 1, 132, 3, _make_timestamp_meta(1700000000 + i), _make_tool_result_step_bytes("ok")),
         )
     conn.commit()
     conn.close()
@@ -387,3 +391,208 @@ def test_newer_tool_arg_names_and_mcp(tmp_path: Path):
     sloc, has_sig = antigravity_reader.session_loc_full(db_path)
     assert has_sig is True
     assert sloc.added == 2 + 1  # write 2 lines; edit 1 line -> 2 lines (net +1)
+
+
+def _write_summaries(root: Path, rows: list[tuple[str, str, int]]) -> None:
+    conn = sqlite3.connect(root / "conversation_summaries.db")
+    conn.execute(
+        "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, "
+        "workspace_uris TEXT, last_modified_time INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO conversation_summaries VALUES (?, ?, ?)",
+        [(cid, json.dumps([uri]), t) for cid, uri, t in rows],
+    )
+    conn.commit()
+    conn.close()
+
+
+def _setup_ccswitch_roots(home: Path) -> tuple[Path, Path]:
+    """默认根 + cc-switch 隔离根：同工作区跨根、仅隔离根独有工作区、同会话 id 两根各一份。"""
+    import os
+
+    default = home / ".gemini" / "antigravity-cli"
+    iso = home / ".cc-switch" / "agy" / "18ca37b1-prov" / "antigravity-cli"
+    for root in (default, iso):
+        (root / "conversations").mkdir(parents=True)
+    _create_mock_session_db(default / "conversations" / "s-default.db")
+    _create_mock_session_db(default / "conversations" / "s-dup.db")
+    _write_summaries(default, [
+        ("s-default", "file:///C:/repo/shared", 2),
+        ("s-dup", "file:///C:/repo/shared", 1),
+    ])
+    _create_mock_session_db(iso / "conversations" / "s-iso.db")
+    _create_mock_session_db(iso / "conversations" / "s-only.db")
+    newer = _create_mock_session_db(iso / "conversations" / "s-dup.db")
+    st = newer.stat()
+    os.utime(newer, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    _write_summaries(iso, [
+        ("s-iso", "file:///C:/repo/shared", 3),
+        ("s-only", "file:///C:/repo/isolated_only", 2),
+        ("s-dup", "file:///C:/repo/shared", 1),
+    ])
+    return default, iso
+
+
+def test_ccswitch_isolated_roots_merge_by_workspace(tmp_path: Path, monkeypatch):
+    for env in ("ANTIGRAVITY_DIR", "ANTIGRAVITY_CLI_DIR", "GEMINI_CLI_DIR"):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    default, iso = _setup_ccswitch_roots(tmp_path)
+
+    from tcer.core.paths import antigravity_roots
+    assert antigravity_roots() == [default, iso]
+
+    refs = {r.key: r for r in antigravity_reader.list_project_refs()}
+    assert set(refs) == {"shared", "isolated_only"}
+    # 同工作区跨根合并成一张卡；同 id 两根各一份只计一次，取较新的文件
+    shared = antigravity_reader.discover_sessions(refs["shared"])
+    assert sorted(p.stem for p in shared) == ["s-default", "s-dup", "s-iso"]
+    dup = next(p for p in shared if p.stem == "s-dup")
+    assert dup.parent.parent == iso
+    assert [p.stem for p in antigravity_reader.discover_sessions(refs["isolated_only"])] == ["s-only"]
+
+    # 无 session_paths 的 ref 走同一套跨根分组
+    bare = ProjectRef(source="antigravity", key="shared", display_name="shared", cwd=refs["shared"].cwd)
+    assert sorted(antigravity_reader.discover_sessions(bare)) == sorted(shared)
+
+    pa = analyze.analyze_project("shared", source="antigravity")
+    assert pa.n_sessions == 3
+    assert pa.aggregate.usage.input_tokens == 3 * 250
+
+
+def test_ccswitch_scan_disabled_by_env_override(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    default, _iso = _setup_ccswitch_roots(tmp_path)
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(default))
+
+    from tcer.core.paths import antigravity_roots
+    assert antigravity_roots() == [default]
+    refs = {r.key: r for r in antigravity_reader.list_project_refs()}
+    assert set(refs) == {"shared"}
+    assert sorted(p.stem for p in refs["shared"].session_paths) == ["s-default", "s-dup"]
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-27 实测格式：并行调用 / status 5 裁剪 / 失败编辑 / 压缩用量
+# --------------------------------------------------------------------------- #
+
+def _call_f7(call_id: str, name: str, args: dict) -> bytes:
+    return (_make_proto_field(1, 2, call_id) + _make_proto_field(2, 2, name)
+            + _make_proto_field(3, 2, json.dumps(args)))
+
+
+def _multi_call_step(calls: list[tuple[str, str, dict]]) -> bytes:
+    f20 = b"".join(_make_proto_field(7, 2, _call_f7(*c)) for c in calls)
+    return _make_proto_field(20, 2, f20)
+
+
+def _result_step(call_id: str, name: str, args: dict, out: str = "ok") -> bytes:
+    """step 132：字段 5.4 回显原调用 + 字段 140 输出。"""
+    f5 = _make_proto_field(4, 2, _call_f7(call_id, name, args))
+    return _make_proto_field(5, 2, f5) + _make_tool_result_step_bytes(out)
+
+
+def _usage_blob(unc: int, out: int, cached: int, rid: str) -> bytes:
+    return (_make_proto_field(2, 0, unc) + _make_proto_field(3, 0, out)
+            + _make_proto_field(5, 0, cached) + _make_proto_field(7, 2, rid))
+
+
+def _gen_row(model: str, unc: int, out: int, cached: int, rid: str) -> bytes:
+    f1 = _make_proto_field(4, 2, _usage_blob(unc, out, cached, rid)) + _make_proto_field(19, 2, model)
+    return _make_proto_field(1, 2, f1)
+
+
+def _compaction_step(unc: int, out: int, cached: int, rid: str) -> bytes:
+    f28 = _make_proto_field(2, 2, _usage_blob(unc, out, cached, rid))
+    return _make_proto_field(5, 2, _make_proto_field(28, 2, f28))
+
+
+def _pruned_user_step(text: str) -> bytes:
+    """status 5 用户步骤：19.2 被清空，只剩 19.3.1 副本。"""
+    f19 = _make_proto_field(3, 2, _make_proto_field(1, 2, text))
+    return _make_proto_field(19, 2, f19)
+
+
+def _build_db(path: Path, gens: list[bytes], steps: list[tuple[int, int, bytes]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)")
+    conn.execute("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, "
+                 "status INTEGER, metadata BLOB, step_payload BLOB)")
+    conn.executemany("INSERT INTO gen_metadata VALUES (?,?)", list(enumerate(gens)))
+    conn.executemany(
+        "INSERT INTO steps VALUES (?,?,?,?,?)",
+        [(i, st, status, _make_timestamp_meta(1700000000 + i), pl)
+         for i, (st, status, pl) in enumerate(steps)],
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_parallel_calls_pruned_steps_failed_edits_and_compaction(tmp_path: Path):
+    w = {"Path": r"C:\t\a.py", "Content": "a\nb\n"}
+    e_ok = {"Path": r"C:\t\a.py", "Target": "b\n", "Replacement": "b\nc\n"}
+    e_bad = {"Path": r"C:\t\a.py", "Target": "zzz\n", "Replacement": "1\n2\n3\n"}
+    e_pruned = {"Path": r"C:\t\b.py", "Target": "", "Replacement": "x\ny\n"}
+    db = _build_db(tmp_path / "conversations" / "s.db", [
+        _gen_row("gemini-3.8-flash", 100, 10, 0, "rid-a"),
+        _gen_row("gemini-4-argon", 200, 20, 1000, "rid-b"),
+        _gen_row("gemini-4-argon", 300, 30, 2000, "rid-c"),
+    ], [
+        (14, 5, _pruned_user_step("帮我改一下")),                       # 0 裁剪的用户提问
+        (15, 5, _make_proto_field(20, 2, b"")),                          # 1 裁剪的调用（turn 0）
+        (132, 5, _result_step("p1", "edit_file", e_pruned)),             # 2 → 由结果补回
+        (15, 3, _multi_call_step([("c1", "write_file", w),               # 3 并行三调用（turn 1）
+                                  ("c2", "edit_file", e_ok),
+                                  ("c3", "manage_task", {"Action": "status"})])),
+        (132, 3, _result_step("c1", "write_file", w)),
+        (132, 3, _result_step("c2", "edit_file", e_ok)),
+        (132, 3, _result_step("c3", "manage_task", {"Action": "status"})),
+        (23, 3, _compaction_step(5000, 700, 40000, "rid-z")),            # 7 压缩（不在 gen 里）
+        (23, 3, _compaction_step(1, 1, 1, "rid-b")),                     # 8 已在 gen 里 → 不重复计
+        (15, 3, _multi_call_step([("c4", "edit_file", e_bad)])),         # 9 turn 2
+        (132, 7, _result_step("c4", "edit_file", e_bad, "Could not successfully apply")),
+    ])
+
+    u = antigravity_reader.aggregate_usage(db)
+    # 工具：裁剪补回 1 + 并行 3 + 失败编辑 1；manage_task 不再冒充子代理 Task
+    assert u.tool_calls == {"Edit": 3, "Write": 1, "manage_task": 1}
+    assert "Task" not in u.tool_calls
+    assert [t.tool_calls for t in u.turn_stats] == [1, 3, 1]
+    # status 5 不是错误；status 7 才是
+    assert u.tool_errors == 1
+    # 压缩：rid-z 计入并按前一次生成（gemini-4-argon）计价；rid-b 已在 gen 里不重复
+    assert u.compaction_count == 2
+    assert u.compaction_turns == [2, 2]
+    assert u.input_tokens == 100 + 200 + 300 + 5000
+    assert u.output_tokens == 10 + 20 + 30 + 700
+    assert u.cache_read_input_tokens == 1000 + 2000 + 40000
+    argon = u.per_model["gemini-4-argon"]
+    assert (argon.input_tokens, argon.output_tokens, argon.cache_read_input_tokens) == (5500, 750, 43000)
+    # 裁剪的提问取 19.3.1 副本，不出乱码
+    assert antigravity_reader.read_user_messages(db) == ["帮我改一下"]
+
+    sloc, has_sig = antigravity_reader.session_loc_full(db)
+    assert has_sig is True
+    # 补回的裁剪编辑 +2（b.py）、write +2、成功 edit +1（b→b,c 行级差分）；失败编辑（+3）不回放
+    assert sloc.added == 2 + 2 + 1
+    assert sloc.deleted == 0
+    assert sloc.file_edit_counts == {r"C:\t\b.py": 1, r"C:\t\a.py": 2}
+
+
+def test_loc_waits_for_result_and_pairs_in_order_without_call_echo(tmp_path: Path):
+    """结果步骤缺字段 5.4（旧格式）时按调用顺序配对；无结果的尾部调用不回放（#32）。"""
+    w1 = {"Path": r"C:\t\a.py", "Content": "1\n"}
+    w2 = {"Path": r"C:\t\b.py", "Content": "1\n2\n"}
+    w3 = {"Path": r"C:\t\c.py", "Content": "1\n2\n3\n"}
+    db = _build_db(tmp_path / "conversations" / "s.db", [], [
+        (15, 3, _multi_call_step([("c1", "write_file", w1), ("c2", "write_file", w2)])),
+        (132, 3, _make_tool_result_step_bytes("ok")),
+        (132, 7, _make_tool_result_step_bytes("failed")),
+        (15, 3, _multi_call_step([("c3", "write_file", w3)])),
+    ])
+    sloc, _ = antigravity_reader.session_loc_full(db)
+    assert sloc.file_edit_counts == {r"C:\t\a.py": 1}
+    assert sloc.added == 1

@@ -2421,9 +2421,9 @@ class ModelCompareView:
                                font=theme.FONT_UI_SMALL, anchor="w")
             sub_lbl.pack(anchor="w", padx=12, pady=(0, 8))
 
-            price_tip = _model_price_tip(mc)
-            for w in (cell, row0, name_lbl, sub_lbl):
-                Tooltip(w, price_tip)
+            tip = Tooltip(cell, _model_price_tip(mc))
+            for w in (row0, name_lbl, sub_lbl):
+                tip.bind_widget(w)
 
     def _build_group(self, group) -> None:
         """Build one per-model metric group from a metric_defs.Group (SSOT)."""

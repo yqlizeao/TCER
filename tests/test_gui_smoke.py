@@ -2073,3 +2073,29 @@ def test_card_resize_fast_without_redundant_pil(root):
         c.frame.destroy()
     container.destroy()
 
+
+
+def test_tooltip_only_one_visible_for_nested_widgets(root):
+    """嵌套部件各挂 Tooltip：指针跨过重合边界父子同时 <Enter>，只许一个浮窗。"""
+    from tcer.gui.widgets import Tooltip
+
+    cell = tk.Frame(root)
+    cell.pack()
+    row = tk.Frame(cell)
+    row.pack()
+    lbl = tk.Label(row, text="Gemini 4 Argon")
+    lbl.pack()
+    tips = [Tooltip(w, "price") for w in (cell, row, lbl)]
+    root.update()
+    try:
+        for t in tips[1:]:
+            t._show()
+            t._spawn()
+        assert sum(1 for t in tips if t.tip is not None) == 1
+        assert Tooltip._active is tips[-1]
+        tips[-1]._hide()
+        assert Tooltip._active is None
+    finally:
+        for t in tips:
+            t._hide()
+        cell.destroy()

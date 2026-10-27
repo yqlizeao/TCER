@@ -961,6 +961,12 @@ def _scan_session_uncached(
                     elif item_type == "server_tool_use":
                         # MCP 服务端工具（2.1.2xx+）：与 tool_use 同口径进
                         # tool_calls/tool_ops（调用在服务端执行，仍是工具行为）。
+                        # 重发去重与 tool_use 同族（srvtoolu_ 与 toolu_ id 不冲突）。
+                        stid = item.get("id")
+                        if isinstance(stid, str) and stid:
+                            if stid in seen_tool_uses:
+                                continue
+                            seen_tool_uses.add(stid)
                         st_name = item.get("name")
                         if isinstance(st_name, str) and st_name:
                             u.tool_calls[st_name] = u.tool_calls.get(st_name, 0) + 1

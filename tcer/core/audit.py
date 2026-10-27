@@ -976,6 +976,27 @@ def format_report(
     return "\n".join(lines)
 
 
+def _coverage_main(args) -> int:
+    """``--coverage``：原始数据普查 + 登记表分类 + 守恒检查（见 core/coverage.py）。"""
+    from tcer.core import coverage
+    if args.source not in ("all", "claude"):
+        print(f"--coverage 暂只支持 claude（收到 --source {args.source}）", file=sys.stderr)
+        return 2
+    rep = coverage.claude_coverage()
+    if args.quiet:
+        print(f"coverage [claude] {'PASS' if rep.ok else 'FAIL'} · 未知/异常 {len(rep.issues)} · "
+              f"失败检查 {len(rep.failed_checks)} · 最高版本 {rep.max_version}")
+    else:
+        print(coverage.format_report(rep, verbose=args.verbose))
+    if args.json:
+        blob = json.dumps(coverage.report_dict(rep), indent=2, ensure_ascii=False)
+        if args.json == "-":
+            print(blob)
+        else:
+            Path(args.json).write_text(blob, encoding="utf-8")
+    return 0 if rep.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="python -m tcer.audit",
@@ -1028,7 +1049,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="CI preset: --all-projects --skip-empty --top 1 --no-loc -q",
     )
+    p.add_argument(
+        "--coverage",
+        action="store_true",
+        help="Raw-data coverage & conservation audit (registry: handled / ignored / unknown); "
+             "currently Claude only",
+    )
     args = p.parse_args(argv)
+
+    if args.coverage:
+        return _coverage_main(args)
 
     if args.ci:
         args.all_projects = True

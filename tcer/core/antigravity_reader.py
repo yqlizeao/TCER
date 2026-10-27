@@ -1,6 +1,8 @@
 """Google Antigravity CLI (agy) local-session reader.
 
-Antigravity CLI stores sessions under ``~/.gemini/antigravity-cli``:
+Antigravity CLI stores sessions under ``~/.gemini/antigravity-cli`` (cc-switch isolated
+terminals use ``~/.cc-switch/agy/<provider_id>/antigravity-cli`` with the same layout;
+all roots are merged by workspace, see :func:`tcer.core.paths.antigravity_roots`):
   * ``conversation_summaries.db``: SQLite database cataloging all conversations,
     their workspace URIs (``workspace_uris``, e.g. ``["file:///C:/GitHub/TCER"]``),
     step counts, last modified timestamps, and title/preview texts.
@@ -14,7 +16,12 @@ Antigravity CLI stores sessions under ``~/.gemini/antigravity-cli``:
       * step_type == 14: User input (prompts).
       * step_type == 15: Assistant turns / tool calls (``write_to_file``,
         ``replace_file_content``, ``view_file``, ``run_command``, etc.).
-      * step_type == 132: Tool execution results and exit codes.
+      * step_type == 132: Tool execution results and exit codes; field 5.4 repeats the
+        originating call (call_id / tool name / args, byte-identical to step 15).
+      * step_type == 23: Context compaction (checkpoint summary). Its LLM usage lives
+        only in step metadata field 28.2 and is NOT mirrored into ``gen_metadata``.
+      * step status (field 4): 3 = done, 5 = done but payload pruned (step 15 loses
+        its tool calls, step 14 keeps only the 19.3.1 copy of the prompt), 7 = failed.
 
 This module implements a zero-dependency, pure Python protobuf wire format decoder
 to parse Antigravity's SQLite databases into TCER's canonical models (``TokenUsage``,
@@ -39,7 +46,7 @@ from tcer.core.parse_util import (
     is_correction as _is_correction,
     is_slash_command as _is_slash_command,
 )
-from tcer.core.paths import antigravity_conversations_dir, antigravity_dir
+from tcer.core.paths import antigravity_conversations_dir, antigravity_roots
 
 # Antigravity tool name -> TCER canonical tool name
 _ANTIGRAVITY_TOOL_MAP = {
@@ -50,7 +57,6 @@ _ANTIGRAVITY_TOOL_MAP = {
     "replace_file_content": "Edit",
     "edit_file": "Edit",
     "run_command": "Bash",
-    "manage_task": "Task",
     "search_web": "WebSearch",
     "read_url_content": "WebFetch",
     "ask_question": "Ask",
@@ -243,6 +249,12 @@ def _extract_user_text(payload: bytes | None) -> str:
         txt = _find_field(sub_fields, 2)
         if isinstance(txt, bytes):
             return txt.decode("utf-8", errors="ignore").strip()
+        # status 5（payload 被裁剪）只剩 19.3.1 副本；未裁剪时二者逐字相同
+        f3 = _find_field(sub_fields, 3)
+        if isinstance(f3, bytes):
+            txt = _find_field(_parse_proto_fields(f3), 1)
+            if isinstance(txt, bytes):
+                return txt.decode("utf-8", errors="ignore").strip()
 
     # Fallback: scan length-delimited fields for non-proto plain text
     for _, wt, val in fields:
@@ -251,9 +263,11 @@ def _extract_user_text(payload: bytes | None) -> str:
             for _, swt, sval in sub:
                 if swt == 2 and isinstance(sval, bytes):
                     try:
-                        s = sval.decode("utf-8", errors="ignore").strip()
+                        # 严格解码 + 拒控制字符：宽松解码会把 protobuf 片段当成提问正文
+                        s = sval.decode("utf-8").strip()
                         if (
                             len(s) > 1
+                            and not any(ord(ch) < 32 and ch not in "\n\r\t" for ch in s)
                             and not s.startswith("{")
                             and not s.startswith("type.googleapis.com")
                             and not s.startswith("file:///")
@@ -264,8 +278,92 @@ def _extract_user_text(payload: bytes | None) -> str:
     return ""
 
 
+def _extract_tool_calls(payload: bytes | None) -> list[tuple[str, str, str]]:
+    """All ``(tool_name, tool_args_json, call_id)`` of a step_type == 15 payload.
+
+    Field 20 repeats field 7 once per call when the model issues parallel tool
+    calls in one turn; reading only the first undercounts tools and LOC.
+    """
+    if not payload:
+        return []
+    f20 = _find_field(_parse_proto_fields(payload), 20)
+    if not isinstance(f20, bytes):
+        return []
+    out: list[tuple[str, str, str]] = []
+    for fn, wt, f7 in _parse_proto_fields(f20):
+        if fn != 7 or wt != 2 or not isinstance(f7, bytes):
+            continue
+        sf7 = _parse_proto_fields(f7)
+        name = _bstr(_find_field(sf7, 2))
+        if name:
+            out.append((name, _bstr(_find_field(sf7, 3)), _bstr(_find_field(sf7, 1))))
+    return out
+
+
+def _extract_result_call(payload: bytes | None) -> tuple[str, str, str]:
+    """``(tool_name, tool_args_json, call_id)`` echoed in a step_type == 132 payload (field 5.4).
+
+    Survives payload pruning (status 5) that empties the originating step 15.
+    """
+    if not payload:
+        return ("", "", "")
+    f5 = _find_field(_parse_proto_fields(payload), 5)
+    if not isinstance(f5, bytes):
+        return ("", "", "")
+    f4 = _find_field(_parse_proto_fields(f5), 4)
+    if not isinstance(f4, bytes):
+        return ("", "", "")
+    sf = _parse_proto_fields(f4)
+    return (_bstr(_find_field(sf, 2)), _bstr(_find_field(sf, 3)), _bstr(_find_field(sf, 1)))
+
+
+def _usage_fields(blob) -> tuple[int, int, int, int, str]:
+    """``(uncached_input, total_output, cached_input, reasoning, response_id)`` of a usage blob."""
+    if not isinstance(blob, bytes):
+        return (0, 0, 0, 0, "")
+    uf = _parse_proto_fields(blob)
+
+    def _i(n: int) -> int:
+        v = _find_field(uf, n)
+        return v if isinstance(v, int) else 0
+
+    return (_i(2), _i(3), _i(5), _i(9), _bstr(_find_field(uf, 7)))
+
+
+def _gen_response_id(data: bytes | None) -> str:
+    """Response id (usage field 7) of a ``gen_metadata`` row."""
+    if not data:
+        return ""
+    inner = _find_field(_parse_proto_fields(data), 1)
+    if not isinstance(inner, bytes):
+        return ""
+    return _usage_fields(_find_field(_parse_proto_fields(inner), 4))[4]
+
+
+def _compaction_usage(payload: bytes | None) -> tuple[int, int, int, int, str]:
+    """Usage of a step_type == 23 compaction call (step metadata field 5.28.2)."""
+    if not payload:
+        return (0, 0, 0, 0, "")
+    f5 = _find_field(_parse_proto_fields(payload), 5)
+    if not isinstance(f5, bytes):
+        return (0, 0, 0, 0, "")
+    f28 = _find_field(_parse_proto_fields(f5), 28)
+    if not isinstance(f28, bytes):
+        return (0, 0, 0, 0, "")
+    return _usage_fields(_find_field(_parse_proto_fields(f28), 2))
+
+
+def _bstr(b) -> str:
+    return b.decode("utf-8", errors="ignore") if isinstance(b, bytes) else ""
+
+
+def _result_ok(status: int, exit_code: int) -> bool:
+    """Tool result succeeded: status 0/3 (done) or 5 (done, payload pruned) and exit code 0."""
+    return exit_code == 0 and status in (0, 3, 5)
+
+
 def _extract_tool_call(payload: bytes | None) -> tuple[str, str, str]:
-    """Extract (tool_name, tool_args_json, call_id) from a step_type == 15 payload."""
+    """Extract the first (tool_name, tool_args_json, call_id) from a step_type == 15 payload."""
     if not payload:
         return ("", "", "")
     fields = _parse_proto_fields(payload)
@@ -348,19 +446,14 @@ def _connect_ro(path: Path | str) -> sqlite3.Connection:
 # Project Discovery
 # --------------------------------------------------------------------------- #
 
-def list_project_refs() -> list[ProjectRef]:
-    """Enumerate Antigravity projects by grouping conversations by workspace."""
-    base_dir = antigravity_dir()
-    if not base_dir.is_dir():
-        return []
+def _root_entries(root: Path) -> list[tuple[str, list[str]]]:
+    """``(conversation_id, [normalized_workspace, ...])`` for one data root, newest first.
 
-    summaries_db = base_dir / "conversation_summaries.db"
-    conv_dir = antigravity_conversations_dir()
-    if not conv_dir.is_dir() and not summaries_db.is_file():
-        return []
-
-    workspace_groups: dict[str, list[str]] = {}  # norm_workspace -> [conv_id, ...]
-
+    Prefers ``conversation_summaries.db``; falls back to scanning each session db's
+    ``trajectory_metadata_blob`` when the catalog is missing or carries no workspaces.
+    """
+    entries: list[tuple[str, list[str]]] = []
+    summaries_db = root / "conversation_summaries.db"
     if summaries_db.is_file():
         try:
             with _connect_ro(summaries_db) as conn:
@@ -376,48 +469,92 @@ def list_project_refs() -> list[ProjectRef]:
                         uris = json.loads(uris_raw)
                     except Exception:
                         uris = [uris_raw]
+                    wss: list[str] = []
                     for u in uris:
                         ws = _normalize_workspace_uri(u)
-                        if ws:
-                            workspace_groups.setdefault(ws, []).append(cid)
+                        if ws and ws not in wss:
+                            wss.append(ws)
+                    if wss:
+                        entries.append((cid, wss))
         except Exception:
             pass
+    if entries:
+        return entries
 
-    # If summaries_db is missing or empty, fallback to inspecting individual .db files
-    if not workspace_groups and conv_dir.is_dir():
-        for db_file in conv_dir.glob("*.db"):
-            cid = db_file.stem
+    conv_dir = root / "conversations"
+    if not conv_dir.is_dir():
+        return entries
+    for db_file in sorted(conv_dir.glob("*.db"), key=lambda f: f.stat().st_mtime, reverse=True):
+        try:
+            with _connect_ro(db_file) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT data FROM trajectory_metadata_blob WHERE id='main'")
+                row = cur.fetchone()
+                if row and row[0]:
+                    # Quick extract file:///... from bytes
+                    m = re.search(rb"file:///[^\x00-\x1f\x7f-\xff]+", row[0])
+                    if m:
+                        ws = _normalize_workspace_uri(m.group(0).decode("utf-8", errors="ignore"))
+                        if ws:
+                            entries.append((db_file.stem, [ws]))
+        except Exception:
+            continue
+    return entries
+
+
+def _workspace_sessions() -> dict[str, list[Path]]:
+    """Group session db files from every Antigravity root by normalized workspace.
+
+    Roots = ``~/.gemini/antigravity-cli`` + cc-switch isolated profiles
+    (:func:`tcer.core.paths.antigravity_roots`). The same workspace across roots
+    merges into one group. A conversation id present in several roots (copied
+    profile) is counted once -- the most recently modified file wins.
+    """
+    entries: list[tuple[str, list[str]]] = []
+    best: dict[str, tuple[int, Path]] = {}
+    for root in antigravity_roots():
+        conv_dir = root / "conversations"
+        for cid, wss in _root_entries(root):
+            entries.append((cid, wss))
+            p = conv_dir / f"{cid}.db"
             try:
-                with _connect_ro(db_file) as conn:
-                    cur = conn.cursor()
-                    cur.execute("SELECT data FROM trajectory_metadata_blob WHERE id='main'")
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        # Quick extract file:///... from bytes
-                        m = re.search(rb"file:///[^\x00-\x1f\x7f-\xff]+", row[0])
-                        if m:
-                            ws = _normalize_workspace_uri(m.group(0).decode("utf-8", errors="ignore"))
-                            if ws:
-                                workspace_groups.setdefault(ws, []).append(cid)
-            except Exception:
+                mt = p.stat().st_mtime_ns
+            except OSError:
                 continue
+            if not p.is_file():
+                continue
+            prev = best.get(cid)
+            if prev is None or mt > prev[0]:
+                best[cid] = (mt, p)
 
+    groups: dict[str, list[Path]] = {}
+    for cid, wss in entries:
+        chosen = best.get(cid)
+        for ws in wss:
+            lst = groups.setdefault(ws, [])
+            if chosen is not None and chosen[1] not in lst:
+                lst.append(chosen[1])
+    return groups
+
+
+def list_project_refs() -> list[ProjectRef]:
+    """Enumerate Antigravity projects by grouping conversations by workspace (across all roots)."""
     refs: list[ProjectRef] = []
-    for ws, cids in workspace_groups.items():
+    for ws, paths in _workspace_sessions().items():
         disp = _project_display_name(ws)
-        s_paths = tuple(conv_dir / f"{cid}.db" for cid in cids if (conv_dir / f"{cid}.db").is_file())
         refs.append(
             ProjectRef(
                 source="antigravity",
                 key=disp,
                 display_name=disp,
                 cwd=ws,
-                path=conv_dir,
-                session_paths=s_paths,
+                path=paths[0].parent if paths else antigravity_conversations_dir(),
+                session_paths=tuple(paths),
             )
         )
 
     return sorted(refs, key=lambda r: r.display_name.lower())
+
 
 
 def resolve_project(project: str) -> ProjectRef | None:
@@ -445,61 +582,12 @@ def discover_sessions(project: str | ProjectRef) -> list[Path]:
     else:
         ref = project
 
-    conv_dir = antigravity_conversations_dir()
-    if not conv_dir.is_dir():
-        return []
-
     if ref.session_paths:
         return [p for p in ref.session_paths if p.is_file()]
 
-    summaries_db = antigravity_dir() / "conversation_summaries.db"
-    cids: list[str] = []
-    target_ws = ref.cwd or ""
+    return [p for p in _workspace_sessions().get(ref.cwd or "", []) if p.is_file()]
 
-    if summaries_db.is_file():
-        try:
-            with _connect_ro(summaries_db) as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT conversation_id, workspace_uris FROM conversation_summaries "
-                    "ORDER BY last_modified_time DESC"
-                )
-                for cid, uris_raw in cur.fetchall():
-                    if not uris_raw:
-                        continue
-                    try:
-                        uris = json.loads(uris_raw)
-                    except Exception:
-                        uris = [uris_raw]
-                    for u in uris:
-                        if _normalize_workspace_uri(u) == target_ws:
-                            cids.append(cid)
-                            break
-        except Exception:
-            pass
 
-    res: list[Path] = []
-    if cids:
-        for cid in cids:
-            p = conv_dir / f"{cid}.db"
-            if p.is_file():
-                res.append(p)
-    else:
-        # Fallback: check each db file in conv_dir
-        for db_file in sorted(conv_dir.glob("*.db"), key=lambda f: f.stat().st_mtime, reverse=True):
-            try:
-                with _connect_ro(db_file) as conn:
-                    cur = conn.cursor()
-                    cur.execute("SELECT data FROM trajectory_metadata_blob WHERE id='main'")
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        m = re.search(rb"file:///[^\x00-\x1f\x7f-\xff]+", row[0])
-                        if m and _normalize_workspace_uri(m.group(0).decode("utf-8", errors="ignore")) == target_ws:
-                            res.append(db_file)
-            except Exception:
-                continue
-
-    return res
 
 
 # --------------------------------------------------------------------------- #
@@ -574,11 +662,15 @@ def aggregate_usage(
             cur.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC")
             gen_rows = cur.fetchall()
             decoded_gens = []
+            gen_ids: set[str] = set()
             for _, data in gen_rows:
                 if cancel_check:
                     cancel_check()
                 if not data:
                     continue
+                rid = _gen_response_id(data)
+                if rid:
+                    gen_ids.add(rid)
                 model, uncached_in, total_out, cached_in, reasoning = _decode_gen_metadata(data)
                 total_in = uncached_in + cached_in
                 if total_in == 0 and total_out == 0:
@@ -616,6 +708,23 @@ def aggregate_usage(
             # turn 0-based（与其余数据源一致；llm_prompts 里程碑提取与
             # ground_dynamics_user_turns 均按 0-based 键消费 turn_stats）
             current_turn = -1
+            seen_calls: set[str] = set()
+
+            def _record_call(name: str, args_json: str) -> None:
+                canon_tool = _canon_tool(name, args_json)
+                u.tool_calls[canon_tool] = u.tool_calls.get(canon_tool, 0) + 1
+                # Extract file path hint for tool_ops
+                fp_hint = ""
+                if args_json:
+                    try:
+                        args = json.loads(args_json)
+                        fp_hint = _arg(
+                            args, "TargetFile", "AbsolutePath", "Path",
+                            "file_path", "path",
+                        )
+                    except Exception:
+                        pass
+                u.tool_ops.append(ToolOp(max(current_turn, 0), canon_tool, fp_hint))
 
             for _, stype, status, meta, payload in step_rows:
                 if cancel_check:
@@ -642,43 +751,64 @@ def aggregate_usage(
                 elif stype == 15:  # Assistant turn / tool call
                     current_turn += 1
                     u.assistant_msgs += 1
-                    tool_name, tool_args_json, _ = _extract_tool_call(payload)
-                    t_calls = 0
-                    if tool_name:
-                        t_calls = 1
-                        canon_tool = _canon_tool(tool_name, tool_args_json)
-                        u.tool_calls[canon_tool] = u.tool_calls.get(canon_tool, 0) + 1
-                        # Extract file path hint for tool_ops
-                        fp_hint = ""
-                        if tool_args_json:
-                            try:
-                                args = json.loads(tool_args_json)
-                                fp_hint = _arg(
-                                    args, "TargetFile", "AbsolutePath", "Path",
-                                    "file_path", "path",
-                                )
-                            except Exception:
-                                pass
-                        u.tool_ops.append(ToolOp(current_turn, canon_tool, fp_hint))
+                    # 并行工具调用：字段 20 下多个字段 7，逐个计
+                    calls = _extract_tool_calls(payload)
+                    for tool_name, tool_args_json, call_id in calls:
+                        if call_id:
+                            seen_calls.add(call_id)
+                        _record_call(tool_name, tool_args_json)
 
                     # Add turn stat entry
                     u.turn_stats.append(
                         TurnStat(
                             turn=current_turn,
                             ts=ts_ms,
-                            tool_calls=t_calls,
+                            tool_calls=len(calls),
                             errors=0,
                             user_turn=u.user_msgs if u.user_msgs > 0 else 1,
                         )
                     )
 
                 elif stype == 132:  # Tool result
+                    # status 5 裁剪掉了 step 15 的调用体，结果步骤字段 5.4 仍带原调用：补计
+                    r_name, r_args, r_cid = _extract_result_call(payload)
+                    if r_name and r_cid and r_cid not in seen_calls:
+                        seen_calls.add(r_cid)
+                        _record_call(r_name, r_args)
+                        if u.turn_stats:
+                            u.turn_stats[-1].tool_calls += 1
                     _, exit_code = _extract_tool_result(payload)
-                    is_err = (exit_code != 0) or (status != 3 and status != 0)
-                    if is_err:
+                    if not _result_ok(status, exit_code):
                         u.tool_errors += 1
                         if u.turn_stats:
                             u.turn_stats[-1].errors += 1
+
+                elif stype == 23:  # Context compaction (checkpoint summary)
+                    u.compaction_count += 1
+                    u.compaction_turns.append(current_turn + 1)
+                    # 压缩调用的 usage 只在步骤元数据里、不进 gen_metadata（按响应 id
+                    # 去重以防上游日后补写）；记录不带模型，按前一次生成的模型计价（推断）。
+                    c_unc, c_out, c_cached, c_reas, c_rid = _compaction_usage(payload)
+                    if (c_unc or c_out or c_cached) and not (c_rid and c_rid in gen_ids):
+                        if c_rid:
+                            gen_ids.add(c_rid)
+                        u.input_tokens += c_unc
+                        u.output_tokens += c_out
+                        u.cache_read_input_tokens += c_cached
+                        u.reasoning_output_tokens += c_reas
+                        u.peak_input_tokens = max(u.peak_input_tokens, c_unc + c_cached)
+                        prev_model = ""
+                        for gi in range(min(current_turn, len(decoded_gens) - 1), -1, -1):
+                            if decoded_gens[gi][0]:
+                                prev_model = decoded_gens[gi][0]
+                                break
+                        if not prev_model:
+                            prev_model = next((g[0] for g in decoded_gens if g[0]), "")
+                        if prev_model:
+                            mu = u.bucket(pricing.normalize(prev_model))
+                            mu.input_tokens += c_unc
+                            mu.output_tokens += c_out
+                            mu.cache_read_input_tokens += c_cached
 
             # 3. Map decoded generation tokens to turn_stats
             for i, (m, u_in, t_out, c_in, _) in enumerate(decoded_gens):
@@ -714,6 +844,11 @@ def session_loc_full(
 ) -> tuple[loc.SessionLoc, bool]:
     """Replay file-modifying tools to compute git-free LOC and rework metrics.
 
+    LOC 按结果裁决（CLAUDE.md #32）：编辑类调用等到 step 132 结果且成功
+    （status 0/3/5）才回放；status 7 的失败编辑（实测 "Could not successfully
+    apply"）不计。调用体优先取结果字段 5.4（裁剪后的 status 5 步骤只剩这份），
+    缺失时按 step 15 调用的出现顺序配对（实测结果严格按调用顺序到达）。
+
     Returns (SessionLoc, has_loc_signal).
     """
     acc = loc._LocAccumulator()
@@ -726,67 +861,69 @@ def session_loc_full(
         with _connect_ro(path) as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT idx, step_type, step_payload FROM steps ORDER BY idx ASC"
+                "SELECT idx, step_type, status, step_payload FROM steps ORDER BY idx ASC"
             )
             step_rows = cur.fetchall()
 
             # turn 0-based（与 aggregate_usage 同口径，turn_net_locs 键空间一致）
             current_turn = -1
-            for _, stype, payload in step_rows:
+            pending: list[tuple[str, str, str]] = []  # (name, args, call_id) awaiting result
+            for _, stype, status, payload in step_rows:
                 if cancel_check:
                     cancel_check()
 
                 if stype == 15:
                     current_turn += 1
-                    tool_name, tool_args_json, _ = _extract_tool_call(payload)
-                    if not tool_name:
-                        continue
+                    pending.extend(_extract_tool_calls(payload))
+                    continue
+                if stype != 132:
+                    continue
 
-                    canon_tool = _ANTIGRAVITY_TOOL_MAP.get(tool_name, tool_name)
+                tool_name, tool_args_json, call_id = _extract_result_call(payload)
+                if tool_name:
+                    pending = [c for c in pending if not (call_id and c[2] == call_id)]
+                elif pending:
+                    tool_name, tool_args_json, call_id = pending.pop(0)
+                if not tool_name or status not in (0, 3, 5):
+                    continue
 
-                    if canon_tool == "Write":
-                        try:
-                            args = json.loads(tool_args_json)
-                        except Exception:
-                            args = {}
-                        # write_to_file: TargetFile/CodeContent; write_file: Path/Content
-                        target = _arg(args, "TargetFile", "target_file", "Path", "file_path")
-                        content = _arg(
-                            args, "CodeContent", "code_content", "Content", "content"
-                        )
-                        if target:
-                            has_signal = True
-                            acc.on_tool_use(
-                                "Write",
-                                {"file_path": target, "content": content},
-                                turn=current_turn,
-                            )
-
-                    elif canon_tool == "Edit":
-                        try:
-                            args = json.loads(tool_args_json)
-                        except Exception:
-                            args = {}
-                        # replace_file_content: TargetFile/TargetContent/ReplacementContent;
-                        # edit_file: Path/Target/Replacement
-                        target = _arg(args, "TargetFile", "target_file", "Path", "file_path")
-                        old_content = _arg(
-                            args, "TargetContent", "target_content", "Target"
-                        )
-                        new_content = _arg(
-                            args, "ReplacementContent", "replacement_content", "Replacement"
-                        )
-                        if target:
-                            has_signal = True
-                            acc.on_tool_use(
-                                "Edit",
-                                {
-                                    "file_path": target,
-                                    "old_string": old_content,
-                                    "new_string": new_content,
-                                },
-                                turn=current_turn,
-                            )
+                canon_tool = _ANTIGRAVITY_TOOL_MAP.get(tool_name, tool_name)
+                if canon_tool not in ("Write", "Edit"):
+                    continue
+                try:
+                    args = json.loads(tool_args_json)
+                except Exception:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                target = _arg(args, "TargetFile", "target_file", "Path", "file_path")
+                if not target:
+                    continue
+                has_signal = True
+                if canon_tool == "Write":
+                    # write_to_file: TargetFile/CodeContent; write_file: Path/Content
+                    content = _arg(args, "CodeContent", "code_content", "Content", "content")
+                    acc.on_tool_use(
+                        "Write",
+                        {"file_path": target, "content": content},
+                        turn=current_turn,
+                    )
+                else:
+                    # replace_file_content: TargetFile/TargetContent/ReplacementContent;
+                    # edit_file: Path/Target/Replacement
+                    old_content = _arg(args, "TargetContent", "target_content", "Target")
+                    new_content = _arg(
+                        args, "ReplacementContent", "replacement_content", "Replacement"
+                    )
+                    acc.on_tool_use(
+                        "Edit",
+                        {
+                            "file_path": target,
+                            "old_string": old_content,
+                            "new_string": new_content,
+                        },
+                        turn=current_turn,
+                    )
 
     except Exception:
         pass

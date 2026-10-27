@@ -29,6 +29,7 @@ python -m tcer.audit --source all --project TCER --json audit-out.json
 python -m tcer.audit --all-projects --top 2 --no-loc   # 批跑全部项目（可加 --source）
 python -m tcer.audit --all-projects --skip-empty --top 1 -q --summary-json -
 python -m tcer.audit --ci --summary-json audit-summary.json   # 等价 CI 预设
+python -m tcer.audit --coverage            # 覆盖与守恒审计：原始数据逐值普查 vs 登记表（暂仅 Claude）
 # 退出码 0/1；cost_sum_per_model 校验逐模型成本加总
 ```
 
@@ -109,11 +110,11 @@ TCER/
 28. **`tool_variants`**：Skill/Agent 身份补录，仅 Claude 源；MCP 键自带服务器名。[data-format.md#tool-variants](doc/data-format.md#tool-variants)。
 31. **Pi 格式**：omp 的上游原生，`pi_reader` 是薄壳复用 omp 解析层；reasoning 是 output 子集，**不**再加进 output。[data-format.md#pi](doc/data-format.md#pi)。
 32. **LOC 按结果裁决**：编辑类调用等 tool_result 且**非 `is_error`** 才回放；`originalFile` 修正延迟一行；replace_all 少计是已知边界，由「LOC 可信度」暴露。[data-format.md#loc-outcome](doc/data-format.md#loc-outcome)。
-33. **数据源版本漂移基线**（2026-10-22）：Claude 2.1.307 / Codex 0.163 / OpenCode 1.19.4 / omp 18.10.4 / Antigravity / WorkBuddy（schema 未经上游核实）；升级先比对基线再改。[data-format.md#version-baseline](doc/data-format.md#version-baseline)。
+33. **数据源版本漂移基线**（2026-10-22；Claude 2026-10-27 起由覆盖审计 `--coverage` 守护，登记表外的新类型/字段/取值一律报「未知」，见 [architecture.md#coverage-audit](doc/architecture.md#coverage-audit)）：Claude 2.1.311 / Codex 0.163 / OpenCode 1.19.4 / omp 18.10.4 / Antigravity / WorkBuddy（schema 未经上游核实）；升级先比对基线再改。[data-format.md#version-baseline](doc/data-format.md#version-baseline)。
 
 ### 评分、指标族与基准
 
-42. **Antigravity / WorkBuddy 数据源**：Antigravity 读 SQLite + 零依赖 Protobuf wire 解码（只读 `mode=ro` 连接，避免干扰运行中的 CLI）；WorkBuddy 无官方 schema（字段假设未经上游核实），按会话触及的业务路径提取最深共同工程根做项目聚合。[data-format.md#antigravity](doc/data-format.md#antigravity) · [data-format.md#workbuddy](doc/data-format.md#workbuddy)。
+42. **Antigravity / WorkBuddy 数据源**：Antigravity 读 SQLite + 零依赖 Protobuf wire 解码（只读 `mode=ro` 连接，避免干扰运行中的 CLI），多根 = `~/.gemini/antigravity-cli` + cc-switch 隔离终端 `~/.cc-switch/agy/<provider_id>/antigravity-cli`，按工作区合并成一卡、同会话 id 跨根只计一次；并行调用逐个计、LOC 按结果（step 132 字段 5.4 回显）裁决、压缩 step 23 的 usage 不在 gen_metadata 须另计、`manage_task` 是后台命令管理非子代理；WorkBuddy 无官方 schema（字段假设未经上游核实），按会话触及的业务路径提取最深共同工程根做项目聚合。[data-format.md#antigravity](doc/data-format.md#antigravity) · [data-format.md#workbuddy](doc/data-format.md#workbuddy)。
 43. **洞察引擎 `core/insights.py`**：纯离线确定性规则（不调 LLM），`session_insights`/`project_insights` 产出亮点/拖累/建议；只在指标确有数据时判断，不臆测。[metrics.md#insights](doc/metrics.md#insights)。
 
 34. **新指标族**：压缩代价、自报成本偏差、LOC 可信度、重试循环、单回合成本、人机时间、分段效率、项目级分析（热点文件/模型切换/工具画像）。[metrics.md#new-metrics](doc/metrics.md#new-metrics)。

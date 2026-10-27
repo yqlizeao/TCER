@@ -1138,7 +1138,7 @@ _ANTIGRAVITY = _SourceAdapter(
     usage_of=_antigravity_usage_of,
     loc_of=_antigravity_loc_of,
     session_key=lambda ref, f: (antigravity_reader.read_session_meta(f).session_id or f.stem),
-    not_found="antigravity project '{project}' not found under ~/.gemini/antigravity-cli",
+    not_found="antigravity project '{project}' not found under ~/.gemini/antigravity-cli or ~/.cc-switch/agy",
     no_sessions="no antigravity session files for '{name}'",
     no_match="no antigravity session matches '{session}'",
 )

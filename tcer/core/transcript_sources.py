@@ -2060,23 +2060,17 @@ class _OpenCode:
 # Antigravity
 # --------------------------------------------------------------------------- #
 def _agy_extract_tool_calls(agy, payload) -> list[tuple[str, str, str]]:
-    """step 15 payload 字段 20 下可重复出现多个字段 7（单轮并行工具调用）。"""
-    if not payload:
-        return []
-    f20 = agy._find_field(agy._parse_proto_fields(payload), 20)
-    if not isinstance(f20, bytes):
-        return []
-    out: list[tuple[str, str, str]] = []
-    for fn, wt, f7 in agy._parse_proto_fields(f20):
-        if fn != 7 or wt != 2 or not isinstance(f7, bytes):
-            continue
-        sf7 = agy._parse_proto_fields(f7)
-        cid = _agy_str(agy._find_field(sf7, 1))
-        name = _agy_str(agy._find_field(sf7, 2))
-        args = _agy_str(agy._find_field(sf7, 3))
-        if name:
-            out.append((name, args, cid))
-    return out
+    """step 15 payload 字段 20 下可重复出现多个字段 7（单轮并行工具调用）；与统计口径同源。"""
+    return agy._extract_tool_calls(payload)
+
+
+def _agy_make_call(agy, name: str, args_json: str, cid: str) -> ToolCallBlock:
+    canon = agy._canon_tool(name, args_json)
+    try:
+        args = json.loads(args_json) if args_json else None
+    except ValueError:
+        args = None
+    return _agy_call(canon, name, cid, args, args_json)
 
 
 def _agy_build(path: Path, cancel) -> tuple[list[Message], list[str]]:
@@ -2103,8 +2097,8 @@ def _agy_build(path: Path, cancel) -> tuple[list[Message], list[str]]:
         except sqlite3.Error:
             decoded_gens = []
         gen_pos = 0
-        cur.execute("SELECT idx, step_type, metadata, step_payload FROM steps ORDER BY idx ASC")
-        for k, (idx, stype, meta, payload) in enumerate(cur.fetchall()):
+        cur.execute("SELECT idx, step_type, status, metadata, step_payload FROM steps ORDER BY idx ASC")
+        for k, (idx, stype, row_status, meta, payload) in enumerate(cur.fetchall()):
             if k % 256 == 0:
                 _check(cancel)
             sec = agy._decode_timestamp(meta)
@@ -2136,13 +2130,8 @@ def _agy_build(path: Path, cancel) -> tuple[list[Message], list[str]]:
                     blocks.append(TextBlock(said))
                 batch = []
                 for ci, (name, args_json, cid) in enumerate(raw_calls):
-                    canon = agy._canon_tool(name, args_json)
-                    try:
-                        args = json.loads(args_json) if args_json else None
-                    except ValueError:
-                        args = None
                     fallback_id = f"agy-{idx}" if ci == 0 else f"agy-{idx}-{ci}"
-                    call = _agy_call(canon, name, cid or fallback_id, args, args_json)
+                    call = _agy_make_call(agy, name, args_json, cid or fallback_id)
                     calls[call.id] = call
                     batch.append(call)
                     blocks.append(call)
@@ -2150,15 +2139,24 @@ def _agy_build(path: Path, cancel) -> tuple[list[Message], list[str]]:
                     msgs.append(Message("assistant", ts, str(idx), None, False, blocks, g_meta))
             elif stype == 132:
                 out_text, exit_code = agy._extract_tool_result(payload)
-                # 结果 payload 不带 call_id：优先按当前轮并行调用的 FIFO 顺序配对，否则配最近未配对调用
-                target = next((c for c in batch if c.id not in paired), None)
+                # 结果字段 5.4 回显原调用（call_id/名/参数）：按 id 精确配对；
+                # status 5 裁剪掉 step 15 调用体时据此补出调用块
+                r_name, r_args, r_cid = agy._extract_result_call(payload)
+                target = calls.get(r_cid) if r_cid else None
+                if target is None and r_name and r_cid:
+                    target = _agy_make_call(agy, r_name, r_args, r_cid)
+                    calls[target.id] = target
+                    msgs.append(Message("assistant", ts, f"{idx}-call", None, False, [target]))
+                if target is None:
+                    # 旧格式无回显：按当前轮并行调用的 FIFO 顺序配对，否则配最近未配对调用
+                    target = next((c for c in batch if c.id not in paired), None)
                 if target is None:
                     target = next((c for c in reversed(list(calls.values()))
                                    if c.id not in paired), None)
                 cid = target.id if target is not None else ""
                 if target is not None:
                     paired.add(target.id)
-                status = ST_ERROR if exit_code else ST_SUCCESS
+                status = ST_ERROR if (exit_code or not agy._result_ok(row_status, 0)) else ST_SUCCESS
                 msgs.append(Message("tool", ts, str(idx), None, False,
                                     [make_result(cid, status, out_text, exit_code=exit_code)]))
             elif stype == 101:
@@ -2176,7 +2174,7 @@ def _agy_build(path: Path, cancel) -> tuple[list[Message], list[str]]:
                 msgs.append(Message("system", ts, str(idx), None, False,
                                     [make_summary_event(EV_COMPACTION, summ, None) if summ
                                      else EventBlock(EV_COMPACTION, None)]))
-    warnings.append("antigravity：结果步骤无 call_id，按出现顺序配对最近的未配对调用；"
+    warnings.append("antigravity：结果按字段 5.4 回显的 call_id 配对（缺失时按出现顺序）；"
                     "思考文本取自步骤 payload 字段 20.3、助手回复取自 20.1（均为推断）")
     return msgs, warnings
 

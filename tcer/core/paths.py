@@ -279,6 +279,33 @@ def antigravity_conversations_dir() -> Path:
     return antigravity_dir() / "conversations"
 
 
+def _antigravity_env_override() -> bool:
+    return any(os.environ.get(e) for e in ("ANTIGRAVITY_DIR", "ANTIGRAVITY_CLI_DIR", "GEMINI_CLI_DIR"))
+
+
+def antigravity_roots() -> list[Path]:
+    """All Antigravity data roots: the canonical dir plus cc-switch isolated profiles.
+
+    cc-switch's "open terminal with this provider (isolated)" launches agy with a
+    per-provider data dir ``~/.cc-switch/agy/<provider_id>/antigravity-cli`` whose
+    layout is identical to ``~/.gemini/antigravity-cli``. An explicit env override
+    pins a single root (no cc-switch scan). Not cached: a newly launched isolated
+    profile becomes visible on the next refresh.
+    """
+    roots = [antigravity_dir()]
+    if _antigravity_env_override():
+        return roots
+    try:
+        provider_dirs = sorted(p for p in (Path.home() / ".cc-switch" / "agy").iterdir() if p.is_dir())
+    except OSError:
+        provider_dirs = []
+    for p in provider_dirs:
+        cand = p / "antigravity-cli"
+        if cand.is_dir() and cand not in roots:
+            roots.append(cand)
+    return roots
+
+
 def workbuddy_roots() -> list[Path]:
     """Return all existing WorkBuddy / CodeBuddy config/data roots.
 

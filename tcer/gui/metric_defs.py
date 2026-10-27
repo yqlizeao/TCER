@@ -823,7 +823,7 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # usage.server_tool_use，reader 已解析）
     "rate_limit_hits": frozenset({"claude", "codex", "omp"}),
     "task_completion": frozenset({"codex"}),
-    "compactions": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
+    "compactions": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
     "web_searches": frozenset({"claude", "codex", "omp", "pi", "antigravity", "workbuddy"}),
     "image_inputs": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
     # Codex 自 cache_write_input_tokens（input 的子集）起上报缓存写入；
