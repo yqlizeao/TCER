@@ -127,7 +127,7 @@ _SOURCE_DISPLAY = {
 def source_label(source: str | None) -> str:
     """source key → 界面显示名（Claude 兜底；未知源显示原始 key，不假装是 Claude）。"""
     if not source or source == "claude":
-        return "Claude"
+        return "ClaudeCode"
     return _SOURCE_DISPLAY.get(source, source)
 
 
@@ -192,6 +192,65 @@ def ui_icon(master, name: str, *, opacity: float = 1.0, size: int = 16):
         except Exception:
             pass
     return source_icon(master, f"ui-{name}")
+
+def vendor_icon_key(model_or_vendor: str | None) -> str | None:
+    """从模型名或供应商名匹配供应商图标 key（对应 assets/vendor-<key>.png）。"""
+    if not model_or_vendor:
+        return None
+    s = str(model_or_vendor).lower().strip()
+    if any(k in s for k in ("claude", "anthropic")):
+        return "claude"
+    if any(k in s for k in ("gpt", "openai", "o1", "o3", "o4", "codex")):
+        return "openai"
+    if any(k in s for k in ("gemini", "google")):
+        return "gemini"
+    if any(k in s for k in ("deepseek",)):
+        return "deepseek"
+    if any(k in s for k in ("zhipu", "glm", "chatglm")):
+        return "zhipu"
+    if any(k in s for k in ("qwen", "alibaba", "aliyun", "qwq")):
+        return "qwen"
+    if any(k in s for k in ("meta", "llama")):
+        return "meta"
+    if any(k in s for k in ("mistral", "codestral")):
+        return "mistral"
+    if any(k in s for k in ("kimi", "moonshot")):
+        return "kimi"
+    if any(k in s for k in ("minimax", "abab")):
+        return "minimax"
+    if any(k in s for k in ("doubao", "bytedance", "volcengine")):
+        return "doubao"
+    if any(k in s for k in ("grok", "xai")):
+        return "grok"
+    if any(k in s for k in ("hunyuan", "tencent", "hy3", "hy4")):
+        return "hunyuan"
+    if any(k in s for k in ("stepfun", "step")):
+        return "stepfun"
+    if any(k in s for k in ("cohere", "command")):
+        return "cohere"
+    if any(k in s for k in ("meituan", "longcat")):
+        return "meituan"
+    if any(k in s for k in ("xiaomi", "mimo")):
+        return "xiaomi"
+    if any(k in s for k in ("opencode",)):
+        return "opencode"
+    if any(k in s for k in ("antigravity", "agy")):
+        return "antigravity"
+    return None
+
+def vendor_icon(master, model_or_vendor: str | None):
+    """16px AI 供应商 Logo（tk.PhotoImage，模块级缓存防 GC）。
+
+    查 ``assets/vendor-<key>.png``，无对应资源时返回 None，调用方降级到文字。
+    构建期已将 RouteSight 图标预缩至 16×16，运行时纯 Tkinter 零依赖。
+    """
+    key = vendor_icon_key(model_or_vendor)
+    if not key:
+        return None
+    path_vendor = os.path.join(_ASSETS_DIR, f"vendor-{key}.png")
+    if os.path.isfile(path_vendor):
+        return source_icon(master, f"vendor-{key}")
+    return source_icon(master, key)
 
 def project_icon_key(project) -> str:
     """项目卡片的图标 key（对应 ``assets/<key>.png``）。
@@ -788,7 +847,9 @@ class StatusBar:
         self._status_lbl.configure(text=clean_text)
         if "错" in clean_text or "失败" in clean_text:
             dot_color = theme.ERROR
-        elif "中…" in clean_text or "加载" in clean_text or "分析" in clean_text:
+        elif "⚠" in clean_text or "警告" in clean_text:
+            dot_color = theme.WARNING
+        elif "中…" in clean_text or "正在" in clean_text or "计算中" in clean_text or "分析中" in clean_text or "加载中" in clean_text:
             dot_color = theme.WARNING
         else:
             dot_color = theme.SUCCESS
@@ -1067,7 +1128,7 @@ class FilterBar:
         self.source_var = tk.StringVar(value="全部")
         self._source_display_names = {
             "all": "全部",
-            "claude": "Claude",
+            "claude": "ClaudeCode",
             "codex": "Codex",
             "opencode": "OpenCode",
             "omp": "Oh My Pi",
@@ -1112,7 +1173,7 @@ class FilterBar:
                                         bg=theme.PANEL, outline=theme.BORDER_SUBTLE)
         self._src_capsule.pack(side="right", padx=(2, 4))
         self._src_lbl = self._src_capsule
-        Tooltip(self._src_capsule, "切换会话数据来源 (全部 / Claude / Codex / OpenCode / Oh My Pi / Pi / Antigravity / WorkBuddy)")
+        Tooltip(self._src_capsule, "切换会话数据来源 (全部 / ClaudeCode / Codex / OpenCode / Oh My Pi / Pi / Antigravity / WorkBuddy)")
 
         # 2. 紧随来源左侧：时间下拉胶囊
         def _on_time_click(_widget):
@@ -1757,53 +1818,94 @@ class SessionColumn:
         ti_lbl.pack(side="left", fill="x", expand=True)
         fit_label(ti_lbl, format_card_title(title, 200))   # 按像素宽截断加省略号
 
-        # Row 3: 摘要行——左「模型短名 · 时长」，右成本金额
+        # Row 3: 摘要行——左「供应商Logo + 紧凑时长」，右成本金额
         from tcer.core.format import fmt_duration_ms
-        model_name = dominant_model_label(r.usage)
+        from tcer.core import analyze as _analyze, pricing as _pricing
+        model_key = _analyze._dominant_model_key(r.usage) if r.usage else None
+        model_name = _pricing.label(model_key) if model_key else dominant_model_label(r.usage)
+        vendor_name = _pricing.vendor(model_key) if model_key else ""
         dur_ms = getattr(r.usage, "session_duration_ms", 0) or 0
+        if not dur_ms and getattr(r.usage, "ended_at", None) and getattr(r.usage, "started_at", None):
+            dur_ms = max(0, r.usage.ended_at - r.usage.started_at)
         act_ms = getattr(r.usage, "active_duration_ms", None) or 0
-        dur = fmt_duration_ms(dur_ms) if dur_ms else "-"
-        # 卡片摘要行保持极简（模型短名 · 持续时长），避免窄栏拥挤截断
-        sum_parts = [p for p in (model_name, dur) if p and p != "-"]
+        dur_short = fmt_duration_ms(dur_ms, short=True) if dur_ms else ""
+        if dur_short == "-":
+            dur_short = ""
+        dur_full = fmt_duration_ms(dur_ms) if dur_ms else "-"
+
         sum_row = tk.Frame(card.frame, bg=card._bg)
         sum_row.pack(fill="x", padx=6, pady=(1, 3))
         card.track_bg(sum_row)
 
-        # 关键：先 pack 右侧金额（固定宽度优先保证），再 pack 左侧可伸缩摘要，绝不发生金额截断
-        cost_fg = theme.WARNING if r.cost >= 50.0 else theme.FG
+        # 关键：先 pack 右侧金额（固定宽度优先保证），再 pack 左侧，绝不发生金额截断
+        cost_fg = theme.WARNING  # 成本金额常驻警示橙，强化成本意识
         cost_lbl = tk.Label(sum_row, text=f"${r.cost:.2f}", bg=card._bg, fg=cost_fg,
                             font=theme.FONT_VALUE, anchor="e")
         cost_lbl.pack(side="right", padx=(4, 0))
 
-        sum_lbl = tk.Label(sum_row, bg=card._bg, fg=theme.MUTED,
-                           font=theme.FONT_UI_SMALL, anchor="w")
-        sum_lbl.pack(side="left", fill="x", expand=True)
-        fit_label(sum_lbl, " · ".join(sum_parts) or "-")
-        # Tooltip：完整标题 + ID + 详细摘要（回合/LOC/返工在此悬浮可见）
+        # 左侧：AI 供应商 Logo + 紧凑时长（如 19.4h），彻底去除「·」
+        v_img = vendor_icon(card.frame, vendor_name or model_key or model_name)
+        if v_img is not None:
+            v_lbl = tk.Label(sum_row, image=v_img, bg=card._bg, anchor="w")
+            v_lbl.pack(side="left", padx=(0, 4))
+            card.track_bg(v_lbl)
+            card.bind_to(v_lbl)
+            if dur_short:
+                d_lbl = tk.Label(sum_row, text=dur_short, bg=card._bg, fg=theme.MUTED,
+                                 font=theme.FONT_UI_SMALL, anchor="w")
+                d_lbl.pack(side="left")
+                card.track_bg(d_lbl)
+                card.bind_to(d_lbl)
+            else:
+                d_lbl = None
+            sum_widget_for_tip = v_lbl
+        else:
+            # 降级：无 Logo 时显示模型短名与紧凑时长（空格分隔，无「·」）
+            sum_parts = [p for p in (model_name, dur_short) if p]
+            sum_lbl = tk.Label(sum_row, bg=card._bg, fg=theme.MUTED,
+                               font=theme.FONT_UI_SMALL, anchor="w")
+            sum_lbl.pack(side="left", fill="x", expand=True)
+            fit_label(sum_lbl, " ".join(sum_parts) or "-")
+            card.track_bg(sum_lbl)
+            card.bind_to(sum_lbl)
+            d_lbl = None
+            sum_widget_for_tip = sum_lbl
+
+        # Tooltip：完整标题 + ID + 详细摘要（包含完整模型名称、时长、回合/LOC/返工）
         turns = r.usage.assistant_msgs
         net_loc = r.net_loc or 0
         loc_str = f"{net_loc:+,} 行"
         churn = r.churn_ratio or 0.0
         rework_str = ("极少返工" if churn < 0.05
                       else f"{'高' if churn >= 0.20 else ''}返工 {churn*100:.0f}%")
-        timing_str = f"持续 {dur}"
+        timing_str = f"持续 {dur_full}"
         if act_ms > 0 and act_ms < dur_ms * 0.95:
-            timing_str += f"（AI 耗时 {fmt_duration_ms(act_ms)}）"
-        detail = " · ".join(filter(None, [
-            timing_str if dur != "-" else "", f"{turns:,} 回合" if turns else "",
-            loc_str, rework_str]))
+            timing_str += f"（AI 耗时 {fmt_duration_ms(act_ms, short=True)}）"
+
+        detail_items = []
+        if model_name:
+            detail_items.append(f"模型: {model_name}")
+        if dur_full != "-":
+            detail_items.append(timing_str)
+        if turns:
+            detail_items.append(f"{turns:,} 回合")
+        detail_items.append(loc_str)
+        detail_items.append(rework_str)
+        detail = " | ".join(detail_items)
+
         tip_text = (f"{title}\nID: {sid}\n{detail}\n"
                     "双击查看会话详情，右键更多操作")
         Tooltip(card.frame, tip_text)
         Tooltip(ti_lbl, tip_text)
-        Tooltip(sum_lbl, tip_text)
+        Tooltip(sum_widget_for_tip, tip_text)
+        if d_lbl is not None:
+            Tooltip(d_lbl, tip_text)
 
         card.bind_to(row1)
         card.bind_to(t_lbl)
         card.bind_to(row2)
         card.bind_to(ti_lbl)
         card.bind_to(sum_row)
-        card.bind_to(sum_lbl)
         card.bind_to(cost_lbl)
 
         return card
@@ -2014,10 +2116,8 @@ class _GroupState:
 BRIEF_METRIC_KEYS: frozenset[str] = frozenset({
     # G1 会话概况（保留：请求数、开始时间、结束时间、持续时长、模型、工具调用、用户消息）
     "turns", "started", "last_time", "duration", "models", "tools",
-    # G2 Token 用量（保留：总 Token、输入、输出、缓存创建、缓存命中）
-    "total_tokens", "input", "output", "cache_write", "cache_read",
-    # G3 缓存效率（全量保留）
-    "chr", "io_ratio", "caf", "cache_efficiency", "cache_write_ratio", "non_cached_input_ratio",
+    # G2 用量统计（原 Token 用量保留：总 Token、输入、输出、缓存创建、缓存命中；原缓存效率仅保留：缓存命中率）
+    "chr", "total_tokens", "input", "output", "cache_write", "cache_read",
     # G4 代码产出与质量
     # 基础（保留：净增行、写入行、删除行、涉及文件）
     "net_loc", "added", "deleted", "files_touched",
@@ -2025,14 +2125,62 @@ BRIEF_METRIC_KEYS: frozenset[str] = frozenset({
     "read_write_ratio", "edit_ratio", "exploration_ratio", "bash_ratio",
     # 质量（保留：返工率、先读后写率、工具错误率）
     "churn", "read_before_write", "tool_error_rate",
-    # G5 成本分析（保留：总成本、每百万Token成本、千行代码成本）
-    "cost", "cost_per_mt", "cpe",
-    # G6 效率基准（保留：TCER）
-    "tcer",
+    # G5 成本效率（原成本分析保留：总成本、每百万Token成本、千行代码成本；原效率基准保留：TCER）
+    "cost", "cost_per_mt", "cpe", "tcer",
 })
 
+def _metric_panel_groups() -> list[Group]:
+    """为指标看板量身定制的分组布局（仅看板专享，其余视图保持 GROUPS SSOT）：
+
+    1. 原「缓存效率 (G3)」指标合并至「Token用量 (G2)」，组名升级为「用量统计」；
+       「缓存命中率 (chr)」置于「总 Token (total_tokens)」前面；
+    2. 原「效率基准 (G6)」指标合并至「成本分析 (G5)」，组名升级为「成本效率」；
+       不再包含「TCER 基准 (bl_tcer)」指标；
+    3. 看板精简为 4 大业务板块：会话概况 ➔ 用量统计 ➔ 代码产出与质量 ➔ 成本效率。
+    """
+    from .metric_defs import Group as _Group
+    groups_by_id = {g.id: g for g in GROUPS}
+
+    # 1. 用量统计 (G2 + G3)
+    g2 = groups_by_id.get("G2")
+    g3 = groups_by_id.get("G3")
+    if g2 is not None and g3 is not None:
+        chr_m = next((m for m in g3.metrics if m.key == "chr"), None)
+        other_g3 = [m for m in g3.metrics if m.key != "chr"]
+        merged_g2_metrics = ([chr_m] if chr_m else []) + list(g2.metrics) + other_g3
+        merged_g2 = _Group("G2", "用量统计", merged_g2_metrics, subgroups=None)
+    else:
+        merged_g2 = g2
+
+    # 2. 成本效率 (G5 + G6，剔除 bl_tcer)
+    g5 = groups_by_id.get("G5")
+    g6 = groups_by_id.get("G6")
+    if g5 is not None and g6 is not None:
+        g6_metrics = [m for m in g6.metrics if m.key != "bl_tcer"]
+        merged_g5_metrics = list(g5.metrics) + g6_metrics
+        merged_g5 = _Group("G5", "成本效率", merged_g5_metrics, subgroups=None)
+    else:
+        merged_g5 = g5
+
+    panel_groups = []
+    for g in GROUPS:
+        if g.id == "G2":
+            if merged_g2 is not None:
+                panel_groups.append(merged_g2)
+        elif g.id == "G3":
+            continue  # 已并入 G2 用量统计
+        elif g.id == "G5":
+            if merged_g5 is not None:
+                panel_groups.append(merged_g5)
+        elif g.id == "G6":
+            continue  # 已并入 G5 成本效率
+        else:
+            panel_groups.append(g)
+    return panel_groups
+
+
 class MetricPanel:
-    """Right-column tab 1: the G1–G6 metric grid, built from metric_defs.GROUPS."""
+    """Right-column tab 1: the metric grid for G1, G2 (用量统计), G4, G5 (成本效率)."""
 
     def __init__(self, parent, controller) -> None:
         self.controller = controller
@@ -2049,8 +2197,8 @@ class MetricPanel:
         # 顶部概况指示条
         self._build_header_strip()
 
-        # 6 大指标分类 (G1–G6，以 metric_defs.GROUPS 为唯一真理源)
-        for group in GROUPS:
+        # 指标分类网格（仅看板定制：G2/G3 合并为「用量统计」，chr 置于 total_tokens 前）
+        for group in _metric_panel_groups():
             self._build_group(group)
 
     def _build_header_strip(self) -> None:
@@ -2064,11 +2212,23 @@ class MetricPanel:
 
         self._h_title = tk.Label(h, text="待选会话", bg=theme.SURFACE_CARD, fg=theme.FG_WHITE,
                                  font=theme.FONT_UI_BOLD)
-        self._h_title.pack(side="left", padx=(12, 8), pady=6)
+        self._h_title.pack(side="left", padx=(12, 6), pady=6)
+
+        self._h_sep1 = tk.Label(h, text="│", bg=theme.SURFACE_CARD, fg=theme.BORDER,
+                                font=theme.FONT_UI)
+        self._h_sep1.pack(side="left", padx=4, pady=6)
+
+        self._h_turns = tk.Label(h, text="- 回合", bg=theme.SURFACE_CARD, fg=theme.MUTED,
+                                 font=theme.FONT_UI)
+        self._h_turns.pack(side="left", padx=4, pady=6)
+
+        self._h_sep2 = tk.Label(h, text="│", bg=theme.SURFACE_CARD, fg=theme.BORDER,
+                                font=theme.FONT_UI)
+        self._h_sep2.pack(side="left", padx=4, pady=6)
 
         self._h_dur = tk.Label(h, text="耗时 -", bg=theme.SURFACE_CARD, fg=theme.MUTED,
                                font=theme.FONT_UI)
-        self._h_dur.pack(side="left", padx=theme.PAD_M, pady=6)
+        self._h_dur.pack(side="left", padx=(4, theme.PAD_M), pady=6)
 
         # 会话视角专属：打开会话记录阅读器（项目汇总视角无单一会话，隐藏）
         self._transcript_btn = RoundedPill(
@@ -2190,6 +2350,33 @@ class MetricPanel:
         vals = report_values(report)
         for key, cell in self._cells.items():
             cell.set_value(vals.get(key, "-"))
+        u = report.usage
+        turns_cell = self._cells.get("turns")
+        if turns_cell:
+            skipped = getattr(u, "empty_usage_skipped", 0)
+            turns_cell.set_sub_text(f"+{skipped} 跳过" if skipped else "")
+
+        from tcer.core import format as _fmt
+        started_cell = self._cells.get("started")
+        if started_cell:
+            st_ms = getattr(u, "started_at", None)
+            date_str = _fmt.fmt_dt(st_ms, _fmt.FMT_DATE) if st_ms else ""
+            started_cell.set_mid_text(date_str if date_str != "-" else "")
+            started_cell.set_sub_text("")
+
+        last_time_cell = self._cells.get("last_time")
+        if last_time_cell:
+            end_ms = getattr(u, "ended_at", None)
+            date_str = _fmt.fmt_dt(end_ms, _fmt.FMT_DATE) if end_ms else ""
+            last_time_cell.set_mid_text(date_str if date_str != "-" else "")
+            last_time_cell.set_sub_text("")
+
+        tools_cell = self._cells.get("tools")
+        if tools_cell:
+            tc = getattr(u, "tool_calls", None) or {}
+            n_types = len(tc)
+            tools_cell.set_mid_text(f"{n_types} 种工具" if n_types else "")
+            tools_cell.set_sub_text("")
         self._apply_key_value_colors(report)
         for state in self._grids:
             self._apply_grid(state)
@@ -2199,13 +2386,14 @@ class MetricPanel:
         is_agg = getattr(report.meta, "session_id", "") == "(aggregate)"
         if is_agg:
             title = "项目全量汇总"
-        u = report.usage
         turns = getattr(u, "assistant_msgs", getattr(u, "turns", 0))
-        self._h_title.config(text=f"{title[:32]} · {turns} 回合")
+        self._h_title.config(text=f"{title[:32]}")
+        self._h_turns.config(text=f"{turns:,} 回合")
 
         from tcer.core.format import fmt_duration_ms
         dur_ms = getattr(u, "session_duration_ms", 0)
-        self._h_dur.config(text=f"耗时 {fmt_duration_ms(dur_ms)}" if dur_ms else "耗时 -")
+        dur_short = fmt_duration_ms(dur_ms, short=True) if dur_ms else "-"
+        self._h_dur.config(text=f"耗时 {dur_short}")
 
         cost_val = getattr(report, "cost", 0.0) or 0.0
         self._h_cost.config(text=f"${cost_val:.2f}")
@@ -2219,40 +2407,20 @@ class MetricPanel:
             self._transcript_btn.pack(side="left", padx=(0, theme.PAD_M), after=self._h_dur)
 
     def _apply_key_value_colors(self, report) -> None:
-        """关键值「达标绿」（2026-10 约定，规则全部可解释、非评分）：
-
-        - 缓存命中率 ≥80%：核心省钱指标达标；
-        - TCER ≥ 当前生效 TCER 基准：高于自己的参考线（阈值来自基准，非拍脑袋）；
-        - 效率衰减比 ≥0.5：文档既有的推荐线。
-        阈值比较一律用 raw_value 原始数值（显示串有舍入，边界会误判）；
-        其余指标保持正文色；异常红/橙仍由 MetricCell.set_value 内部规则负责。
-        """
-        from .metric_defs import raw_value as _raw
-
-        rules = []
-        chr_v = _raw(report, "chr")
-        if chr_v is not None and chr_v >= 80:
-            rules.append(("chr", theme.VALUE_GOOD))
-        eff_v = _raw(report, "efficiency_decay")
-        if eff_v is not None and eff_v >= 0.5:
-            rules.append(("efficiency_decay", theme.VALUE_GOOD))
-        tcer_v = _raw(report, "tcer")
-        bl_v = _raw(report, "bl_tcer")
-        if tcer_v is not None and bl_v is not None and tcer_v >= bl_v:
-            rules.append(("tcer", theme.VALUE_GOOD))
-        for key, fg in rules:
-            cell = self._cells.get(key)
-            if cell is not None and cell.value.cget("text") not in ("-", UNSUPPORTED_LABEL):
-                cell.value.config(fg=fg)
+        """保留方法供兼容（动态阈值判定已全面下线，转为 MetricCell 内部 FIXED_METRIC_COLORS 固定语义色）。"""
+        pass
 
     def clear(self) -> None:
         self._transcript_btn.pack_forget()
         self._h_title.config(text="待选会话")
+        self._h_turns.config(text="- 回合")
         self._h_dur.config(text="耗时 -")
         self._h_cost.config(text="$0.00")
         self._h_loc.config(text="+0 行")
         for cell in self._cells.values():
             cell.set_value("-")
+            cell.set_mid_text("")
+            cell.set_sub_text("")
         for state in self._grids:
             self._apply_grid(state)
 
@@ -2813,7 +2981,7 @@ class RealProjectsView:
         arrow.pack(side="left", padx=(2, 4))
         card.bind_to(arrow)
         cost = t.get("cost") or 0.0
-        cost_fg = theme.WARNING if cost >= 50.0 else theme.FG
+        cost_fg = theme.WARNING  # 项目总成本常驻警示橙，强化成本意识
         cost_lbl = tk.Label(row1, bg=theme.PANEL_2, fg=cost_fg,
                             font=theme.FONT_VALUE, anchor="e",
                             text=f"${cost:.2f}")

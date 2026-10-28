@@ -43,7 +43,6 @@ _NON_PLOTTABLE = frozenset({
 
 # Baseline reference lines (key → metrics module constant name).
 _METRIC_BASELINE: dict[str, str] = {
-    "tcer": "TCER_BASELINE",
     "cpe": "CPE_BASELINE",
 }
 

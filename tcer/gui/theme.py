@@ -121,6 +121,8 @@ LEVEL_COLORS = {
 VALUE_GOOD = "#22c55e"      # 活力绿 — 正向指标
 VALUE_BAD = "#ef4444"       # 活力红 — 负向/异常指标
 VALUE_NEUTRAL = FG          # 数值默认 = 正文色（层级靠字重/等宽家族，不靠变色）
+VALUE_TCER = PURPLE         # 典雅紫罗兰 — TCER 核心效能基准常驻色
+UNSUPPORTED_FG = "#cbd5e1"  # 强化弱化可读性的冷银灰（数据源缺失/不适用标签）
 
 # Per-row "best" marker (模型对比) — gold highlights the best value in each row
 VALUE_BEST = "#eab308"      # 璀璨金 — 该行最优值
@@ -143,7 +145,8 @@ FONT_UI = (FONT_CJK, 10)
 FONT_UI_BOLD = (FONT_CJK, 10, "bold")
 FONT_UI_SMALL = (FONT_CJK, 9)
 FONT_UI_SMALL_BOLD = (FONT_CJK, 9, "bold")
-FONT_VALUE = (FONT_MONO_NAME, 10, "bold")   # 数值沉稳有力（等宽粗体，扎实锚点）
+FONT_VALUE = (FONT_MONO_NAME, 12, "bold")   # 数值醒目有力（Consolas 12 bold，专业看板）
+FONT_UI_12_BOLD = (FONT_CJK, 12, "bold")
 FONT_MONO = (FONT_MONO_NAME, 10)
 FONT_STAT = (FONT_CJK, 9)                   # 状态栏字号清晰可辨
 
@@ -154,9 +157,8 @@ def has_cjk(text: str) -> bool:
                or "\u3000" <= c <= "\u303f" for c in text)
 
 
-def value_font(text: str, mono=FONT_VALUE, cjk=FONT_UI_BOLD):
-    """数值字体：纯数字 / ASCII 用等宽粗体（对齐扎实）；带中文单位或说明的值改用
-    UI 粗体——「12.1 小时」「864 次（8 种）」在等宽字体里会被回退字形撑出空洞。"""
+def value_font(text: str, mono=FONT_VALUE, cjk=FONT_UI_12_BOLD):
+    """数值字体：纯数字 / ASCII 用等宽粗体（Consolas 12 bold，对齐扎实）；带中文说明时回退至同字号 UI 粗体。"""
     return cjk if has_cjk(text) else mono
 def setup_style(ttk) -> None:
     """Configure the ttk Style for the dark theme (call once after Style() creation)."""
@@ -232,6 +234,17 @@ TOKEN_COLORS = {
     "cache_write": WARNING,    # 橙 — 缓存写 (创建)
     "cache_read": SUCCESS,     # 青绿 — 缓存读 (命中)
     "output": LEVEL_COMPOUND,  # 黄 — 输出
+}
+
+# 固定指标前景色字典（身份认知固定色，不随数值大小动态评判好坏）
+FIXED_METRIC_COLORS = {
+    "chr": VALUE_GOOD,                  # 缓存命中率：达标绿 (青翠)
+    "input": TOKEN_COLORS["input"],      # 输入 Token：蓝
+    "output": TOKEN_COLORS["output"],    # 输出 Token：黄
+    "cache_write": TOKEN_COLORS["cache_write"],  # 缓存创建：橙
+    "cache_read": TOKEN_COLORS["cache_read"],    # 缓存命中：绿
+    "cost": WARNING,                     # 总成本：常驻金橙
+    "tcer": VALUE_TCER,                  # TCER 核心效能：典雅紫
 }
 # 图表分类 palette（多列/多模型循环取色），与 TOKEN_COLORS 同族色。
 CHART_PALETTE = (ACCENT, SUCCESS, LEVEL_COMPOUND, WARNING, "#c586c0", "#56ADBC")

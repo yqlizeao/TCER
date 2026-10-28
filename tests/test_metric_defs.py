@@ -105,9 +105,9 @@ def test_report_values_golden_strings():
     assert v["deleted"] == "20"
     assert v["churn"] == "4.8%"              # reworked 20 / added 420
     assert "user_msgs" not in v              # 「用户消息」格已移出 SSOT（2026-10 收敛）
-    assert v["turns"] == "50（+3 跳过）"
+    assert v["turns"] == "50"                # 纯数字无中文（跳过数转由卡片副文本行展示）
     assert v["thinking_count"] == "7"
-    assert v["tools"] == "15 次（2 种）"
+    assert v["tools"] == "15"                 # 纯数字无中文（总调用量在主值，工具种类数在中间副标展示）
     assert v["entrypoint"] == "claude-vscode"
     assert v["edit_ratio"] == "100.0%"       # Edit / (Edit+Write) = 5/5
     assert v["read_write_ratio"] == "2.0"     # Read/(Write+Edit)=10/5; a ratio, not %

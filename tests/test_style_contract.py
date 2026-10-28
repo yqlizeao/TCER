@@ -97,12 +97,13 @@ def test_card_no_border_state():
 
 
 def test_font_value_discipline():
-    """数值字体纪律：FONT_VALUE 必须与正文字号一致（10pt bold），
-    层级靠字重+等宽家族——防止仪表盘大字号回潮。"""
+    """数值字体纪律：FONT_VALUE（Consolas 12 bold）指标看板关键数值清晰有力；
+    Title/正文字号 10pt regular。"""
     from tcer.gui import theme
-    assert theme.FONT_VALUE[1] == theme.FONT_UI[1] == 10, (
-        f"FONT_VALUE={theme.FONT_VALUE} 必须与 FONT_UI={theme.FONT_UI} 同字号（纪律派）")
+    assert theme.FONT_VALUE[1] == 12, (
+        f"FONT_VALUE={theme.FONT_VALUE} 期望 12pt bold")
     assert theme.FONT_VALUE[2] == "bold"
+    assert theme.FONT_UI[1] == 10
     assert len(theme.FONT_UI) == 2  # 正文 regular（无 weight 项）
 
 

@@ -652,30 +652,32 @@ class MetricCell:
         self.title = tk.Label(self.frame, text=metric.name, bg=theme.PANEL, fg=title_fg,
                               font=theme.FONT_UI, anchor="w")
         self.title.pack(anchor="w", padx=10, pady=(6, 0))
-        self._unit_lbl: tk.Label | None = None
-        if metric.unit:
-            self._unit_lbl = tk.Label(self.frame, text=metric.unit, bg=theme.PANEL,
-                                      fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
-            self._unit_lbl.pack(anchor="w", padx=10, pady=(0, 0))
+
+        # 中间小字行：单位（美元、小时等）或次级说明（2026-10-28、7 种工具等）
+        # 视觉哲学：“两头大、小字放中间”——标题(10pt)与数值(12pt Consolas bold)醒目，中间弱化灰(10pt/9pt)
+        init_mid = metric.unit or ""
+        self.mid_lbl = tk.Label(self.frame, text=init_mid, bg=theme.PANEL,
+                                fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
+        if init_mid:
+            self.mid_lbl.pack(anchor="w", padx=10, pady=(0, 0))
+        self._unit_lbl = self.mid_lbl
 
         self.var = tk.StringVar(value="-")
         value_fg = theme.VALUE_NEUTRAL
+
+        self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
+                              fg=value_fg, font=theme.FONT_VALUE, anchor="w")
+        self.value.pack(anchor="w", padx=10, pady=(1, 6))
+
+        # 辅助说明行（独立在数值下方一行：≈ 4.17亿、+2 跳过等）
+        self.sub_lbl = tk.Label(self.frame, text="", bg=theme.PANEL, fg=theme.MUTED,
+                                font=theme.FONT_UI_SMALL, anchor="w")
         if approx:
-            row = tk.Frame(self.frame, bg=theme.PANEL)
-            row.pack(anchor="w", padx=10, pady=(1, 6))
-            self.value = tk.Label(row, textvariable=self.var, bg=theme.PANEL,
-                                  fg=value_fg, font=theme.FONT_VALUE, anchor="w")
-            self.value.pack(side="left")
-            self.approx_lbl = tk.Label(row, text="", bg=theme.PANEL, fg=theme.MUTED,
-                                       font=theme.FONT_UI_SMALL, anchor="w")
-            self.approx_lbl.pack(side="left", padx=(4, 0))
-            widgets = (self.frame, self.title, self.value, self.approx_lbl)
-        else:
-            self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
-                                  fg=value_fg, font=theme.FONT_VALUE, anchor="w")
-            self.value.pack(anchor="w", padx=10, pady=(1, 6))
-            self.approx_lbl = None
-            widgets = (self.frame, self.title, self.value)
+            self.value.pack_configure(pady=(1, 0))
+            self.sub_lbl.pack(anchor="w", padx=10, pady=(0, 6))
+        self.approx_lbl = self.sub_lbl
+
+        widgets = [self.frame, self.title, self.mid_lbl, self.value, self.sub_lbl]
 
         if on_click:
             self.value.config(cursor=CLICK_CURSOR)
@@ -692,12 +694,9 @@ class MetricCell:
                 self.title.configure(fg=color)
                 self.frame.set_surface(outline=theme.BORDER_SUBTLE)
 
-            for _w in (self.frame, self.title, self.value):
+            for _w in widgets:
                 _w.bind("<Enter>", _on_enter, add="+")
                 _w.bind("<Leave>", _on_leave, add="+")
-            if self.approx_lbl:
-                self.approx_lbl.bind("<Enter>", _on_enter, add="+")
-                self.approx_lbl.bind("<Leave>", _on_leave, add="+")
 
         tip = f"{metric.name}\n{metric.tip}"
         for w in widgets:
@@ -706,52 +705,77 @@ class MetricCell:
         self.frame.bind("<Configure>", self._fit_wrap, add="+")
 
     def _fit_wrap(self, e) -> None:
+        if getattr(e, "width", 0) < 60:
+            return
         wl = max(60, e.width - 16)
-        if to_int(self.value.cget("wraplength") or 0) != wl:
+        curr = to_int(self.value.cget("wraplength") or 0)
+        if abs(curr - wl) >= 4:
             self.value.config(wraplength=wl, justify="left")
 
     @property
     def key(self) -> str:
         return self.metric.key
 
-    def set_value(self, text: str, fg: str | None = None) -> None:
+    def set_value(self, text: str, fg: str | None = None, sub_text: str | None = None) -> None:
         """Update displayed value and apply sentiment-based coloring.
 
         ``fg`` 由调用方显式给定（如看板的「达标绿」规则）时优先于内部异常阈值着色。
+        ``sub_text`` 位于数值下方一行展示辅助说明（如 ≈ 4.17亿、+2 跳过、18 种工具）。
         """
         self.var.set(text)
         self.value.config(font=theme.value_font(text))
-        if self.approx_lbl is not None:
+        if sub_text is not None:
+            self.set_sub_text(sub_text)
+        elif self._approx:
             try:
                 num = float(text.replace(",", "").replace("%", "").replace("$", ""))
                 from tcer.core.format import fmt_approx_cn
-                self.approx_lbl.config(text=fmt_approx_cn(num) or "")
+                self.set_sub_text(fmt_approx_cn(num) or "")
             except (ValueError, TypeError):
-                self.approx_lbl.config(text="")
+                self.set_sub_text("")
         if fg is not None:
             self.value.config(fg=fg)
             return
         if text == UNSUPPORTED_LABEL:
             # 数据源不提供该字段 — 弱化显示，与「无数据 -」区分。
-            self.value.config(fg=theme.MUTED)
+            self.value.config(fg=theme.UNSUPPORTED_FG)
             return
-        if text in ("-", "0", "0.0", "0.00", "0.000"):
+        if text == "-":
             fg = theme.VALUE_NEUTRAL
         else:
-            try:
-                # 注意 num 是显示标度：pct/pct4 格式已 ×100（"35.2%" → 35.2）。
-                # 「异常才着色」纪律：无绿色奖励、无非零即色；只有真异常阈值
-                # （高返工 / 工具报错）才允许警示色，其余一律中性。
-                num = float(text.replace(",", "").replace("%", "").replace("$", ""))
-                if self.metric.key == "churn":
-                    fg = theme.ERROR if num >= 35 else (theme.WARNING if num >= 15 else theme.VALUE_NEUTRAL)
-                elif self.metric.key == "tool_error_rate":
-                    fg = theme.ERROR if num >= 10 else (theme.WARNING if num > 0 else theme.VALUE_NEUTRAL)
-                else:
-                    fg = theme.VALUE_NEUTRAL
-            except (ValueError, TypeError):
-                fg = theme.VALUE_NEUTRAL
+            # 固定语义色（身份认知色，不随数值大小动态评判好坏；未配置固定色的指标保持中性白）
+            fg = theme.FIXED_METRIC_COLORS.get(self.metric.key, theme.VALUE_NEUTRAL)
         self.value.config(fg=fg)
+
+    def set_mid_text(self, text: str) -> None:
+        """设置位于标题与主数值之间的中间小字（如 2026-10-28、7 种工具、单位等）。"""
+        display_text = text if text else (self.metric.unit or "")
+        self.mid_lbl.config(
+            text=display_text,
+            font=theme.value_font(display_text, mono=theme.FONT_MONO, cjk=theme.FONT_UI_SMALL)
+        )
+        if display_text:
+            if not self.mid_lbl.winfo_manager():
+                self.mid_lbl.pack(anchor="w", padx=10, pady=(0, 0), before=self.value)
+        else:
+            if self.mid_lbl.winfo_manager():
+                self.mid_lbl.pack_forget()
+
+    def set_sub_text(self, text: str) -> None:
+        """设置位于数值下方独立一行的辅助说明（如 ≈ 4.17亿、+2 跳过等）。"""
+        self.sub_lbl.config(
+            text=text,
+            font=theme.value_font(text, mono=theme.FONT_MONO, cjk=theme.FONT_UI_SMALL)
+        )
+        if text:
+            self.value.pack_configure(pady=(1, 0))
+            if not self.sub_lbl.winfo_manager():
+                self.sub_lbl.pack(anchor="w", padx=10, pady=(0, 6))
+        else:
+            if not self._approx:
+                if self.sub_lbl.winfo_manager():
+                    self.sub_lbl.pack_forget()
+                self.value.pack_configure(pady=(1, 6))
 
 
 class SelectableLabel(tk.Text):

@@ -65,9 +65,9 @@ GROUPS: list[Group] = [
                "括号内为跳过的零 usage 桩（thinking stub / 占位行）。", "basic"),
         Metric("started", "开始时间", "", "会话首个事件的时间戳（Claude 为首条助手回复；其余源含会话头/首条用户消息）。", "basic"),
         Metric("last_time", "结束时间", "", "会话最后事件的时间戳（Claude 为末条助手回复；其余源含收尾事件），配合「开始时间」可判断活跃时段。", "basic"),
-        Metric("duration", "持续时长", "",
+        Metric("duration", "持续时长", "小时",
                "会话从首条事件到末条事件的真实跨度（历经时长），含用户阅读、测试、排错与暂停等待。", "basic"),
-        Metric("active_duration", "计算耗时", "",
+        Metric("active_duration", "计算耗时", "小时",
                "模型实际生成与运行的累计时间（AI 纯计算耗时），不含用户思考、阅读与等待。\n"
                "与「持续时长」对比可直观展现人机协作中 AI 的真实占用时间。\n"
                "说明：Codex / Oh My Pi 提供单次补全精确耗时；Claude 仅记录整轮墙钟，显示「不适用」。", "basic"),
@@ -86,7 +86,7 @@ GROUPS: list[Group] = [
                "说明：<1 分钟的连发与 >30 分钟的离开不计入。", "basic"),
         Metric("entrypoint", "启动方式", "",
                "会话启动入口：claude-vscode（VS Code 扩展）、claude-cli（命令行）等。", "basic"),
-        Metric("memory_files", "项目记忆文件", "个",
+        Metric("memory_files", "项目记忆文件", "",
                "当前项目 memory/ 目录下的文件数量（项目级指标，项目汇总与会话"
                "视图均显示同一计数）。点击查看文件列表并可跳转到目录。", "basic"),
         Metric("cli_version", "客户端版本", "",
@@ -268,11 +268,11 @@ GROUPS: list[Group] = [
                    "公式：工具出错次数 ÷ 总工具调用\n"
                    "推荐：越低越好\n"
                    "说明：反映操作可靠性，偏高常因文件不存在、命令失败、Edit 匹配不到；审查/探索类自然略高。", "basic", "down"),
-            Metric("retry_loops", "重试循环", "次",
+            Metric("retry_loops", "重试循环", "",
                    "公式：同工具对同一路径连续重复调用 ≥3 次的循环个数\n"
                    "推荐：0，越少越好\n"
                    "说明：卡死信号——错误率只给比例，循环给结构：同一文件反复 Edit 失败、反复 Read 同一大文件，往往是陷入死循环的回合级证据。无路径的工具（Bash）不参与。", "basic", "down"),
-            Metric("retry_loop_max", "最长重试", "次",
+            Metric("retry_loop_max", "最长重试", "",
                    "公式：最长一次重试循环的连续重复次数\n"
                    "推荐：≤3，越低越好\n"
                    "说明：单个循环烧掉的回合数上限，与「重试循环」个数互补——个数少但很长时更值得复盘。", "basic", "down"),
@@ -284,7 +284,7 @@ GROUPS: list[Group] = [
                    "公式：被编辑 ≥3 次的文件数\n"
                    "推荐：越少越好\n"
                    "说明：同一文件反复修改多为一次没改对，比整体返工率更聚焦的质量信号。", "basic", "down"),
-            Metric("unseen_writes", "盲写文件", "次",
+            Metric("unseen_writes", "盲写文件", "",
                    "公式：Write 写入「此前未读取/未接触」文件的次数\n"
                    "推荐：越低越可靠\n"
                    "说明：既反映「盲写」习惯，也是净增行高估的上界——覆写已有文件会把旧内容计为新增。", "basic", "down"),
@@ -378,28 +378,26 @@ CONCEPT_NOTES: list[tuple[str, str, str]] = [
 def _duration_hours(report: SessionReport) -> str:
     u = report.usage
     if u.started_at and u.ended_at:
-        return fmt.fmt_duration_ms(u.ended_at - u.started_at)
+        hours = (u.ended_at - u.started_at) / 3_600_000
+        return f"{hours:.1f}" if hours >= 0.1 else "<0.1"
     return "-"
+
 def _active_duration_display(report: SessionReport) -> str:
     act = report.usage.active_duration_ms
-    return fmt.fmt_duration_ms(act) if act else "-"
-
-
-
+    if act:
+        hours = act / 3_600_000
+        return f"{hours:.1f}" if hours >= 0.1 else "<0.1"
+    return "-"
 
 def _tools_summary(report: SessionReport) -> str:
     tc = report.usage.tool_calls
     if not tc:
         return "-"
-    return f"{sum(tc.values())} 次（{len(tc)} 种）"
-
+    return f"{sum(tc.values()):,}"
 
 def _turns_display(u) -> str:
-    """请求数：与 raw_value 同口径（助手响应数），有跳过追加 (+N 跳过)"""
+    """请求数：与 raw_value 同口径（助手响应数），纯数字无中文。"""
     total = u.assistant_msgs
-    skipped = u.empty_usage_skipped
-    if skipped:
-        return f"{fmt.fmt_int(total)}（+{skipped} 跳过）"
     return fmt.fmt_int(total)
 
 
@@ -589,8 +587,8 @@ _DISPLAY_EXTRACTORS = {
     "subagent": lambda r: str(r.subagent_count or 0),
     "code_loc": lambda r: _code_loc_display(r),
     "turns": lambda r: _turns_display(r.usage),
-    "started": lambda r: fmt.fmt_dt(r.usage.started_at),
-    "last_time": lambda r: fmt.fmt_dt(r.usage.ended_at),
+    "started": lambda r: fmt.fmt_dt(r.usage.started_at, "%H:%M") if r.usage.started_at else "-",
+    "last_time": lambda r: fmt.fmt_dt(r.usage.ended_at, "%H:%M") if r.usage.ended_at else "-",
     "duration": _duration_hours,
     "active_duration": _active_duration_display,
     "models": lambda r: fmt.models_label(r.usage) if r.usage.models else "-",
@@ -770,7 +768,7 @@ MODEL_GROUPS: list[Group] = [
 UNSUPPORTED_LABEL = "不适用"
 
 SOURCE_LABELS = {
-    "claude": "Claude", "codex": "Codex", "opencode": "OpenCode",
+    "claude": "ClaudeCode", "codex": "Codex", "opencode": "OpenCode",
     "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
     "workbuddy": "WorkBuddy",
 }

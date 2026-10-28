@@ -56,7 +56,7 @@ def test_upload_dialog_grouped_by_directory_and_icons(root):
         g1 = dlg._groups[0]
         assert len(g1["items"]) == 2
         g1_sources = [it["source_label"] for it in g1["items"]]
-        assert "Claude" in g1_sources
+        assert "ClaudeCode" in g1_sources
         assert "Codex" in g1_sources
 
         # 检查图标 key：不再使用裸中括号文字，而是映射到 source_icon key

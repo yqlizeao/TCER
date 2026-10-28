@@ -213,7 +213,7 @@ class SessionComparePopup:
             for j, val in enumerate(vals):
                 fg = row_colors.get(j, theme.VALUE_NEUTRAL)
                 if val == self._unsupported:
-                    fg = theme.MUTED
+                    fg = theme.UNSUPPORTED_FG
                 tk.Label(grid, text=val, bg=theme.SURFACE_CARD, fg=fg,
                          font=theme.FONT_VALUE, anchor="e").grid(
                              row=i + 1, column=j + 1, sticky="e", padx=2, pady=1)

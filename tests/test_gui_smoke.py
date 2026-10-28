@@ -148,7 +148,7 @@ def test_metric_panel_group_collapse(root, reports):
     assert panel._groups
     gs = panel._groups[0]                       # G1 会话概况：默认展开
     assert not gs.collapsed and gs.body.winfo_manager() != ""
-    g4 = panel._groups[3]                       # G4 代码产出与质量：默认展开
+    g4 = next(g for g in panel._groups if '代码产出' in g.name)  # G4 代码产出与质量：默认展开
     assert not g4.collapsed and g4.body.winfo_manager() != ""
     assert g4.arrow.cget("text")[0] in ("▼", "▾")
     panel._toggle_group(gs)
@@ -769,6 +769,62 @@ def test_session_card_mark_icon_bg_tracks_card(root, reports):
     assert _marks_row(card2).winfo_manager() == ""
 
 
+def test_session_card_vendor_icon_and_compact_duration(root, reports):
+    """会话卡片底部摘要行（四项优化原则）：
+    1. 紧凑且不引入多余指标（无回合/LOC干扰卡片表面）；
+    2. 供应商 Logo（16x16 图标，替换文字模型名）；
+    3. 时长使用紧凑英文单位（如 1.0h，替换「小时」中文）；
+    4. 彻底去掉「·」；
+    5. 悬浮 Tooltip 包含完整模型名称与详细信息。
+    """
+    from tcer.gui.views import SessionColumn, vendor_icon_key, vendor_icon
+    from tcer.gui import theme
+
+    # 1. vendor_icon_key 解析覆盖
+    assert vendor_icon_key("claude-opus-5-5") == "claude"
+    assert vendor_icon_key("Anthropic") == "claude"
+    assert vendor_icon_key("glm-5.3-flash") == "zhipu"
+    assert vendor_icon_key("Zhipu AI") == "zhipu"
+    assert vendor_icon_key("gpt-4o") == "openai"
+    assert vendor_icon_key("OpenAI") == "openai"
+    assert vendor_icon_key("gemini-2.5-pro") == "gemini"
+    assert vendor_icon_key("deepseek-v3") == "deepseek"
+    assert vendor_icon_key("qwen-2.5-coder") == "qwen"
+
+    # 2. vendor_icon 返回有效 16x16 PhotoImage
+    for k in ("claude", "zhipu", "openai", "gemini", "deepseek", "qwen", "meta"):
+        img = vendor_icon(root, k)
+        assert img is not None
+        assert img.width() == 16 and img.height() == 16
+
+    # 3. 卡片渲染
+    class _Ctl:
+        def __getattr__(self, name):
+            return lambda *a, **kw: None
+
+    col = SessionColumn(root, _Ctl())
+    col.update(reports)
+    root.update_idletasks()
+
+    card = col._cards[0]
+    row3 = [w for w in card.frame.winfo_children() if w is not card.rail][2]
+    row3_children = row3.winfo_children()
+
+    # 右侧金额常驻 WARNING 橙色
+    cost_lbl = next(w for w in row3_children if isinstance(w, tk.Label) and "$" in w.cget("text"))
+    assert cost_lbl.cget("fg") == theme.WARNING
+
+    # 包含供应商图标 Label
+    icon_lbl = next(w for w in row3_children if isinstance(w, tk.Label) and w.cget("image"))
+    assert icon_lbl is not None
+
+    # 紧凑时长（包含 h，不含「·」或「小时」）
+    dur_lbl = next(w for w in row3_children if isinstance(w, tk.Label) and "h" in w.cget("text"))
+    assert "·" not in dur_lbl.cget("text")
+    assert "小时" not in dur_lbl.cget("text")
+    assert dur_lbl.cget("text") == "1.0h"
+
+
 def test_metric_panel_deck_chips_ssot(root):
     """deck 摘要与 chip：单 Label 摘要不被 sub 擦除（历史 bug 四摘要永久空白）；
     chip 取值走 SSOT display（Codex 源 cache_write 显示「不适用」并置灰）；
@@ -809,7 +865,7 @@ def test_metric_panel_deck_chips_ssot(root):
     for k in ("cache_write", "output_tps"):
         v_lbl, _ = mp._chips[k]
         assert v_lbl.cget("text") == UNSUPPORTED_LABEL, k
-        assert v_lbl.cget("fg") == theme.MUTED, k
+        assert v_lbl.cget("fg") == theme.UNSUPPORTED_FG, k
     frame.destroy()
 
 
