@@ -2894,15 +2894,6 @@
       "_note": "智谱 AI 2026 高吞吐极速推理模型；面向高并发智能体工具调用与代码生成优化；无独立缓存写入计价",
       "vendor": "Zhipu AI"
     },
-    "glm-5.3-flashx-legal": {
-      "display_name": "GLM-5.3-FlashX-Legal",
-      "input": 0.37,
-      "output": 1.25,
-      "cache_read": 0.075,
-      "cache_write": 0.0,
-      "_note": "智谱 AI 2026-11-02 发布；FlashX 法律领域版本（法律检索/合同审查/文书起草），1M 上下文；国际站 $0.37/$1.25/$0.075，缓存存储限时免费；无独立缓存写入计价",
-      "vendor": "Zhipu AI"
-    },
     "qwen3.8-2.4t-a95b": {
       "display_name": "Qwen3.8 2.4T A95B",
       "input": 2.0,
