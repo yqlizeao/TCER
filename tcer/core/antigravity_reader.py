@@ -43,8 +43,11 @@ from tcer.core import loc, pricing
 from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
 from tcer.core.parse_util import (
     as_int as _as_int,
+    basename_of as _basename_of,
     is_correction as _is_correction,
     is_slash_command as _is_slash_command,
+    is_windows_path as _is_windows_path,
+    norm_path as _norm_path,
 )
 from tcer.core.paths import antigravity_conversations_dir, antigravity_roots
 
@@ -419,6 +422,11 @@ def _normalize_workspace_uri(uri: str) -> str:
     elif raw.startswith("file://"):
         raw = raw[7:]
     unquoted = urllib.parse.unquote(raw)
+    if _is_windows_path(unquoted):
+        # Windows 盘符路径：在任何宿主 OS 下都按 Windows 语义规范化
+        # （在 Windows 上与 Path.resolve() 结果一致；在 POSIX 上避免
+        # 把 "C:/..." 当相对路径拼到 cwd 上）。
+        return _norm_path(unquoted)
     p = Path(unquoted)
     try:
         # Resolve to handle drive letters and backslashes uniformly
@@ -431,8 +439,9 @@ def _project_display_name(workspace_dir: str) -> str:
     """Return a concise display name for a workspace path."""
     if not workspace_dir:
         return "Antigravity 项目"
-    p = Path(workspace_dir)
-    return p.name or str(p)
+    # basename_of：Windows 盘符路径在任何宿主 OS 下都按 Windows 语义取
+    # （在 Windows 上与 Path(workspace_dir).name 一致）。
+    return _basename_of(workspace_dir) or workspace_dir
 
 
 def _connect_ro(path: Path | str) -> sqlite3.Connection:

@@ -28,6 +28,7 @@ from tcer.core import (
     workbuddy_reader,
 )
 from tcer.core.models import ProjectRef, SessionMeta, SessionReport, TokenUsage
+from tcer.core.parse_util import normcase_path as _normcase_path
 from tcer.core.paths import ref_root, resolve_project
 
 
@@ -248,8 +249,9 @@ def _display_cwd(cwd: str) -> str:
 def real_projects(refs: list[ProjectRef]) -> list[RealProject]:
     r"""把 (source, key) 粒度的 ref 按「真实工作目录」聚合。
 
-    规范化用 ``os.path.normcase + normpath``：Windows 下折叠盘符大小写与
-    斜杠方向（``C:\GitHub\TCER`` == ``c:/github/tcer``）；展示名盘符统一
+    规范化用 ``parse_util.normcase_path``（Windows 盘符路径在任何宿主 OS 下
+    都按 Windows 语义折叠盘符大小写与斜杠方向：``C:\GitHub\TCER`` ==
+    ``c:/github/tcer``，在 Windows 上与 ``os.path.normcase + normpath`` 一致）；展示名盘符统一
     大写（``_display_cwd``）。**父子路径不合并**（``c:\playground`` 与
     ``c:\playground\langfuse`` 是不同的工作目录语义）。
     """
@@ -275,7 +277,7 @@ def real_projects(refs: list[ProjectRef]) -> list[RealProject]:
                 sg = singles[s_key] = RealProject(key=s_key, display=disp, refs=[])
             sg.refs.append(ref)
             continue
-        key = os.path.normcase(os.path.normpath(cwd))
+        key = _normcase_path(cwd)
         g = groups.get(key)
         if g is None:
             g = groups[key] = RealProject(key=key, display=_display_cwd(cwd))

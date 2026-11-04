@@ -13,6 +13,9 @@ from pathlib import Path
 from tcer.core import pricing
 from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
 from tcer.core.parse_util import as_int as _as_int, first_str as _first_str
+from tcer.core.parse_util import basename_of as _basename_of
+from tcer.core.parse_util import is_windows_path as _is_windows_path
+from tcer.core.parse_util import norm_path as _norm_path
 from tcer.core.paths import codex_dir, codex_sessions_dir, encode_hash
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
@@ -188,10 +191,16 @@ def _normalize_cwd(cwd: str | None) -> str | None:
     """Normalize cwd path to avoid duplicates from drive-letter case differences.
 
     On Windows ``c:\\GitHub`` and ``C:\\GitHub`` resolve to the same path;
-    ``Path.resolve()`` normalises the drive letter to uppercase.
+    ``Path.resolve()`` normalises the drive letter to uppercase. Windows
+    drive-letter paths get the same treatment on any host (normpath +
+    uppercase drive) instead of ``Path.resolve()``, which would misread
+    ``C:\\...`` as a relative path on POSIX and glue it onto the cwd.
     """
     if not cwd:
         return cwd
+    if _is_windows_path(cwd):
+        p = _norm_path(cwd)
+        return p[0].upper() + p[1:]
     try:
         return str(Path(cwd).resolve())
     except (OSError, ValueError):
@@ -1478,4 +1487,6 @@ def _session_id_from_filename(path: Path) -> str | None:
 def _display_name_for_cwd(cwd: str | None) -> str:
     if not cwd:
         return _NO_CWD_LABEL
-    return Path(cwd).name or cwd
+    # basename_of：Windows 盘符路径在任何宿主 OS 下都按 Windows 语义取
+    # （在 Windows 上与 Path(cwd).name 一致）。
+    return _basename_of(cwd) or cwd

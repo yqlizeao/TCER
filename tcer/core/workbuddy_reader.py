@@ -32,8 +32,11 @@ from tcer.core import loc, pricing
 from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
 from tcer.core.parse_util import (
     as_int as _as_int,
+    basename_of as _basename_of,
+    has_parent_dir as _has_parent_dir,
     is_correction as _is_correction,
     is_slash_command as _is_slash_command,
+    norm_path as _norm_path,
 )
 from tcer.core.paths import encode_hash, workbuddy_dir, workbuddy_roots, workbuddy_sessions_dir
 
@@ -205,8 +208,8 @@ def _collect_known_cwds() -> dict[str, str]:
         for src in ("claude", "codex", "omp", "pi", "antigravity"):
             for r in paths.list_project_refs(src):
                 if r.cwd and Path(r.cwd).is_dir():
-                    dname = Path(r.cwd).name.lower()
-                    known[dname] = os.path.normpath(r.cwd)
+                    dname = _basename_of(r.cwd).lower()
+                    known[dname] = _norm_path(r.cwd)
     except Exception:
         pass
     return known
@@ -273,10 +276,12 @@ def classify_workbuddy_project(p: Path, known_cwds: dict[str, str] | None = None
     # 1. Check if operations within session targeted a real business project (e.g. E:\slg)
     detected_dir = extract_project_dir_from_session(p)
     if detected_dir:
-        norm_dir = os.path.normpath(detected_dir)
-        dname = Path(norm_dir).name
+        # norm_path：Windows 盘符路径在任何宿主 OS 下都按 Windows 语义规范化
+        # （在 Windows 上与 os.path.normpath 一致）。
+        norm_dir = _norm_path(detected_dir)
+        dname = _basename_of(norm_dir)
         # Ensure it's not a bare drive root like "C:\" or timestamped sandbox
-        if dname and not _TS_RE.search(dname) and len(Path(norm_dir).parts) > 1:
+        if dname and not _TS_RE.search(dname) and _has_parent_dir(norm_dir):
             if dname.lower() not in ("workbuddy", "workbuddy ai", "codebuddy", "default", "projects"):
                 return dname.lower(), dname, norm_dir
 
@@ -308,7 +313,7 @@ def classify_workbuddy_project(p: Path, known_cwds: dict[str, str] | None = None
             actual_cwd = resolve_actual_project_cwd(tail, [p], known_cwds)
             if not actual_cwd and meta_cwd and not _TS_RE.search(meta_cwd):
                 if not any(k in meta_cwd.lower() for k in ("workbuddy", "codebuddy")):
-                    actual_cwd = os.path.normpath(meta_cwd)
+                    actual_cwd = _norm_path(meta_cwd)
             return tail.lower(), tail, actual_cwd
 
     # 3. Ordinary sessions -> merge into a single 'WorkBuddy' entry
