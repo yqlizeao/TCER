@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from tcer.core import reader
@@ -102,6 +103,11 @@ _TEST_PATTERNS = [
     r'/spec/',             # RSpec style
 ]
 
+# 预编译：热路径上每工具调用都跑 _is_test_file/_is_doc_file，字符串 pattern
+# 每次 re.search 都要走 _compile 分发表（实测一次全量扫描约 6 万次调用）。
+# 编译后对象与原字符串 pattern 逐值等价（同 pattern + IGNORECASE）。
+_TEST_RES = [re.compile(p, re.IGNORECASE) for p in _TEST_PATTERNS]
+
 # Path patterns for documentation / planner-text files (feeds 「文档行」).
 # 散文类文档——.csv 计入产出（在闸门里）但属数据、不算文档。
 _DOC_PATTERNS = [
@@ -110,6 +116,7 @@ _DOC_PATTERNS = [
     # license_checker.py / my_readme.py 这类代码文件误判成文档。
     r'(^|/)(readme|changelog|license|contributing)(\.[^/]+)?$',
 ]
+_DOC_RES = [re.compile(p, re.IGNORECASE) for p in _DOC_PATTERNS]
 # docs/doc 目录内的文件：仅当本体也是文本/文档后缀才计入「文档行」——
 # 落在 docs/ 下的 .ts/.py 源码（组件库文档站常见）是代码，不是散文文档。
 _DOC_TEXT_RE = re.compile(
@@ -120,20 +127,31 @@ _DOC_EXCLUDE = [
     r'requirements[^/]*\.txt$',   # requirements.txt / requirements-dev.txt
     r'robots\.txt$',
 ]
+_DOC_EXCLUDE_RES = [re.compile(p, re.IGNORECASE) for p in _DOC_EXCLUDE]
 
 
+@lru_cache(maxsize=4096)
 def _is_test_file(file_path: str) -> bool:
-    """Check if file path matches test file patterns."""
+    """Check if file path matches test file patterns.
+
+    纯函数（只依赖路径串），同一文件在一会话内被反复编辑是常态，缓存命中率
+    高；输出与未缓存版逐值一致。
+    """
     normalized = file_path.replace('\\', '/')
-    return any(re.search(pat, normalized, re.IGNORECASE) for pat in _TEST_PATTERNS)
+    return any(rx.search(normalized) for rx in _TEST_RES)
 
 
+@lru_cache(maxsize=4096)
 def _is_doc_file(file_path: str) -> bool:
-    """Check if file path is a documentation / planner-text file."""
+    """Check if file path is a documentation / planner-text file.
+
+    纯函数，同 _is_test_file 缓存；先判 _DOC_EXCLUDE 再判 _DOC_PATTERNS，
+    顺序与原实现一致。
+    """
     normalized = file_path.replace('\\', '/')
-    if any(re.search(pat, normalized, re.IGNORECASE) for pat in _DOC_EXCLUDE):
+    if any(rx.search(normalized) for rx in _DOC_EXCLUDE_RES):
         return False
-    return any(re.search(pat, normalized, re.IGNORECASE) for pat in _DOC_PATTERNS)
+    return any(rx.search(normalized) for rx in _DOC_RES)
 
 
 def _nlines(s) -> int:
@@ -141,11 +159,14 @@ def _nlines(s) -> int:
     return len(s.splitlines()) if isinstance(s, str) else 0
 
 
+@lru_cache(maxsize=4096)
 def _is_code(file_path: str) -> bool:
     """True for any countable text output — code, planner text, or config.
 
     产出闸门：代码 ∪ 策划文本 ∪ 配置（含 Godot 场景/资源）都计入 net_loc。
     另认无后缀知名文件（Makefile / Dockerfile / CMakeLists.txt 等）。
+
+    纯函数（只依赖路径串），同 _is_test_file 缓存；Path 构造只发生在首次。
     """
     pp = Path(file_path)
     if pp.suffix.lower() in _PRODUCTIVE_SUFFIXES:

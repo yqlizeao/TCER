@@ -169,3 +169,77 @@ def test_merge_rebases_turns_and_skips_empty_other():
     f = TokenUsage().merge(b)
     assert [o.turn for o in f.tool_ops] == [0]
     assert [t.turn for t in f.turn_stats] == [0]
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-05 冷态扫描优化（loc 分类缓存 / iter_messages 去 strip /
+# _add_usage_delta 快路径 / meta 采样预过滤与早停）的等价性护栏。
+# --------------------------------------------------------------------------- #
+from tcer.core import loc as _loc
+from tcer.core.reader import _add_usage_delta, iter_messages
+
+
+def test_loc_classifiers_cached_match_uncached():
+    """预编译正则 + lru_cache 的三分类器与逐值语义一致（含边界路径）。"""
+    cases = [
+        "/repo/app.py", "C:\\repo\\test_foo.py", "/repo/tests/test_a.py",
+        "/repo/foo.test.ts", "/repo/spec/models_spec.rb", "/repo/README.md",
+        "/repo/docs/guide.txt", "/repo/requirements-dev.txt",
+        "/repo/CMakeLists.txt", "/repo/src/license_checker.py",
+        "/repo/my_readme.py", "/repo/Makefile", "/repo/Dockerfile",
+        "/repo/data.csv", "/repo/app.docx", "/repo/a/b/c.md",
+    ]
+    for p in cases:
+        assert _loc._is_code(p) == _loc._is_code.__wrapped__(p)
+        assert _loc._is_test_file(p) == _loc._is_test_file.__wrapped__(p)
+        assert _loc._is_doc_file(p) == _loc._is_doc_file.__wrapped__(p)
+    # 缓存命中后仍一致（同一路径反复调用是热路径常态）。
+    for p in cases:
+        assert _loc._is_code(p) == _loc._is_code.__wrapped__(p)
+
+
+def test_add_usage_delta_zero_and_growth():
+    """快路径：无增量零分配返回；有增量只记差额；回退值不记（逐字段取 max）。"""
+    u = TokenUsage()
+    rec = {"i": 100, "cw": 50, "cr": 200, "o": 300, "cw1h": 10,
+           "think": 5, "bucket": "", "stat": None}
+    before = (u.input_tokens, u.output_tokens, u.cache_write_1h_tokens,
+              u.reasoning_output_tokens)
+    # 完全相同行（rewind 重发）：零增量，数值不动。
+    _add_usage_delta(u, rec, {"input_tokens": 100, "cache_creation_input_tokens": 50,
+                              "cache_read_input_tokens": 200, "output_tokens": 300,
+                              "cache_creation": {"ephemeral_1h_input_tokens": 10},
+                              "output_tokens_details": {"thinking_tokens": 5}})
+    assert (u.input_tokens, u.output_tokens, u.cache_write_1h_tokens,
+            u.reasoning_output_tokens) == before
+    assert rec == {"i": 100, "cw": 50, "cr": 200, "o": 300, "cw1h": 10,
+                   "think": 5, "bucket": "", "stat": None}
+    # 流式快照增长：只记 output +400 的差额，其余不动。
+    _add_usage_delta(u, rec, {"input_tokens": 100, "cache_creation_input_tokens": 50,
+                              "cache_read_input_tokens": 200, "output_tokens": 700})
+    assert u.output_tokens == 400 and u.input_tokens == 0
+    assert rec["o"] == 700
+    # 回退值（更小的快照）：不记负增量。
+    _add_usage_delta(u, rec, {"input_tokens": 100, "cache_creation_input_tokens": 50,
+                              "cache_read_input_tokens": 200, "output_tokens": 600})
+    assert u.output_tokens == 400 and rec["o"] == 700
+    # estimated 占位：永不贡献。
+    _add_usage_delta(u, rec, {"input_tokens": 999, "output_tokens": 999,
+                              "estimated": True})
+    assert u.input_tokens == 0 and u.output_tokens == 400
+
+
+def test_iter_messages_whitespace_lines(tmp_path):
+    """去 strip 后：空行/纯空白行跳过，首尾空白行照常解析（与旧行为一致）。"""
+    p = tmp_path / "s.jsonl"
+    p.write_text(
+        "\n"
+        "   \n"
+        '  {"type": "user", "message": {"role": "user", "content": "hi"}}  \n'
+        '{"type": "assistant", "message": {"role": "assistant", "content": []}}\n'
+        "not json\n"
+        "\t\n",
+        encoding="utf-8",
+    )
+    objs = list(iter_messages(p))
+    assert [o.get("type") for o in objs] == ["user", "assistant"]

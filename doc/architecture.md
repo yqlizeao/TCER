@@ -140,6 +140,14 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 - **omp/pi 单遍解析**：`omp_reader.scan_file` 一次解码出 meta、usage、loc（file_cache key `("omp_scan", is_subagent)`），`scan_folded` 折叠子代理；analyze 的 omp/pi usage 与 loc 钩子共用 `("omp_folded"/"pi_folded", 子代理签名)` 一条缓存。实测 omp 冷态 6.0s → 3.8s。
 - **`TokenUsage.merge`**：最大回合号用 `max(map(attrgetter))`；对方无 `tool_ops`/`turn_stats` 时跳过整段重基准。热态 merge 0.655s → 0.259s（cProfile 口径）。
 - **`parse_timestamp_ms`**：字符串分支抽为 `lru_cache(131072)` 的 `_parse_ts_str`；含 `:` 的串直接走 RFC3339 路径（`int()`/`float()` 都不接受冒号，输出不变）。新旧实现对本机 386,274 个不同时间戳取值对拍 0 差异（`tests/test_perf_equivalence.py`）。
+- **2026-11-05 冷态扫描优化（240 会话 / 25k 行合成语料，独立主机）**：冷态 1.07s → 0.84s（约 −22%），热态 0.17s 不变，黄金快照（#44 口径，全项目 SessionReport + TokenUsage 全字段，浮点按 repr）逐字段 diff 完全一致，`tcer.audit --ci` 对合成语料 6/6 项目 PASS。改动全是等价变换，不改数值：
+  - `loc._is_code/_is_test_file/_is_doc_file`：纯函数加 `lru_cache(4096)`（同一文件一会话内反复编辑是常态）+ 正则预编译（`re.search(字符串)` 每次走 `_compile` 分发表；一次全量扫描约 6 万次调用）。`on_tool_use` 0.48s → 0.09s（cProfile 口径）。
+  - `reader.iter_messages`：去掉每行 `line.strip()` 整行复制（`json.loads` 本就容忍首尾空白；空行走 `JSONDecodeError` 分支跳过，逐行一致）。
+  - `reader._scan_session_uncached`：每行 `obj.get("type")` 只取一次（旧实现各分支重复近 6 次）；行时间戳只解析一次（timings 与时间窗口共用）；模型名只取一次（TurnStat 与 per_model 桶共用）。
+  - `reader._add_usage_delta`：快路径先算 6 个增量，全为 0 时零分配返回（流式快照重发行的绝大多数情形），有增量时走同一条记账分支。
+  - `reader._read_session_meta_uncached`：tail 行预过滤 `"ai-title"` 字面串才解析；大文件尾部 16 KiB 无 `b"ai-title"` 时跳过解码；头循环早停（全部元数据字段首个非空 wins + 回退标题首条提问 wins 都齐全时；注意 head_title 是最后一个 ai-title wins，不能做早停条件）；`_classify_user` 只对 user 行调用、已有任一标题时跳过。
+  - `pricing.normalize`：早已是 `lru_cache`（与 `resolve`/`label` 同口径），本次只补文档说明，未改行为。
+- **刻意不做（本次复核）**：json 解码仍是冷态下限（实测约占冷态 1/3，纯标准库无可替代）；项目级 ProjectAnalysis 缓存仍不做（键覆盖漏项即错数）；`user_input.classify_*` 未动（单文本快路径需复制整条判定树，收益约 0.02s 不值得冒口径漂移风险）。
 - **`file_cache._sig`**：`Path.resolve()` → `normcase(abspath())`，省掉 Windows 每次开句柄（≈28µs × 5000 次）；代价是符号链接别名最多多缓存一份，正确性不受影响。
 - **`metrics._is_code_search_tool`**：纯函数加 `lru_cache`（≈29 万次调用）。
 - **刻意不做**：项目级 ProjectAnalysis 缓存（热态全量仅 0.64s，而键需覆盖全部参数、每个会话及子代理/旁路文件签名、价表与 composite_baselines 配置版本，漏项即错数）；Claude 解码层替换（`scan_once` 仅省 ≈5% 且要重现 Extra data 判定；字节流会改变 `errors="replace"` 语义）。

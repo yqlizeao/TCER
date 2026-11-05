@@ -237,6 +237,10 @@ def normalize(model: str) -> str:
     Use this to deduplicate per_model buckets (e.g. merge ``claude-opus-4-6`` into
     ``claude-opus-4-6-20260206``).  The returned string is always a valid table key
     when a match exists, so ``label()`` and ``resolve()`` will find it directly.
+
+    已缓存（``lru_cache``）：价表进程内静态（``_load`` 同为 lru_cache），与
+    ``resolve`` / ``label`` 同口径；扫描时每新回合调两次（TurnStat + per_model
+    桶），第二次为缓存命中。
     """
     mid = _match_id(model)
     return mid if mid is not None else model

@@ -181,9 +181,9 @@ def iter_messages(path: Path, *, keep_meta: bool = False):
     """
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            line = line.strip()
-            if not line:
-                continue
+            # 不 strip：json.loads 本就容忍首尾空白，strip 是整行复制（冷态
+            # 每行一次分配）；空行/纯空白行会走 JSONDecodeError 分支跳过，
+            # 与旧行为逐行一致。
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -497,33 +497,44 @@ def _add_usage_delta(u: TokenUsage, rec: dict, usage: dict) -> None:
     cw_new = _as_int(usage.get("cache_creation_input_tokens"))
     cc = usage.get("cache_creation")
     det = usage.get("output_tokens_details")
-    new = {
-        "i": _as_int(usage.get("input_tokens")),
-        "cw": cw_new,
-        "cr": _as_int(usage.get("cache_read_input_tokens")),
-        "o": _as_int(usage.get("output_tokens")),
-        "cw1h": (min(_as_int(cc.get("ephemeral_1h_input_tokens")), cw_new)
-                 if isinstance(cc, dict) else 0),
-        "think": _as_int(det.get("thinking_tokens")) if isinstance(det, dict) else 0,
-    }
-    d = {k: max(0, new[k] - rec[k]) for k in new}
-    if not any(d.values()):
+    # 快路径：先算 6 个增量，绝大多数快照行增量全为 0（重发/未增长）——
+    # 旧实现先建两个 dict 再逐项 max，6000 次调用约 0.15s；此处无增量时
+    # 零分配直接返回，有增量时再走同一条记账分支，数值逐值一致。
+    di = _as_int(usage.get("input_tokens")) - rec["i"]
+    dcw = cw_new - rec["cw"]
+    dcr = _as_int(usage.get("cache_read_input_tokens")) - rec["cr"]
+    do = _as_int(usage.get("output_tokens")) - rec["o"]
+    dcw1h = ((min(_as_int(cc.get("ephemeral_1h_input_tokens")), cw_new)
+              if isinstance(cc, dict) else 0) - rec["cw1h"])
+    dthink = (_as_int(det.get("thinking_tokens"))
+              if isinstance(det, dict) else 0) - rec["think"]
+    if di <= 0 and dcw <= 0 and dcr <= 0 and do <= 0 and dcw1h <= 0 and dthink <= 0:
         return
-    for k in d:
-        rec[k] += d[k]
-    u.input_tokens += d["i"]
-    u.cache_creation_input_tokens += d["cw"]
-    u.cache_read_input_tokens += d["cr"]
-    u.output_tokens += d["o"]
-    u.cache_write_1h_tokens += d["cw1h"]
-    u.reasoning_output_tokens += d["think"]
-    u.bucket(rec["bucket"]).add(d["i"], d["cw"], d["cr"], d["o"], d["cw1h"])
+    di = max(0, di)
+    dcw = max(0, dcw)
+    dcr = max(0, dcr)
+    do = max(0, do)
+    dcw1h = max(0, dcw1h)
+    dthink = max(0, dthink)
+    rec["i"] += di
+    rec["cw"] += dcw
+    rec["cr"] += dcr
+    rec["o"] += do
+    rec["cw1h"] += dcw1h
+    rec["think"] += dthink
+    u.input_tokens += di
+    u.cache_creation_input_tokens += dcw
+    u.cache_read_input_tokens += dcr
+    u.output_tokens += do
+    u.cache_write_1h_tokens += dcw1h
+    u.reasoning_output_tokens += dthink
+    u.bucket(rec["bucket"]).add(di, dcw, dcr, do, dcw1h)
     stat = rec.get("stat")
     if stat is not None:
-        stat.input_tokens += d["i"]
-        stat.cache_write += d["cw"]
-        stat.cache_read += d["cr"]
-        stat.output_tokens += d["o"]
+        stat.input_tokens += di
+        stat.cache_write += dcw
+        stat.cache_read += dcr
+        stat.output_tokens += do
     u.peak_input_tokens = max(u.peak_input_tokens, rec["i"] + rec["cw"] + rec["cr"])
 
 
@@ -594,10 +605,13 @@ def _scan_session_uncached(
         if cancel_check is not None:
             cancel_check()
 
+        # 每行只取一次 type：旧实现在各分支里重复 obj.get("type") 近 6 次
+        # （冷态 25k 行 ≈ 15 万次 dict.get），结果逐值一致。
+        otype = obj.get("type")
         _uid = obj.get("uuid")
         if isinstance(_uid, str) and _uid:
             chain[_uid] = (obj.get("parentUuid"), obj.get("timestamp"),
-                           obj.get("type") == "attachment")
+                           otype == "attachment")
         if obj.get("isMeta") is True:
             continue  # 与历史行为一致：isMeta 行只进 chain，不参与任何统计
 
@@ -610,7 +624,7 @@ def _scan_session_uncached(
         # cost-state（2.1.3xx）：Claude 自报的会话累计成本（含子代理开销；
         # 实测只写在主会话文件、子代理文件没有，故父子 merge 求和不双计）。
         # 累计值 → 取最大、不求和；hasUnknownModelCost 为真时不可靠，不填。
-        if obj.get("type") == "cost-state":
+        if otype == "cost-state":
             if not is_sub:
                 tc = obj.get("totalCostUSD")
                 if isinstance(tc, (int, float)) and not isinstance(tc, bool):
@@ -619,12 +633,12 @@ def _scan_session_uncached(
             continue
 
         # 用户在 AI 运行时排队输入（打断/并行输入信号）。
-        if obj.get("type") == "queue-operation":
+        if otype == "queue-operation":
             u.queued_input_count += 1
             continue
 
         # attachment 子类型：计划模式使用、读取截断（上下文浪费）。
-        if obj.get("type") == "attachment":
+        if otype == "attachment":
             att = obj.get("attachment")
             sub = att.get("type") if isinstance(att, dict) else None
             if sub in ("plan_mode", "plan_mode_reentry"):
@@ -635,13 +649,13 @@ def _scan_session_uncached(
             continue
 
         # Claude Code 2.1.x 顶层 mode 事件：{"type": "mode", "mode": "plan", ...}
-        if obj.get("type") == "mode":
+        if otype == "mode":
             if obj.get("mode") in ("plan", "plan_mode"):
                 u.plan_mode_count += 1
             continue
 
         # 非 message 行：system 子类型携带真实回合耗时 / 限流 / 压缩信号。
-        if obj.get("type") == "system":
+        if otype == "system":
             sub = obj.get("subtype")
             if sub == "stop_hook_summary":
                 u.hook_run_count += _as_int(obj.get("hookCount"))
@@ -801,6 +815,10 @@ def _scan_session_uncached(
         # analysis compares turns across responses, not within one).
         if role == "assistant":
             mid = msg.get("id")
+            # 行时间戳只解析一次：timings 与时间窗口共用（旧实现各解析一次，
+            # 第二次虽命中 lru_cache 仍有调用开销；无 id 的行 _ets 保持 None，
+            # 下方按需再解析——取值与旧实现一致）。
+            _ets = None
             if isinstance(mid, str) and mid:
                 _tm = timings.get(mid)
                 _ets = parse_timestamp_ms(obj.get("timestamp"))
@@ -822,11 +840,13 @@ def _scan_session_uncached(
                 if isinstance(mid, str) and mid:  # skip empty string → treat as no id
                     seen.add(mid)
                 # Track time window from all assistant turns (even zero-usage ones).
-                ts = parse_timestamp_ms(obj.get("timestamp"))
+                ts = _ets if _ets is not None else parse_timestamp_ms(obj.get("timestamp"))
                 if ts is not None:
                     u.started_at = ts if u.started_at is None else min(u.started_at, ts)
                     u.ended_at = ts if u.ended_at is None else max(u.ended_at, ts)
                 usage = msg.get("usage") or {}
+                # 模型名只取一次：TurnStat 与 per_model 桶共用（旧实现各取一次）。
+                model = msg.get("model")
                 i = _as_int(usage.get("input_tokens"))
                 cw = _as_int(usage.get("cache_creation_input_tokens"))
                 cr = _as_int(usage.get("cache_read_input_tokens"))
@@ -871,15 +891,14 @@ def _scan_session_uncached(
                     u.output_tokens += o
                     u.cache_write_1h_tokens += cw1h
                     u.peak_input_tokens = max(u.peak_input_tokens, i + cw + cr)
-                    model_raw = msg.get("model")
                     stat = TurnStat(
                         turn=current_turn, ts=ts,
                         input_tokens=i, cache_write=cw, cache_read=cr,
                         output_tokens=o,
                         user_turn=u.user_msgs if u.user_msgs > 0 else 1,
-                        model=(pricing.normalize(model_raw)
-                               if isinstance(model_raw, str) and model_raw
-                               and model_raw != "<synthetic>" else ""),
+                        model=(pricing.normalize(model)
+                               if isinstance(model, str) and model
+                               and model != "<synthetic>" else ""),
                     )
                     u.turn_stats.append(stat)
                 # Claude 的网页搜索/抓取计数在 usage.server_tool_use 里（每响应一次）。
@@ -887,7 +906,6 @@ def _scan_session_uncached(
                 if isinstance(stu, dict):
                     u.web_search_count += (_as_int(stu.get("web_search_requests"))
                                            + _as_int(stu.get("web_fetch_requests")))
-                model = msg.get("model")
                 # Skip synthetic stubs (ccswitch 429 errors, "No response requested")
                 # — they use the same message.model field but are not real model turns.
                 if isinstance(model, str) and model and model != "<synthetic>":
@@ -1124,8 +1142,12 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
 
     # Newest ai-title in the tail wins. Keep overwriting → the last non-empty
     # aiTitle in the tail is the freshest the file has.
+    # 预过滤：只有含 "ai-title" 字面串的行才可能是 ai-title 行（type 值本身
+    # 就含该串），其余行跳过 json.loads；判定仍以解析后的 type 为准。
     tail_title: str | None = None
     for line in tail:
+        if "ai-title" not in line:
+            continue
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
@@ -1138,6 +1160,15 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
     head_title: str | None = None
     fallback_title: str | None = None
     for line in head:
+        # 早停：全部元数据字段（首个非空 wins）+ 回退标题（首条提问 wins）都
+        # 已齐全时，后面的头行不再提供新信息。注意 head_title 是「最后一个
+        # ai-title wins」，不能拿它做早停条件——已设 head_title 时只跳过
+        # classify（回退标题已无用），仍继续扫后面的 ai-title 行。
+        if (session_id is not None and cwd is not None and entrypoint is not None
+                and cli_version is not None and git_branch is not None
+                and reasoning_effort is not None and permission_mode is not None
+                and fallback_title is not None):
+            break
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
@@ -1171,7 +1202,10 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
         if permission_mode is None and isinstance(obj.get("permissionMode"), str):
             permission_mode = obj["permissionMode"] or None
         # First real user message — only used when no ai-title exists at all.
-        if fallback_title is None:
+        # 只有 user 行才可能是提问，且已有任一标题时不再分类（省掉每行一次
+        # classify 的正则开销）。
+        if (fallback_title is None and head_title is None
+                and obj.get("type") == "user"):
             ui = _classify_user(obj)
             if ui is not None and ui.is_question:
                 fallback_title = ui.text
@@ -1220,8 +1254,12 @@ def _read_head_tail_lines(path: Path, head_n: int, tail_n: int) -> tuple[list[st
         fb.seek(seek_pos)
         if seek_pos > 0:
             fb.readline()  # discard the possibly-partial first line
-        raw = fb.read().decode("utf-8", errors="replace")
-    tail_lines = raw.splitlines()
+        raw = fb.read()
+    # tail 唯一用途是找最新 ai-title；原始字节里没有 "ai-title" 时直接
+    # 跳过 16 KiB 解码（无 ai-title 行可找，结果与解码后扫描一致）。
+    if b"ai-title" not in raw:
+        return head, []
+    tail_lines = raw.decode("utf-8", errors="replace").splitlines()
     skip = max(0, len(tail_lines) - tail_n)
     tail = tail_lines[skip:]
     return head, tail
