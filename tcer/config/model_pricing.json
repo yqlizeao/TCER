@@ -2849,6 +2849,15 @@
       "_note": "别名跟随：GPT-6.1 Sol 默认基座别名",
       "vendor": "OpenAI"
     },
+    "gpt-6.1-terra": {
+      "display_name": "GPT-6.1 Terra",
+      "input": 1.0,
+      "output": 5.0,
+      "cache_read": 0.05,
+      "cache_write": 1.25,
+      "_note": "OpenAI 2026-10-26 发布；视觉推理/精确计算机操作/自然写作；1.05M 上下文，128K 最大输出，知识截止 2026-06；标准价（30 分钟缓存写 $1.25，12 小时档 $2.50）；Batch/Flex 半价；Fast mode 2 倍不入表；分段计费：>272K 输入 token 整单输入/缓存读 2x、输出 1.5x",
+      "vendor": "OpenAI"
+    },
     "gpt-5.6-cyber": {
       "display_name": "GPT-5.6 Cyber",
       "input": 12.5,
