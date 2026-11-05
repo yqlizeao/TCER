@@ -2795,6 +2795,24 @@
       "_note": "智谱 AI 极速轻量模型；极高并发支持与毫秒级即时交互",
       "vendor": "Zhipu AI"
     },
+    "kimi-k3.1-pro": {
+      "display_name": "Kimi K3.1 Pro",
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.2,
+      "cache_write": 0.0,
+      "_note": "Moonshot 2026-10-23 发布；1.05M 上下文；标准价 input/output/cache-hit $2/$10/$0.20（Moonshot 官方定价页，多站点核实一致）；全上下文无长文加价；缓存写按 TTL（5min/1h）分档计费，具体价未核实记 0；Batch 优惠仅 K2.7 Code/K2.6（60%），K3.1 Pro 不适用",
+      "vendor": "Moonshot AI"
+    },
+    "kimi-k3.1-pro-highspeed": {
+      "display_name": "Kimi K3.1 Pro HighSpeed",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.2,
+      "cache_write": 0.0,
+      "_note": "Moonshot Kimi K3.1 Pro 极速版（2-3× 速度）；标准价为基准版 2×：$4/$20，缓存命中 $0.20（Moonshot 官方定价页，多站点核实一致）；缓存写按 TTL 分档计费，具体价未核实记 0",
+      "vendor": "Moonshot AI"
+    },
     "kimi-k3.5": {
       "display_name": "Kimi K3.5",
       "input": 0.6,
