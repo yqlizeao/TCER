@@ -42,6 +42,12 @@ class TcerGui:
         self._q: queue.Queue = queue.Queue()
         self._projects: list = []
         self._activity_cache: dict[int, int | None] = {}
+        # 分析证实的空项目：since 值 → 项目 idx 集合。左栏初筛只看文件 mtime
+        # （便宜），与会话级 started/ended 口径并不完全一致——文件被同步触
+        # 碰、只追加了用户消息等情况会产生「可见但 0 会话」的幽灵项目；一旦
+        # 某项目在该 since 下分析出 0 会话，就记入这里并隐藏（刷新项目列表时
+        # 清空，从磁盘重新推导）。
+        self._proven_empty: dict[str, set[int]] = {}
         self._current: analyze.ProjectAnalysis | None = None
         self._selected_project_idx: int | None = None
         self._selected_session_id: str | None = None
@@ -415,6 +421,8 @@ class TcerGui:
         self._activity_cache = {
             i: project_latest_activity_ms(p) for i, p in enumerate(self._projects)
         }
+        # 刷新即从磁盘重新推导：之前分析证实的空项目结论作废（期间可能有新活动）。
+        self._proven_empty = {}
         # 启动时恢复上次选中的项目（一次性；之后的刷新回到默认选首个）。
         preferred = self._restore_project_uid
         self._restore_project_uid = None
@@ -469,15 +477,45 @@ class TcerGui:
         """按当前 since 隐藏「最近活动早于 since」或无活动的项目 idx。
 
         until 不参与左栏（仅影响会话级 reanalyze）。无 since → 空集（全显）。
+        另含分析证实的空项目（``_proven_empty``）：左栏 mtime 初筛与会话级
+        started/ended 口径不一致时，分析出 0 会话的项目在此隐藏，列表不再
+        出现「可见但点开 0 会话」的幽灵项目。
         """
-        since_ms = since_date_to_ms(self.filter.get_params().get("since"))
+        params = self.filter.get_params()
+        since_ms = since_date_to_ms(params.get("since"))
         if since_ms is None:
             return set()
-        return {
+        hidden = {
             i for i in range(len(self._projects))
             if (self._activity_cache.get(i) is None
                 or self._activity_cache[i] < since_ms)
         }
+        hidden |= self._proven_empty.get(params.get("since") or "", set())
+        return hidden
+
+    def _maybe_hide_proven_empty(self, n_sessions: int) -> bool:
+        """时间筛选下分析出 0 会话时，隐藏该幽灵项目并推进到下一可见项目。
+
+        左栏 mtime 初筛与会话级 started/ended 口径并不完全一致——文件被同
+        步触碰、只追加了用户消息等情况，都会让项目「可见但点开 0 会话」。
+        一旦分析证实，就记入 ``_proven_empty``（按 since 值分桶）并走
+        ``apply_time_filter`` 隐藏它、自动推进（无可见项目时清空视图并提示）。
+        返回 True 表示已接管，调用方直接 return，不渲染这个空项目；每轮至
+        少隐藏一个项目，不会死循环。无 since（全部）时不接管：那时 0 会话
+        就是真空项目，已由 ``_empty_projects`` 置灰处理。
+        """
+        since = self.filter.get_params().get("since")
+        if n_sessions != 0 or not since:
+            return False
+        idx = self._selected_project_idx
+        if idx is None:
+            return False
+        self._proven_empty.setdefault(since, set()).add(idx)
+        proj = self._selected_project()
+        self.filter.set_status(
+            f"「{views.project_label(proj)}」在{since}无会话活动，已从列表隐藏")
+        self.apply_time_filter()
+        return True
 
     def apply_time_filter(self) -> None:
         """时间筛选变化时：按 since 隐藏左栏项目，必要时改选可见项，再 reanalyze 一次。
@@ -631,6 +669,11 @@ class TcerGui:
             # 门放行了它但 ref 已错位——丢弃结果，同时立刻为「当前」项目重新分析，
             # 而不是把「分析中…」留在屏上永不落地。
             self.reanalyze()
+            return
+        # 时间筛选下的空结果 = 幽灵项目：左栏 mtime 初筛说它今天有活动，但按
+        # 会话 started/ended 口径一个会话都没有（文件被同步触碰、只追加了用
+        # 户消息等）。接管后直接 return，不渲染这个空项目。
+        if self._maybe_hide_proven_empty(a.n_sessions):
             return
         self._current = a
         prev_sid = self._selected_session_id

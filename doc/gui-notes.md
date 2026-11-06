@@ -47,6 +47,7 @@
 
 - **视角 = 当前选中**：有选中会话 ⇔ 会话视角；否则项目视角。唯一写点 `app.TcerGui._set_session_view(sid)`（同步 activity_bar 兼容桩）；「项目/会话」分段控件与项目右键「项目视角/会话视角」均已移除，`FilterBar` 不再持有 `view_mode`。
 - **丝滑回程两条**：①再点已选会话卡 = 取消选中回项目汇总（`SessionColumn._select` 识别，`on_select_session(None)`）；②会话视角下点当前项目卡 = 清选中回项目视角，**不重算**（数据没变）。无选中会话时点项目保留「点项目 = 重算」语义（点当前项目即刷新）。项目右键菜单已收敛为「在资源管理器中打开 + 复制项目路径」两项（「刷新此项目」「复制项目名称」及视角切换项均已移除）。
+- **时间筛选幽灵项目（2026-11-06）**：筛「今天」时左栏与会话栏口径不一致——左栏初筛是文件 mtime（`paths.project_latest_activity_ms`，启动时一次算完、零 IO），会话栏是内容时间戳（`analyze._filter_by_started_at` 的 started/ended 窗口）。文件被同步触碰、只追加用户消息、或 `journal.jsonl`（workflow 编排日志）被刷新，都会让项目「可见但点开 0 会话」。两道防线：①`project_latest_activity_ms` 不计 `journal.jsonl`（与 analyze/audit 的排除口径一致）；②分析证实 0 会话后，`app._maybe_hide_proven_empty` 把该项目记入 `_proven_empty`（按 since 值分桶）并经 `apply_time_filter` 隐藏、自动推进到下一可见项目（无可见项目时清空视图并提示「所选时间范围内无项目活动」）；刷新项目列表（F5）时清空 `_proven_empty` 从磁盘重新推导。刻意不做：不为迁就 mtime 放宽会话筛选（会把旧活动算进「今天」，违反数据真实第一）；不为统一口径在启动时全量解析（冷启动代价）。
 - **不自动选第一个会话**：`_on_analysis` 只在「同项目重分析且上一选中会话仍可见（或处于分批构建待选 `_pending_select_sid`）」时延续选中（会话视角保持）；否则 `_set_session_view(None)` 落回项目视角。`_clear_analysis_view` 同步复位视角，保证「sid=None ⇔ 项目视角」不变量处处成立。
 - **选中来源全走同一入口**：会话卡 / 效率榜排名行 / 趋势图定位均触发 `on_select_session`；各消费方（`_render_metrics`/`_update_ranking_view`/`_update_model_compare`/状态栏徽标/「会话记录」按钮）沿用 `mode == "session" and _selected_session_id` 双条件守卫，不变量下行为自洽。
 - **指标看板小分类平铺**：`MetricPanel._build_group` 不再按 `group.subgroups` 渲染「· 基础/行为/质量」标题行，G4 整组一张网格（`group.metrics` 即 `_subgrouped` 保证的扁平序）。子类结构保留在 `metric_defs`（HTML 报告 `html_report.py` 仍按子类分节），勿在看板重新加回小分类行。

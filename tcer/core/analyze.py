@@ -406,9 +406,15 @@ def _filter_by_started_at(
 
     A session that started before ``since`` but was still active within the window
     counts (active boundary = ``ended_at``, falling back to ``started_at``). This
-    matches the "今天有活动" intuition and stays consistent with the project-list
-    mtime filter (last-write ≈ ended_at), so a project shown in the left column
-    always has sessions to show when opened.
+    matches the "今天有活动" intuition.
+
+    与左栏项目列表的口径关系：左栏初筛是文件 mtime（``paths.project_latest_
+    activity_ms``，便宜、启动时一次算完），与这里的 started/ended 口径并不
+    完全一致——``journal.jsonl`` 这类非会话文件（paths 层已排除）、文件被同步
+    触碰、只追加了用户消息等情况，都会让项目「可见但点开 0 会话」。幽灵项目
+    由 GUI 层兜底：分析证实 0 会话后记入 ``_proven_empty`` 并隐藏（见 app.py
+    ``_on_analysis`` / ``_compute_hidden``）。本函数只负责会话级真相，不为
+    迁就 mtime 而放宽（放宽会把旧活动算进「今天」，违反数据真实第一）。
     """
     since_ms = _parse_date_to_ms(since) if since else None
     until_ms = _parse_date_to_ms(until, end_of_day=True) if until else None

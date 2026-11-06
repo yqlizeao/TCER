@@ -197,6 +197,29 @@ def test_project_latest_activity_ms_claude(tmp_path, monkeypatch):
     assert paths.project_latest_activity_ms(ref_empty) is None
 
 
+def test_project_latest_activity_ms_ignores_journal(tmp_path, monkeypatch):
+    """journal.jsonl（workflow 编排日志）不计入项目最近活动。
+
+    它不是会话（analyze/audit 同样排除），但 mtime 会随每次 workflow 运行
+    刷新；计入会让项目在时间筛选中「可见但点开 0 会话」（幽灵项目）。
+    """
+    import os
+    from tcer.core.models import ProjectRef
+    root = tmp_path / ".claude"
+    _seed_claude_project(root, "h", sid="a")
+    early, late = 1_700_000_000_000, 1_750_000_000_000
+    os.utime(root / "projects" / "h" / "a.jsonl", ns=(early * 1_000_000,) * 2)
+    j = root / "projects" / "h" / "a" / "subagents" / "workflows" / "journal.jsonl"
+    j.parent.mkdir(parents=True, exist_ok=True)
+    j.write_text('{"type": "started"}\n', encoding="utf-8")
+    os.utime(j, ns=(late * 1_000_000,) * 2)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    paths.reset_claude_roots_cache()
+    ref = ProjectRef(source="claude", key="h", display_name="h", cwd=None,
+                     path=root / "projects" / "h")
+    assert paths.project_latest_activity_ms(ref) == early
+
+
 def test_discover_jsonl_roots_param(tmp_path, monkeypatch):
     """roots= 限定单根；默认（None）跨根 union（向后兼容）。"""
     from tcer.core import paths, reader

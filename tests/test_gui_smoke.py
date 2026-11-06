@@ -1027,6 +1027,10 @@ def test_on_analysis_no_default_session_select():
             view_mode=tk.StringVar(value=mode),
         )
         g._set_session_view = lambda sid: TcerGui._set_session_view(g, sid)
+        # _on_analysis 先过幽灵项目守门（_maybe_hide_proven_empty）：按
+        # test_smart_view 的惯例把真方法绑到 stub 上；本用例 n_sessions=2，
+        # 守门返回 False 不接管（且 stub 的 get_params 无 since，同样不接管）。
+        g._maybe_hide_proven_empty = lambda n: TcerGui._maybe_hide_proven_empty(g, n)
         return g, first_calls
 
     # 旧选中没保住 → 无选中 + 项目视角，不 select_first

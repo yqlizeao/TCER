@@ -482,11 +482,16 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
     from SQLite (== authoritative started_at). Returns None when there are no
     scannable files / the project is empty / all stats failed. Lazy-imports
     readers like ``project_has_sessions`` to avoid import cycles with ``paths``.
+
+    只计「能成为会话」的文件：Claude 的 ``journal.jsonl``（subagents/workflows
+    编排日志，非会话回放）不计——它被 analyze/audit 同样排除；否则一次 workflow
+    运行就会让项目在时间筛选中「可见但点开 0 会话」（幽灵项目，见 #44 补充）。
     """
     if ref.source == "claude":
         from tcer.core import reader
         root = ref_root(ref)
         files = reader.discover_jsonl(ref.key, roots=[root] if root is not None else None)
+        files = [f for f in files if f.name != "journal.jsonl"]
         return _max_mtime_ms(files)
     if ref.source in ("codex", "omp", "pi", "workbuddy"):
         return _max_mtime_ms(ref.session_paths)
