@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-基于真实 AI 编程助手会话数据，构建多维 AI 编程效率计量体系（TCER 为核心）。支持七个数据来源：Claude Code（`~/.claude`）、Codex（`~/.codex`）、OpenCode（`~/.local/share/opencode`，仅 SQLite `opencode.db`）、Oh My Pi / omp（`~/.omp`）、Pi / earendil-works/pi（`~/.pi`）、Antigravity（`~/.gemini/antigravity-cli`）、WorkBuddy / CodeBuddy（`~/.workbuddy-ai` 等）。**已移除**（2026-10）：Grok 数据源与 Grok 独有指标（xAI 模型价格保留）、OpenCode 旧版磁盘 JSON 存储兼容。
+基于真实 AI 编程助手会话数据，构建多维 AI 编程效率计量体系（TCER 为核心）。支持七个数据来源：Claude Code（`~/.claude`）、Codex（`~/.codex`）、OpenCode（`~/.local/share/opencode`，仅 SQLite `opencode.db`）、Oh My Pi / omp（`~/.omp`）、Pi / earendil-works/pi（`~/.pi`）、Antigravity（`~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide`）、WorkBuddy / CodeBuddy（`~/.workbuddy-ai` 等）。**已移除**（2026-10）：Grok 数据源与 Grok 独有指标（xAI 模型价格保留）、OpenCode 旧版磁盘 JSON 存储兼容。
 
 - **GUI-only**：`python -m TCER` 启动桌面界面
 - **纯离线**：不依赖 git、不做联网操作，数据来自本地 JSONL / SQLite 文件
@@ -114,7 +114,7 @@ TCER/
 
 ### 评分、指标族与基准
 
-42. **Antigravity / WorkBuddy 数据源**：Antigravity 读 SQLite + 零依赖 Protobuf wire 解码（只读 `mode=ro` 连接，避免干扰运行中的 CLI），多根 = `~/.gemini/antigravity-cli` + cc-switch 隔离终端 `~/.cc-switch/agy/<provider_id>/antigravity-cli`，按工作区合并成一卡、同会话 id 跨根只计一次；并行调用逐个计、LOC 按结果（step 132 字段 5.4 回显）裁决、压缩 step 23 的 usage 不在 gen_metadata 须另计、`manage_task` 是后台命令管理非子代理；WorkBuddy 无官方 schema（字段假设未经上游核实），按会话触及的业务路径提取最深共同工程根做项目聚合。[data-format.md#antigravity](doc/data-format.md#antigravity) · [data-format.md#workbuddy](doc/data-format.md#workbuddy)。
+42. **Antigravity / WorkBuddy 数据源**：Antigravity 读 SQLite + 零依赖 Protobuf wire 解码（只读 `mode=ro` 连接，避免干扰运行中的 CLI），多根 = `~/.gemini/antigravity-cli`（CLI）+ `~/.gemini/antigravity`（桌面 App 2.0）+ `~/.gemini/antigravity-ide`（IDE）+ `~/.config/antigravity`（ccusage 对齐，未实测）+ cc-switch 隔离终端 `~/.cc-switch/agy/<provider_id>/antigravity-cli`，按工作区合并成一卡、同会话 id 跨根只计一次；发现 = summaries 库 + 直接 glob `conversations/*.db` 取并集（summaries 不可靠：GUI Language Server 关闭时会刷回子集抹掉 CLI 行）；`~/.gemini/antigravity-backup/` 不扫（备份副本会重复计数）；Remote Agents / AI Studio 网页版云端无本地文件、明确不支持；并行调用逐个计、LOC 按结果（step 132 字段 5.4 回显）裁决、压缩 step 23 的 usage 不在 gen_metadata 须另计、`manage_task` 是后台命令管理非子代理；WorkBuddy 无官方 schema（字段假设未经上游核实），按会话触及的业务路径提取最深共同工程根做项目聚合。[data-format.md#antigravity](doc/data-format.md#antigravity) · [data-format.md#workbuddy](doc/data-format.md#workbuddy)。
 43. **洞察引擎 `core/insights.py`**：纯离线确定性规则（不调 LLM），`session_insights`/`project_insights` 产出亮点/拖累/建议；只在指标确有数据时判断，不臆测。[metrics.md#insights](doc/metrics.md#insights)。
 
 34. **新指标族**：压缩代价、自报成本偏差、LOC 可信度、重试循环、单回合成本、人机时间、分段效率、项目级分析（热点文件/模型切换/工具画像）。[metrics.md#new-metrics](doc/metrics.md#new-metrics)。

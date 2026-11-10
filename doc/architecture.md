@@ -9,9 +9,9 @@
 | `tcer/core/opencode_reader.py` | OpenCode SQLite（仅 `opencode.db`）发现、project/session/message/part 读取、Token/工具/summary diff 聚合 |
 | `tcer/core/omp_reader.py` | omp（Oh My Pi）`~/.omp/agent/sessions` JSONL 发现/解析、header cwd 分组、`message.usage` 单响应聚合、子代理 `<stem>/` 折叠、edit/write LOC |
 | `tcer/core/pi_reader.py` | Pi（earendil-works/pi）`~/.pi/agent/sessions` 薄壳，复用 omp 解析层（`durationMs`、`provider`+`modelId`、`cacheWrite1h`/`reasoning`） |
-| `tcer/core/antigravity_reader.py` | Antigravity（agy CLI）`~/.gemini/antigravity-cli` 会话发现/解析、新旧两套工具参数名 LOC |
+| `tcer/core/antigravity_reader.py` | Antigravity（CLI / 桌面 App / IDE）`~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide` 会话发现/解析、新旧两套工具参数名 LOC |
 | `tcer/core/workbuddy_reader.py` | WorkBuddy / CodeBuddy 会话发现/解析与按目录项目聚合 |
-| `tcer/core/paths.py` | 定位 `~/.claude`（含 `.zclaude` 等自定义 `CLAUDE_CONFIG_DIR` 兄弟目录自动识别）/ `~/.codex` / `~/.local/share/opencode` / `~/.omp` / `~/.pi` / `~/.gemini/antigravity-cli` / WorkBuddy 根、项目哈希编解码、统一项目引用 |
+| `tcer/core/paths.py` | 定位 `~/.claude`（含 `.zclaude` 等自定义 `CLAUDE_CONFIG_DIR` 兄弟目录自动识别）/ `~/.codex` / `~/.local/share/opencode` / `~/.omp` / `~/.pi` / `~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide` / WorkBuddy 根、项目哈希编解码、统一项目引用 |
 | `tcer/core/loc.py` | git-free 代码量统计：session_loc（会话内工具调用回放，含 originalFile F1 修正；不读磁盘） |
 | `tcer/core/metrics.py` | 全部公式：TCER/CHR/CPE/CAF/TTAF/NTCER/churn + 综合效率分 v2（`score_axes`/`efficiency_score`）+ 评级 + 逐模型成本 |
 | `tcer/core/pricing.py` | 逐模型计价：从 `tcer/config/model_pricing.json`（≈350 模型，当前 347 条）解析 $/MTok |
@@ -74,7 +74,7 @@ tcer/gui/
 2. **GUI 全中文、代码用缩写**：界面显示完整中文（如「缓存命中率」而非「CHR」），仅 TCER 保留英文缩写。代码标识符可用缩写（chr/cpe/ntcer…）。
 3. **运行方式**：`python -m tcer`（从仓库根目录，绿色免安装）。
 4. **库层不动**：tcer/core/ 下模块有完整测试覆盖，改动需谨慎。GUI 改动集中在 tcer/gui/。
-5. **纯离线**：不依赖任何版本管理工具（git 等）、不做任何联网操作。所有数据来自本地 `~/.claude/`、`~/.codex/`、`~/.local/share/opencode/`、`~/.omp/`、`~/.pi/`、`~/.gemini/antigravity-cli/` 与 WorkBuddy 目录。
+5. **纯离线**：不依赖任何版本管理工具（git 等）、不做任何联网操作。所有数据来自本地 `~/.claude/`、`~/.codex/`、`~/.local/share/opencode/`、`~/.omp/`、`~/.pi/`、`~/.gemini/antigravity-cli/` + `antigravity/` + `antigravity-ide/` 与 WorkBuddy 目录。
 
 ## Codex 支持
 

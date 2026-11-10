@@ -284,17 +284,34 @@ def _antigravity_env_override() -> bool:
 
 
 def antigravity_roots() -> list[Path]:
-    """All Antigravity data roots: the canonical dir plus cc-switch isolated profiles.
+    """All Antigravity data roots: the canonical surfaces plus cc-switch isolated profiles.
+
+    The three surfaces share one on-disk layout (``conversations/<uuid>.db``
+    SQLite + ``conversation_summaries.db``) under ``~/.gemini/``:
+    ``antigravity-cli`` (CLI, ``agy``), ``antigravity`` (desktop App 2.0),
+    ``antigravity-ide`` (IDE). ``~/.config/antigravity`` is a fourth root
+    listed by ccusage's Antigravity guide (provenance unverified, kept for
+    parity; harmless when absent). ``~/.gemini/antigravity-backup`` is
+    deliberately NOT a root: it holds copies of the same sessions and
+    scanning it would double-count them.
 
     cc-switch's "open terminal with this provider (isolated)" launches agy with a
     per-provider data dir ``~/.cc-switch/agy/<provider_id>/antigravity-cli`` whose
     layout is identical to ``~/.gemini/antigravity-cli``. An explicit env override
-    pins a single root (no cc-switch scan). Not cached: a newly launched isolated
+    pins a single root (no multi-surface or cc-switch scan). Not cached: a newly launched isolated
     profile becomes visible on the next refresh.
     """
     roots = [antigravity_dir()]
     if _antigravity_env_override():
         return roots
+    home = Path.home()
+    for cand in (
+        home / ".gemini" / "antigravity",
+        home / ".gemini" / "antigravity-ide",
+        home / ".config" / "antigravity",
+    ):
+        if cand not in roots:
+            roots.append(cand)
     try:
         provider_dirs = sorted(p for p in (Path.home() / ".cc-switch" / "agy").iterdir() if p.is_dir())
     except OSError:

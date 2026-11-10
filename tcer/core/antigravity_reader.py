@@ -1,8 +1,14 @@
-"""Google Antigravity CLI (agy) local-session reader.
+"""Google Antigravity (CLI / desktop App / IDE) local-session reader.
 
-Antigravity CLI stores sessions under ``~/.gemini/antigravity-cli`` (cc-switch isolated
-terminals use ``~/.cc-switch/agy/<provider_id>/antigravity-cli`` with the same layout;
-all roots are merged by workspace, see :func:`tcer.core.paths.antigravity_roots`):
+Antigravity stores sessions under ``~/.gemini/antigravity-cli`` (CLI, ``agy``),
+``~/.gemini/antigravity`` (desktop App 2.0) and ``~/.gemini/antigravity-ide``
+(IDE) — the three surfaces share one on-disk layout — plus
+``~/.config/antigravity`` (ccusage parity) and cc-switch isolated terminals
+(``~/.cc-switch/agy/<provider_id>/antigravity-cli``); all roots are merged by
+workspace, see :func:`tcer.core.paths.antigravity_roots`.
+``~/.gemini/antigravity-backup`` is deliberately not scanned (copies of the
+same sessions). Remote Agents and the AI Studio web mode run in the cloud and
+leave no local files, so they are out of scope.
   * ``conversation_summaries.db``: SQLite database cataloging all conversations,
     their workspace URIs (``workspace_uris``, e.g. ``["file:///C:/GitHub/TCER"]``),
     step counts, last modified timestamps, and title/preview texts.
@@ -458,10 +464,18 @@ def _connect_ro(path: Path | str) -> sqlite3.Connection:
 def _root_entries(root: Path) -> list[tuple[str, list[str]]]:
     """``(conversation_id, [normalized_workspace, ...])`` for one data root, newest first.
 
-    Prefers ``conversation_summaries.db``; falls back to scanning each session db's
-    ``trajectory_metadata_blob`` when the catalog is missing or carries no workspaces.
+    Union of ``conversation_summaries.db`` and a direct glob of
+    ``conversations/*.db`` (deduped by conversation id, catalog wins).
+    The catalog alone is not reliable: when CLI and GUI share a machine,
+    closing the GUI's Language Server flushes its in-memory subset back into
+    the catalog and wipes unmapped CLI rows, so sessions that exist on disk
+    would silently disappear if only the catalog were read. Sessions missing
+    from the catalog are recovered from each session db's
+    ``trajectory_metadata_blob``. Roots without a catalog (App/IDE may not
+    keep one) are covered by the glob alone.
     """
     entries: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
     summaries_db = root / "conversation_summaries.db"
     if summaries_db.is_file():
         try:
@@ -485,15 +499,16 @@ def _root_entries(root: Path) -> list[tuple[str, list[str]]]:
                             wss.append(ws)
                     if wss:
                         entries.append((cid, wss))
+                        seen.add(cid)
         except Exception:
             pass
-    if entries:
-        return entries
 
     conv_dir = root / "conversations"
     if not conv_dir.is_dir():
         return entries
     for db_file in sorted(conv_dir.glob("*.db"), key=lambda f: f.stat().st_mtime, reverse=True):
+        if db_file.stem in seen:
+            continue
         try:
             with _connect_ro(db_file) as conn:
                 cur = conn.cursor()
@@ -506,6 +521,7 @@ def _root_entries(root: Path) -> list[tuple[str, list[str]]]:
                         ws = _normalize_workspace_uri(m.group(0).decode("utf-8", errors="ignore"))
                         if ws:
                             entries.append((db_file.stem, [ws]))
+                            seen.add(db_file.stem)
         except Exception:
             continue
     return entries
@@ -514,8 +530,8 @@ def _root_entries(root: Path) -> list[tuple[str, list[str]]]:
 def _workspace_sessions() -> dict[str, list[Path]]:
     """Group session db files from every Antigravity root by normalized workspace.
 
-    Roots = ``~/.gemini/antigravity-cli`` + cc-switch isolated profiles
-    (:func:`tcer.core.paths.antigravity_roots`). The same workspace across roots
+    Roots = CLI + desktop App + IDE + config surfaces plus cc-switch isolated
+    profiles (:func:`tcer.core.paths.antigravity_roots`). The same workspace across roots
     merges into one group. A conversation id present in several roots (copied
     profile) is counted once -- the most recently modified file wins.
     """

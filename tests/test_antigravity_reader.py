@@ -441,7 +441,13 @@ def test_ccswitch_isolated_roots_merge_by_workspace(tmp_path: Path, monkeypatch)
     default, iso = _setup_ccswitch_roots(tmp_path)
 
     from tcer.core.paths import antigravity_roots
-    assert antigravity_roots() == [default, iso]
+    assert antigravity_roots() == [
+        default,
+        tmp_path / ".gemini" / "antigravity",
+        tmp_path / ".gemini" / "antigravity-ide",
+        tmp_path / ".config" / "antigravity",
+        iso,
+    ]
 
     refs = {r.key: r for r in antigravity_reader.list_project_refs()}
     assert set(refs) == {"shared", "isolated_only"}
@@ -596,3 +602,116 @@ def test_loc_waits_for_result_and_pairs_in_order_without_call_echo(tmp_path: Pat
     sloc, _ = antigravity_reader.session_loc_full(db)
     assert sloc.file_edit_counts == {r"C:\t\a.py": 1}
     assert sloc.added == 1
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-10 桌面 App + IDE 支持：多根发现、summaries 不全兜底、backup 排除
+# --------------------------------------------------------------------------- #
+
+def _setup_surface_roots(home: Path) -> dict[str, Path]:
+    """CLI + App + IDE + config 四根 + backup 根（备份副本，必须排除）。"""
+    roots: dict[str, Path] = {}
+    for name, sub in (
+        ("cli", ".gemini/antigravity-cli"),
+        ("app", ".gemini/antigravity"),
+        ("ide", ".gemini/antigravity-ide"),
+        ("cfg", ".config/antigravity"),
+        ("bak", ".gemini/antigravity-backup"),
+    ):
+        root = home / sub
+        (root / "conversations").mkdir(parents=True)
+        roots[name] = root
+    return roots
+
+
+def test_app_ide_config_roots_discovered_and_backup_excluded(tmp_path: Path, monkeypatch):
+    for env in ("ANTIGRAVITY_DIR", "ANTIGRAVITY_CLI_DIR", "GEMINI_CLI_DIR"):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    roots = _setup_surface_roots(tmp_path)
+    _create_mock_session_db(roots["cli"] / "conversations" / "s-cli.db")
+    _create_mock_session_db(roots["app"] / "conversations" / "s-app.db")
+    _create_mock_session_db(roots["ide"] / "conversations" / "s-ide.db")
+    _create_mock_session_db(roots["cfg"] / "conversations" / "s-cfg.db")
+    _create_mock_session_db(roots["bak"] / "conversations" / "s-bak.db")
+    _write_summaries(roots["cli"], [("s-cli", "file:///C:/repo/cli-proj", 5)])
+    _write_summaries(roots["app"], [("s-app", "file:///C:/repo/app-proj", 5)])
+    _write_summaries(roots["ide"], [("s-ide", "file:///C:/repo/ide-proj", 5)])
+    _write_summaries(roots["cfg"], [("s-cfg", "file:///C:/repo/cfg-proj", 5)])
+    _write_summaries(roots["bak"], [("s-bak", "file:///C:/repo/bak-proj", 5)])
+
+    from tcer.core.paths import antigravity_roots
+    assert antigravity_roots() == [
+        roots["cli"], roots["app"], roots["ide"], roots["cfg"],
+    ]
+
+    refs = {r.key: r for r in antigravity_reader.list_project_refs()}
+    assert set(refs) == {"cli-proj", "app-proj", "ide-proj", "cfg-proj"}
+    assert "bak-proj" not in refs
+    for key, stem in (("cli-proj", "s-cli"), ("app-proj", "s-app"),
+                      ("ide-proj", "s-ide"), ("cfg-proj", "s-cfg")):
+        assert [p.stem for p in antigravity_reader.discover_sessions(refs[key])] == [stem]
+
+    pa = analyze.analyze_project("app-proj", source="antigravity")
+    assert pa.n_sessions == 1
+    assert pa.aggregate.usage.input_tokens == 250
+
+
+def test_summaries_partial_rows_recovered_by_glob(tmp_path: Path, monkeypatch):
+    """summaries 只剩部分行（GUI Language Server 刷库 bug）：漏掉的会话由 glob 从 blob 找回。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv_dir = tmp_path / "conversations"
+    conv_dir.mkdir(parents=True)
+    _create_mock_session_db(conv_dir / "s-listed.db")
+    _create_mock_session_db(conv_dir / "s-wiped.db")
+    _write_summaries(tmp_path, [("s-listed", "file:///C:/repo/partial-proj", 5)])
+    # s-wiped 不在 summaries 里，只能从 blob 的 file:///C:/test/app 找回
+
+    refs = {r.key: r for r in antigravity_reader.list_project_refs()}
+    # blob 是 b"something file:///C:/test/app something"，兜底正则把空格后的
+    # "something" 也吞进工作区（既有行为）；关键是会话被找回，不是 key 的拼写
+    assert set(refs) == {"partial-proj", "app something"}
+    assert [p.stem for p in antigravity_reader.discover_sessions(refs["partial-proj"])] == ["s-listed"]
+    assert [p.stem for p in antigravity_reader.discover_sessions(refs["app something"])] == ["s-wiped"]
+
+
+def test_no_summaries_glob_only(tmp_path: Path, monkeypatch):
+    """根目录没有 summaries 库：只靠 glob + blob 发现（App/IDE 未证实有自己的库）。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv_dir = tmp_path / "conversations"
+    conv_dir.mkdir(parents=True)
+    _create_mock_session_db(conv_dir / "s-blob.db")
+
+    refs = antigravity_reader.list_project_refs()
+    # 同上：blob 兜底正则把 "something" 吞进工作区名（既有行为）
+    assert [r.key for r in refs] == ["app something"]
+    assert [p.stem for p in antigravity_reader.discover_sessions(refs[0])] == ["s-blob"]
+
+
+def test_cross_surface_same_session_dedup(tmp_path: Path, monkeypatch):
+    """同一会话 id 在 CLI 与 App 各一份：只计一次，取 mtime 较新的文件。"""
+    import os
+
+    for env in ("ANTIGRAVITY_DIR", "ANTIGRAVITY_CLI_DIR", "GEMINI_CLI_DIR"):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    cli = tmp_path / ".gemini" / "antigravity-cli"
+    app = tmp_path / ".gemini" / "antigravity"
+    for root in (cli, app):
+        (root / "conversations").mkdir(parents=True)
+    _create_mock_session_db(cli / "conversations" / "s-dup.db")
+    newer = _create_mock_session_db(app / "conversations" / "s-dup.db")
+    st = newer.stat()
+    os.utime(newer, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    _write_summaries(cli, [("s-dup", "file:///C:/repo/shared", 1)])
+    _write_summaries(app, [("s-dup", "file:///C:/repo/shared", 2)])
+
+    refs = {r.key: r for r in antigravity_reader.list_project_refs()}
+    assert set(refs) == {"shared"}
+    shared = antigravity_reader.discover_sessions(refs["shared"])
+    assert [p.stem for p in shared] == ["s-dup"]
+    assert shared[0].parent.parent == app
+
+    pa = analyze.analyze_project("shared", source="antigravity")
+    assert pa.n_sessions == 1
+    assert pa.aggregate.usage.input_tokens == 250
