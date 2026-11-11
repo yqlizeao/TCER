@@ -1506,6 +1506,15 @@
       "cache_write": 0,
       "vendor": "Alibaba"
     },
+    "qwen3.6-27b": {
+      "display_name": "Qwen3.6 27B",
+      "input": 0.6,
+      "output": 3.6,
+      "cache_read": 0,
+      "cache_write": 0,
+      "_note": "通义千问 3.6 代 27B 开源推理模型；阿里国际站（新加坡）标准价 $0.60/$3.60（0<Token≤256K，思考与非思考输出同价）；价页未列缓存价，缓存两列记 0；无免费额度",
+      "vendor": "Alibaba"
+    },
     "qwen3.5-plus": {
       "display_name": "Qwen3.5 Plus",
       "input": 0.26,
@@ -1801,11 +1810,11 @@
     },
     "mistral-large-4": {
       "display_name": "Mistral Large 4",
-      "input": 1.36,
-      "output": 4.18,
-      "cache_read": 0,
+      "input": 0.7,
+      "output": 2.1,
+      "cache_read": 0.07,
       "cache_write": 0,
-      "_note": "Mistral 2026-10 开放权重多模态旗舰（v26.10）；价取自 Mistral 官方 docs.mistral.ai/inference/pricing（2026-10-22）；注意 models.dev 记 0.68/2.09/0.07（恰为一半），两源冲突、未获第二官方来源印证；缓存读价官方未列",
+      "_note": "Mistral 2026-10-29 开放权重并重置价目（GA v26.10）：标准价 $0.70/$2.10，缓存读 $0.07（Mistral 官方 docs 模型页，无折扣标注）；此前预览期挂牌价 $1.36/$4.18 已失效",
       "vendor": "Mistral AI"
     },
     "mistral-medium-3.1": {
@@ -2383,11 +2392,11 @@
     },
     "grok-4.6-build": {
       "display_name": "Grok 4.6 Build",
-      "input": 4.0,
-      "output": 12.0,
-      "cache_read": 1.0,
+      "input": 2,
+      "output": 6,
+      "cache_read": 0.5,
       "cache_write": 0.0,
-      "_note": "xAI Grok Build CLI 官方专用编码版；深度匹配命令行自动化构建、排错与工程落地流程；分段计费：上下文 >200k 时单价翻倍",
+      "_note": "xAI Grok Build CLI 官方专用编码版；取基础档单价（<200k）$2/$6，缓存读 $0.50；分段计费：prompt ≥200k 时单价翻倍（$4/$12，缓存读 $1）；无独立缓存写入计价",
       "vendor": "xAI"
     },
     "glm-4-plus": {
@@ -2800,8 +2809,8 @@
       "input": 2.0,
       "output": 10.0,
       "cache_read": 0.2,
-      "cache_write": 0.0,
-      "_note": "Moonshot 2026-10-23 发布；1.05M 上下文；标准价 input/output/cache-hit $2/$10/$0.20（Moonshot 官方定价页，多站点核实一致）；全上下文无长文加价；缓存写按 TTL（5min/1h）分档计费，具体价未核实记 0；Batch 优惠仅 K2.7 Code/K2.6（60%），K3.1 Pro 不适用",
+      "cache_write": 2.0,
+      "_note": "Moonshot 2026-10-23 发布；1.05M 上下文；标准价 input/output/cache-hit $2/$10/$0.20（Moonshot 官方定价页，多站点核实一致）；全上下文无长文加价；缓存写按 TTL 分档计费：5min $2.00（主价）、1h $4.00（Moonshot 官方定价页）；Batch 优惠仅 K2.7 Code/K2.6（60%），K3.1 Pro 不适用",
       "vendor": "Moonshot AI"
     },
     "kimi-k3.1-pro-highspeed": {
@@ -2809,8 +2818,26 @@
       "input": 4.0,
       "output": 20.0,
       "cache_read": 0.2,
-      "cache_write": 0.0,
-      "_note": "Moonshot Kimi K3.1 Pro 极速版（2-3× 速度）；标准价为基准版 2×：$4/$20，缓存命中 $0.20（Moonshot 官方定价页，多站点核实一致）；缓存写按 TTL 分档计费，具体价未核实记 0",
+      "cache_write": 4.0,
+      "_note": "Moonshot Kimi K3.1 Pro 极速版（2-3× 速度）；标准价为基准版 2×：$4/$20，缓存命中 $0.20（Moonshot 官方定价页，多站点核实一致）；缓存写按 TTL 分档计费：5min $4.00（主价）、1h $8.00（Moonshot 官方定价页）",
+      "vendor": "Moonshot AI"
+    },
+    "k3.1-pro": {
+      "display_name": "Kimi K3.1 Pro",
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.2,
+      "cache_write": 2.0,
+      "_note": "别名行：Kimi Code 套餐里的裸名，与 kimi-k3.1-pro 同价；标准价 $2/$10，缓存命中 $0.20；缓存写按 TTL 分档（5min $2.00、1h $4.00），主价取 5min 默认档",
+      "vendor": "Moonshot AI"
+    },
+    "k3.1-pro-highspeed": {
+      "display_name": "Kimi K3.1 Pro HighSpeed",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.2,
+      "cache_write": 4.0,
+      "_note": "别名行：Kimi Code 套餐里的裸名，与 kimi-k3.1-pro-highspeed 同价；标准价 $4/$20，缓存命中 $0.20；缓存写按 TTL 分档（5min $4.00、1h $8.00），主价取 5min 默认档",
       "vendor": "Moonshot AI"
     },
     "kimi-k3.5": {
@@ -2946,6 +2973,24 @@
       "cache_read": 0.5,
       "cache_write": 0.0,
       "_note": "xAI 2026 推理智能体模型；取基础档单价（<200k）；分段计费：prompt ≥200k 时单价翻倍（4/12，缓存亦翻倍）；无独立缓存写入计价",
+      "vendor": "xAI"
+    },
+    "grok-4.7-build": {
+      "display_name": "Grok 4.7 Build",
+      "input": 2,
+      "output": 6,
+      "cache_read": 0.5,
+      "cache_write": 0,
+      "_note": "xAI Grok Build 专用编码版，与 grok-4.7 同价；基础档（prompt <200k）$2/$6，缓存读 $0.50；≥200k 时单价翻倍（$4/$12，缓存读 $1）；无独立缓存写入计价；Batch 8 折、Priority 2x、美国区端点 1.1x",
+      "vendor": "xAI"
+    },
+    "grok-4.7-build-fast": {
+      "display_name": "Grok 4.7 Build Fast",
+      "input": 4,
+      "output": 12,
+      "cache_read": 1.0,
+      "cache_write": 0,
+      "_note": "xAI Grok 4.7 Fast（仅 Cursor / Grok Build，不上公共 API）；基础档（prompt <200k）$4/$12，缓存读 $1；>200k 时 $6/$18，缓存读 $1.50；无独立缓存写入计价；无 Batch 折扣",
       "vendor": "xAI"
     },
     "mimo-v2.6-pro": {
