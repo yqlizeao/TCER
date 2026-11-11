@@ -542,9 +542,21 @@ def test_2026_10_22_sync_new_entries():
     assert pricing.resolve("claude-sonnet-5-5") != pricing.resolve("claude-sonnet-5")
     assert pricing.table_key("claude-sonnet-5-5[1m]") == "claude-sonnet-5-5"
     # Gemini 4 Argon must not fall to default or a gemini-3.x key
+    # (2026-11-11: flipped to the standard price 4/20/0.2 per the iron rule;
+    #  intro 2/10/0.1 through 2026-11-30 lives in _note)
     assert pricing.table_key("gemini-4-argon") == "gemini-4-argon"
-    assert pricing.resolve("gemini-4-argon") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 0.0}
+    assert pricing.resolve("gemini-4-argon") == {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 0.0}
     assert pricing.table_key("gemini-4-argon-preview") == "gemini-4-argon"
+    # Gemini 4 Carbon: standard price, must not bind to Argon
+    assert pricing.table_key("gemini-4-carbon") == "gemini-4-carbon"
+    assert pricing.resolve("gemini-4-carbon") == {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 0.0}
+    assert pricing.resolve("gemini-4-carbon") == pricing.resolve("gemini-4-argon")
+    # Claude Fable/Mythos 5.2: must not prefix-match onto 5.1 or 5
+    assert pricing.table_key("claude-fable-5-2") == "claude-fable-5-2"
+    assert pricing.resolve("claude-fable-5-2") == {"input": 8.0, "output": 40.0, "cache_read": 0.2, "cache_write": 10.0}
+    assert pricing.resolve("claude-fable-5-2") != pricing.resolve("claude-fable-5-1")
+    assert pricing.table_key("claude-mythos-5-2") == "claude-mythos-5-2"
+    assert pricing.resolve("claude-mythos-5-2") == {"input": 8.0, "output": 40.0, "cache_read": 0.2, "cache_write": 10.0}
     # MiniMax M3.1 Flash must not forward-prefix onto minimax-m3
     assert pricing.table_key("MiniMax-M3.1-Flash") == "minimax-m3.1-flash"
     assert pricing.resolve("MiniMax-M3.1-Flash") == {"input": 0.15, "output": 0.6, "cache_read": 0.015, "cache_write": 0.0}

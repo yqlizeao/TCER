@@ -29,11 +29,20 @@
   "models": {
     "gemini-4-argon": {
       "display_name": "Gemini 4 Argon",
-      "input": 2.0,
-      "output": 10.0,
-      "cache_read": 0.1,
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.2,
       "cache_write": 0.0,
-      "_note": "Google DeepMind Gemini 4 代首发模型（2026-10-13）；介绍价至 2026-11-30（当前生效，官方定价页 2026-10-22 核对）；2026-12-01 起涨至 4/20/0.2；缓存仅隐式（无显式缓存写入计价）；无付费分段；不提供免费档",
+      "_note": "Google DeepMind Gemini 4 代首发模型（2026-10-13；官方定价页 2026-11-11 核对）；标准价 4/20/0.2；介绍价 2/10（缓存读 0.10）至 2026-11-30；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 2/10；不提供免费档",
+      "vendor": "Google"
+    },
+    "gemini-4-carbon": {
+      "display_name": "Gemini 4 Carbon",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.2,
+      "cache_write": 0.0,
+      "_note": "Google Gemini 4 代旗舰（2026-10-28 发布，2026-11-10 上公开 API 付费档；官方定价页 2026-11-11 核对）；标准价 4/20/0.2；介绍价 2/10（缓存读 0.10）至 2026-11-30；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 2/10；不提供免费档；思考 token 全计费",
       "vendor": "Google"
     },
     "pg-gemini-4-argon": {
@@ -97,6 +106,15 @@
       "_note": "Anthropic 2026 高度对齐与高安全性研究模型；缓存读优惠倍率 0.025×（$0.25/MTok）；1h 缓存写 $20（2×，5m 写 12.5 为本表 cache_write）；Batch 优惠：5/25；数据驻留（inference_geo=us）全品类 1.1×",
       "vendor": "Anthropic"
     },
+    "claude-fable-5-2": {
+      "display_name": "Claude Fable 5.2",
+      "input": 8.0,
+      "output": 40.0,
+      "cache_read": 0.2,
+      "cache_write": 10.0,
+      "_note": "Anthropic 2026-11-09 GA；较 Fable 5.1（10/50）降价 20%；缓存读优惠倍率 0.025×（$0.20/MTok）；1h 缓存写 $16（2×，5m 写 10 为本表 cache_write）；Fast mode 16/80（约 2.5× 生成速度，不可与 Batch 叠加）；Batch 优惠：4/20；数据驻留（inference_geo=us）全品类 1.1×",
+      "vendor": "Anthropic"
+    },
     "claude-mythos-5-1": {
       "display_name": "Claude Mythos 5.1",
       "input": 10,
@@ -104,6 +122,15 @@
       "cache_read": 0.25,
       "cache_write": 12.5,
       "_note": "Anthropic 2026 极限推理探索模型（Limited Availability）；缓存读倍率 0.025×；1h 缓存写 $20；Batch 优惠：5/25",
+      "vendor": "Anthropic"
+    },
+    "claude-mythos-5-2": {
+      "display_name": "Claude Mythos 5.2",
+      "input": 8.0,
+      "output": 40.0,
+      "cache_read": 0.2,
+      "cache_write": 10.0,
+      "_note": "与 Fable 5.2 同款模型，仅限 Anthropic 网络与生命科学验证项目成员组织；缓存读倍率 0.025×（$0.20/MTok）；1h 缓存写 $16；Fast mode 16/80；Batch 优惠：4/20；数据驻留（inference_geo=us）全品类 1.1×",
       "vendor": "Anthropic"
     },
     "claude-fable-5": {
