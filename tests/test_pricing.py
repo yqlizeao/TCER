@@ -559,6 +559,9 @@ def test_2026_10_22_sync_new_entries():
     assert pricing.resolve("claude-fable-5-2") != pricing.resolve("claude-fable-5-1")
     assert pricing.table_key("claude-mythos-5-2") == "claude-mythos-5-2"
     assert pricing.resolve("claude-mythos-5-2") == {"input": 8.0, "output": 40.0, "cache_read": 0.2, "cache_write": 10.0}
+    # Gemini Decision 1: scoring model, output is free, must resolve to its own key
+    assert pricing.table_key("gemini-decision-1") == "gemini-decision-1"
+    assert pricing.resolve("gemini-decision-1") == {"input": 0.1, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
     # MiniMax M3.1 Flash must not forward-prefix onto minimax-m3
     assert pricing.table_key("MiniMax-M3.1-Flash") == "minimax-m3.1-flash"
     assert pricing.resolve("MiniMax-M3.1-Flash") == {"input": 0.15, "output": 0.6, "cache_read": 0.015, "cache_write": 0.0}

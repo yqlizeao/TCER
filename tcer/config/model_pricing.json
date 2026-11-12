@@ -45,6 +45,15 @@
       "_note": "Google Gemini 4 代旗舰（2026-10-28 发布，2026-11-10 上公开 API 付费档；官方定价页 2026-11-11 核对）；标准价 4/20/0.2；介绍价 2/10（缓存读 0.10）至 2026-11-30；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 2/10；不提供免费档；思考 token 全计费",
       "vendor": "Google"
     },
+    "gemini-decision-1": {
+      "display_name": "Gemini Decision 1",
+      "input": 0.1,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "_note": "Google 2026-11-11 发布（Decisions API 专用）；决策/评分模型，不逐 token 生成文本：单次前向给最多 1000 个问题打分（yes/no、选择 2–255 项、rubric），返回概率与置信度，150–250ms；输入 $0.10/MTok，输出 $0（不产生输出 token）；共享输入按请求计一次；不支持上下文缓存与 Batch；有免费档（AI Studio 原型）；256K 多模态输入（文本/图像/音频/视频/PDF）",
+      "vendor": "Google"
+    },
     "pg-gemini-4-argon": {
       "display_name": "Gemini 4 Argon",
       "input": 2.0,
