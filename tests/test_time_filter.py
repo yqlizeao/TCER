@@ -10,7 +10,15 @@
 from __future__ import annotations
 
 from tcer.core.models import ProjectRef
+from tcer.core.paths import since_date_to_ms
 from tcer.gui.app import TcerGui
+
+
+def _today_ms() -> int:
+    """2026-11-06 当地 00:00 的 epoch ms：与 ``_compute_hidden`` 用的
+    ``since_date_to_ms`` 同一口径。之前硬编码的 1793894400000 是 HKT
+    午夜，只在 TZ=Asia/Hong_Kong 时等于当地午夜，UTC 下测试会误失败。"""
+    return since_date_to_ms("2026-11-06")  # type: ignore[return-value]
 
 
 def _ref(key: str) -> ProjectRef:
@@ -53,7 +61,7 @@ def _shell(since, activity, proven_empty=None):
 def test_compute_hidden_includes_proven_empty():
     # p0/p1 的 mtime 都在今天内，p2 早于今天；p1 已被分析证实今天 0 会话。
     app = _shell("2026-11-06",
-                 {0: 1_793_894_400_000, 1: 1_793_894_400_000, 2: 1_700_000_000_000},
+                 {0: _today_ms(), 1: _today_ms(), 2: 1_700_000_000_000},
                  {"2026-11-06": {1}})
     assert app._compute_hidden() == {1, 2}
     # 换一个 since 值：该日期的 proven-empty 结论不适用，只剩 mtime 口径
@@ -67,7 +75,7 @@ def test_compute_hidden_includes_proven_empty():
 
 def test_maybe_hide_proven_empty_records_and_advances():
     app = _shell("2026-11-06",
-                 {0: 1_793_894_400_000, 1: 1_793_894_400_000, 2: 1_793_894_400_000})
+                 {0: _today_ms(), 1: _today_ms(), 2: _today_ms()})
     assert app._maybe_hide_proven_empty(0) is True
     assert app._proven_empty == {"2026-11-06": {1}}
     assert app._apply_called == 1
@@ -77,7 +85,7 @@ def test_maybe_hide_proven_empty_records_and_advances():
 
 def test_maybe_hide_proven_empty_noop_cases():
     app = _shell("2026-11-06",
-                 {0: 1_793_894_400_000, 1: 1_793_894_400_000, 2: 1_793_894_400_000})
+                 {0: _today_ms(), 1: _today_ms(), 2: _today_ms()})
     # 有会话 → 不接管；无 since（全部）→ 不接管（真空项目由 _empty_projects 置灰）。
     assert app._maybe_hide_proven_empty(3) is False
     app.filter.since = None

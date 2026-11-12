@@ -509,6 +509,38 @@ def _gen_row(model: str, unc: int, out: int, cached: int, rid: str) -> bytes:
     return _make_proto_field(1, 2, f1)
 
 
+def _usage_blob_no_id(unc: int, out: int, cached: int) -> bytes:
+    """ccusage #2026 形态：Gemini 经 ACP/localharness 时 usage 不带
+    response_id（字段 7）/provider_assigned_message_id/message_id。"""
+    return (_make_proto_field(2, 0, unc) + _make_proto_field(3, 0, out)
+            + _make_proto_field(5, 0, cached))
+
+
+def _gen_row_unkeyed_mirror(model: str, unc: int, out: int, cached: int, step_idx: int) -> bytes:
+    """ccusage #2026 实际行形态（Antigravity 1.4.1 实测解码）：同一 turn 的 usage
+    在 gen_metadata 内出现两次——field 4 主 usage + field 17 retry_infos[0]
+    镜像（仅 1 次尝试时也照写）——且 usage 无 id 字段；另带 step_indices（字段 2）、
+    custom_metadata.request_id（字段 20）、model_display_name（字段 21）。"""
+    usage = _usage_blob_no_id(unc, out, cached)
+    retry = _make_proto_field(4, 2, usage)
+    custom = _make_proto_field(1, 2, "request_id") + _make_proto_field(2, 2, "req-0")
+    f1 = (_make_proto_field(4, 2, usage)
+          + _make_proto_field(17, 2, retry)
+          + _make_proto_field(19, 2, model)
+          + _make_proto_field(20, 2, custom)
+          + _make_proto_field(21, 2, model + "-medium"))
+    return _make_proto_field(1, 2, f1) + _make_proto_field(2, 0, step_idx)
+
+
+def _step_meta_with_model_usage(unc: int, out: int, cached: int, display_name: str, seconds: int) -> bytes:
+    """ccusage #2026 的 steps 行形态：metadata 字段 9 model_usage 与 gen_metadata
+    的 usage 逐值相同（第三份拷贝），generator_model_info（字段 24）带 display name。"""
+    info = _make_proto_field(1, 2, display_name)
+    return (_make_timestamp_meta(seconds)
+            + _make_proto_field(9, 2, _usage_blob_no_id(unc, out, cached))
+            + _make_proto_field(24, 2, info))
+
+
 def _compaction_step(unc: int, out: int, cached: int, rid: str) -> bytes:
     f28 = _make_proto_field(2, 2, _usage_blob(unc, out, cached, rid))
     return _make_proto_field(5, 2, _make_proto_field(28, 2, f28))
@@ -586,6 +618,59 @@ def test_parallel_calls_pruned_steps_failed_edits_and_compaction(tmp_path: Path)
     assert sloc.added == 2 + 2 + 1
     assert sloc.deleted == 0
     assert sloc.file_edit_counts == {r"C:\t\b.py": 1, r"C:\t\a.py": 2}
+
+
+def test_ccusage_2026_unkeyed_mirror_copies_count_once(tmp_path: Path):
+    """ccusage #2026/#2027 三倍计数：TCER 未中招（合成复现验证）。
+
+    ccusage 因同时读三处 usage（gen_metadata field 4 + 同行 retry_infos[0]
+    镜像 + steps metadata field 9 model_usage），无 id 时去重失效而计 3x。
+    TCER 只读 gen_metadata field 4（不解析 retry_infos；steps 只读 stype 23
+    的压缩用量），所以同一 turn 的三份拷贝只计 1x。本测试按 #2026 实际行形态
+    （issue 给出的 gen_metadata[0]/steps[1] 解码值）构造数据并锁定该行为：
+    若将来 reader 开始读 steps model_usage 或 retry_infos，必须先补去重，
+    否则本测试失败。
+    """
+    from tcer.core.antigravity_reader import _gen_response_id
+
+    db_path = tmp_path / "conversations" / "s.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    gens = [
+        _gen_row_unkeyed_mirror("gemini-4-argon", 15027, 49, 5000, 1),
+        _gen_row_unkeyed_mirror("gemini-4-argon", 20000, 100, 7000, 3),
+    ]
+    # usage 确实无 id（复现前提）；若上游开始填 id，_gen_response_id 应返回它
+    assert _gen_response_id(gens[0]) == ""
+    assert _decode_gen_metadata(gens[0]) == ("gemini-4-argon", 15027, 49, 5000, 0)
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)")
+    conn.execute("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, "
+                 "status INTEGER, metadata BLOB, step_payload BLOB)")
+    conn.executemany("INSERT INTO gen_metadata VALUES (?,?)", list(enumerate(gens)))
+    conn.executemany(
+        "INSERT INTO steps VALUES (?,?,?,?,?)",
+        [
+            (0, 14, 0, _make_timestamp_meta(1700000000), _make_user_step_bytes("帮我写个函数")),
+            (1, 15, 0, _step_meta_with_model_usage(15027, 49, 5000, "gemini-4-argon-medium", 1700000001),
+             _make_tool_call_step_bytes("c1", "read_file", {"Path": r"C:\t\a.py"})),
+            (2, 14, 0, _make_timestamp_meta(1700000002), _make_user_step_bytes("再改一下")),
+            (3, 15, 0, _step_meta_with_model_usage(20000, 100, 7000, "gemini-4-argon-medium", 1700000003),
+             _make_tool_call_step_bytes("c2", "read_file", {"Path": r"C:\t\a.py"})),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    u = antigravity_reader.aggregate_usage(db_path)
+    # 1x 而非 3x：两回合各计一次（15027+20000 / 49+100 / 5000+7000）
+    assert u.input_tokens == 35027
+    assert u.output_tokens == 149
+    assert u.cache_read_input_tokens == 12000
+    # steps 的 model_usage 拷贝不得另起 "gemini-4-argon-medium" 分桶
+    assert set(u.per_model) == {"gemini-4-argon"}
+    assert [(t.input_tokens, t.output_tokens, t.cache_read) for t in u.turn_stats] == [
+        (15027, 49, 5000), (20000, 100, 7000),
+    ]
 
 
 def test_loc_waits_for_result_and_pairs_in_order_without_call_echo(tmp_path: Path):
