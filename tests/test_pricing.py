@@ -562,6 +562,10 @@ def test_2026_10_22_sync_new_entries():
     # Gemini Decision 1: scoring model, output is free, must resolve to its own key
     assert pricing.table_key("gemini-decision-1") == "gemini-decision-1"
     assert pricing.resolve("gemini-decision-1") == {"input": 0.1, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+    # Gemini 4 Hydrogen: Flash tier, standard price from Google Cloud billing
+    # SKUs (2026-11-12); not yet announced or on the docs pricing page
+    assert pricing.table_key("gemini-4-hydrogen") == "gemini-4-hydrogen"
+    assert pricing.resolve("gemini-4-hydrogen") == {"input": 1.5, "output": 7.5, "cache_read": 0.075, "cache_write": 0.0}
     # MiniMax M3.1 Flash must not forward-prefix onto minimax-m3
     assert pricing.table_key("MiniMax-M3.1-Flash") == "minimax-m3.1-flash"
     assert pricing.resolve("MiniMax-M3.1-Flash") == {"input": 0.15, "output": 0.6, "cache_read": 0.015, "cache_write": 0.0}

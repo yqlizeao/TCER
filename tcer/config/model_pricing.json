@@ -16,7 +16,7 @@
       "_note": "（可选）模型定位描述与计费特性注解，GUI 悬浮展示",
       "vendor": "模型所属厂商（如 Anthropic、OpenAI、Google、xAI、DeepSeek、Alibaba 等）"
     },
-    "model_count": 358,
+    "model_count": 360,
     "note": "可自由增删 models 条目；未匹配到的模型回退到 default（Anthropic 通用 list 价）。"
   },
   "default": {
@@ -43,6 +43,15 @@
       "cache_read": 0.2,
       "cache_write": 0.0,
       "_note": "Google Gemini 4 代旗舰（2026-10-28 发布，2026-11-10 上公开 API 付费档；官方定价页 2026-11-11 核对）；标准价 4/20/0.2；介绍价 2/10（缓存读 0.10）至 2026-11-30；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 2/10；不提供免费档；思考 token 全计费",
+      "vendor": "Google"
+    },
+    "gemini-4-hydrogen": {
+      "display_name": "Gemini 4 Hydrogen",
+      "input": 1.5,
+      "output": 7.5,
+      "cache_read": 0.075,
+      "cache_write": 0.0,
+      "_note": "Gemini 4 Flash 代（内部代号 Hydrogen；2026-11-12 Google Cloud 计费 SKU 公开标准价 1.5/7.5/0.075，尚未正式发布——官方 models/定价页与 Vertex 定价页均未列出，cc-switch 未收录，发布后以官方定价页复核；Batch/Flex 0.75/3.75，Priority 2.70/13.50；缓存仅隐式）",
       "vendor": "Google"
     },
     "gemini-decision-1": {
