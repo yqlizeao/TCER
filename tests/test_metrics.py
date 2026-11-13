@@ -969,3 +969,34 @@ def test_segment_metrics_turn_number_not_index():
     assert segs[2]["added"] == 20
     assert segs[2]["compactions"] == 1   # 压缩位置也按回合号归段
     assert abs(m["decay_ratio"] - 10.0) < 1e-9  # 20/2
+
+
+def test_compare_models_same_label_buckets_disambiguated():
+    """同名消歧：内部实验桶（gemini-4-argon-trial/-s/-e 等后缀变体）与
+    gemini-4-argon 落到同一 display_name「Gemini 4 Argon」——重名组全部追加
+    原始名括注，单桶（无歧义）保持简洁原名。2026-11-13 用户截图两张同名卡
+    （Orchestrator 别名由价表 display_name 的「· Orchestrator」后缀区分，
+    不再撞名，消歧机制为其余撞名场景兜底）。"""
+    ra = _single_model_report("gemini-4-argon", added=100, deleted=10)
+    rt = _single_model_report("gemini-4-argon-trial", added=50, deleted=5)
+    comps = {mc.model_id: mc for mc in metrics.compare_models([ra, rt])}
+    assert set(comps) == {"gemini-4-argon", "gemini-4-argon-trial"}
+    assert comps["gemini-4-argon"].display_name == "Gemini 4 Argon（gemini-4-argon）"
+    assert comps["gemini-4-argon-trial"].display_name == (
+        "Gemini 4 Argon（gemini-4-argon-trial）")
+    # 无歧义单桶：保持简洁原名，不加括注
+    r2 = _single_model_report("gemini-4-argon", added=100, deleted=10)
+    assert metrics.compare_models([r2])[0].display_name == "Gemini 4 Argon"
+
+
+def test_compare_models_orchestrator_alias_labels():
+    """价表 display_name 带编排角色后缀（2026-11-13），模型对比卡一眼可辨。
+    pro-orchestrator 归 Carbon（2026-11-13 用户亲证本地编排为 Carbon 版：
+    包装记录名与规划主体 gemini-4-carbon 同会话同现，名字里的 pro 是产品线名
+    不指 Pro 方案）。"""
+    from tcer.core.pricing import label, table_key, resolve
+    assert label("gemini-pro-orchestrator") == "Gemini 4 Carbon · Orchestrator"
+    assert table_key("gemini-pro-orchestrator") == "gemini-pro-orchestrator"
+    assert resolve("gemini-pro-orchestrator") == resolve("gemini-4-carbon")
+    assert label("gemini-flash-worker-agy") == "Gemini 4 Hydrogen · Orchestrator"
+    assert label("gemini-4-argon") == "Gemini 4 Argon"

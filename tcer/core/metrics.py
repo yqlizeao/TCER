@@ -658,6 +658,18 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
                     mc._rbw_sum += r.read_before_write
                     mc._rbw_count += 1
 
+    # 同名消歧：per_model 按原始记录名分桶（见上），别名/内部实验桶落到同一
+    # SKU 时 display_name 相同（gemini-pro-orchestrator 与 gemini-4-argon 都是
+    # 「Gemini 4 Argon」）会出两张同名卡。只对重名组追加原始名括注，无歧义的
+    # 单桶保持简洁。
+    _by_label: dict[str, list[str]] = {}
+    for mid, mc in buckets.items():
+        _by_label.setdefault(mc.display_name, []).append(mid)
+    for _label, mids in _by_label.items():
+        if len(mids) > 1:
+            for mid in mids:
+                buckets[mid].display_name = f"{_label}（{mid}）"
+
     # Compute derived metrics
     grand_tokens = sum(mc.total_tokens for mc in buckets.values())
     grand_cost = 0.0
