@@ -29,20 +29,20 @@
   "models": {
     "gemini-4-argon": {
       "display_name": "Gemini 4 Argon",
-      "input": 4.0,
-      "output": 20.0,
-      "cache_read": 0.2,
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1,
       "cache_write": 0.0,
-      "_note": "Google DeepMind Gemini 4 代首发模型（2026-10-13；官方定价页 2026-11-11 核对）；标准价 4/20/0.2；介绍价 2/10（缓存读 0.10）至 2026-11-30；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 2/10；不提供免费档",
+      "_note": "Google DeepMind Gemini 4 代首发模型（2026-10-13；官方定价页 2026-11-13 核对）；当前生效价 2/10/0.10（介绍价，至 2026-11-30），2026-12-01 起翻标准价 4/20/0.2（到期须改表）；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 1/5（缓存读 0.05）；不提供免费档",
       "vendor": "Google"
     },
     "gemini-4-carbon": {
       "display_name": "Gemini 4 Carbon",
-      "input": 4.0,
-      "output": 20.0,
-      "cache_read": 0.2,
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1,
       "cache_write": 0.0,
-      "_note": "Google Gemini 4 代旗舰（2026-10-28 发布，2026-11-10 上公开 API 付费档；官方定价页 2026-11-11 核对）；标准价 4/20/0.2；介绍价 2/10（缓存读 0.10）至 2026-11-30；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 2/10；不提供免费档；思考 token 全计费",
+      "_note": "Google Gemini 4 代旗舰（2026-10-28 发布，2026-11-10 上公开 API 付费档；官方定价页 2026-11-13 核对）；当前生效价 2/10/0.10（介绍价，至 2026-11-30），2026-12-01 起翻标准价 4/20/0.2（到期须改表）；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 1/5（缓存读 0.05）；不提供免费档；思考 token 全计费",
       "vendor": "Google"
     },
     "gemini-4-hydrogen": {
@@ -55,7 +55,7 @@
       "vendor": "Google"
     },
     "gemini-flash-worker-agy": {
-      "display_name": "Gemini 4 Hydrogen",
+      "display_name": "Gemini 4 Hydrogen · Orchestrator",
       "input": 1.5,
       "output": 7.5,
       "cache_read": 0.075,
@@ -64,12 +64,12 @@
       "vendor": "Google"
     },
     "gemini-pro-orchestrator": {
-      "display_name": "Gemini 4 Argon",
-      "input": 4.0,
-      "output": 20.0,
-      "cache_read": 0.2,
+      "display_name": "Gemini 4 Carbon · Orchestrator",
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1,
       "cache_write": 0.0,
-      "_note": "别名跟随：Antigravity Orchestrator 模式的规划模型调用记录名（本机父会话实测）；官方文档：Orchestrator（Argon）属 Google AI Pro 方案（Ultra 为 Orchestrator（Carbon）），规划/审查/重规划由 Argon 执行；实现工作量记在 gemini-flash-worker-agy（即 Hydrogen），两桶各按所属模型价计；计价同 gemini-4-argon",
+      "_note": "别名跟随：Antigravity 编排（Orchestrator）模式的包装记录名（本机唯一出现于 01072736 编排父会话，与规划主体 gemini-4-carbon 1230 条及实现 worker 同会话同现，用户亲证其编排为 Carbon 版——名字里的 pro 是产品线名不指 Pro 方案）；官方文档：编排 = 规划模型（Carbon 或 Argon）+ Hydrogen 实现动态协作，规划/审查/重规划由规划模型执行并另记 gemini-4-carbon 等主名下，本名只承包装/协调调用；计价同 gemini-4-carbon",
       "vendor": "Google"
     },
     "gemini-decision-1": {
@@ -92,20 +92,20 @@
     },
     "gemini-3.8-flash": {
       "display_name": "Gemini 3.8 Flash",
-      "input": 1.5,
-      "output": 7.5,
-      "cache_read": 0.15,
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
       "cache_write": 0.0,
-      "_note": "Google DeepMind 2026 前沿主力智能体模型；专为高通量软件工程与长周期知识工作流优化；支持多档思考深度调节（Effort），具备原生多模态理解与极低延迟执行能力；标准价 1.50/7.50/0.15；介绍价至 2026-12-31 为 0.75/3.75/0.075；Batch/Flex 档 0.75/3.75/0.075（介绍期 0.375/1.875/0.0375）、Priority 档 2.7/13.5/0.27（介绍期 1.35/6.75/0.135）；缓存存储 $1.00/MTok/小时（介绍期 $0.50）",
+      "_note": "Google DeepMind 2026 前沿主力智能体模型；专为高通量软件工程与长周期知识工作流优化；支持多档思考深度调节（Effort），具备原生多模态理解与极低延迟执行能力；当前生效介绍价 0.75/3.75/0.075 至 2026-12-31，2027-01-01 起翻标准价 1.50/7.50/0.15（到期须改表）；Batch/Flex 档 0.375/1.875/0.0375、Priority 档 1.35/6.75/0.135（2027-01-01 起分别 0.75/3.75/0.075 与 2.7/13.5/0.27）；缓存存储 $0.50/MTok/小时（2027-01-01 起 $1.00）",
       "vendor": "Google"
     },
     "gemini-3.8-flash-high": {
       "display_name": "Gemini 3.8 Flash (High)",
-      "input": 1.5,
-      "output": 7.5,
-      "cache_read": 0.15,
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
       "cache_write": 0,
-      "_note": "Google DeepMind 2026 高思考档位智能体模型；在保持 Flash 级别高通量的同时施加更深度的逻辑思辨；标准价 1.5/7.5/0.15；介绍价 0.75/3.75/0.075 至 2026-12-31；计价同 gemini-3.8-flash",
+      "_note": "Google DeepMind 2026 高思考档位智能体模型；在保持 Flash 级别高通量的同时施加更深度的逻辑思辨；当前生效介绍价 0.75/3.75/0.075 至 2026-12-31，2027-01-01 起翻标准价 1.5/7.5/0.15（到期须改表）；计价同 gemini-3.8-flash",
       "vendor": "Google"
     },
     "gemini-2.5-pro": {
@@ -897,20 +897,20 @@
     },
     "gemini-3.7-flash": {
       "display_name": "Gemini 3.7 Flash",
-      "input": 1.5,
-      "output": 7.5,
-      "cache_read": 0.15,
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
       "cache_write": 0,
-      "_note": "Google DeepMind 前沿混合推理模型；标准价 1.5/7.5/0.15；介绍价 0.75/3.75/0.075 至 2026-12-31；Batch/Flex 档 0.75/3.75/0.075（介绍期 0.375/1.875/0.0375）、Priority 档 2.7/13.5/0.27（介绍期 1.35/6.75/0.135）；缓存存储 $1.00/MTok/小时（介绍期 $0.50）",
+      "_note": "Google DeepMind 前沿混合推理模型；当前生效介绍价 0.75/3.75/0.075 至 2026-12-31，2027-01-01 起翻标准价 1.5/7.5/0.15（到期须改表）；Batch/Flex 档 0.375/1.875/0.0375、Priority 档 1.35/6.75/0.135；缓存存储 $0.50/MTok/小时（2027-01-01 起 $1.00）",
       "vendor": "Google"
     },
     "gemini-3.6-flash": {
       "display_name": "Gemini 3.6 Flash",
-      "input": 1.5,
-      "output": 7.5,
-      "cache_read": 0.15,
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
       "cache_write": 0,
-      "_note": "Google DeepMind 经典高通量模型；标准价 1.5/7.5/0.15；介绍价 0.75/3.75/0.075 至 2026-12-31；Batch/Flex 档 0.75/3.75/0.075（介绍期 0.375/1.875/0.0375）、Priority 档 2.7/13.5/0.27（介绍期 1.35/6.75/0.135）；缓存存储 $1.00/MTok/小时（介绍期 $0.50）",
+      "_note": "Google DeepMind 经典高通量模型；当前生效介绍价 0.75/3.75/0.075 至 2026-12-31（官方定价页 2026-11-13 核对），2027-01-01 起翻标准价 1.5/7.5/0.15（到期须改表）；Batch/Flex 档 0.375/1.875/0.0375、Priority 档 1.35/6.75/0.135；缓存存储 $0.50/MTok/小时（2027-01-01 起 $1.00）",
       "vendor": "Google"
     },
     "gemini-3.5-flash": {
@@ -980,11 +980,11 @@
     },
     "gemini-flash-latest": {
       "display_name": "Gemini Flash (latest)",
-      "input": 1.5,
-      "output": 7.5,
-      "cache_read": 0.15,
+      "input": 0.75,
+      "output": 3.75,
+      "cache_read": 0.075,
       "cache_write": 0,
-      "_note": "别名跟随：官方 latest 别名；当前指向 gemini-3.8-flash 标准价档",
+      "_note": "别名跟随：官方 latest 别名；当前指向 gemini-3.8-flash 当前生效价档",
       "vendor": "Google"
     },
     "gemini-flash-lite-latest": {

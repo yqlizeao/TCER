@@ -108,7 +108,7 @@ def test_note_for_multitrack_annotations():
     # 促销/下线路由条目：当前生效价为主价，备注含促销期或下线路由说明
     assert "2026-09-11 起 V4 Flash 退役" in pricing.note_for("deepseek-v4-flash")
     assert "促销价" in pricing.note_for("gpt-5.6-sol")
-    assert "介绍价至 2026-12-31" in pricing.note_for("gemini-3.8-flash")
+    assert "介绍价 0.75/3.75/0.075 至 2026-12-31" in pricing.note_for("gemini-3.8-flash")
     # 别名条目跟随主条目（resolve 路径不同，note 同样命中）
     assert "legacy 别名" in pricing.note_for("deepseek-chat")
     # 无备注条目 / 未知模型 / 空值 → None
@@ -302,11 +302,12 @@ def test_newly_added_models_and_current_time_pricing():
     assert pricing.is_table_priced("deepseek-flash")
     assert pricing.resolve("deepseek-flash") == {"input": 0.3, "output": 1.2, "cache_read": 0.006, "cache_write": 0.0}
 
-    # 价表铁律（仓库 CLAUDE.md 原 #3）：主价一律厂商标准价，介绍价/促销价记 _note。
+    # 价表口径（2026-11-13 用户裁决，同 DeepSeek 高峰档先例）：主价一律当前实际生效价，
+    # 未来档/促销价记 _note 并写明翻价日期。
     # GPT-5.6 Sol 促销价 4/20/0.4/5 至 2026-11-30，标准价 5/30/0.5/6.25 为主价
     assert pricing.resolve("gpt-5.6-sol") == {"input": 5.0, "output": 30.0, "cache_read": 0.5, "cache_write": 6.25}
-    # Gemini 3.8 Flash 介绍价 0.75/3.75/0.075 至 2026-12-31，标准价 1.5/7.5/0.15 为主价
-    assert pricing.resolve("gemini-3.8-flash") == {"input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 0.0}
+    # Gemini 3.8 Flash 当前生效介绍价 0.75/3.75/0.075 至 2026-12-31，标准价 1.5/7.5/0.15 记 _note
+    assert pricing.resolve("gemini-3.8-flash") == {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0}
     # DeepSeek V4 Pro 恢复官方高峰档价（官方撤回路由公告）
     assert pricing.resolve("deepseek-v4-pro") == {"input": 1.32, "output": 3.96, "cache_read": 0.044, "cache_write": 0.0}
     # o3-mini 官方标准挂牌价
@@ -544,14 +545,15 @@ def test_2026_10_22_sync_new_entries():
     assert pricing.resolve("claude-sonnet-5-5") != pricing.resolve("claude-sonnet-5")
     assert pricing.table_key("claude-sonnet-5-5[1m]") == "claude-sonnet-5-5"
     # Gemini 4 Argon must not fall to default or a gemini-3.x key
-    # (2026-11-11: flipped to the standard price 4/20/0.2 per the iron rule;
-    #  intro 2/10/0.1 through 2026-11-30 lives in _note)
+    # (2026-11-13: flipped back to the currently effective intro price 2/10/0.1
+    #  through 2026-11-30 per the current-effective-price ruling; the standard
+    #  4/20/0.2 from 2026-12-01 lives in _note)
     assert pricing.table_key("gemini-4-argon") == "gemini-4-argon"
-    assert pricing.resolve("gemini-4-argon") == {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 0.0}
+    assert pricing.resolve("gemini-4-argon") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 0.0}
     assert pricing.table_key("gemini-4-argon-preview") == "gemini-4-argon"
-    # Gemini 4 Carbon: standard price, must not bind to Argon
+    # Gemini 4 Carbon: same-price sibling of Argon, must not bind to Argon
     assert pricing.table_key("gemini-4-carbon") == "gemini-4-carbon"
-    assert pricing.resolve("gemini-4-carbon") == {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 0.0}
+    assert pricing.resolve("gemini-4-carbon") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 0.0}
     assert pricing.resolve("gemini-4-carbon") == pricing.resolve("gemini-4-argon")
     # Claude Fable/Mythos 5.2: must not prefix-match onto 5.1 or 5
     assert pricing.table_key("claude-fable-5-2") == "claude-fable-5-2"
@@ -578,21 +580,24 @@ def test_2026_10_22_sync_new_entries():
 
 
 def test_2026_11_12_standard_price_flips():
-    """2026-11-12：介绍价/促销价当主价的同类错误批量翻为标准价（仓库 CLAUDE.md 原 #3；
-    与 2026-11-11 Gemini 4 Argon 翻价同一口径）。官方页当日核对：
-    Google 定价页（3.6/3.8 Flash；3.7 Flash 多家来源引官方页同结构）、
-    OpenAI 定价页（GPT-5.6 Sol 促销至 2026-11-30；标准价见 08-21 降价公告旧价列）。"""
-    std_flash = {"input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 0.0}
+    """Gemini Flash 系主价口径（两段历史，现口径见 docstring 末行）：
+    2026-11-12 曾批量翻为标准价 1.5/7.5/0.15（当日旧铁律「主价一律厂商标准价」）；
+    2026-11-13 随「主价一律当前实际生效价」新裁决（同 DeepSeek 高峰档先例、
+    同日 Argon/Carbon 翻回介绍价 2/10/0.1）翻回当前生效介绍价 0.75/3.75/0.075
+    （至 2026-12-31，2027-01-01 起翻标准价——届时须改表与断言）。官方页当日核对：
+    Google 定价页（3.6/3.8 Flash 现价与 2027-01-01 翻价档；
+    3.7 Flash 多家来源引官方页同结构）。"""
+    intro_flash = {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0}
     for key in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash",
                 "gemini-3.8-flash-high"):
-        assert pricing.resolve(key) == std_flash, key
-        assert "介绍价" in (pricing.note_for(key) or ""), key
-    # 别名行跟随标准价档，不带介绍价文案
-    assert pricing.resolve("gemini-flash-latest") == std_flash
-    assert "标准价档" in (pricing.note_for("gemini-flash-latest") or "")
-    # 介绍价数字仍在 _note 里（多轨），主价不再是介绍价
-    assert "0.75/3.75" in (pricing.note_for("gemini-3.8-flash") or "")
-    assert "介绍价至 2026-12-31" in (pricing.note_for("gemini-3.8-flash") or "")
+        assert pricing.resolve(key) == intro_flash, key
+        assert "2027-01-01" in (pricing.note_for(key) or ""), key
+    # 别名行跟随当前生效价档
+    assert pricing.resolve("gemini-flash-latest") == intro_flash
+    assert "当前生效价档" in (pricing.note_for("gemini-flash-latest") or "")
+    # 标准价数字仍在 _note 里（多轨），到期翻价日期写明
+    assert "1.50/7.50/0.15" in (pricing.note_for("gemini-3.8-flash") or "")
+    assert "介绍价 0.75/3.75/0.075 至 2026-12-31" in (pricing.note_for("gemini-3.8-flash") or "")
 
     std_sol = {"input": 5.0, "output": 30.0, "cache_read": 0.5, "cache_write": 6.25}
     for key in ("gpt-5.6", "gpt-5.6-sol", "gpt-5.6-low", "gpt-5.6-medium",
