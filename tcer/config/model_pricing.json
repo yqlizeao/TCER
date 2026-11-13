@@ -54,6 +54,24 @@
       "_note": "Gemini 4 Flash 代（内部代号 Hydrogen；2026-11-12 Google Cloud 计费 SKU 公开标准价 1.5/7.5/0.075，尚未正式发布——官方 models/定价页与 Vertex 定价页均未列出，cc-switch 未收录，发布后以官方定价页复核；Batch/Flex 0.75/3.75，Priority 2.70/13.50；缓存仅隐式）",
       "vendor": "Google"
     },
+    "gemini-flash-worker-agy": {
+      "display_name": "Gemini 4 Hydrogen",
+      "input": 1.5,
+      "output": 7.5,
+      "cache_read": 0.075,
+      "cache_write": 0.0,
+      "_note": "别名跟随：Antigravity Orchestrator 模式的实现 worker 记录名（agy=Antigravity 后缀，本机 12 会话实测，占实现大头）；官方文档：Orchestrator = 规划模型（Carbon/Argon）+ Gemini 4 Hydrogen（Flash 代）动态协作，文件编辑/构建/测试等实现工作由 Hydrogen 执行并记在该名下；计价同 gemini-4-hydrogen（SKU 公开未正式发布，发布后随主条目复核）",
+      "vendor": "Google"
+    },
+    "gemini-pro-orchestrator": {
+      "display_name": "Gemini 4 Argon",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.2,
+      "cache_write": 0.0,
+      "_note": "别名跟随：Antigravity Orchestrator 模式的规划模型调用记录名（本机父会话实测）；官方文档：Orchestrator（Argon）属 Google AI Pro 方案（Ultra 为 Orchestrator（Carbon）），规划/审查/重规划由 Argon 执行；实现工作量记在 gemini-flash-worker-agy（即 Hydrogen），两桶各按所属模型价计；计价同 gemini-4-argon",
+      "vendor": "Google"
+    },
     "gemini-decision-1": {
       "display_name": "Gemini Decision 1",
       "input": 0.1,
