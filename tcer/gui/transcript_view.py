@@ -276,7 +276,8 @@ class _MarkerRail:
     颜色编码（排除高频的普通单步工具报错，聚焦高信噪比语义）：
     - 翠绿（``theme.SUCCESS``）：代码改动轮次（Edit / Write）
     - 亮紫（``theme.PURPLE``）：成本 / Token 热点轮次（占比 ≥25% 且显著偏高）
-    - 冷青（``theme.CYAN``）：上下文演进轮次（上下文压缩 / 切换模型 / 派生子代理）
+    - 金橙（``theme.WARNING``）：上下文压缩轮次（独立一色，一眼数出压缩次数）
+    - 冷青（``theme.CYAN``）：其余上下文演进轮次（切换模型 / 派生子代理）
     - 冰蓝（``theme.TRANSCRIPT_SYN_KW``）：深度推演长链（≥15 步）
     - 金黄（``theme.LEVEL_COMPOUND``）：当前查找（Ctrl+F）命中所在轮次
     - 珊瑚红（``theme.ERROR``）：仅限会话中断（aborted）或系统级错误事件
@@ -285,6 +286,7 @@ class _MarkerRail:
     _TAG_PALETTE = {
         "change": theme.SUCCESS,
         "hotspot": theme.PURPLE,
+        "compaction": theme.WARNING,
         "context": theme.CYAN,
         "deep": theme.TRANSCRIPT_SYN_KW,
         "search": theme.LEVEL_COMPOUND,
@@ -339,6 +341,35 @@ class _MarkerRail:
         self._vp = vp
         self._redraw_viewport()
 
+    def set_geometry(self, ys, total: int) -> None:
+        """按真实渲染像素重排刻度位置（渲染完成后调用一次）。
+
+        ``ys[i]`` 是第 i 轮 ``tn:<i>`` mark 的像素 y（None = 该轮不可见/未渲染，
+        取前一个已知轮的位置外推）；``total`` 是全文总像素高。重排只改刻度的
+        f0/f1，颜色标签与悬停提示不变。
+        """
+        if total <= 0 or not self._ticks:
+            return
+        if not any(y is not None for y in ys):
+            return
+        last = 0
+        filled: list[int] = []
+        for y in ys:
+            if y is not None:
+                last = y
+            filled.append(last)
+        new_ticks = []
+        for f0, f1, i, tags, tip in self._ticks:
+            if i >= len(filled):
+                continue
+            y0 = filled[i]
+            y1 = filled[i + 1] if i + 1 < len(filled) else total
+            y1 = max(y1, y0 + 1)
+            new_ticks.append((y0 / total, min(y1, total) / total, i, tags, tip))
+        if new_ticks:
+            self._ticks = new_ticks
+            self._redraw()
+
     def _rebuild_ticks(self) -> None:
         self._ticks = []
         n = len(self._turns)
@@ -368,9 +399,12 @@ class _MarkerRail:
                     t_str = S.format_tokens(tel.total_tokens) if tel.total_tokens else ""
                     hs = " · ".join(x for x in (t_str and f"{t_str} tok", c_str) if x)
                     labels.append(f"Token/成本热点（{hs}）" if hs else "Token/成本热点")
-                if tel.has_context_shift:
+                if tel.compaction_count:
+                    tags.append("compaction")
+                    labels.append("上下文压缩")
+                elif tel.has_context_shift:
                     tags.append("context")
-                    labels.append("上下文演进（压缩/切模型/子代理）")
+                    labels.append("上下文演进（切模型/子代理）")
                 if tel.is_deep_turn and "hotspot" not in tags:
                     tags.append("deep")
                     labels.append(f"深度推演（{len(turn.steps)} 步）")
@@ -1248,7 +1282,7 @@ class TranscriptWindow:
         t.tag_configure("chev", font=small, foreground=theme.MUTED)
         for name, col in (("tone_success", theme.SUCCESS), ("tone_danger", theme.ERROR),
                           ("tone_warning", theme.WARNING), ("tone_muted", theme.MUTED),
-                          ("tone_neutral", theme.MUTED)):
+                          ("tone_neutral", theme.MUTED), ("tone_accent", theme.CYAN)):
             t.tag_configure(name, foreground=col)
         # 步骤详情
         dm = DETAIL_IND
@@ -1284,6 +1318,7 @@ class TranscriptWindow:
         t.tag_configure("ev_line", font=small, foreground=theme.MUTED, justify="center",
                         spacing1=theme.PAD_S, spacing3=theme.PAD_S)
         t.tag_configure("ev_danger", foreground=theme.ERROR)
+        t.tag_configure("ev_accent", foreground=theme.CYAN)
         t.tag_configure("ev_detail", font=small, foreground=theme.MUTED, justify="center",
                         lmargin1=IND, lmargin2=IND)
         t.tag_configure("inj", font=small, foreground=theme.MUTED, background=theme.PANEL,
@@ -1562,6 +1597,16 @@ class TranscriptWindow:
         self._entries = tr.index()
         self._telemetries = T.compute_turn_telemetries(tr)
         self._file_changes = T.summarize_file_changes(tr)
+        # 压缩事件编号（文档序 1..N）：序号显示 + 页头「压缩 N 次」共用的预计算。
+        # 每轮压缩数在 TurnTelemetry.compaction_count（core 单一来源，块与 messages 同引用）。
+        self._compaction_seq: dict[int, int] = {}
+        n_comp = 0
+        for m in tr.messages:
+            for b in m.blocks:
+                if b.type == "event" and b.kind == S.EV_COMPACTION:
+                    n_comp += 1
+                    self._compaction_seq[id(b)] = n_comp
+        self._n_compactions = n_comp
         self._style = tr.agent_style
         self._state = "ready"
         ref = self._refs[self._idx]
@@ -1592,9 +1637,59 @@ class TranscriptWindow:
     def _refresh_marker_rail(self) -> None:
         search_keys = self._hit_keys(self._search) if self._search is not None else ()
         self._marker_rail.set_turns(self._turns, self._telemetries, search_keys)
+        # set_turns 会用权重估计重建刻度（Ctrl+F 每键触发）——紧跟着按真实
+        # 像素重排，否则已同步的几何被冲掉、刻度在两种对齐间来回跳。
+        self._sync_rail_geometry()
+
+    def _sync_rail_geometry(self) -> None:
+        """渲染完成后用各轮的真实像素位置重排标尺刻度。
+
+        初次 set_turns 按「步骤数权重」估位——长会话里各轮的文档高度差异巨大
+        （有的轮是数千行的最终回复），估出的刻度位置与视口框（真实高度比例）
+        对不上，点击跳转也偏（2026-11 反馈「滑动条显示两个，并不吻合」）。
+        渲染完成后每轮都有 ``tn:<i>`` tag，按其起点到文档首的真实像素 y / 总
+        像素重排一次。必须用 ``count(..., "ypixels")``（文档相对、与可见性无
+        关）——``bbox`` 对屏幕外字符返回 None、对可见字符返回**视口相对**坐标，
+        除以文档总像素会整体错位（code-review F1 实证）。
+        """
+        if self._closed or not self._turns:
+            return
+        if not self._turns:
+            return
+        t = self._txt
+        try:
+            total = t.count("1.0", "end-1c", "ypixels")
+            if isinstance(total, tuple):
+                total = total[0]
+        except tk.TclError:
+            return
+        if not total or total <= 0:
+            return
+        ys: list[int | None] = []
+        for i in range(len(self._turns)):
+            try:
+                n = t.count("1.0", f"tn:{i}.first", "ypixels")
+                # 距离为 0（第一轮）时 Tk 返回 None，语义是 0；正常返回 (n,)
+                if n is None:
+                    n = 0
+                elif isinstance(n, tuple):
+                    n = n[0] if n else 0
+                ys.append(n)
+            except tk.TclError:
+                ys.append(None)
+        self._marker_rail.set_geometry(ys, int(total))
 
     def _on_rail_jump(self, turn_idx: int) -> None:
         if 0 <= turn_idx < len(self._turns):
+            # 压缩轮默认折叠、过程里的压缩行不可见——点标尺跳转时自动展开，
+            # 否则「跳过去」依然什么都看不到（2026-11 反馈）。
+            tel = (self._telemetries[turn_idx]
+                   if turn_idx < len(self._telemetries) else None)
+            if tel is not None and tel.compaction_count:
+                turn = self._turns[turn_idx]
+                if not T.is_timeline_expanded(turn, self._expand_all, self._turn_ov):
+                    self._turn_ov[turn.key] = True
+                    self._rerender_turn(turn_idx)
             self._goto_turn(turn_idx, flash=True)
             self._lock_outline_to_turn(turn_idx)
 
@@ -1662,6 +1757,9 @@ class TranscriptWindow:
             add(lambda: lab(rng))
         add(lambda: lab(f"{tr.question_count} 次提问"))
         add(lambda: lab(f"{tr.tool_call_count} 次工具调用"))
+        if self._n_compactions:
+            add(lambda: lab(f"压缩 {self._n_compactions} 次",
+                            fg=theme.CYAN, tip="上下文压缩次数；点击标尺金橙刻度可跳到压缩位置"))
         if tr.model:
             add(lambda: lab(tr.model, mono=True,
                             tip="、".join(tr.models) if len(tr.models) > 1 else None))
@@ -1894,6 +1992,10 @@ class TranscriptWindow:
         self._row_total = 0
         self._cur_turn = -1
         self._hover_act = None
+        # 压缩事件预计算（加载空态默认 0；_set_transcript 按实际消息重算）
+        self._compaction_seq: dict[int, int] = {}
+        self._n_compactions = 0
+        self._rail_sync_after: int | None = None   # 标尺几何重排防抖（_after_edit）
         self._hit_clear()
         self._search = None
         self._search_open = set()
@@ -2016,6 +2118,7 @@ class TranscriptWindow:
     def _finish_render(self) -> None:
         self._render_done = True
         self.perf["rendered"] = time.perf_counter() - self.perf.get("t0", 0)
+        self._sync_rail_geometry()
         self._status.configure(text="", fg=theme.MUTED)
         t = self._txt
         if not self._any_rows:
@@ -2360,6 +2463,10 @@ class TranscriptWindow:
         parts = text.split(" · ")
         lead = " · ".join(parts[:2]) if len(parts) >= 2 else text
         rest = (" · " + " · ".join(parts[2:])) if len(parts) > 2 else ""
+        # 折叠态的轮看不到过程里的压缩行——摘要行尾补冷青徽标，压缩信号不消失
+        tel = (self._telemetries[turn.index]
+               if turn.index < len(self._telemetries) else None)
+        n_comp = tel.compaction_count if tel else 0
 
         def draw() -> None:
             self._ins("▾ " if row.expanded else "▸ ", "tl_head")
@@ -2368,9 +2475,14 @@ class TranscriptWindow:
                 a, b = rest.split(err, 1)
                 self._ins(a, "tl_head")
                 self._ins(err, "tl_head", "tl_err")
-                self._ins(b + "\n", "tl_head")
+                self._ins(b, "tl_head")
             else:
-                self._ins(rest + "\n", "tl_head")
+                self._ins(rest, "tl_head")
+            # 压缩徽标与错误高亮可并存（压缩+失败同轮时红字不丢）
+            if n_comp:
+                self._ins(" · ", "tl_head")
+                self._ins(f"压缩 {n_comp} 次", "tl_head", "tone_accent")
+            self._ins("\n", "tl_head")
 
         self._act_block(draw, lambda k=turn.key, ex=row.expanded, ti=turn.index:
                         self._toggle_turn(k, ex, ti))
@@ -2416,6 +2528,12 @@ class TranscriptWindow:
 
     def _render_step(self, turn, row) -> None:
         step = row.step
+        # 压缩事件与 leading/trailing 事件同一醒目形态。此前过程步骤里的压缩
+        # 走 _step_parts 渲染成灰色小步骤行（「· 上下文已压缩」），在数千步的
+        # 长会话里完全不可辨（2026-11 反馈：「一条浅白色的线，看不清楚」）。
+        if step.kind == "event" and step.block.kind == S.EV_COMPACTION:
+            self._render_compaction_line(step.block, step.body)
+            return
         glyph, tone, title, detail, meta, mono, expandable = self._step_parts(step)
         # Windows GDI 下 U+23FA「⏺」会回退到 Segoe UI Emoji 绘出深灰键帽方框，统一规整为纯几何圆点
         if glyph == "⏺":
@@ -2776,7 +2894,23 @@ class TranscriptWindow:
             self._ins("\n", "md_gap")      # 与上方执行过程拉开间距
         self._md(turn.final.text, turn_key=turn.key, turn_idx=turn.index)
 
+    def _render_compaction_line(self, block, body) -> None:
+        """压缩事件的统一醒目形态：``── 上下文已压缩 #N ──``（冷青）+ 量化与摘要。
+
+        leading/trailing 事件（EventRow）与过程步骤（EventStep）两条渲染路径
+        都收敛到这里，序号来自 _compaction_seq（block 与 messages 同引用）。
+        """
+        d = S.describe_event(block, body)
+        seq = self._compaction_seq.get(id(block))
+        label = f"{d.label} #{seq}" if seq else d.label
+        self._ins(f"──  {label}  ──\n", "ev_line", "ev_accent")
+        if d.detail:
+            self._ins(_clip_block(d.detail, 400) + "\n", "ev_detail")
+
     def _render_event(self, row) -> None:
+        if row.block.kind == S.EV_COMPACTION:
+            self._render_compaction_line(row.block, row.body)
+            return
         d = S.describe_event(row.block, row.body)
         tags = ("ev_line", "ev_danger") if d.tone == "danger" else ("ev_line",)
         self._ins(f"──  {d.label}  ──\n", *tags)
@@ -3368,6 +3502,20 @@ class TranscriptWindow:
         self._after_edit()
 
     def _after_edit(self) -> None:
+        # 单轮重绘会平移后续所有轮的真实位置——重排必须在，但不能每轮一次：
+        # Ctrl+F 批量展开可达 SEARCH_EXPAND_MAX 轮、每次内容懒加载也触发，
+        # 全量扫描按轮数线性放大（2000 轮 × 60 轮 = 数十万次 Tcl 调用）。
+        # 防抖合并成一次（真实坐标重排只需最终状态；窗口已关则跳过）。
+        if self._rail_sync_after is not None and not self._closed:
+            try:
+                self._win.after_cancel(self._rail_sync_after)
+            except tk.TclError:
+                pass
+        if not self._closed:
+            try:
+                self._rail_sync_after = self._win.after(80, self._sync_rail_geometry)
+            except tk.TclError:
+                pass
         self._on_scrolled()
 
     # ------------------------------------------------------------------ 滚动 / 目录联动

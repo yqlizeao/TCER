@@ -1530,6 +1530,7 @@ class TurnTelemetry:
     has_code_change: bool = False
     is_hotspot: bool = False
     has_context_shift: bool = False
+    compaction_count: int = 0       # 该轮上下文压缩次数（标尺独立于切模型/子代理标色）
     is_deep_turn: bool = False
     is_severe_abort: bool = False
 
@@ -1616,9 +1617,13 @@ def compute_turn_telemetries(tr: Transcript) -> list[TurnTelemetry]:
         ctx_shift = False
         severe_abort = bool(turn.aborted)
 
+        compaction = 0
         for ev in (*turn.leading_events, *turn.trailing_events):
             ek = ev.block.kind
-            if ek in (EV_COMPACTION, EV_MODEL_CHANGE, EV_SUB_AGENT):
+            if ek == EV_COMPACTION:
+                compaction += 1
+                ctx_shift = True
+            elif ek in (EV_MODEL_CHANGE, EV_SUB_AGENT):
                 ctx_shift = True
             elif ek in (EV_ABORTED, EV_ERROR):
                 severe_abort = True
@@ -1627,7 +1632,10 @@ def compute_turn_telemetries(tr: Transcript) -> list[TurnTelemetry]:
             atomic_n += 1
             if st.kind == "event":
                 ek = st.block.kind
-                if ek in (EV_COMPACTION, EV_MODEL_CHANGE, EV_SUB_AGENT):
+                if ek == EV_COMPACTION:
+                    compaction += 1
+                    ctx_shift = True
+                elif ek in (EV_MODEL_CHANGE, EV_SUB_AGENT):
                     ctx_shift = True
                 elif ek in (EV_ABORTED, EV_ERROR):
                     severe_abort = True
@@ -1662,6 +1670,7 @@ def compute_turn_telemetries(tr: Transcript) -> list[TurnTelemetry]:
             atomic_steps=atomic_n,
             has_code_change=has_chg,
             has_context_shift=ctx_shift,
+            compaction_count=compaction,
             is_deep_turn=atomic_n >= 15,
             is_severe_abort=severe_abort,
         ))

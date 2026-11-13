@@ -107,7 +107,8 @@ GROUPS: list[Group] = [
                "stop hook（lint/test 等用户配置的钩子）的累计耗时与失败次数——"
                "「你自己装的钩子拖慢了多少」。", "basic", "down"),
         Metric("subagent", "子代理", "",
-               "并入该会话的子代理数量。子代理是 Claude Code 为复杂任务自动拆出的并行助手，"
+               "并入该会话的子代理数量。子代理是代理为复杂任务自动拆出的并行助手"
+               "（Claude Code 的 Task / Antigravity 的 invoke_subagent 等），"
                "其 Token 与代码行合并计入父会话。", "basic"),
     ]),
     Group("G2", "Token 用量", [
@@ -776,7 +777,7 @@ SOURCE_LABELS = {
 # key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
 _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Claude 独有
-    "subagent": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
+    "subagent": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
     "memory_files": frozenset({"claude"}),
     # Claude 的推理输出并入「输出」，不单独上报
     "reasoning_tokens": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"}),

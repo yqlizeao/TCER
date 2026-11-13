@@ -878,3 +878,56 @@ def test_six_product_enhancements_end_to_end(root, app, tmp_path, monkeypatch):
     win._jump_to_change_step(0, first_edit.id)
     root.update()
     assert win._step_ov.get(first_edit.id) is True
+
+
+def test_entry_compaction_visibility_end_to_end(root, app, tmp_path, monkeypatch):
+    """压缩可见性（2026-11）：页头「压缩 N 次」、事件行序号+量化（accent 冷青）、
+    标尺压缩独立色刻度。走真实右键 → 阅读器入口链路。"""
+    from tcer.core import transcript as T
+    p = _write_session(tmp_path, n_filler=6)
+    with p.open("a", encoding="utf-8") as fh:
+        # 第 1 次：compact_boundary 带 compactMetadata（pre→post），紧跟 isCompactSummary 摘要整块替换
+        fh.write(json.dumps({"type": "system", "subtype": "compact_boundary",
+                             "timestamp": _ts(100), "sessionId": "sess-1",
+                             "compactMetadata": {"preTokens": 123456, "postTokens": 23456}}) + "\n")
+        fh.write(json.dumps({"type": "user", "uuid": "cs1", "timestamp": _ts(101), "sessionId": "sess-1",
+                             "isCompactSummary": True,
+                             "message": {"role": "user", "content": "这是压缩摘要 ABC"}}) + "\n")
+        # 第 2 次：只有 preTokens（无 post），且无摘要跟随 → boundary 事件自身展示
+        fh.write(json.dumps({"type": "system", "subtype": "compact_boundary",
+                             "timestamp": _ts(120), "sessionId": "sess-1",
+                             "compactMetadata": {"preTokens": 99999}}) + "\n")
+        # 压缩后同轮继续（无新提问）：boundary 成为该轮过程步骤；final 文本落最后
+        # 才能保持折叠态（final=None 的轮自动展开）——折叠时压缩行不可见，靠徽标
+        fh.write(json.dumps(_ca([_tu("t9", "Read", {"file_path": "C:/proj/demo/a.py"})], 121, "m5")) + "\n")
+        fh.write(json.dumps(_cr("t9", "ok", 123)) + "\n")
+        fh.write(json.dumps(_ca([{"type": "text", "text": "压缩后继续工作"}], 124, "m7")) + "\n")
+
+    report = _report(p)
+    win = _right_click_open(app, root, monkeypatch, [report])
+    assert _ready(root, win)
+    # 页头计数
+    assert win._n_compactions == 2
+    header_texts = [w.cget("text") for w in win._info.winfo_children()
+                    if isinstance(w, tk.Label)]
+    assert any(t == "压缩 2 次" for t in header_texts)
+    # 标尺：压缩轮次有独立 compaction 刻度（不再与切模型/子代理混色）
+    assert any("compaction" in tags for _f0, _f1, _i, tags, _tip in win._marker_rail._ticks)
+
+    # 折叠态：压缩藏在过程步骤里不可见，摘要行徽标保证信号不消失
+    doc = _doc(win)
+    assert any("压缩 2 次" in ln for ln in doc.splitlines())
+    # 徽标必须带冷青 tag（未注册 tag 在 Tk 里静默无样式——曾因删注册回归）
+    hit = win._txt.search("压缩 2 次", "1.0", "end")
+    assert hit and "tone_accent" in win._txt.tag_names(hit)
+    assert "上下文已压缩 #1" not in doc
+    # 点标尺跳转压缩轮 → 自动展开 → 明细行（序号 + 量化）出现
+    comp_turn = next(i for i, tel in enumerate(win._telemetries) if tel.compaction_count)
+    win._on_rail_jump(comp_turn)
+    assert _pump(root, lambda: win._render_done)
+    doc = _doc(win)
+    assert "上下文已压缩 #1" in doc
+    assert "压缩前 123,456 → 压缩后 23,456 tok（丢弃 100,000）" in doc
+    assert "这是压缩摘要 ABC" in doc
+    assert "上下文已压缩 #2" in doc
+    assert "压缩前 99,999 tok" in doc

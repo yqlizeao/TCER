@@ -1019,7 +1019,9 @@ def describe_event(block, body: str | None = None) -> EventDisplay:
     if k == EV_ABORTED:
         return EventDisplay(t("turnAborted"), None, "muted")
     if k == EV_COMPACTION:
-        return EventDisplay(t("event.compaction"), join(text, extra), "muted")
+        # accent：压缩是「上下文拐点」事件，比普通事件醒目（阅读器内冷青；
+        # 标尺上压缩轮对应金橙刻度，见 transcript_view._MarkerRail 图例）
+        return EventDisplay(t("event.compaction"), join(text, extra), "accent")
     if k == EV_MODEL_CHANGE:
         return EventDisplay(t("event.modelChange", model=text), None, "muted")
     if k == EV_THINKING_LEVEL:

@@ -191,7 +191,11 @@ OpenCode 把会话持久化在 `~/.local/share/opencode/opencode.db`（SQLite，
 
 ## Antigravity 数据格式（CLI / 桌面 App / IDE）
 
-会话存于 `~/.gemini/antigravity-cli`（CLI）、`~/.gemini/antigravity`（桌面 App 2.0）、`~/.gemini/antigravity-ide`（IDE），三者同一 SQLite+protobuf 结构；另认 `~/.config/antigravity`（ccusage 对齐，未实测）。`~/.gemini/antigravity-backup/` 不扫（备份副本会重复计数）。Remote Agents / AI Studio 网页版云端无本地文件、明确不支持。发现 = summaries 库 + 直接 glob `conversations/*.db` 取并集按 conversation_id 去重（summaries 不可靠：CLI 与 GUI 混用时关 GUI 的 Language Server 会把子集刷回库、抹掉 CLI 行）。工具参数名新旧两套都认：新版 `write_file{Path,Content}` / `edit_file{Path,Target,Replacement}` / `read_file{Path}`，旧版 `TargetFile` / `CodeContent`（只认旧名会让 LOC 全丢）；`call_mcp_tool{ServerName,ToolName}` 记为 `mcp__<server>__<tool>`。摘要库的 `parent_conversation_id` / `nesting_depth` / `agent_name` 疑似子代理字段，实测全空，暂未做折叠。回合键（turn_stats / tool_ops / turn_net_locs）与其余各源一致从 0 起。
+会话存于 `~/.gemini/antigravity-cli`（CLI）、`~/.gemini/antigravity`（桌面 App 2.0）、`~/.gemini/antigravity-ide`（IDE），三者同一 SQLite+protobuf 结构；另认 `~/.config/antigravity`（ccusage 对齐，未实测）。`~/.gemini/antigravity-backup/` 不扫（备份副本会重复计数）。Remote Agents / AI Studio 网页版云端无本地文件、明确不支持。发现 = summaries 库 + 直接 glob `conversations/*.db` 取并集按 conversation_id 去重（summaries 不可靠：CLI 与 GUI 混用时关 GUI 的 Language Server 会把子集刷回库、抹掉 CLI 行）。工具参数名新旧两套都认：新版 `write_file{Path,Content}` / `edit_file{Path,Target,Replacement}` / `read_file{Path}`，旧版 `TargetFile` / `CodeContent`（只认旧名会让 LOC 全丢）；`call_mcp_tool{ServerName,ToolName}` 记为 `mcp__<server>__<tool>`。回合键（turn_stats / tool_ops / turn_net_locs）与其余各源一致从 0 起。
+
+### 子代理折叠（2026-11 启用）
+
+`invoke_subagent {Prompt}` 一次派发多个子代理（各落一个独立 `conversations/<uuid>.db`：无 step 14 用户输入、标题/预览空），`manage_subagents {Action,ConversationIds}`（list/kill）与 `schedule {TimerCondition:<子会话id>}` 参数可交叉印证；`manage_subagents`/`schedule` 照 `manage_task` 先例保持原名透传、`invoke_subagent` 映射 Task。父子关系取 summaries 库的 `parent_conversation_id`（2026-10 基线时本机全空、2026-11 起桌面 App 根已有数据：`agent_name` ∈ `self`（并行子代理）/`research`（研究子代理），`nesting_depth`=1；CLI 根仍全空）；会话库内 `parent_references` 表仍全空不可用。折叠语义同原 #5：列表只出父会话、`aggregate_usage`/`session_loc_full` 把子会话递归折叠进父（Token/LOC 保留真实成本，user 信号在解析层按 is_sub 跳过——实测子会话 step 14 为空，防御上游日后写入派发 prompt）、`n_subagents` 开放；父 db 缺失的孤儿仍独立成卡。summaries 父指针进程级缓存（`_PARENT_MAPS`，运行期新写入重启后生效，同 Claude 自定义根先例）；file_cache key 并入子 db `(mtime_ns,size)` 签名（父 mtime 不随子会话写入变化）。
 
 ## omp 数据格式（Oh My Pi / omp）
 
@@ -401,7 +405,7 @@ Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-ag
   - ②**Codex rust-v0.163.0**（上游源码，本机数据停在 0.142.5，**新格式仅 mock 验证**）：见 #1 cache_write、#5 子代理、#27 线程 id 去重与 `.jsonl.zst`；未确认：子代理 rollout 的 `subagent_history_start_ordinal` 继承段若含 token_count 可能轻微重复计。
   - ③**OpenCode v1.19.4**（本机 db 1.19.2）：仅 SQLite（`session`/`message`/`part`）。LOC：只回放 `state.status=='completed'` 的工具（同 #32 口径，无 state 的旧形状放行）；edit 优先 `state.metadata.filediff.{additions,deletions}`（消除 replaceAll 少计）、`apply_patch` 读 `metadata.files[{filePath,type,additions,deletions}]`（缺失回退解析 `patchText`，`type=add` 视为确认新文件）、write 的 `metadata.exists===false` 撤销 unseen；混合模型按逐 assistant 消息 `modelID` 的 `tokens` 分桶、余量记会话主模型。上游 dev 分支的 v2 存储（`session_v2`/`session_message`、`opencode-next.db`）**未发布未实现**。
   - ④**omp 18.10.4 / Pi**：见 #26（diff 回退、compaction、429）、#31（`durationMs`、`provider+modelId`、reasoning 已闭环）。
-  - ⑤**Antigravity**（`~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide`，本机 26 会话）：新版工具参数 `write_file{Path,Content}`/`edit_file{Path,Target,Replacement}`/`read_file{Path}` 与旧 `TargetFile`/`CodeContent` 两套都认（旧版只认旧名，LOC 全丢）；`call_mcp_tool{ServerName,ToolName}` 记为 `mcp__<server>__<tool>`（#28）。摘要库新增 `parent_conversation_id`/`nesting_depth`/`agent_name` 疑似子代理字段，本机全空，未做折叠。
+  - ⑤**Antigravity**（`~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide`，本机 26 会话）：新版工具参数 `write_file{Path,Content}`/`edit_file{Path,Target,Replacement}`/`read_file{Path}` 与旧 `TargetFile`/`CodeContent` 两套都认（旧版只认旧名，LOC 全丢）；`call_mcp_tool{ServerName,ToolName}` 记为 `mcp__<server>__<tool>`（#28）。摘要库子代理字段漂移：2026-10 全空 → 2026-11 桌面 App 根已有 10 行 `parent_conversation_id`/`nesting_depth`/`agent_name`，子代理折叠已启用（见「子代理折叠」节；CLI 根仍全空）。
   - ⑥**WorkBuddy**：无官方公开 transcript schema，reader 字段假设来自作者样本、**未经上游核实**；`paths.workbuddy_roots` 额外认产品自身的 `WORKBUDDY_CONFIG_DIR`/`CODEBUDDY_CONFIG_DIR`。依赖本机真实目录的测试在目录缺失时 skip。
 
 ## 补充：旧 AGENTS.md 独有的数据源条目

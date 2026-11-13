@@ -1123,17 +1123,35 @@ _PI = _SourceAdapter(
 
 
 # ---- antigravity hooks ----------------------------------------------------- #
+def _antigravity_subagent_key(f: Path) -> tuple:
+    """Fold child conversation db signatures into the antigravity cache key.
+
+    子会话 db 由 aggregate_usage/session_loc_full 折叠进父（原 #5）；父 db 的
+    mtime 不随子会话写入变化，不带签名时子会话追加只会用旧的合并结果。
+    """
+    parts = []
+    for sub in antigravity_reader.subagent_dbs(f):
+        try:
+            st = sub.stat()
+            parts.append((sub.name, int(st.st_mtime_ns), int(st.st_size)))
+        except OSError:
+            parts.append((sub.name, 0, 0))
+    return tuple(parts)
+
+
 def _antigravity_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
     from tcer.core import file_cache
     return file_cache.get_or_compute(
-        f, "antigravity_usage", lambda: antigravity_reader.aggregate_usage(f)
+        f, ("antigravity_usage", _antigravity_subagent_key(f)),
+        lambda: antigravity_reader.aggregate_usage(f),
     )
 
 
 def _antigravity_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
     from tcer.core import file_cache
     return file_cache.get_or_compute(
-        f, "antigravity_loc", lambda: antigravity_reader.session_loc_full(f)
+        f, ("antigravity_loc", _antigravity_subagent_key(f)),
+        lambda: antigravity_reader.session_loc_full(f),
     )
 
 
@@ -1149,6 +1167,7 @@ _ANTIGRAVITY = _SourceAdapter(
     not_found="antigravity project '{project}' not found under ~/.gemini/antigravity-cli or ~/.cc-switch/agy",
     no_sessions="no antigravity session files for '{name}'",
     no_match="no antigravity session matches '{session}'",
+    subagents_of=lambda ref, f: len(antigravity_reader.subagent_dbs(f)),
 )
 
 

@@ -70,6 +70,11 @@ _ANTIGRAVITY_TOOL_MAP = {
     "read_url_content": "WebFetch",
     "ask_question": "Ask",
     "generate_image": "Image",
+    # 子代理派发（实测 2026-11：一次 step 15 可并行 invoke 多个，各自落独立
+    # conversation db，由 summaries.parent_conversation_id 折叠回父会话）。
+    "invoke_subagent": "Task",
+    # manage_subagents（list/kill）/ schedule（定时器）是后台管理动作，照
+    # manage_task 先例不作 Task，保持原名透传。
 }
 
 
@@ -461,6 +466,112 @@ def _connect_ro(path: Path | str) -> sqlite3.Connection:
 # Project Discovery
 # --------------------------------------------------------------------------- #
 
+# 子代理折叠（2026-11 启用）：summaries 库的 parent_conversation_id 记录
+# invoke_subagent 派生的子会话（agent_name=self/research，nesting_depth=1）。
+# 2026-10 基线时本机全空故未折叠，桌面 App 根现在已有数据（CLI 根暂仍全空）。
+# 进程级缓存：与 paths.claude_config_dirs 同一先例——TCER 运行期间新写入的
+# parent 指针不进索引，重启后生效。
+_PARENT_MAPS: dict[str, dict[str, str]] = {}
+
+
+def _summaries_parent_map(root: Path) -> dict[str, str]:
+    """``{conversation_id: parent_conversation_id}`` of one data root (cached).
+
+    只缓存**确定性**结果：旧 schema 无该列等明确失败缓存空映射；瞬时失败
+    （Antigravity GUI 正在写库时的 database is locked 等）本次返回空、不缓存
+    ——缓存了会把「瞬时读不到」变成整个进程禁用折叠，数值随启动时机漂移
+    （code-review F4）。
+    """
+    key = os.path.normcase(str(root))
+    cached = _PARENT_MAPS.get(key)
+    if cached is not None:
+        return cached
+    mapping: dict[str, str] = {}
+    summaries_db = root / "conversation_summaries.db"
+    if summaries_db.is_file():
+        try:
+            with _connect_ro(summaries_db) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT conversation_id, parent_conversation_id "
+                    "FROM conversation_summaries "
+                    "WHERE parent_conversation_id IS NOT NULL "
+                    "AND parent_conversation_id != ''"
+                )
+                for cid, par in cur.fetchall():
+                    if cid and par and cid != par:
+                        mapping[cid] = par
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "no such column" not in msg and "no such table" not in msg:
+                return mapping  # 锁冲突等瞬时错误：本次视作无，不写入缓存
+        except Exception:
+            return mapping  # 库损坏等未知错误：同样只影响本次
+    _PARENT_MAPS[key] = mapping
+    return mapping
+
+
+def _is_subagent_cid(cid: str) -> bool:
+    """cid 是否带 parent 指针且父 db 在任一根存在的子会话（**跨根**判定）。
+
+    同一会话 id 跨根多副本（拷贝的 profile、summaries 被一侧刷掉）必须整体
+    认定：只按副本所在根判定会一侧折叠、另一侧独立成卡 → Token/LOC 双计
+    （code-review F3；旧 best-by-cid 去重的保证不能丢）。
+    """
+    roots = antigravity_roots()
+    for root in roots:
+        par = _summaries_parent_map(root).get(cid)
+        if par:
+            return any((r / "conversations" / f"{par}.db").is_file() for r in roots)
+    return False
+
+
+def reset_parent_map_cache() -> None:
+    """清空 summaries 父指针进程级缓存（测试用；生产语义见 _PARENT_MAPS 注释）。"""
+    _PARENT_MAPS.clear()
+
+
+def subagent_dbs(path: Path) -> list[Path]:
+    """Child conversation dbs of ``path`` per summaries.parent_conversation_id.
+
+    children 从**所有根**枚举（best-by-mtime 选最新副本，与 `_workspace_sessions`
+    的跨根去重语义一致——父副本在哪根不影响子会话发现，code-review F3）。
+    深度优先收齐嵌套子会话（实测 depth 全为 1，递归只作防御）；父 db 已被
+    清理的孤儿由调用方按「父不存在仍独立」语义处理。防环：visited 集合。
+    """
+    path = Path(path)
+    if not path.is_file():
+        return []
+    roots = antigravity_roots()
+    conv_dirs = [r / "conversations" for r in roots]
+    by_parent: dict[str, list[str]] = {}
+    for root in roots:
+        for cid, par in _summaries_parent_map(root).items():
+            by_parent.setdefault(par, []).append(cid)
+    out: list[Path] = []
+    visited = {path.stem}
+    stack = [path.stem]
+    while stack:
+        cur = stack.pop(0)
+        for cid in by_parent.get(cur, ()):
+            if cid in visited:
+                continue
+            visited.add(cid)
+            cands = [(c / f"{cid}.db") for c in conv_dirs]
+            cands = [c for c in cands if c.is_file()]
+            if cands:
+                newest = max(cands, key=lambda p: p.stat().st_mtime)
+                out.append(newest)
+                stack.append(cid)
+    out.sort(key=lambda p: p.stem)
+    return out
+
+
+def _is_subagent_path(path: Path) -> bool:
+    """True when ``path`` is a child conversation whose parent db still exists."""
+    return _is_subagent_cid(Path(path).stem)
+
+
 def _root_entries(root: Path) -> list[tuple[str, list[str]]]:
     """``(conversation_id, [normalized_workspace, ...])`` for one data root, newest first.
 
@@ -534,12 +645,17 @@ def _workspace_sessions() -> dict[str, list[Path]]:
     profiles (:func:`tcer.core.paths.antigravity_roots`). The same workspace across roots
     merges into one group. A conversation id present in several roots (copied
     profile) is counted once -- the most recently modified file wins.
+    子代理会话（summaries.parent_conversation_id 指向存在父 db 的）不单独成
+    卡：Token/LOC 由 aggregate_usage/session_loc_full 折叠进父会话（原 #5），
+    父 db 缺失的孤儿仍独立展示。
     """
     entries: list[tuple[str, list[str]]] = []
     best: dict[str, tuple[int, Path]] = {}
     for root in antigravity_roots():
         conv_dir = root / "conversations"
         for cid, wss in _root_entries(root):
+            if _is_subagent_cid(cid):
+                continue  # 子会话（跨根判定，防副本一侧独立成卡双计）：折叠进父
             entries.append((cid, wss))
             p = conv_dir / f"{cid}.db"
             try:
@@ -664,7 +780,7 @@ def read_session_meta(path: Path) -> SessionMeta:
         cwd=cwd,
         title=title,
         path=path,
-        is_subagent=False,
+        is_subagent=_is_subagent_path(path),
         entrypoint="agy",
         source="antigravity",
     )
@@ -674,7 +790,38 @@ def aggregate_usage(
     path: Path,
     cancel_check: Callable[[], None] | None = None,
 ) -> TokenUsage:
-    """Aggregate token usage, tool metrics, and turn timelines from an Antigravity .db."""
+    """Aggregate token usage, tool metrics, and turn timelines from an Antigravity .db.
+
+    invoke_subagent 派生的子会话（独立 conversation db）折叠并入父会话
+    （原 #5：Token 保留真实成本，不单独计 session）；merge 的逐回合字段
+    rebase（turn_stats/compaction_turns/turn_net_locs）由 TokenUsage.merge
+    统一处理。子会话的 step 14 实测为空，user 信号另在解析层按 is_sub 跳过
+    作防御（同 omp _aggregate_single(is_subagent=True) 口径）。
+    """
+    u = _aggregate_single(path, cancel_check)
+    for sub in subagent_dbs(path):
+        u = u.merge(_fold_subtree_usage(sub, cancel_check))
+    return u
+
+
+def _fold_subtree_usage(
+    path: Path,
+    cancel_check: Callable[[], None] | None = None,
+) -> TokenUsage:
+    """Fold one subagent subtree: parse as sub-agent, recurse into nested children."""
+    u = _aggregate_single(path, cancel_check, is_sub=True)
+    for nested in subagent_dbs(path):
+        u = u.merge(_fold_subtree_usage(nested, cancel_check))
+    return u
+
+
+def _aggregate_single(
+    path: Path,
+    cancel_check: Callable[[], None] | None = None,
+    is_sub: bool = False,
+) -> TokenUsage:
+    """Parse one conversation db (no subagent folding)."""
+    path = Path(path)
     u = TokenUsage()
     if not path.is_file():
         return u
@@ -764,6 +911,10 @@ def aggregate_usage(
                 ts_ms = int(ts * 1000) if ts is not None else None
 
                 if stype == 14:  # User input
+                    # 子代理的 step 14 实测为空（派发 prompt 不落子会话）；
+                    # is_sub 守卫防上游日后写入派发 prompt 被当用户提问（原 #15）。
+                    if is_sub:
+                        continue
                     u.user_msgs += 1
                     txt = _extract_user_text(payload)
                     if u.first_prompt_chars == 0 and txt:
@@ -873,9 +1024,33 @@ def session_loc_full(
     （status 0/3/5）才回放；status 7 的失败编辑（实测 "Could not successfully
     apply"）不计。调用体优先取结果字段 5.4（裁剪后的 status 5 步骤只剩这份），
     缺失时按 step 15 调用的出现顺序配对（实测结果严格按调用顺序到达）。
+    子代理会话经 loc.merge_session_locs 并入父会话（原 #13：合并后重算
+    high_churn；与 omp scan_folded 同构，无信号子会话不产出空 LOC）。
 
     Returns (SessionLoc, has_loc_signal).
     """
+    sloc, has_signal = _loc_single(path, cancel_check)
+    subs = subagent_dbs(path)
+    if not subs:
+        return sloc, has_signal
+    slocs = [sloc] if has_signal else []
+    any_signal = has_signal
+    for sub in subs:
+        sl, hs = session_loc_full(sub, cancel_check)
+        if hs:
+            slocs.append(sl)
+            any_signal = True
+    if not slocs:
+        return loc.SessionLoc(added=0, deleted=0), False
+    return loc.merge_session_locs(slocs), any_signal
+
+
+def _loc_single(
+    path: Path,
+    cancel_check: Callable[[], None] | None = None,
+) -> tuple[loc.SessionLoc, bool]:
+    """Replay one conversation db (no subagent folding)."""
+    path = Path(path)
     acc = loc._LocAccumulator()
     has_signal = False
 

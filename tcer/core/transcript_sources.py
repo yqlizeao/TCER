@@ -64,6 +64,27 @@ def _opt_str(v) -> str | None:
     return v if isinstance(v, str) and v else None
 
 
+def _num(v) -> int | None:
+    """宽容取正整数（bool 不算数）；缺/非法返回 None——压缩量化有数字才显示。"""
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+        return int(v)
+    return None
+
+
+def compaction_quant_text(pre, post) -> str:
+    """压缩量化文案（Claude compactMetadata / omp·Pi tokensBefore·After 共用）。
+
+    单次丢弃量 = pre − post（Claude 的 cumulativeDroppedTokens 是会话累计值，
+    不能当单次值）；缺任一侧就不显示数字，不臆造。
+    """
+    pre, post = _num(pre), _num(post)
+    if pre and post and pre > post:
+        return f"压缩前 {pre:,} → 压缩后 {post:,} tok（丢弃 {pre - post:,}）"
+    if pre:
+        return f"压缩前 {pre:,} tok"
+    return ""
+
+
 def _dumps(v) -> str:
     return ts_.dumps_compact(v)
 
@@ -261,6 +282,7 @@ class _Claude:
         self.seen_tool_result: set[str] = set()
         self.calls: dict[str, tuple] = {}        # id → (ToolCallBlock, ts)
         self.pr_urls: set[str] = set()
+        self._compact_quant = ""                 # compact_boundary 刚记下的量化（compact_summary 接回）
         self.last_user_bash: tuple | None = None  # (Message, ToolCallBlock)
         self.session_dir = None
         try:
@@ -323,6 +345,15 @@ class _Claude:
         elif sub == "compact_boundary":
             c = obj.get("content")
             text = c.strip() if isinstance(c, str) and c.strip() else "Conversation compacted"
+            # compactMetadata 的 preTokens/postTokens（reader 同源键）量化并进
+            # 事件文本；quant 同时挂实例状态：紧随其后的 isCompactSummary 摘要
+            # 行会整块替换本事件文本（compact_summary），替换时把量化接回摘要前。
+            cm = obj.get("compactMetadata")
+            quant = (compaction_quant_text(cm.get("preTokens"), cm.get("postTokens"))
+                     if isinstance(cm, dict) else "")
+            self._compact_quant = quant
+            if quant:
+                text = f"{text} · {quant}"
             self.push_event(ts, EV_COMPACTION, text)
         elif sub == "local_command":
             c = obj.get("content")
@@ -361,6 +392,14 @@ class _Claude:
         last = self.messages[-1] if self.messages else None
         if (last is not None and last.role == "system" and len(last.blocks) == 1
                 and last.blocks[0].type == "event" and last.blocks[0].kind == EV_COMPACTION):
+            # isCompactSummary 摘要整块替换 boundary 事件：compact_boundary 刚
+            # 记下的量化（压缩前→后/丢弃）不能丢，接在摘要正文前。
+            quant = self._compact_quant
+            if quant:
+                block = make_summary_event(
+                    EV_COMPACTION, f"{quant}\n\n{summary}",
+                    ContentRef("jsonl", str(self.path), off, pointer="/message/content"))
+                self._compact_quant = ""
             last.blocks[0] = block
             return
         self.push("system", ts, None, [block])
@@ -1620,10 +1659,17 @@ class _Omp:
                 return [Message("system", ets, None, None, False, [EventBlock(EV_THINKING_LEVEL, lv)])]
             return []
         if typ in ("compaction", "branch_summary"):
+            # tokensBefore/tokensAfter（omp + Pi 共有，reader _note_compaction 同源键）：
+            # 量化放正文首行；无 summary 的压缩也不再静默（有数字才显示，不臆造）。
+            quant = compaction_quant_text(ev.get("tokensBefore"), ev.get("tokensAfter"))
             s = ev.get("summary")
             if isinstance(s, str) and s.strip():
+                text = f"{quant}\n\n{s}" if quant else s
                 return [Message("system", ets, None, None, False,
-                                [make_summary_event(EV_COMPACTION, s, self.ref(n, "/summary"))])]
+                                [make_summary_event(EV_COMPACTION, text, self.ref(n, "/summary"))])]
+            if quant:
+                return [Message("system", ets, None, None, False,
+                                [EventBlock(EV_COMPACTION, quant)])]
             return []
         if typ == "custom_message" and ev.get("display") is not False:
             c = ev.get("content")

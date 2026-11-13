@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+import pytest
+
 from tcer.core import analyze, antigravity_reader, loc
 from tcer.core.antigravity_reader import (
     _decode_gen_metadata,
@@ -800,3 +802,178 @@ def test_cross_surface_same_session_dedup(tmp_path: Path, monkeypatch):
     pa = analyze.analyze_project("shared", source="antigravity")
     assert pa.n_sessions == 1
     assert pa.aggregate.usage.input_tokens == 250
+
+
+# --------------------------------------------------------------------------- #
+# 子代理折叠（2026-11 启用：summaries.parent_conversation_id 已有真实数据）
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(autouse=True)
+def _clear_parent_map_cache():
+    """_PARENT_MAPS 是进程级缓存，测试间必须互不可见。"""
+    antigravity_reader.reset_parent_map_cache()
+    yield
+    antigravity_reader.reset_parent_map_cache()
+
+
+def _write_summaries_with_parent(root: Path, rows) -> None:
+    """rows: (cid, parent_cid, uri, mtime)；parent_cid 为 '' 表示主会话。"""
+    root.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(root / "conversation_summaries.db")
+    conn.execute(
+        "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, "
+        "workspace_uris TEXT, last_modified_time INTEGER, parent_conversation_id TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
+        [(cid, json.dumps([uri]), t, par) for cid, par, uri, t in rows],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_subagent_folding_by_summaries_parent(tmp_path: Path, monkeypatch):
+    """父 + 2 子：列表只出父、Token/LOC 折叠、is_subagent 标记、Task 映射。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    uri = "file:///C:/proj/foldy"
+    w = {"Path": r"C:\t\a.py", "Content": "x=1\ny=2\nz=3\n"}
+
+    # 父：提问 + 并行派发两个子代理（invoke_subagent → Task；manage_subagents 透传）
+    parent = _build_db(conv / "p1.db", [
+        _gen_row("gemini-3.8-flash", 100, 10, 200, "rid-p"),
+    ], [
+        (14, 3, _make_user_step_bytes("审查一下文档")),
+        (15, 3, _multi_call_step([("i1", "invoke_subagent", {"Prompt": "分片1"}),
+                                  ("i2", "invoke_subagent", {"Prompt": "分片2"}),
+                                  ("m1", "manage_subagents", {"Action": "list"})])),
+        (132, 3, _result_step("m1", "manage_subagents", {"Action": "list"})),
+    ])
+    # 子 1：1 gen + 派发 prompt 落 step 14（防御守卫：不得计入 user_msgs）+ 写 3 行
+    sub1 = _build_db(conv / "c1.db", [
+        _gen_row("gemini-3.8-flash", 100, 10, 200, "rid-s1"),
+    ], [
+        (14, 3, _make_user_step_bytes("你是派发的子代理 prompt，不是用户提问")),
+        (15, 3, _multi_call_step([("w1", "write_file", w)])),
+        (132, 3, _result_step("w1", "write_file", w)),
+    ])
+    # 子 2：1 gen + 1 回复步骤，无 step 14（子会话实测无用户输入的形态）
+    sub2 = _build_db(conv / "c2.db", [
+        _gen_row("gemini-3.8-flash", 100, 10, 200, "rid-s2"),
+    ], [
+        (15, 3, _make_proto_field(20, 2, b"")),
+    ])
+    # 孤儿：指向不存在的父 → 仍独立成卡
+    orphan = _build_db(conv / "c3.db", [
+        _gen_row("gemini-3.8-flash", 100, 10, 200, "rid-s3"),
+    ], [])
+    _write_summaries_with_parent(tmp_path, [
+        ("p1", "", uri, 3),
+        ("c1", "p1", uri, 2),
+        ("c2", "p1", uri, 1),
+        ("c3", "ghost", uri, 0),
+    ])
+
+    meta_p = antigravity_reader.read_session_meta(parent)
+    meta_c1 = antigravity_reader.read_session_meta(sub1)
+    assert meta_p.is_subagent is False
+    assert meta_c1.is_subagent is True
+
+    ref = antigravity_reader.resolve_project("foldy")
+    assert ref is not None
+    sessions = antigravity_reader.discover_sessions(ref)
+    assert sorted(p.stem for p in sessions) == ["c3", "p1"]  # 子会话不单独成卡，孤儿独立
+
+    u = antigravity_reader.aggregate_usage(parent)
+    assert u.input_tokens == 300          # 父 100 + 子 100 + 子 100
+    assert u.output_tokens == 30
+    assert u.cache_read_input_tokens == 600
+    assert u.user_msgs == 1               # 子 1 的派发 prompt 不计
+    assert u.first_prompt_chars == len("审查一下文档")
+    assert u.tool_calls.get("Task") == 2  # 并行两个 invoke_subagent
+    assert u.tool_calls.get("manage_subagents") == 1  # 管理动作不冒充 Task
+    assert "invoke_subagent" not in u.tool_calls
+    assert u.assistant_msgs == 3          # 逐回合时间线串接（turn rebase）
+
+    sloc, has_sig = antigravity_reader.session_loc_full(parent)
+    assert has_sig is True
+    assert sloc.added == 3                # 只有子 1 写了 3 行
+
+    pa = analyze.analyze_project("foldy", source="antigravity")
+    assert pa.n_sessions == 2             # 父 + 孤儿
+    assert pa.n_subagents == 2            # subagents_of 钩子
+    assert pa.aggregate.usage.input_tokens == 400  # 折叠父(300) + 孤儿(100)
+
+    assert len(antigravity_reader.subagent_dbs(parent)) == 2
+
+
+def test_parent_map_schema_without_parent_column(tmp_path: Path, monkeypatch):
+    """旧 schema summaries（无 parent 列）：容错为无子会话，一切照旧。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    db = _build_db(conv / "p9.db", [_gen_row("gemini-3.8-flash", 100, 10, 0, "r")], [])
+    _write_summaries(tmp_path, [("p9", "file:///C:/proj/legacy", 1)])
+
+    assert antigravity_reader.subagent_dbs(db) == []
+    ref = antigravity_reader.resolve_project("legacy")
+    assert [p.stem for p in antigravity_reader.discover_sessions(ref)] == ["p9"]
+    u = antigravity_reader.aggregate_usage(db)
+    assert u.input_tokens == 100
+
+
+def test_cross_root_subagent_no_double_count(tmp_path: Path, monkeypatch):
+    """同 cid 跨根多副本且 summaries 分歧（一侧被刷掉父行）：整体认定折叠，
+    不允许一侧折叠、另一侧独立成卡造成 Token/LOC 双计（code-review F3）。"""
+    import os
+    for env in ("ANTIGRAVITY_DIR", "ANTIGRAVITY_CLI_DIR", "GEMINI_CLI_DIR"):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    root_a = tmp_path / ".gemini" / "antigravity"          # summaries 完整：c1 → p1
+    root_b = tmp_path / ".gemini" / "antigravity-cli"      # summaries 被刷掉：c1 无父行
+    for root in (root_a, root_b):
+        (root / "conversations").mkdir(parents=True)
+    w = {"Path": r"C:\t\a.py", "Content": "x=1\ny=2\n"}
+    parent = _build_db(root_a / "conversations" / "p1.db",
+                       [_gen_row("gemini-3.8-flash", 100, 10, 0, "r-p")], [])
+    sub_a = _build_db(root_a / "conversations" / "c1.db",
+                      [_gen_row("gemini-3.8-flash", 100, 10, 0, "r-a")], [])
+    sub_b = _build_db(root_b / "conversations" / "c1.db",
+                      [_gen_row("gemini-3.8-flash", 100, 10, 0, "r-b")], [])
+    st = sub_b.stat()
+    os.utime(sub_b, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))  # 副本更新 → best 语义
+    conn = sqlite3.connect(root_a / "conversation_summaries.db")
+    conn.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, "
+                 "workspace_uris TEXT, last_modified_time INTEGER, parent_conversation_id TEXT)")
+    conn.executemany("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)", [
+        ("p1", json.dumps(["file:///C:/proj/dual"]), 2, ""),
+        ("c1", json.dumps(["file:///C:/proj/dual"]), 1, "p1"),
+    ])
+    conn.commit()
+    conn.close()
+    # 根 B 的 summaries 无 c1 行（GUI Language Server 刷掉场景）
+    conn = sqlite3.connect(root_b / "conversation_summaries.db")
+    conn.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, "
+                 "workspace_uris TEXT, last_modified_time INTEGER)")
+    conn.commit()
+    conn.close()
+
+    # c1 无论从哪个根判定都是子会话（跨根认定）
+    assert antigravity_reader._is_subagent_cid("c1") is True
+    assert antigravity_reader._is_subagent_path(sub_b) is True
+    # children 跨根枚举取最新副本
+    subs = antigravity_reader.subagent_dbs(parent)
+    assert [p.name for p in subs] == ["c1.db"]
+    assert subs[0] == sub_b
+
+    uri = "file:///C:/proj/dual"
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path / ".gemini" / "antigravity"))
+    monkeypatch.setenv("ANTIGRAVITY_CLI_DIR", str(tmp_path / ".gemini" / "antigravity-cli"))
+    refs = {r.key: r for r in antigravity_reader.list_project_refs()}
+    assert set(refs) == {"dual"}
+    sessions = antigravity_reader.discover_sessions(refs["dual"])
+    assert [p.stem for p in sessions] == ["p1"]        # c1 两份副本都不独立成卡
+
+    pa = analyze.analyze_project("dual", source="antigravity")
+    assert pa.n_sessions == 1
+    assert pa.n_subagents == 1
+    assert pa.aggregate.usage.input_tokens == 200       # 父 100 + 最新子副本 100，只计一次
