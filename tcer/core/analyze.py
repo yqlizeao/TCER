@@ -44,6 +44,7 @@ class ProjectAnalysis:
     code_dir: Path | None  # 项目工作目录（仅展示用途；TCER 不读取真实仓库）
     n_sessions: int  # number of real sessions (not counting subagents separately)
     n_subagents: int  # total subagent files folded into the sessions above
+    n_killed_subagents: int = 0  # folded subagents the coordinator removed (Antigravity)
     source: str = "claude"
     project_ref: ProjectRef | None = None
 
@@ -444,6 +445,8 @@ def _mk_report(
     *,
     ctx: _MetricCtx,
     n_sub: int = 0,
+    n_killed: int = 0,
+    names: tuple[str, ...] = (),
     unseen: int = 0,
     sloc: loc.SessionLoc | None = None,
     set_subagent_density: bool = False,
@@ -481,6 +484,8 @@ def _mk_report(
         cpe_baseline=ctx.baseline_cpe,
     )
     rep.subagent_count = n_sub
+    rep.killed_subagent_count = n_killed
+    rep.subagent_names = tuple(names)
     rep.unseen_writes = unseen
     if sloc:
         details = {fp: cnt for fp, cnt in sloc.file_edit_counts.items() if cnt >= 3}
@@ -824,6 +829,9 @@ class _SourceAdapter:
     no_match: str       # .format(session=...)
     requires_path: bool = False  # OpenCode: ref.path (SQLite db) 必须存在
     subagents_of: Callable[[ProjectRef, object], int] | None = None  # omp: folded subagent count
+    subagent_detail_of: (  # Antigravity: (killed workers, named workers) of the folded subtree
+        Callable[[ProjectRef, object], tuple[int, tuple[str, ...]]] | None
+    ) = None
 
 
 def _analyze_source_project(
@@ -894,8 +902,12 @@ def _analyze_source_project(
         # 逐会话子代理数（omp/pi 折叠的 SubAgent 计入所属主会话；与 Claude
         # 路径及聚合层 n_subagents 口径一致，CSV 导出的 subagent_count 不再恒 0）。
         n_sub_h = (adapter.subagents_of(ref, h) if adapter.subagents_of else 0)
+        n_killed_h, names_h = (
+            adapter.subagent_detail_of(ref, h) if adapter.subagent_detail_of else (0, ())
+        )
         if no_loc:
-            reports.append(_mk_report(meta, u, None, None, None, ctx=ctx, n_sub=n_sub_h))
+            reports.append(_mk_report(meta, u, None, None, None, ctx=ctx, n_sub=n_sub_h,
+                                      n_killed=n_killed_h, names=names_h))
             continue
         # Single scan yields the LOC and whether any edit signal existed.
         sloc, has_signal = adapter.loc_of(ref, h, meta)
@@ -907,6 +919,7 @@ def _analyze_source_project(
         reports.append(_mk_report(
             meta, u, sloc.added - sloc.deleted, sloc.added, sloc.deleted,
             ctx=ctx, sloc=sloc, unseen=sloc.unseen_writes, n_sub=n_sub_h,
+            n_killed=n_killed_h, names=names_h,
         ))
 
     first = handles[0] if handles else None
@@ -935,6 +948,7 @@ def _analyze_source_project(
         )
 
     n_sub_total = sum(r.subagent_count for r in reports)
+    n_killed_total = sum(r.killed_subagent_count for r in reports)
     return ProjectAnalysis(
         project_hash=ref.key,
         reports=reports,
@@ -942,6 +956,7 @@ def _analyze_source_project(
         code_dir=code_path,
         n_sessions=len(reports),
         n_subagents=n_sub_total,
+        n_killed_subagents=n_killed_total,
         source=adapter.source,
         project_ref=ref,
     )
@@ -1168,6 +1183,10 @@ _ANTIGRAVITY = _SourceAdapter(
     no_sessions="no antigravity session files for '{name}'",
     no_match="no antigravity session matches '{session}'",
     subagents_of=lambda ref, f: len(antigravity_reader.subagent_dbs(f)),
+    subagent_detail_of=lambda ref, f: (
+        antigravity_reader.killed_subagent_count(f),
+        antigravity_reader.subagent_names(f),
+    ),
 )
 
 

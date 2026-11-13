@@ -113,6 +113,8 @@ def report_row_dict(r: SessionReport) -> dict:
         "path": str(r.meta.path),
         "is_subagent": r.meta.is_subagent,
         "subagent_count": r.subagent_count,
+        "killed_subagent_count": r.killed_subagent_count,
+        "subagent_names": list(r.subagent_names),
         "cwd": r.meta.cwd,
         "assistant_turns": u.assistant_msgs,
         "input_tokens": u.input_tokens,
@@ -260,7 +262,7 @@ def to_json(reports: list[SessionReport], agg: SessionReport, n_sessions: int) -
 
 
 _CSV_FIELDS = [
-    "session_id", "source", "started_at", "ended_at", "is_subagent", "subagent_count", "assistant_turns", "input_tokens",
+    "session_id", "source", "started_at", "ended_at", "is_subagent", "subagent_count", "killed_subagent_count", "assistant_turns", "input_tokens",
     "cache_write_tokens", "cache_read_tokens", "output_tokens",
     "total_tokens", "chr", "io_ratio", "cost_usd", "cost_per_mt",
     "tcer", "cpe", "net_loc", "caf",
@@ -304,6 +306,8 @@ _CSV_EXCLUDED = frozenset({
     # Dict-valued: one CSV column per tool name would be unbounded and unstable
     # across sessions. Uploaded as JSON to the server layer instead.
     "tool_calls", "tool_variants",
+    # List-valued: named worker identities (Antigravity summaries.agent_name).
+    "subagent_names",
 })
 
 

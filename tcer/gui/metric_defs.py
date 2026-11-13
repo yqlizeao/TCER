@@ -109,7 +109,10 @@ GROUPS: list[Group] = [
         Metric("subagent", "子代理", "",
                "并入该会话的子代理数量。子代理是代理为复杂任务自动拆出的并行助手"
                "（Claude Code 的 Task / Antigravity 的 invoke_subagent 等），"
-               "其 Token 与代码行合并计入父会话。", "basic"),
+               "其 Token 与代码行合并计入父会话。Antigravity 具名 worker 在括号内列出。", "basic"),
+        Metric("killed_subagents", "被移除子代理", "",
+               "协调者主动移除的子代理数（Antigravity Swarm 的 killed worker）——"
+               "其产出被丢弃、已消耗的 Token 全部浪费，是编排失控/返工的直接信号。", "basic", "down"),
     ]),
     Group("G2", "Token 用量", [
         Metric("total_tokens", "总 Token", "",
@@ -416,7 +419,7 @@ def _turns_display(u) -> str:
 # Metric.fmt at import so consumers can also read it off the Metric object.
 _SESSION_FMT: dict[str, str] = {
     # G1 — text / custom display (see _DISPLAY_EXTRACTORS), grade is plain text
-    "subagent": "text", "turns": "text", "started": "text", "last_time": "text",
+    "subagent": "text", "killed_subagents": "int", "turns": "text", "started": "text", "last_time": "text",
     "duration": "text", "active_duration": "text", "models": "text", "tools": "text", "entrypoint": "text",
     "cli_version": "text",
     "thread_source": "text", "approval_policy": "text",
@@ -475,6 +478,7 @@ _REPORT_ATTR = {
     "cost_vs_reported": "cost_reported_ratio",
     "loc_confidence": "loc_patch_agreement",
     "context_window_used": "context_window_used_ratio",
+    "killed_subagents": "killed_subagent_count",
     "reasoning_ratio": "reasoning_output_ratio",
     "task_completion": "task_completion_rate",
     "ttft": "time_to_first_token_sec",
@@ -584,8 +588,19 @@ def _compaction_cost_display(r) -> str:
     return text
 
 
+def _subagent_display(r) -> str:
+    """「子代理」显示：纯数字；Antigravity 具名 worker 追加括号名单（≤5 全列）。"""
+    n = r.subagent_count or 0
+    names = tuple(r.subagent_names or ())
+    if not names:
+        return str(n)
+    shown = "、".join(names[:5])
+    more = f" 等{len(names)}个" if len(names) > 5 else ""
+    return f"{n}（{shown}{more}）"
+
+
 _DISPLAY_EXTRACTORS = {
-    "subagent": lambda r: str(r.subagent_count or 0),
+    "subagent": _subagent_display,
     "code_loc": lambda r: _code_loc_display(r),
     "turns": lambda r: _turns_display(r.usage),
     "started": lambda r: fmt.fmt_dt(r.usage.started_at, "%H:%M") if r.usage.started_at else "-",
@@ -778,6 +793,8 @@ SOURCE_LABELS = {
 _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Claude 独有
     "subagent": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
+    # Antigravity summaries.killed：被移除的 Swarm worker（其余源无此信号）
+    "killed_subagents": frozenset({"antigravity"}),
     "memory_files": frozenset({"claude"}),
     # Claude 的推理输出并入「输出」，不单独上报
     "reasoning_tokens": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"}),

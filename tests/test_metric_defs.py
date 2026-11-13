@@ -346,3 +346,27 @@ def test_aborted_tasks_supported_for_local_agents():
 def test_support_note_appended_to_tip():
     m = metric_defs.METRIC_BY_KEY["context_window"]
     assert "仅以下数据源提供" in m.tip and "Codex" in m.tip
+
+
+def test_subagent_display_with_worker_names():
+    """「子代理」显示具名 worker 名单；「被移除子代理」仅 antigravity 支持。"""
+    r = _report()
+    r.meta.source = "antigravity"
+    r.subagent_count = 4
+    r.subagent_names = ("parser", "verifier", "monitor")
+    assert metric_defs.display(r, "subagent") == "4（parser、verifier、monitor）"
+    r.subagent_names = tuple(f"w{i}" for i in range(7))
+    assert metric_defs.display(r, "subagent") == "4（w0、w1、w2、w3、w4 等7个）"
+    r.subagent_names = ()
+    assert metric_defs.display(r, "subagent") == "4"
+    assert metric_defs.display(r, "killed_subagents") == "0"
+    r.killed_subagent_count = 2
+    assert metric_defs.display(r, "killed_subagents") == "2"
+    assert metric_defs.raw_value(r, "killed_subagents") == 2.0
+
+
+def test_killed_subagents_unsupported_outside_antigravity():
+    """killed 信号只有 Antigravity summaries 有——其余源显示不适用。"""
+    claude = _report_for("claude")
+    assert metric_defs.display(claude, "killed_subagents") == metric_defs.UNSUPPORTED_LABEL
+    assert metric_defs.raw_value(claude, "killed_subagents") is None

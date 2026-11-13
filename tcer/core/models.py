@@ -464,6 +464,11 @@ class SessionReport:
     code_reworked: int | None = None  # deleted lines the session itself had written
                                       # earlier (self-rework); churn = reworked / added
     subagent_count: int = 0  # number of subagent sessions folded into this one
+    killed_subagent_count: int = 0  # folded subagents the coordinator removed
+                                    # (Antigravity Swarm killed workers — their
+                                    # tokens are pure waste)
+    subagent_names: tuple[str, ...] = ()  # folded named workers (summaries
+                                          # agent_name; anonymous ones omitted)
     churn_ratio: float | None = None  # deleted / added (rework fraction)
     unseen_writes: int = 0  # Write calls whose target file hadn't been touched yet
                             # in this session (F1 exposure: prior size assumed 0)

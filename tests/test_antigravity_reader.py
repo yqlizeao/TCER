@@ -810,10 +810,10 @@ def test_cross_surface_same_session_dedup(tmp_path: Path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clear_parent_map_cache():
-    """_PARENT_MAPS 是进程级缓存，测试间必须互不可见。"""
-    antigravity_reader.reset_parent_map_cache()
+    """_SUMMARIES_INFO 是进程级缓存，测试间必须互不可见。"""
+    antigravity_reader.reset_summaries_cache()
     yield
-    antigravity_reader.reset_parent_map_cache()
+    antigravity_reader.reset_summaries_cache()
 
 
 def _write_summaries_with_parent(root: Path, rows) -> None:
@@ -827,6 +827,24 @@ def _write_summaries_with_parent(root: Path, rows) -> None:
     conn.executemany(
         "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?)",
         [(cid, json.dumps([uri]), t, par) for cid, par, uri, t in rows],
+    )
+    conn.commit()
+    conn.close()
+
+
+def _write_summaries_full(root: Path, rows) -> None:
+    """rows: (cid, parent_cid, uri, mtime, agent_name, killed)——完整 schema。"""
+    root.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(root / "conversation_summaries.db")
+    conn.execute(
+        "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, "
+        "workspace_uris TEXT, last_modified_time INTEGER, parent_conversation_id TEXT, "
+        "agent_name TEXT, killed INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?)",
+        [(cid, json.dumps([uri]), t, par, name, killed)
+         for cid, par, uri, t, name, killed in rows],
     )
     conn.commit()
     conn.close()
@@ -905,6 +923,52 @@ def test_subagent_folding_by_summaries_parent(tmp_path: Path, monkeypatch):
     assert pa.aggregate.usage.input_tokens == 400  # 折叠父(300) + 孤儿(100)
 
     assert len(antigravity_reader.subagent_dbs(parent)) == 2
+
+
+def test_killed_subagents_and_names(tmp_path: Path, monkeypatch):
+    """killed worker 计数与具名 worker 名单：killed=1 计入父卡、名字非空才收。
+
+    Swarm 语义：coordinator 移除 worker（killed）后其产出被丢弃——Token 是
+    纯浪费；agent_name 是 @parser/@verifier 式具名（匿名 self 不碍事，这里
+    直接测非空名单）。同时验 analyze 链路（rep 与 ProjectAnalysis 聚合）。
+    """
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    uri = "file:///C:/proj/swarmy"
+    parent = _build_db(conv / "p1.db", [
+        _gen_row("gemini-3.8-flash", 100, 10, 200, "rid-p"),
+    ], [
+        (14, 3, _make_user_step_bytes("并行修三个模块")),
+    ])
+    for cid in ("c1", "c2", "c3", "c4"):
+        _build_db(conv / f"{cid}.db", [
+            _gen_row("gemini-3.8-flash", 100, 10, 200, f"rid-{cid}"),
+        ], [])
+    _write_summaries_full(tmp_path, [
+        ("p1", "", uri, 5, "", 0),
+        ("c1", "p1", uri, 4, "parser", 0),
+        ("c2", "p1", uri, 3, "verifier", 1),
+        ("c3", "p1", uri, 2, "monitor", 1),
+        ("c4", "p1", uri, 1, "self", 0),
+    ])
+
+    assert antigravity_reader.killed_subagent_cids() == {"c2", "c3"}
+    assert antigravity_reader.killed_subagent_count(parent) == 2
+    # `self`（invoke_subagent 并行子代理通用名）不算具名，不进名单
+    assert antigravity_reader.subagent_names(parent) == ("parser", "verifier", "monitor")
+    assert len(antigravity_reader.subagent_dbs(parent)) == 4
+
+    ref = antigravity_reader.resolve_project("swarmy")
+    assert ref is not None
+    sessions = antigravity_reader.discover_sessions(ref)
+    assert [p.stem for p in sessions] == ["p1"]  # 只出父卡
+
+    pa = analyze.analyze_project("swarmy", source="antigravity")
+    assert pa.n_sessions == 1 and pa.n_subagents == 4
+    assert pa.n_killed_subagents == 2
+    rep = pa.reports[0]
+    assert rep.killed_subagent_count == 2
+    assert rep.subagent_names == ("parser", "verifier", "monitor")
 
 
 def test_parent_map_schema_without_parent_column(tmp_path: Path, monkeypatch):

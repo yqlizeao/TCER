@@ -41,6 +41,7 @@ import re
 import sqlite3
 import sys
 import urllib.parse
+from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -467,48 +468,109 @@ def _connect_ro(path: Path | str) -> sqlite3.Connection:
 # --------------------------------------------------------------------------- #
 
 # 子代理折叠（2026-11 启用）：summaries 库的 parent_conversation_id 记录
-# invoke_subagent 派生的子会话（agent_name=self/research，nesting_depth=1）。
-# 2026-10 基线时本机全空故未折叠，桌面 App 根现在已有数据（CLI 根暂仍全空）。
-# 进程级缓存：与 paths.claude_config_dirs 同一先例——TCER 运行期间新写入的
-# parent 指针不进索引，重启后生效。
-_PARENT_MAPS: dict[str, dict[str, str]] = {}
+# invoke_subagent 派生的子会话（agent_name=self/research/named worker，
+# nesting_depth=1）。2026-10 基线时本机全空故未折叠，桌面 App 根现在已有数据
+# （CLI 根暂仍全空）。进程级缓存：与 paths.claude_config_dirs 同一先例——
+# TCER 运行期间新写入的 parent 指针不进索引，重启后生效。
+_SummariesInfo = namedtuple("_SummariesInfo", "parents names killed")
+
+_SUMMARIES_INFO: dict[str, _SummariesInfo] = {}  # normcase(root) → summaries 快照
 
 
-def _summaries_parent_map(root: Path) -> dict[str, str]:
-    """``{conversation_id: parent_conversation_id}`` of one data root (cached).
+def _summaries_info(root: Path) -> _SummariesInfo:
+    """summaries 表的 (父指针, worker 名, killed 集) 一次读出、进程级缓存。
 
-    只缓存**确定性**结果：旧 schema 无该列等明确失败缓存空映射；瞬时失败
-    （Antigravity GUI 正在写库时的 database is locked 等）本次返回空、不缓存
-    ——缓存了会把「瞬时读不到」变成整个进程禁用折叠，数值随启动时机漂移
-    （code-review F4）。
+    只缓存**确定性**结果：旧 schema 无 agent_name/killed 列等明确失败缓存空
+    快照（列按 PRAGMA 实际存在降级）；瞬时失败（Antigravity GUI 正在写库时的
+    database is locked 等）本次返回空、不缓存——缓存了会把「瞬时读不到」变成
+    整个进程禁用折叠，数值随启动时机漂移（code-review F4）。
     """
     key = os.path.normcase(str(root))
-    cached = _PARENT_MAPS.get(key)
+    cached = _SUMMARIES_INFO.get(key)
     if cached is not None:
         return cached
-    mapping: dict[str, str] = {}
+    parents: dict[str, str] = {}
+    names: dict[str, str] = {}
+    killed: set[str] = set()
     summaries_db = root / "conversation_summaries.db"
     if summaries_db.is_file():
         try:
             with _connect_ro(summaries_db) as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT conversation_id, parent_conversation_id "
-                    "FROM conversation_summaries "
-                    "WHERE parent_conversation_id IS NOT NULL "
-                    "AND parent_conversation_id != ''"
-                )
-                for cid, par in cur.fetchall():
-                    if cid and par and cid != par:
-                        mapping[cid] = par
+                cols = {row[1] for row in conn.execute("PRAGMA table_info(conversation_summaries)")}
+                sel = "conversation_id"
+                for c in ("parent_conversation_id", "agent_name", "killed"):
+                    if c in cols:
+                        sel += f", {c}"
+                for row in conn.execute(f"SELECT {sel} FROM conversation_summaries"):
+                    cid = row[0]
+                    if not cid:
+                        continue
+                    if len(row) > 1 and row[1] and row[1] != cid:
+                        parents[cid] = row[1]
+                    if len(row) > 2 and row[2]:
+                        names[cid] = str(row[2])
+                    if len(row) > 3 and row[3]:
+                        killed.add(cid)
         except sqlite3.OperationalError as exc:
             msg = str(exc).lower()
             if "no such column" not in msg and "no such table" not in msg:
-                return mapping  # 锁冲突等瞬时错误：本次视作无，不写入缓存
+                return _SummariesInfo(parents, names, killed)  # 锁冲突等瞬时错误：本次视作无，不写入缓存
         except Exception:
-            return mapping  # 库损坏等未知错误：同样只影响本次
-    _PARENT_MAPS[key] = mapping
-    return mapping
+            return _SummariesInfo(parents, names, killed)  # 库损坏等未知错误：同样只影响本次
+    info = _SummariesInfo(parents, names, killed)
+    _SUMMARIES_INFO[key] = info
+    return info
+
+
+def _summaries_parent_map(root: Path) -> dict[str, str]:
+    return _summaries_info(root).parents
+
+
+def killed_subagent_cids() -> set[str]:
+    """全部根 summaries 中 killed=1 的会话 id 并集（跨根同 cid 副本任一侧标记即算）。"""
+    out: set[str] = set()
+    for root in antigravity_roots():
+        out |= _summaries_info(root).killed
+    return out
+
+
+def killed_subagent_count(path: Path) -> int:
+    """折叠子树中被协调者移除的子代理数（Antigravity Swarm 的 killed worker）。
+
+    被 kill 的 worker 产出被丢弃，其已消耗的 Token 是纯浪费——父会话卡上
+    显示该数。跨根判定同 _is_subagent_cid：任一根标记即算。
+    """
+    subs = subagent_dbs(path)
+    if not subs:
+        return 0
+    killed = killed_subagent_cids()
+    return sum(1 for p in subs if p.stem in killed)
+
+
+def subagent_names(path: Path) -> tuple[str, ...]:
+    """折叠子树的具名 worker 名（summaries.agent_name），按子 db 顺序。
+
+    只收真正具名的 worker（Swarm 的 @parser/@verifier 式命名）——编排会话
+    一眼可辨的信号；`self`（invoke_subagent 并行子代理的通用名）与空串不算
+    具名，混进名单只会制造「self、self、…」噪声。
+    """
+    subs = subagent_dbs(path)
+    if not subs:
+        return ()
+    names: dict[str, str] = {}
+    for root in antigravity_roots():
+        names.update(_summaries_info(root).names)
+    out = []
+    for p in subs:
+        n = names.get(p.stem)
+        if n and n != "self":
+            out.append(n)
+    return tuple(out)
+
+
+def reset_summaries_cache() -> None:
+    """清空 summaries 快照进程级缓存（测试用；生产语义见 _SUMMARIES_INFO 注释）。"""
+    _SUMMARIES_INFO.clear()
 
 
 def _is_subagent_cid(cid: str) -> bool:
