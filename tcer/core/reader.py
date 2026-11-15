@@ -258,11 +258,19 @@ def read_user_messages(path: Path) -> list[str]:
     :func:`tcer.core.user_input.read_user_messages`, which reads the main
     session only.
     """
-    messages: list[str] = []
+    return [t for t, _ in read_user_messages_timed(path)]
+
+
+def read_user_messages_timed(path: Path) -> list[tuple[str, int | None]]:
+    """同 :func:`read_user_messages`，每条附该行 ``timestamp``（epoch ms，缺失为 None）。
+
+    ``read_user_messages`` 由本函数派生，两者口径永远一致。
+    """
+    messages: list[tuple[str, int | None]] = []
     for obj in iter_messages(path):
         ui = _classify_user(obj)
         if ui is not None and ui.is_question:
-            messages.append(_clip_user(ui.text))
+            messages.append((_clip_user(ui.text), parse_timestamp_ms(obj.get("timestamp"))))
     return messages
 
 

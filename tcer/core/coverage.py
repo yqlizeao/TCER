@@ -472,6 +472,8 @@ def format_report(rep: CoverageReport, *, verbose: bool = False) -> str:
         for e in rep.issues:
             lines.append(f"    [{_STATUS_LABEL[e.status]}] {e.dim.rstrip('=')} = {e.value} ×{e.count:,}"
                          f"  版本 {e.min_version or '-'}~{e.max_version or '-'}  首见 {e.example}")
+            if e.note:
+                lines.append(f"        说明：{e.note}")
     if verbose:
         lines.append("  ── 完整登记 ──")
         for e in rep.entries:
@@ -495,3 +497,313 @@ def report_dict(rep: CoverageReport) -> dict:
         "entries": [e.__dict__ for e in rep.entries],
         "checks": [c.__dict__ for c in rep.checks],
     }
+
+
+# =========================================================================== #
+# Antigravity 覆盖审计（2026-11-15 起；SQLite + Protobuf，普查只用 wire 解码器）
+# =========================================================================== #
+# 普查已覆盖到的各端版本（language server 版本，取自 ``<root>/log/*.log``）。
+ANTIGRAVITY_CENSUS_VERSIONS: dict[str, str] = {
+    "antigravity-cli": "1.5.9",   # CLI（agy）
+    "antigravity": "2.32.0",      # 桌面 App 2.0
+}
+
+_NONUSE = "无用量，不影响指标"
+_PASS = "原名计入工具画像（非读写类）"
+
+ANTIGRAVITY_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
+    "db.table": {
+        "steps": (_H, "事件流：提问/工具调用/结果/压缩"),
+        "gen_metadata": (_H, "逐生成 usage 与模型（权威）"),
+        "trajectory_metadata_blob": (_H, "工作区 URI"),
+        "trajectory_meta": (_I, "轨迹元数据，" + _NONUSE),
+        "executor_metadata": (_I, "执行器元数据，" + _NONUSE),
+        "parent_references": (_I, "本机全空；子代理父指针取 summaries"),
+        "battle_mode_infos": (_I, "对战模式信息，" + _NONUSE),
+    },
+    "summaries.table": {
+        "conversation_summaries": (_H, "会话目录：工作区/父指针/worker 名/killed"),
+        "conversation_parents": (_I, "2.32 新增，本机为空；父指针仍取 conversation_summaries"),
+        "search_schema_version": (_I, "全文索引版本"),
+        **{t: (_I, "全文索引") for t in (
+            "conversations_fts", "conversations_fts_data", "conversations_fts_idx",
+            "conversations_fts_content", "conversations_fts_docsize", "conversations_fts_config")},
+    },
+    "step_type": {
+        "14": (_H, "用户输入（user_input SSOT）"),
+        "15": (_H, "助手回合 / 工具调用（字段 20 可并行多个）"),
+        "132": (_H, "工具结果：退出码 / LOC 裁决 / 5.4 回显补计调用"),
+        "23": (_H, "上下文压缩（usage 在步骤元数据 5.28.2）"),
+        "101": (_I, "后台任务（manage_task）结果系统消息，" + _NONUSE),
+        "90": (_I, "浏览器快照文件引用，" + _NONUSE),
+        "17": (_I, "API 报错 / 执行终止消息，" + _NONUSE + "（不计入 api_error）"),
+    },
+    "status": {
+        "3": (_H, "完成"),
+        "5": (_H, "完成但 payload 被裁剪（调用由 132 回显补回、提问取 19.3.1）"),
+        "8": (_I, "生成中的瞬态（2026-11-15 实测活跃会话 step 15 先 8 后转 3）；"
+                  "reader 不按非 132 步骤状态取舍，不影响计数"),
+    },
+    "status.132": {
+        "3": (_H, "完成（按退出码判错）"),
+        "5": (_H, "完成，payload 被裁剪"),
+        "7": (_H, "失败 → 工具错误"),
+        "4": (_H, "失败（如 Invalid argument）→ 工具错误"),
+        "6": (_H, "run_command 转后台任务（task-N）：仍在运行，不计工具错误、不回放 LOC"),
+        "2": (_H, "常驻进程（IsDaemon）仍在运行：不计工具错误、不回放 LOC"),
+    },
+    "gen.field": {
+        "4": (_H, "usage 块"),
+        "19": (_H, "模型名"),
+        **{f: (_I, "生成请求元数据（非用量；按样本推断）") for f in (
+            "1", "2", "3", "8", "9", "10", "11", "12", "14", "16", "17", "20", "21")},
+    },
+    "gen.usage": {
+        "2": (_H, "未命中缓存输入"),
+        "3": (_H, "输出（= 9 思考 + 10 回复，受守恒检查）"),
+        "5": (_H, "缓存命中输入"),
+        "7": (_H, "响应 id（压缩用量去重）"),
+        "9": (_H, "思考 Token（output 子集）"),
+        "10": (_I, "回复 Token（output 子集）"),
+        "1": (_I, "模型枚举号"),
+        "6": (_I, "常量（实测恒为 24）"),
+        "8": (_I, "会话 ID 结构"),
+        "11": (_I, "trace id"),
+    },
+}
+
+# 原始工具名登记：映射表里的 + 已知原名透传的。``mcp_*`` 由 _canon_tool 规则判定。
+_AGY_PASSTHROUGH = (
+    "manage_task", "read_board", "post_message", "swarm_wait", "webview_browser",
+    "enter_plan_mode", "exit_plan_mode", "schedule", "send_message", "manage_subagents",
+    "define_subagent", "list_plugin_accounts", "search_marketplace",
+)
+
+
+def _agy_tool_status(name: str, mcp_servers: set[str]) -> tuple[str, str]:
+    from tcer.core import antigravity_reader as ar
+    if name in ar._ANTIGRAVITY_TOOL_MAP:
+        return _H, f"映射为 {ar._ANTIGRAVITY_TOOL_MAP[name]}"
+    if name == "call_mcp_tool":
+        return _H, "MCP 网关 → mcp__<server>__<tool>"
+    if name == "swarm":
+        return _H, "action=add → Task；status/kill/title 原名"
+    if name in _AGY_PASSTHROUGH:
+        return _H, _PASS
+    if name.startswith("mcp_"):
+        canon = ar._canon_tool(name, "", mcp_servers)
+        if canon != name:
+            return _H, f"MCP → {canon.split('__')[1]}"
+        return UNKNOWN, "MCP server 边界未知（原名计入）：确认 server 名后登记 _MCP_KNOWN_SERVERS"
+    return UNKNOWN, "未登记工具：若是写文件类会漏计 LOC，需判断"
+
+
+def _agy_log_version(root: Path) -> str:
+    """``<root>/log/*.log`` 里最新的 ``Language server version: X``（只读最近几个文件头）。"""
+    import re as _re
+    d = Path(root) / "log"
+    if not d.is_dir():
+        return ""
+    pat = _re.compile(r"Language server version:\s*(\S+)")
+    best = ""
+    for f in sorted(d.glob("*.log"))[-5:]:
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                for _, line in zip(range(40), fh):
+                    m = pat.search(line)
+                    if m and _vkey(m.group(1)) > _vkey(best):
+                        best = m.group(1)
+        except OSError:
+            continue
+    return best
+
+
+def antigravity_coverage(roots: Iterable[Path] | None = None, *,
+                         cross_check_reader: bool = True) -> CoverageReport:
+    """Census raw Antigravity SQLite/Protobuf against :data:`ANTIGRAVITY_REGISTRY`."""
+    import re as _re
+    from tcer.core import antigravity_reader as ar
+    if roots is None:
+        from tcer.core.paths import antigravity_roots
+        roots = antigravity_roots()
+    roots = [Path(r) for r in roots]
+    P, F = ar._parse_proto_fields, ar._find_field
+    uuid_re = _re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+    rep = CoverageReport(source="antigravity")
+    tally = _Tally()
+    versions: dict[str, str] = {}
+    split_bad: list[str] = []
+    uuid_prompts: list[str] = []
+    reader_mismatch: list[str] = []
+    compaction_no_usage: list[str] = []
+    gen_no_id: list[str] = []
+    n_split = n_uuid = n_empty14 = n_comp_nouse = n_gen_noid = 0
+    all_cids: set[str] = set()
+    parents: dict[str, str] = {}
+    tool_where: dict[str, str] = {}
+    tool_servers: dict[str, set[str]] = {}
+
+    for root in roots:
+        name = root.name
+        v = _agy_log_version(root)
+        if v:
+            versions[name] = max(versions.get(name, ""), v, key=_vkey)
+        sp = root / "conversation_summaries.db"
+        if sp.is_file():
+            try:
+                with ar._connect_ro(sp) as c:
+                    for (t,) in c.execute("select name from sqlite_master where type='table'"):
+                        tally.add("summaries.table", t, "", str(sp))
+            except Exception:  # noqa: BLE001 — 运行中的 App 瞬时锁：跳过该库
+                pass
+            try:
+                parents.update(ar._summaries_info(root).parents)
+            except Exception:  # noqa: BLE001
+                pass
+        d = root / "conversations"
+        if not d.is_dir():
+            continue
+        for db in sorted(d.glob("*.db")):
+            all_cids.add(db.stem)
+            rep.files += 1
+            try:
+                conn = ar._connect_ro(db)
+            except Exception:  # noqa: BLE001
+                rep.bad_json += 1
+                continue
+            try:
+                for (t,) in conn.execute("select name from sqlite_master where type='table'"):
+                    tally.add("db.table", t, "", str(db))
+                servers: set[str] = set()
+                for gidx, data in conn.execute("select idx, data from gen_metadata"):
+                    if not data:
+                        continue
+                    servers |= ar._mcp_servers_in(data)
+                    inner = F(P(data), 1)
+                    if not isinstance(inner, bytes):
+                        continue
+                    ifs = P(inner)
+                    for fn in {fn for fn, _, _ in ifs}:
+                        tally.add("gen.field", str(fn), "", f"{db}:gen#{gidx}")
+                    ub = F(ifs, 4)
+                    if not isinstance(ub, bytes):
+                        continue
+                    uf = P(ub)
+                    for fn in {fn for fn, _, _ in uf}:
+                        tally.add("gen.usage", str(fn), "", f"{db}:gen#{gidx}")
+                    g = {fn: val for fn, _, val in uf if isinstance(val, int)}
+                    if 10 in g and g.get(3, 0) != g.get(9, 0) + g[10]:
+                        n_split += 1
+                        if len(split_bad) < _EXAMPLES_PER_ISSUE:
+                            split_bad.append(f"{db}:gen#{gidx} out={g.get(3)} think={g.get(9)} reply={g[10]}")
+                    if (g.get(2) or g.get(3) or g.get(5)) and not isinstance(F(uf, 7), bytes):
+                        n_gen_noid += 1
+                        if len(gen_no_id) < _EXAMPLES_PER_ISSUE:
+                            gen_no_id.append(f"{db}:gen#{gidx}")
+
+                calls15: list[str] = []
+                echo132: set[str] = set()
+                for idx, st, status, payload in conn.execute(
+                        "select idx, step_type, status, step_payload from steps order by idx"):
+                    rep.lines += 1
+                    where = f"{db}:step#{idx}"
+                    tally.add("step_type", str(st), "", where)
+                    tally.add("status.132" if st == 132 else "status", str(status), "", where)
+                    if not payload:
+                        continue
+                    if st == 15:
+                        f20 = F(P(payload), 20)
+                        if isinstance(f20, bytes):
+                            for fn, _, f7 in P(f20):
+                                if fn != 7 or not isinstance(f7, bytes):
+                                    continue
+                                cfs = P(f7)
+                                nm = F(cfs, 2)
+                                cid = F(cfs, 1)
+                                calls15.append(cid.decode("utf-8", "ignore") if isinstance(cid, bytes) else "")
+                                if isinstance(nm, bytes):
+                                    tn = nm.decode("utf-8", "ignore")
+                                    tally.add("tool", tn, "", where)
+                                    tool_where.setdefault(tn, where)
+                                    tool_servers.setdefault(tn, set()).update(servers)
+                    elif st == 132:
+                        f5 = F(P(payload), 5)
+                        f4 = F(P(f5), 4) if isinstance(f5, bytes) else None
+                        if isinstance(f4, bytes):
+                            cfs = P(f4)
+                            nm, cid = F(cfs, 2), F(cfs, 1)
+                            if isinstance(nm, bytes) and nm and isinstance(cid, bytes) and cid:
+                                echo132.add(cid.decode("utf-8", "ignore"))
+                                tn = nm.decode("utf-8", "ignore")
+                                if tn not in tool_where:
+                                    tally.add("tool", tn, "", where)
+                                    tool_where[tn] = where
+                                tool_servers.setdefault(tn, set()).update(servers)
+                    elif st == 14:
+                        txt = ar._extract_user_text(payload)
+                        if not txt:
+                            n_empty14 += 1
+                        elif uuid_re.match(txt):
+                            n_uuid += 1
+                            if len(uuid_prompts) < _EXAMPLES_PER_ISSUE:
+                                uuid_prompts.append(f"{where} {txt}")
+                    elif st == 23:
+                        f5 = F(P(payload), 5)
+                        if not (isinstance(f5, bytes) and isinstance(F(P(f5), 28), bytes)):
+                            n_comp_nouse += 1
+                            if len(compaction_no_usage) < _EXAMPLES_PER_ISSUE:
+                                compaction_no_usage.append(f"{where} status={status}")
+
+                if cross_check_reader:
+                    expect = len(calls15) + len(echo132 - {c for c in calls15 if c})
+                    got = sum(ar._aggregate_single(db).tool_calls.values())
+                    if got != expect:
+                        reader_mismatch.append(f"{db} reader={got} 独立计数={expect}")
+            finally:
+                conn.close()
+
+    # ---- 登记表分类 ----
+    for (dim, value), cnt in sorted(tally.counts.items(), key=lambda kv: (kv[0][0], -kv[1])):
+        if dim == "tool":
+            status, note = _agy_tool_status(value, tool_servers.get(value, set()))
+        else:
+            status, note = ANTIGRAVITY_REGISTRY.get(dim, {}).get(
+                value, (UNKNOWN, "未登记：reader 未处理，需判断是否影响指标"))
+        rep.entries.append(CoverageEntry(
+            dim=dim, value=value, count=cnt, status=status, note=note,
+            example=tally.where.get((dim, value), "") if status in (UNKNOWN, UNEXPECTED) else ""))
+
+    orphans = sorted(c for c, p in parents.items() if c in all_cids and p not in all_cids)
+    rep.max_version = " / ".join(f"{k} {v}" for k, v in sorted(versions.items())) or "-"
+    rep.census_version = " / ".join(f"{k} {v}" for k, v in sorted(ANTIGRAVITY_CENSUS_VERSIONS.items()))
+    newer = [f"{k} {v}（普查 {ANTIGRAVITY_CENSUS_VERSIONS.get(k, '未登记')}）"
+             for k, v in sorted(versions.items())
+             if _vkey(v) > _vkey(ANTIGRAVITY_CENSUS_VERSIONS.get(k, ""))]
+
+    rep.checks += [
+        CoverageCheck("output_equals_thinking_plus_reply", n_split == 0, "warn",
+                      f"usage 输出 ≠ 思考 + 回复 {n_split} 次（output 口径变了）", split_bad),
+        CoverageCheck("prompt_text_not_metadata", n_uuid == 0, "warn",
+                      f"提问正文是纯 UUID {n_uuid} 条（提取误入元数据）", uuid_prompts),
+        CoverageCheck("prompt_text_present", True, "info",
+                      f"无正文的用户步骤 {n_empty14} 条（空提交 / 无参数技能调用 / 仅编辑器上下文；"
+                      f"仍计入 user_msgs）"),
+        CoverageCheck("compaction_has_usage", n_comp_nouse == 0, "info",
+                      f"压缩步骤无用量（5.28 缺失）{n_comp_nouse} 次：该次压缩调用用量本地不可得",
+                      compaction_no_usage),
+        CoverageCheck("gen_usage_has_response_id", n_gen_noid == 0, "info",
+                      f"有用量但无响应 id 的生成 {n_gen_noid} 条（压缩用量无法与之去重）", gen_no_id),
+        CoverageCheck("subagent_parent_exists", not orphans, "info",
+                      f"父会话库缺失的子代理 {len(orphans)} 个（孤儿独立成卡）",
+                      orphans[:_EXAMPLES_PER_ISSUE]),
+        CoverageCheck("version_within_census", not newer, "info",
+                      f"各端版本 {rep.max_version}，普查版本 {rep.census_version}"
+                      + (f"：{'、'.join(newer)} 更新，新增取值未登记时会在上方列为未知" if newer else "")),
+    ]
+    if cross_check_reader:
+        rep.checks.insert(2, CoverageCheck(
+            "reader_tool_calls_match", not reader_mismatch, "warn",
+            f"reader 工具调用数与独立计数不符的会话库 {len(reader_mismatch)} 个",
+            reader_mismatch[:_EXAMPLES_PER_ISSUE]))
+    return rep

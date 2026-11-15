@@ -422,13 +422,19 @@ def _aggregate_single(db_path: Path, session_id: str, *, is_subagent: bool = Fal
 
 
 def read_user_messages(db_path: Path, session_id: str) -> list[str]:
-    messages: list[str] = []
+    return [t for t, _ in read_user_messages_timed(db_path, session_id)]
+
+
+def read_user_messages_timed(db_path: Path, session_id: str) -> list[tuple[str, int | None]]:
+    """真人提问 + 所属 message 的 ``time_created``（epoch ms / None）。"""
+    messages: list[tuple[str, int | None]] = []
     with _connect(db_path) as con:
         if not _has_table(con, "message"):
             return []
         rows = con.execute(
             """
-            select m.data as message_data, p.data as part_data
+            select m.data as message_data, p.data as part_data,
+                   m.time_created as message_time
             from message m
             left join part p on p.message_id = m.id
             where m.session_id = ?
@@ -453,7 +459,8 @@ def read_user_messages(db_path: Path, session_id: str) -> list[str]:
                 and not data.get("ignored")):
             text = data.get("text")
             if isinstance(text, str) and text.strip():
-                messages.append(truncate_summary(text.strip(), 500))
+                messages.append((truncate_summary(text.strip(), 500),
+                                 parse_timestamp_ms(row["message_time"])))
     return messages
 
 

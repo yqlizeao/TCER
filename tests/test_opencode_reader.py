@@ -206,6 +206,9 @@ def test_opencode_sqlite_usage_messages_and_loc(tmp_path, monkeypatch):
     # No step-finish parts in fixture → fall back to session total input as peak.
     assert u.peak_input_tokens == 1000 + 40 + 300
     assert opencode_reader.read_user_messages(db, "ses-1") == ["实现 OpenCode 支持"]
+    timed = opencode_reader.read_user_messages_timed(db, "ses-1")
+    assert [t for t, _ in timed] == ["实现 OpenCode 支持"]
+    assert all(isinstance(ts, int) for _, ts in timed)
 
 
 def test_opencode_reasoning_ratio_at_most_one(tmp_path, monkeypatch):

@@ -163,3 +163,96 @@ def test_registry_has_no_empty_notes():
         for value, (status, note) in reg.items():
             assert status in (coverage.HANDLED, coverage.IGNORED), (dim, value)
             assert note.strip(), (dim, value)
+
+
+# --------------------------------------------------------------------------- #
+# Antigravity
+# --------------------------------------------------------------------------- #
+def _agy_root(tmp_path: Path, steps, gens=None, *, version: str = "2.32.0",
+              name: str = "antigravity") -> Path:
+    from test_antigravity_reader import _build_db, _gen_row
+    root = tmp_path / name
+    _build_db(root / "conversations" / "c1.db",
+              gens if gens is not None else [_gen_row("gemini-4-argon", 10, 5, 0, "r1")], steps)
+    (root / "log").mkdir()
+    (root / "log" / "cli-1.log").write_text(
+        f"I1115 server.go:1] Language server version: {version}\n", encoding="utf-8")
+    return root
+
+
+def _agy_clean_steps():
+    from test_antigravity_reader import _make_user_step_bytes, _multi_call_step, _result_step
+    return [
+        (14, 3, _make_user_step_bytes("帮我改一下")),
+        (15, 3, _multi_call_step([("c1", "edit_file", {"Path": "a.py"}),
+                                  ("c2", "mcp_chrome_devtools_click", {})])),
+        (132, 3, _result_step("c1", "edit_file", {"Path": "a.py"})),
+        (132, 3, _result_step("c2", "mcp_chrome_devtools_click", {})),
+    ]
+
+
+def test_antigravity_clean_data_passes(tmp_path):
+    rep = coverage.antigravity_coverage([_agy_root(tmp_path, _agy_clean_steps())])
+    assert rep.ok, coverage.format_report(rep)
+    assert rep.files == 1 and rep.max_version == "antigravity 2.32.0"
+    assert _check(rep, "reader_tool_calls_match").ok
+
+
+def test_antigravity_drift_is_named(tmp_path):
+    from test_antigravity_reader import (_make_proto_field, _multi_call_step, _result_step,
+                                         _gen_row)
+    uuid = "a8e7d3d1-86da-416e-bb71-82e9c7a753a8"
+    steps = _agy_clean_steps() + [
+        (999, 3, b""),                                                    # 新 step 类型
+        (15, 3, _multi_call_step([("c3", "teleport_file", {}),            # 新工具
+                                  ("c4", "mcp_mystery_srv_go", {})])),    # MCP 边界未知
+        (132, 9, _result_step("c3", "teleport_file", {})),               # 新状态值
+        (14, 3, _make_proto_field(7, 2, _make_proto_field(1, 2, uuid))),  # 兜底不应出 UUID
+    ]
+    gen = _gen_row("gemini-4-argon", 10, 5, 0, "r1")
+    # usage 新字段 42 + 输出 ≠ 思考 + 回复
+    bad = _make_proto_field(1, 2, _make_proto_field(4, 2, (
+        _make_proto_field(2, 0, 1) + _make_proto_field(3, 0, 9) + _make_proto_field(9, 0, 2)
+        + _make_proto_field(10, 0, 3) + _make_proto_field(7, 2, "r2")
+        + _make_proto_field(42, 0, 1))))
+    rep = coverage.antigravity_coverage(
+        [_agy_root(tmp_path, steps, [gen, bad], version="2.40.0")])
+    keys = {(e.dim, e.value, e.status) for e in rep.entries}
+    assert ("step_type", "999", coverage.UNKNOWN) in keys
+    assert ("tool", "teleport_file", coverage.UNKNOWN) in keys
+    assert ("tool", "mcp_mystery_srv_go", coverage.UNKNOWN) in keys
+    assert ("tool", "mcp_chrome_devtools_click", coverage.HANDLED) in keys
+    assert ("status.132", "9", coverage.UNKNOWN) in keys
+    assert ("gen.usage", "42", coverage.UNKNOWN) in keys
+    assert not _check(rep, "output_equals_thinking_plus_reply").ok
+    assert _check(rep, "prompt_text_not_metadata").ok        # 第 1 项修复后不再出 UUID
+    assert not _check(rep, "version_within_census").ok       # 2.40.0 > 普查 2.32.0
+    assert not rep.ok
+    text = coverage.format_report(rep)
+    assert "说明：未登记" in text
+
+
+def test_antigravity_background_status_registered(tmp_path):
+    from test_antigravity_reader import _multi_call_step, _result_step
+    steps = _agy_clean_steps() + [
+        (15, 3, _multi_call_step([("c5", "run_command", {"CommandLine": "npm run dev"})])),
+        (132, 6, _result_step("c5", "run_command", {"CommandLine": "npm run dev"})),
+    ]
+    rep = coverage.antigravity_coverage([_agy_root(tmp_path, steps)])
+    keys = {(e.dim, e.value, e.status) for e in rep.entries}
+    assert ("status.132", "6", coverage.HANDLED) in keys
+    assert rep.ok, coverage.format_report(rep)
+
+
+def test_antigravity_reader_mismatch_detected(tmp_path, monkeypatch):
+    from tcer.core import antigravity_reader as ar
+    root = _agy_root(tmp_path, _agy_clean_steps())
+    real = ar._aggregate_single
+
+    def fake(path, *a, **k):
+        u = real(path, *a, **k)
+        u.tool_calls["Phantom"] = 1
+        return u
+    monkeypatch.setattr(ar, "_aggregate_single", fake)
+    rep = coverage.antigravity_coverage([root])
+    assert not _check(rep, "reader_tool_calls_match").ok

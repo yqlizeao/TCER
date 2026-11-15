@@ -1805,3 +1805,30 @@ def test_all_public_apis_on_empty_and_one_turn_transcripts():
     assert T.find_search_hits([], "x").total == 0
     assert T.find_turn_row_index([], [], "t1") == -1
     assert empty.agent_style.id == "claude" or empty.agent_style.id == "generic"
+
+
+def test_antigravity_background_command_status_is_pending(tmp_path):
+    """step 132 status 6（run_command 转后台）/ 2（常驻进程）显示为「运行中」而非错误。"""
+    db = tmp_path / "1c0ffee0-052a-4e8d-9b2e-cabb6eb0c83f.db"
+    con = sqlite3.connect(db)
+    con.execute("create table steps (idx integer primary key, step_type integer, status integer default 0, "
+                "has_subtrajectory numeric default 'false', metadata blob, error_details blob, permissions blob, "
+                "task_details blob, render_info blob, step_payload blob, step_format integer default 0)")
+    t0 = 1_790_000_000
+    call = lambda cid, cmd: _ld(7, _sf(1, cid) + _sf(2, "run_command") + _sf(3, '{"CommandLine":"%s"}' % cmd))
+    rows = [
+        (0, 14, 0, t0, _ld(19, _sf(2, "启动开发服务器"))),
+        (1, 15, 3, t0 + 1, _ld(20, call("c1", "npm run dev") + call("c2", "srv") + call("c3", "bad"))),
+        (2, 132, 6, t0 + 2, _ld(140, _ld(2, _sf(1, "Background task started")))),
+        (3, 132, 2, t0 + 3, _ld(140, _ld(2, _sf(1, "daemon running")))),
+        (4, 132, 4, t0 + 4, _ld(140, _ld(2, _sf(1, "Invalid argument")))),
+    ]
+    for idx, st, status, ts, payload in rows:
+        con.execute("insert into steps (idx, step_type, status, metadata, step_payload) values (?,?,?,?,?)",
+                    (idx, st, status, _agy_meta(ts), payload))
+    con.commit()
+    con.close()
+    tr = load("antigravity", db)
+    tools = [s for s in tr.turns[0].steps if s.kind == "tool"]
+    assert [t.status for t in tools] == ["pending", "pending", "error"]
+

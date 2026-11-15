@@ -173,30 +173,47 @@ def read_user_messages(source: str | None, path: Path | None,
     **只读主会话**：Claude ``subagents/``、omp/pi ``<stem>/`` 子目录、Codex/OpenCode
     子会话都不并入——子代理的 user 消息是 AI 写给 AI 的派发 prompt。
     """
+    return _dispatch(source, path, session_id, "read_user_messages")
+
+
+def read_user_messages_timed(source: str | None, path: Path | None,
+                             session_id: str | None = None) -> list[tuple[str, int | None]]:
+    """同 :func:`read_user_messages`，每条附发出时间（epoch ms；源未记录为 None）。
+
+    时间取自该条用户消息自身的记录（Claude/Codex/omp/pi/WorkBuddy 行 ``timestamp``、
+    OpenCode ``message.time_created``、Antigravity step 元数据），不是回合推算。
+    各源 ``read_user_messages`` 都由其 ``read_user_messages_timed`` 派生，正文与
+    条数逐条一致；两个入口共用 :func:`_dispatch` 的同一套源分发与主会话边界。
+    """
+    return _dispatch(source, path, session_id, "read_user_messages_timed")
+
+
+def _dispatch(source: str | None, path: Path | None, session_id: str | None,
+              fn: str) -> list:
     if path is None:
         return []
     src = (source or "claude").lower()
     path = Path(path)
     if src == "codex":
         from tcer.core import codex_reader
-        return codex_reader.read_user_messages(path)
+        return getattr(codex_reader, fn)(path)
     if src == "opencode":
         if not session_id:
             return []
         from tcer.core import opencode_reader
-        return opencode_reader.read_user_messages(path, session_id)
+        return getattr(opencode_reader, fn)(path, session_id)
     if src == "omp":
         from tcer.core import omp_reader
-        return omp_reader.read_user_messages(path)
+        return getattr(omp_reader, fn)(path)
     if src == "pi":
         from tcer.core import pi_reader
-        return pi_reader.read_user_messages(path)
+        return getattr(pi_reader, fn)(path)
     if src == "antigravity":
         from tcer.core import antigravity_reader
-        return antigravity_reader.read_user_messages(path)
+        return getattr(antigravity_reader, fn)(path)
     if src in ("workbuddy", "codebuddy"):
         from tcer.core import workbuddy_reader
-        return workbuddy_reader.read_user_messages(path)
+        return getattr(workbuddy_reader, fn)(path)
     from tcer.core import reader
     try:
         _, main, _ = reader.session_artifacts(path)
@@ -204,4 +221,4 @@ def read_user_messages(source: str | None, path: Path | None,
         main = path
     if reader.is_subagent(main) or not main.is_file():
         return []
-    return reader.read_user_messages(main)
+    return getattr(reader, fn)(main)

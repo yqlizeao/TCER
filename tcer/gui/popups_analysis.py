@@ -2016,14 +2016,14 @@ class WeeklyReportPopup:
 
     def _set_placeholder(self) -> None:
         placeholder_md = (
-            "# AI 研发周报生成器\n\n"
-            "请确认上方时间周期、项目范围与生成引擎，点击右上角 **「立即生成周报」**。\n\n"
+            "# 工作回顾\n\n"
+            "选好上方的时间周期与项目范围，点右上角 **「生成周报」**。\n\n"
             "---\n\n"
-            "### 核心特性\n"
-            "- **全源会话事实抽取**：自动扫描 Claude Code, Codex, OMP, Antigravity 等多代理会话事实；\n"
-            "- **真实工作意图聚类**：聚合真人 Prompt 需求、改动核心文件、净增代码量、算力成本与自返工率；\n"
-            "- **智能业务交付提炼**：由大模型或本地规则提炼业务交付成果与技术攻坚亮点，诊断人机协作卡点；\n"
-            "- **持久化闭环归档**：周报自动沉淀至主界面「LLM 报告」收信箱，随时回看与跨周期比对。\n"
+            "### 内容\n"
+            "- **每日概览**：每天在哪些项目上有活动；\n"
+            "- **按项目逐会话**：列出你发出的每一条提问与编辑过的文件，散落在各会话里的工作一处看全；\n"
+            "- **LLM 归纳（可选）**：把同一件事的多次提问合并成条目，并附逐会话原始记录供核对；\n"
+            "- 指标只在文末留一行；结果自动保存到「LLM 报告」页签。\n"
         )
         self._render_markdown(placeholder_md)
 
@@ -2055,7 +2055,7 @@ class WeeklyReportPopup:
             if not ask_yes_no(
                     self.win,
                     "周报 LLM 提炼确认",
-                    "将把所选周期的会话事实（含用户需求原文摘录、改动文件、产出与成本统计）发送到\n"
+                    "将把所选周期内你的提问原文（截断）、编辑过的文件路径与日期发送到\n"
                     f"{llm_prefs.model()} @ {llm_prefs.base_url()}\n\n"
                     "出境后不可撤销；结果只进「LLM 报告」收信箱，不参与任何指标计算。\n\n"
                     "选「否」可改用本地离线规则生成。"):
@@ -2101,29 +2101,17 @@ class WeeklyReportPopup:
                 )
 
                 entry_id = str(uuid4())
-                model_name = "离线规则聚合"
                 if use_llm:
                     def _ui_llm():
                         if self.win.winfo_exists():
-                            self.status_lbl.config(text=f"● 数据汇总完毕，正在由 LLM ({llm_prefs.model()}) 润色提炼…")
+                            self.status_lbl.config(text=f"● 数据汇总完毕，正在由 LLM ({llm_prefs.model()}) 归纳本周工作…")
                     ui_q.put(_ui_llm)
-
-                    sys_p, user_p = weekly.build_weekly_prompt_payload(agg)
-                    try:
-                        from tcer.core import llm_client
-                        text = llm_client.chat(
-                            base_url=llm_prefs.base_url(),
-                            api_key=llm_prefs.api_key(),
-                            model=llm_prefs.model(),
-                            system=sys_p,
-                            user=user_p,
-                        )
-                        model_name = llm_prefs.model()
-                    except Exception as err:
-                        offline_md = weekly.generate_offline_markdown(agg)
-                        text = f"> ⚠️ **提示**：调用大模型提炼失败（{err}），已自动回退为本地离线客观事实聚合。\n\n{offline_md}"
-                else:
-                    text = weekly.generate_offline_markdown(agg)
+                from tcer.core import llm_client
+                text, model_name = weekly.compose_report(
+                    agg, use_llm=use_llm, model_name=llm_prefs.model(),
+                    chat=lambda sp, up: llm_client.chat(
+                        base_url=llm_prefs.base_url(), api_key=llm_prefs.api_key(),
+                        model=llm_prefs.model(), system=sp, user=up))
 
                 title = f"研发周报 ({since} ~ {until})"
                 scope_str = f"{agg.total_sessions} 会话 · {len(agg.project_summaries)} 项目"
@@ -2158,7 +2146,7 @@ class WeeklyReportPopup:
                     self.jump_btn.config(state="normal")
                     self._render_markdown(text)
                     self.status_lbl.config(
-                        text=f"● 已完成：{scope_str} · 净增 {agg.total_net_loc:+d} 行 · 成本 ${agg.total_cost:.2f} · 已入库收信箱",
+                        text=f"● 已完成：{len(agg.project_summaries)} 个项目 · {agg.total_sessions} 个会话 · {agg.total_prompts} 条提问 · 已入库收信箱",
                         fg=theme.SUCCESS,
                     )
                     if hasattr(self.controller, "llm_reports_view"):

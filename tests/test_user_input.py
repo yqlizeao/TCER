@@ -129,3 +129,26 @@ def test_omp_user_messages_skip_subagent_dispatch(tmp_path):
     _write(sub_dir / "SubAgent.jsonl", [msg("user", "派发 prompt")])
     assert omp_reader.read_user_messages(main) == ["真人"]
     assert ui.read_user_messages("omp", main) == ["真人"]
+
+
+def test_read_user_messages_derives_from_timed(tmp_path):
+    """SSOT：read_user_messages 恒等于 read_user_messages_timed 的正文列；时间取自消息自身。"""
+    import json as _json
+    from tcer.core import user_input as UI
+    lines = [
+        {"type": "user", "timestamp": "2026-09-22T02:00:00.000Z",
+         "message": {"role": "user", "content": "第一问"}},
+        {"type": "user", "timestamp": "2026-09-23T03:30:00.000Z",
+         "message": {"role": "user", "content": "<command-name>/clear</command-name>"}},
+        {"type": "user", "message": {"role": "user", "content": "无时间戳的一问"}},
+    ]
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(x, ensure_ascii=False) for x in lines) + "\n",
+                 encoding="utf-8")
+    timed = UI.read_user_messages_timed("claude", p)
+    assert [t for t, _ in timed] == UI.read_user_messages("claude", p) == ["第一问", "无时间戳的一问"]
+    from datetime import datetime, timezone
+    want = int(datetime(2026, 9, 22, 2, tzinfo=timezone.utc).timestamp() * 1000)
+    assert timed[0][1] == want and timed[1][1] is None
+    assert UI.read_user_messages_timed("claude", None) == []
+    assert UI.read_user_messages_timed("opencode", p, None) == []

@@ -157,6 +157,9 @@ def test_aggregate_usage_maps_codex_tokens_and_tools(tmp_path):
     assert u.user_msgs == 1
     assert u.user_message_texts == []
     assert codex_reader.read_user_messages(p) == ["实现 Codex 支持"]
+    timed = codex_reader.read_user_messages_timed(p)
+    assert [t for t, _ in timed] == ["实现 Codex 支持"]
+    assert all(isinstance(ts, int) for _, ts in timed)
 
 
 def test_read_conversation_maps_codex_turns(tmp_path):

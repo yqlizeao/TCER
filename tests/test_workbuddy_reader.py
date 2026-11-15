@@ -240,6 +240,9 @@ def test_synthetic_session(tmp_path):
     # User messages
     msgs = workbuddy_reader.read_user_messages(p)
     assert msgs == ["帮我重构代码"]
+    timed = workbuddy_reader.read_user_messages_timed(p)
+    assert [t for t, _ in timed] == msgs
+    assert all(isinstance(ts, int) for _, ts in timed)
 
     # Conversation
     conv = workbuddy_reader.read_conversation(p)

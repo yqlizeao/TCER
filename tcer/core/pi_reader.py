@@ -49,6 +49,7 @@ _loc_scan = omp_reader._loc_scan
 session_loc_full = omp_reader.session_loc_full
 has_loc_signal = omp_reader.has_loc_signal
 read_user_messages = omp_reader.read_user_messages
+read_user_messages_timed = omp_reader.read_user_messages_timed
 read_conversation = omp_reader.read_conversation
 _subagent_files = omp_reader._subagent_files
 _classify_omp_tool = omp_reader._classify_omp_tool

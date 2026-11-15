@@ -1318,30 +1318,19 @@ class TcerGui:
                     since, until, project_refs=project_refs, progress_callback=_prog
                 )
                 entry_id = str(uuid4())
-                model_name = "离线规则聚合"
-
-                if use_llm and llm_prefs.enabled():
+                llm_on = use_llm and llm_prefs.enabled()
+                if llm_on:
                     self._llm_ui_queue.put(
                         lambda: self.filter.set_status(
-                            f"数据汇总完毕，正在由 LLM ({llm_prefs.model()}) 润色提炼周报…"
+                            f"数据汇总完毕，正在由 LLM ({llm_prefs.model()}) 归纳本周工作…"
                         )
                     )
-                    sys_p, user_p = weekly.build_weekly_prompt_payload(agg)
-                    try:
-                        from tcer.core import llm_client
-                        text = llm_client.chat(
-                            base_url=llm_prefs.base_url(),
-                            api_key=llm_prefs.api_key(),
-                            model=llm_prefs.model(),
-                            system=sys_p,
-                            user=user_p,
-                        )
-                        model_name = llm_prefs.model()
-                    except Exception as err:
-                        offline_md = weekly.generate_offline_markdown(agg)
-                        text = f"> ⚠️ **提示**：调用大模型生成失败（{err}），已自动回退为本地离线事实聚合。\n\n{offline_md}"
-                else:
-                    text = weekly.generate_offline_markdown(agg)
+                from tcer.core import llm_client
+                text, model_name = weekly.compose_report(
+                    agg, use_llm=llm_on, model_name=llm_prefs.model(),
+                    chat=lambda sp, up: llm_client.chat(
+                        base_url=llm_prefs.base_url(), api_key=llm_prefs.api_key(),
+                        model=llm_prefs.model(), system=sp, user=up))
 
                 title = f"研发周报 ({since} ~ {until})"
                 scope_str = f"{agg.total_sessions} 会话 · {len(agg.project_summaries)} 项目"

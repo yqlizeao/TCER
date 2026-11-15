@@ -860,8 +860,13 @@ def _aggregate_single(path: Path) -> TokenUsage:
 
 def read_user_messages(path: Path) -> list[str]:
     """Extract Codex user-message text on demand for the popup."""
-    return [truncate_summary(msg["text"], 500)
-            for _, msg in _events_with_user_messages(path) if msg is not None]
+    return [t for t, _ in read_user_messages_timed(path)]
+
+
+def read_user_messages_timed(path: Path) -> list[tuple[str, int | None]]:
+    """同 :func:`read_user_messages`，每条附事件 ``timestamp``（epoch ms / None）。"""
+    return [(truncate_summary(msg["text"], 500), parse_timestamp_ms(obj.get("timestamp")))
+            for obj, msg in _events_with_user_messages(path) if msg is not None]
 
 
 def read_conversation(path: Path) -> list[dict]:

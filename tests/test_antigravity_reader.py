@@ -287,6 +287,9 @@ def test_meta_and_user_messages(tmp_path: Path):
     user_msgs = antigravity_reader.read_user_messages(db_path)
     assert len(user_msgs) == 1
     assert user_msgs[0] == "Please create a new file"
+    timed = antigravity_reader.read_user_messages_timed(db_path)
+    assert [t for t, _ in timed] == user_msgs
+    assert all(isinstance(ts, int) for _, ts in timed)
 
 
 def test_list_and_resolve_projects(tmp_path: Path, monkeypatch):
@@ -1041,3 +1044,83 @@ def test_cross_root_subagent_no_double_count(tmp_path: Path, monkeypatch):
     assert pa.n_sessions == 1
     assert pa.n_subagents == 1
     assert pa.aggregate.usage.input_tokens == 200       # 父 100 + 最新子副本 100，只计一次
+
+
+def test_user_text_never_returns_metadata_uuid():
+    """2.32.0 实测：字段 19 为空 / 只有 chip + 空白正文时，旧兜底扫描从字段 5
+    元数据（5.12 step id）捞出 UUID 当提问。字段 19 存在即权威；多个 19.3 副本逐个找正文。"""
+    uuid = "a8e7d3d1-86da-416e-bb71-82e9c7a753a8"
+    meta5 = _make_proto_field(5, 2, _make_proto_field(12, 2, uuid))
+    # ① 字段 19 长度 0
+    assert _extract_user_text(meta5 + _make_proto_field(19, 2, b"")) == ""
+    # ② 技能 chip（19.3.2）+ 空白正文副本（19.3.1 = " "）
+    chip = _make_proto_field(3, 2, _make_proto_field(2, 2, _make_proto_field(27, 2, "grill-me")))
+    blank = _make_proto_field(3, 2, _make_proto_field(1, 2, " "))
+    assert _extract_user_text(meta5 + _make_proto_field(19, 2, chip + blank)) == ""
+    # ③ 正文在第二个 19.3 副本里（第一个是 chip）→ 找回真实提问
+    real = _make_proto_field(3, 2, _make_proto_field(1, 2, "继续推进 Sprint 2"))
+    assert _extract_user_text(meta5 + _make_proto_field(19, 2, chip + real)) == "继续推进 Sprint 2"
+    # ④ 无字段 19 的旧格式：兜底扫描跳过字段 5，且拒绝纯 UUID
+    assert _extract_user_text(meta5) == ""
+    assert _extract_user_text(_make_proto_field(7, 2, _make_proto_field(1, 2, uuid))) == ""
+    assert _extract_user_text(_make_proto_field(7, 2, _make_proto_field(1, 2, "旧格式提问"))) == "旧格式提问"
+
+
+def test_mcp_single_underscore_names_and_swarm_dispatch():
+    """App 2.32：mcp_<server>_<tool> 按已知 server 最长前缀拆；拆不开保持原名。
+    swarm 只有 action=add 是子代理派发。"""
+    canon = antigravity_reader._canon_tool
+    assert canon("mcp_chrome_devtools_take_screenshot") == "mcp__chrome_devtools__take_screenshot"
+    assert canon("mcp_chrome_devtools_click") == "mcp__chrome_devtools__click"
+    # 未知 server：不猜边界
+    assert canon("mcp_llm_wiki_search") == "mcp_llm_wiki_search"
+    # 本会话权限条目证实的 server（含 '-' 写成 '_'）
+    assert canon("mcp_llm_wiki_search", "", {"llm-wiki"}) == "mcp__llm_wiki__search"
+    # 最长前缀优先
+    assert canon("mcp_a_b_c", "", {"a", "a_b"}) == "mcp__a_b__c"
+    assert canon("mcp_chrome_devtools") == "mcp_chrome_devtools"   # 无 tool 段
+    assert antigravity_reader._mcp_servers_in(
+        b"\n$mcp(chrome_devtools/evaluate_script)\x1a\x00mcp(*)") == {"chrome_devtools"}
+    assert canon("swarm", '{"action":"add","name":"monitor","brief":"x"}') == "Task"
+    for act in ("status", "kill", "title"):
+        assert canon("swarm", json.dumps({"action": act})) == "swarm"
+    assert canon("swarm", "not json") == "swarm"
+
+
+def test_mcp_servers_from_gen_metadata_permissions(tmp_path: Path):
+    """会话库 gen_metadata 里的权限条目 mcp(<server>/<tool>) 参与拆分。"""
+    gen = _gen_row("gemini-4-argon", 10, 5, 0, "r1") + b"\n$mcp(team_kb/lookup)"
+    db = _build_db(tmp_path / "conversations" / "m.db", [gen], [
+        (15, 3, _multi_call_step([("c1", "mcp_team_kb_lookup", {"q": "x"}),
+                                  ("c2", "mcp_chrome_devtools_click", {}),
+                                  ("c3", "swarm", {"action": "add", "name": "w1"}),
+                                  ("c4", "swarm", {"action": "status"})])),
+    ])
+    tc = antigravity_reader.aggregate_usage(db).tool_calls
+    assert tc.get("mcp__team_kb__lookup") == 1
+    assert tc.get("mcp__chrome_devtools__click") == 1
+    assert tc.get("Task") == 1 and tc.get("swarm") == 1
+
+
+def test_background_command_status_is_not_a_tool_error(tmp_path: Path):
+    """status 6（run_command 转后台 task-N）/ 2（常驻进程）不是失败；status 4 / 7 是。
+    LOC 回放仍只认 0/3/5。"""
+    assert antigravity_reader._result_failed(6, 0) is False
+    assert antigravity_reader._result_failed(2, 0) is False
+    assert antigravity_reader._result_failed(6, 1) is True     # 有非零退出码仍算错
+    assert antigravity_reader._result_failed(7, 0) is True
+    assert antigravity_reader._result_failed(4, 0) is True
+    assert antigravity_reader._result_failed(3, 0) is False
+    db = _build_db(tmp_path / "conversations" / "bg.db",
+                   [_gen_row("gemini-4-argon", 10, 5, 0, "r1")], [
+        (15, 3, _multi_call_step([("c1", "run_command", {"CommandLine": "npm run dev"}),
+                                  ("c2", "run_command", {"CommandLine": "srv", "IsDaemon": True}),
+                                  ("c3", "run_command", {"CommandLine": "bad"})])),
+        (132, 6, _result_step("c1", "run_command", {"CommandLine": "npm run dev"})),
+        (132, 2, _result_step("c2", "run_command", {"CommandLine": "srv", "IsDaemon": True})),
+        (132, 4, _result_step("c3", "run_command", {"CommandLine": "bad"})),
+    ])
+    u = antigravity_reader.aggregate_usage(db)
+    assert u.tool_calls.get("Bash") == 3
+    assert u.tool_errors == 1
+

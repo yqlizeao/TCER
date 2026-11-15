@@ -2202,7 +2202,12 @@ def _agy_build(path: Path, cancel) -> tuple[list[Message], list[str]]:
                 cid = target.id if target is not None else ""
                 if target is not None:
                     paired.add(target.id)
-                status = ST_ERROR if (exit_code or not agy._result_ok(row_status, 0)) else ST_SUCCESS
+                if exit_code:
+                    status = ST_ERROR
+                elif row_status in agy._BACKGROUND_STATUS:
+                    status = ST_PENDING  # 转后台 / 常驻进程：仍在运行，不是失败
+                else:
+                    status = ST_ERROR if agy._result_failed(row_status, 0) else ST_SUCCESS
                 msgs.append(Message("tool", ts, str(idx), None, False,
                                     [make_result(cid, status, out_text, exit_code=exit_code)]))
             elif stype == 101:
@@ -2270,7 +2275,8 @@ _AGY_ARG_KEYS = {
     KIND_EDIT: ("TargetFile", "target_file", "AbsolutePath", "Path", "path", "file_path"),
     KIND_SHELL: ("CommandLine", "command_line", "command", "Command"),
     KIND_WEB: ("query", "Query", "url", "Url"),
-    KIND_AGENT: ("Role", "TaskName", "task_name", "description", "Description", "Prompt"),
+    KIND_AGENT: ("Role", "TaskName", "task_name", "description", "Description", "Prompt",
+                 "name", "brief"),  # name/brief：swarm(action=add) 派生 worker
     "ask": ("question", "Question"),
 }
 

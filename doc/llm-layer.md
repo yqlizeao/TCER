@@ -80,6 +80,14 @@
   - **④纠正信号交叉验证（方案 C，kind="crosscheck"）**——`llm_prompts.build_correction_crosscheck_payload/format_correction_crosscheck`：指标层 `correction_msg_count` 是 CORRECTION_RE 确定性判定（审计账本不可替换），Jev 对同批用户消息逐条两问（corrects=纠正先前方向 / newreq=新增需求，**两问独立不假设互补**——jaggedness #8），与正则结果四象限对账（双方确认/疑似误报/疑似漏报/不确定带 0.40–0.60 **仅正则命中侧有此分类**）；消息截断 400 字符、上限 40 条、跳过斜杠命令；右键「纠正信号交叉验证」→ 每次数据出境确认（用户消息文本）→ (sid,"crosscheck") 去重 → `_crosscheck_worker`（读 `_load_user_messages`）→ 报告入库；`audit_warnings` 的 provider="crosscheck" 口径：必备节只查「执行摘要」，**转折锚点/责任表述两条叙事契约跳过**（数据对账报告天然无此二要素，不跳会双误报——Jev 报告踩过同款坑）。
   - **⑤计费记账（方案 F）**——`typesafe_client._record_usage`（真实网络调用成功后累加 usage.input/output_tokens 落盘 `tcer_typesafe_usage.json`，**缓存命中不计**——没花钱就不进账单；锁内原子写），`usage_stats()/usage_cost_usd()`（官方输入单价 $0.042/MTok、输出免费）；LlmReportsView 标题条「Jev 累计 N 次 · Xk tokens · ≈$x.xxx」（on_show 刷新、零请求隐藏、Tooltip 说明口径）——opt-in 付费必须可见，按「每解决一个任务」算账而非每 token。
 
+<a id="weekly"></a>
+### 周报 = 个人工作回顾（`core/weekly.py`，2026-11-15 改版）
+
+- **定位**：回答「我这周做了什么」，不是效能汇报。主体 = 按真实工作目录（`normcase_path(meta.cwd)`，跨源合并）→ 逐会话列出**全部**真人提问（经 `user_input` SSOT，压成一行截 160 字）+ 编辑类工具碰过的文件（相对 cwd）；顶部每日概览；指标只留文末一行。**禁止**再加评价/阻力诊断/「下周建议」套话（旧版的写死建议属于编造内容）。
+- **日期口径**：任一回合时间戳（`turn_stats[].ts`）落在区间内即纳入，否则退回 started/ended 重叠；Claude 回合不记 `user_turn`，提问**无法逐条按日期切分** → 区间外也有活动的会话标「跨周期」并在脚注说明。
+- **折叠而非丢弃**：「继续/好的/hello」类简短回复折叠成计数；无实质提问且未编辑文件的会话不列出，但在脚注报数量与项目名。
+- **LLM 模式**：payload 只含提问/文件/日期（不含成本 Token），要求「看不出结果就不写」；输出后**附逐会话原始记录**供核对；两处 GUI 入口共用 `compose_report`。
+
 ## 相空间收敛动力学（原 #39 ①②；GUI 部分见 gui-notes.md#phase-portrait）
 
 <a id="dynamics"></a>

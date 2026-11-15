@@ -161,7 +161,9 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 <a id="coverage-audit"></a>
 ### 覆盖与守恒审计（`core/coverage.py`，2026-10-27）
 
-闭环审计用同一套解析逻辑重算，只能证明自洽；格式漂移时解析器静默跳过、自洽检查照样全绿（agy 并行调用漏计 490 次即此类）。覆盖审计补这一块：直接 `json.loads` 原始行（不经 reader）普查每个维度的实际取值，逐项对照登记表——**已处理** / **已知忽略（必须写理由）** / **未知**；计价相关字段另有取值白名单（白名单外 = **取值异常**）。守恒检查：结果↔调用、有用量行↔message.id、快照输入只增、`iterations` 单项、子代理↔父会话、reader 工具调用数↔独立计数（warn 失败判 FAIL；进行中会话的未完成调用、请求↔回复差额等如实列为 info）。上游升级出现新类型/新字段 → 报告点名「未知」并给首见文件:行号，处理后登记入表、提升 `CLAUDE_CENSUS_VERSION`。反向测试 `tests/test_coverage.py` 逐类构造破损数据断言被抓到。目前仅 Claude；其余源按同一模式补登记表。
+闭环审计用同一套解析逻辑重算，只能证明自洽；格式漂移时解析器静默跳过、自洽检查照样全绿（agy 并行调用漏计 490 次即此类）。覆盖审计补这一块：直接 `json.loads` 原始行（不经 reader）普查每个维度的实际取值，逐项对照登记表——**已处理** / **已知忽略（必须写理由）** / **未知**；计价相关字段另有取值白名单（白名单外 = **取值异常**）。守恒检查：结果↔调用、有用量行↔message.id、快照输入只增、`iterations` 单项、子代理↔父会话、reader 工具调用数↔独立计数（warn 失败判 FAIL；进行中会话的未完成调用、请求↔回复差额等如实列为 info）。上游升级出现新类型/新字段 → 报告点名「未知」并给首见文件:行号，处理后登记入表、提升 `CLAUDE_CENSUS_VERSION`。反向测试 `tests/test_coverage.py` 逐类构造破损数据断言被抓到。
+
+- **Antigravity**（2026-11-15，`antigravity_coverage` / `--source antigravity`，`--source all` 两源一起跑）：普查只用 wire 解码器 `_parse_proto_fields` + 固定字段路径，不经 reader 的解释逻辑。维度：会话库表 / 摘要库表 / step 类型 / 状态（132 单列）/ `gen_metadata` 字段号 / usage 字段号 / 原始工具名（映射表 + 已知透传表 + `mcp_*` 拆分规则判定，未登记工具报未知——写文件类新工具会漏计 LOC）。守恒：输出 = 思考 + 回复、提问正文不得是纯 UUID（防元数据误入回归）、reader 工具调用数 ↔ 独立计数（step 15 字段 20.7 ∪ 132 回显 5.4 按 call id）、压缩步骤带用量、有用量的生成带响应 id、子代理父库存在；版本取各根 `log/*.log` 的 language server 版本，对照 `ANTIGRAVITY_CENSUS_VERSIONS`（按端分别登记）。其余源（Codex / OpenCode / omp / Pi / WorkBuddy）仍待按同一模式补登记表。
 
 <a id="guard-tests"></a>
 ### 原 #22 护栏测试

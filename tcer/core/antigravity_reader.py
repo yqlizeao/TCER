@@ -227,11 +227,22 @@ def _decode_gen_metadata(data: bytes) -> tuple[str, int, int, int, int]:
     )
 
 
-def _canon_tool(tool_name: str, tool_args_json: str = "") -> str:
+def _canon_tool(tool_name: str, tool_args_json: str = "",
+                mcp_servers: frozenset[str] | set[str] | None = None) -> str:
     """Map an agy tool name to the canonical name.
 
-    ``call_mcp_tool`` is a generic MCP gateway (args ``ServerName``/``ToolName``);
-    expose it as ``mcp__<server>__<tool>`` like the other sources (CLAUDE.md #28).
+    MCP 工具统一成 ``mcp__<server>__<tool>``（与其余源一致，CLAUDE.md #28）：
+
+    - ``call_mcp_tool``（CLI 通用网关，参数 ``ServerName``/``ToolName``）；
+    - App 2.32 起直接以 ``mcp_<server>_<tool>`` 调用（单下划线，server 内的 ``-``
+      也写成 ``_``）——server/tool 边界不可从名字本身判定，只按**已知服务器名**
+      最长前缀拆分：内置 :data:`_MCP_KNOWN_SERVERS` ∪ 本会话权限条目
+      ``mcp(<server>/<tool>)`` 里出现的 server（``mcp_servers``）。不读
+      ``~/.gemini/config/mcp_config.json``：外部配置随时间变化，同一会话会算出
+      不同结果且 file_cache key 覆盖不到。拆不开的保持原名，不猜边界。
+
+    ``swarm``：只有 ``action=add``（派生 worker）是子代理派发 → ``Task``；
+    status/kill/title 是编排管理动作，照 ``manage_subagents`` 先例保持原名。
     """
     if tool_name == "call_mcp_tool" and tool_args_json:
         try:
@@ -241,7 +252,34 @@ def _canon_tool(tool_name: str, tool_args_json: str = "") -> str:
                 return f"mcp__{srv}__{tl}"
         except Exception:
             pass
+    elif tool_name == "swarm":
+        try:
+            a = json.loads(tool_args_json) if tool_args_json else {}
+        except Exception:
+            a = {}
+        return "Task" if isinstance(a, dict) and a.get("action") == "add" else "swarm"
+    elif tool_name.startswith("mcp_") and not tool_name.startswith("mcp__"):
+        rest = tool_name[4:]
+        servers = _MCP_KNOWN_SERVERS | frozenset(mcp_servers or ())
+        for srv in sorted({s.replace("-", "_") for s in servers}, key=len, reverse=True):
+            if rest.startswith(srv + "_") and len(rest) > len(srv) + 1:
+                return f"mcp__{srv}__{rest[len(srv) + 1:]}"
+        return tool_name
     return _ANTIGRAVITY_TOOL_MAP.get(tool_name, tool_name)
+
+
+# 已知 Antigravity MCP 服务器（server 名内 ``-`` 写作 ``_``）。实测 2026-11-15
+# App 2.32.0：官方 chrome-devtools 插件 → ``mcp_chrome_devtools_<tool>``，权限
+# 条目 ``mcp(chrome_devtools/evaluate_script)`` 证实边界。新增须有同类实证。
+_MCP_KNOWN_SERVERS = frozenset({"chrome_devtools"})
+# 权限条目 ``mcp(<server>/<tool>)``（gen_metadata 内的请求配置副本）。
+_MCP_PERM_RE = re.compile(rb"mcp\(([A-Za-z0-9_\-]+)/")
+
+
+def _mcp_servers_in(blob: bytes | None) -> set[str]:
+    if not blob or b"mcp(" not in blob:
+        return set()
+    return {m.group(1).decode("ascii") for m in _MCP_PERM_RE.finditer(blob)}
 
 
 def _arg(args: dict, *keys: str) -> str:
@@ -253,8 +291,19 @@ def _arg(args: dict, *keys: str) -> str:
     return ""
 
 
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
 def _extract_user_text(payload: bytes | None) -> str:
-    """Extract user prompt text from a step_type == 14 step_payload."""
+    """Extract user prompt text from a step_type == 14 step_payload.
+
+    字段 19 是用户输入的权威载体：19.2 正文；status 5（payload 被裁剪）时只剩
+    19.3.1 副本（可重复出现，与技能/命令 chip 19.3.2 并列）。**19 存在即以它为准**
+    ——为空（实测 2.32.0：长度 0）或只有 chip + 空白正文（无参数技能调用）时返回
+    空串，不再兜底扫描：兜底曾从字段 5 元数据里捞出 5.12 的 UUID 当成提问
+    （2026-11-15 普查 369 条中 10 条）。
+    """
     if not payload:
         return ""
     fields = _parse_proto_fields(payload)
@@ -264,15 +313,20 @@ def _extract_user_text(payload: bytes | None) -> str:
         txt = _find_field(sub_fields, 2)
         if isinstance(txt, bytes):
             return txt.decode("utf-8", errors="ignore").strip()
-        # status 5（payload 被裁剪）只剩 19.3.1 副本；未裁剪时二者逐字相同
-        f3 = _find_field(sub_fields, 3)
-        if isinstance(f3, bytes):
-            txt = _find_field(_parse_proto_fields(f3), 1)
-            if isinstance(txt, bytes):
-                return txt.decode("utf-8", errors="ignore").strip()
+        for f3 in _find_all_fields(sub_fields, 3):
+            if isinstance(f3, bytes):
+                t = _find_field(_parse_proto_fields(f3), 1)
+                if isinstance(t, bytes):
+                    s = t.decode("utf-8", errors="ignore").strip()
+                    if s:
+                        return s
+        return ""
 
-    # Fallback: scan length-delimited fields for non-proto plain text
-    for _, wt, val in fields:
+    # Fallback（无字段 19 的旧格式）: scan length-delimited fields for plain text.
+    # 字段 5 是步骤元数据（时间戳 / step id / trajectory 引用），不含用户正文。
+    for fnum, wt, val in fields:
+        if fnum == 5:
+            continue
         if wt == 2 and isinstance(val, bytes):
             sub = _parse_proto_fields(val)
             for _, swt, sval in sub:
@@ -286,6 +340,7 @@ def _extract_user_text(payload: bytes | None) -> str:
                             and not s.startswith("{")
                             and not s.startswith("type.googleapis.com")
                             and not s.startswith("file:///")
+                            and not _UUID_RE.match(s)
                         ):
                             return s
                     except Exception:
@@ -375,6 +430,20 @@ def _bstr(b) -> str:
 def _result_ok(status: int, exit_code: int) -> bool:
     """Tool result succeeded: status 0/3 (done) or 5 (done, payload pruned) and exit code 0."""
     return exit_code == 0 and status in (0, 3, 5)
+
+
+# 命令未结束的结果状态（2026-11-15 实测 CLI）：6 = ``run_command`` 超过
+# ``WaitMsBeforeAsync`` 转后台任务（``<会话id>/task-N``，真正结果稍后经 step 101
+# 回传）、2 = 常驻进程（``IsDaemon``）仍在运行。不是失败，不计工具错误；也不是
+# 「已成功」，LOC 回放仍只认 0/3/5。
+_BACKGROUND_STATUS = frozenset({2, 6})
+
+
+def _result_failed(status: int, exit_code: int) -> bool:
+    """Tool result counts as a tool error: not ok, and not a still-running background command."""
+    if exit_code == 0 and status in _BACKGROUND_STATUS:
+        return False
+    return not _result_ok(status, exit_code)
 
 
 def _extract_tool_call(payload: bytes | None) -> tuple[str, str, str]:
@@ -897,11 +966,13 @@ def _aggregate_single(
             gen_rows = cur.fetchall()
             decoded_gens = []
             gen_ids: set[str] = set()
+            mcp_servers: set[str] = set()  # 权限条目里出现的 MCP server（拆 mcp_<srv>_<tool> 用）
             for _, data in gen_rows:
                 if cancel_check:
                     cancel_check()
                 if not data:
                     continue
+                mcp_servers |= _mcp_servers_in(data)
                 rid = _gen_response_id(data)
                 if rid:
                     gen_ids.add(rid)
@@ -945,7 +1016,7 @@ def _aggregate_single(
             seen_calls: set[str] = set()
 
             def _record_call(name: str, args_json: str) -> None:
-                canon_tool = _canon_tool(name, args_json)
+                canon_tool = _canon_tool(name, args_json, mcp_servers)
                 u.tool_calls[canon_tool] = u.tool_calls.get(canon_tool, 0) + 1
                 # Extract file path hint for tool_ops
                 fp_hint = ""
@@ -1016,7 +1087,7 @@ def _aggregate_single(
                         if u.turn_stats:
                             u.turn_stats[-1].tool_calls += 1
                     _, exit_code = _extract_tool_result(payload)
-                    if not _result_ok(status, exit_code):
+                    if _result_failed(status, exit_code):
                         u.tool_errors += 1
                         if u.turn_stats:
                             u.turn_stats[-1].errors += 1
@@ -1195,18 +1266,24 @@ def _loc_single(
 
 def read_user_messages(path: Path) -> list[str]:
     """Extract all user prompts from the conversation."""
-    msgs: list[str] = []
+    return [t for t, _ in read_user_messages_timed(path)]
+
+
+def read_user_messages_timed(path: Path) -> list[tuple[str, int | None]]:
+    """同 :func:`read_user_messages`，每条附 step 元数据时间戳（epoch ms / None）。"""
+    msgs: list[tuple[str, int | None]] = []
     if not path.is_file():
         return msgs
 
     try:
         with _connect_ro(path) as conn:
             cur = conn.cursor()
-            cur.execute("SELECT step_payload FROM steps WHERE step_type = 14 ORDER BY idx ASC")
-            for (payload,) in cur.fetchall():
+            cur.execute("SELECT metadata, step_payload FROM steps WHERE step_type = 14 ORDER BY idx ASC")
+            for meta, payload in cur.fetchall():
                 txt = _extract_user_text(payload)
                 if txt:
-                    msgs.append(txt)
+                    ts = _decode_timestamp(meta)
+                    msgs.append((txt, int(ts * 1000) if ts is not None else None))
     except Exception:
         pass
     return msgs

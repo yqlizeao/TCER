@@ -446,6 +446,9 @@ def test_read_user_messages(tmp_path):
         _assistant([_text("ok")], _usage(5, 2)),
     ])
     assert omp_reader.read_user_messages(p) == ["first", "second"]
+    timed = omp_reader.read_user_messages_timed(p)
+    assert [t for t, _ in timed] == ["first", "second"]
+    assert all(isinstance(ts, int) for _, ts in timed)
 
 
 # --------------------------------------------------------------------------- subagent folding

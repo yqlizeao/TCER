@@ -557,6 +557,7 @@ def test_read_user_messages_filters_cc_injections(tmp_path):
 
     # Popup path: only the real message survives.
     assert reader.read_user_messages(p) == ["请帮我修复这个 bug"]
+    assert [t for t, _ in reader.read_user_messages_timed(p)] == ["请帮我修复这个 bug"]
 
     # Cached path (aggregate_usage w/ texts) agrees.
     u = reader.aggregate_usage(p)

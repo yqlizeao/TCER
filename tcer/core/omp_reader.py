@@ -529,12 +529,17 @@ def read_user_messages(path: Path) -> list[str]:
     dispatch prompts (AI → AI), never human input (口径 SSOT
     :mod:`tcer.core.user_input`). Usage/LOC folding is unaffected.
     """
+    return [t for t, _ in read_user_messages_timed(path)]
+
+
+def read_user_messages_timed(path: Path) -> list[tuple[str, int | None]]:
+    """同 :func:`read_user_messages`，每条附事件 ``timestamp``（epoch ms / None）。"""
     return _read_user_messages_single(Path(path))
 
 
-def _read_user_messages_single(path: Path) -> list[str]:
-    """Extract omp user-message text from ONE session JSONL."""
-    messages: list[str] = []
+def _read_user_messages_single(path: Path) -> list[tuple[str, int | None]]:
+    """Extract omp user-message text (+ timestamp) from ONE session JSONL."""
+    messages: list[tuple[str, int | None]] = []
     for obj in iter_events(path):
         if obj.get("type") != "message":
             continue
@@ -547,7 +552,8 @@ def _read_user_messages_single(path: Path) -> list[str]:
             continue
         text = _message_text(mm.get("content")).strip()
         if text:
-            messages.append(truncate_summary(text, 500))
+            messages.append((truncate_summary(text, 500),
+                             parse_timestamp_ms(obj.get("timestamp"))))
     return messages
 
 

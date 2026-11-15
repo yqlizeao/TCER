@@ -588,7 +588,13 @@ def has_loc_signal(path: Path) -> bool:
 
 def read_user_messages(path: Path) -> list[str]:
     """Extract cleaned WorkBuddy user-message texts."""
-    msgs: list[str] = []
+    return [t for t, _ in read_user_messages_timed(path)]
+
+
+def read_user_messages_timed(path: Path) -> list[tuple[str, int | None]]:
+    """同 :func:`read_user_messages`，每条附记录 ``timestamp``（epoch ms / None）。"""
+    from tcer.core.reader import parse_timestamp_ms
+    msgs: list[tuple[str, int | None]] = []
     for obj in iter_records(path):
         if obj.get("type") == "message" and obj.get("role") == "user":
             content = obj.get("content") or []
@@ -600,7 +606,7 @@ def read_user_messages(path: Path) -> list[str]:
                 txt = ""
             clean = clean_user_text(txt)
             if clean:
-                msgs.append(clean[:500])
+                msgs.append((clean[:500], parse_timestamp_ms(obj.get("timestamp"))))
     return msgs
 
 

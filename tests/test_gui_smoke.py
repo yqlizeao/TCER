@@ -2076,7 +2076,7 @@ def test_weekly_report_popup_smoke(root):
     assert popup.until_var.get() != ""
     # 验证文本框占位
     content = popup.text_widget.get("1.0", "end")
-    assert "AI 研发周报生成器" in content
+    assert "工作回顾" in content
     popup.win.destroy()
 
 def test_draw_rounded_rect_bg_performance_and_accuracy(root):
