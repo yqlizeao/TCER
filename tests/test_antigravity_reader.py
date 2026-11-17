@@ -1124,3 +1124,98 @@ def test_background_command_status_is_not_a_tool_error(tmp_path: Path):
     assert u.tool_calls.get("Bash") == 3
     assert u.tool_errors == 1
 
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-17：运行期新 worker 折叠 / blob 父指针兜底 / 客户端标题 / 盘符大小写
+# --------------------------------------------------------------------------- #
+
+def _set_blob(db: Path, blob: bytes) -> None:
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE IF NOT EXISTS trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB)")
+    conn.execute("INSERT OR REPLACE INTO trajectory_metadata_blob VALUES ('main', ?)", (blob,))
+    conn.commit()
+    conn.close()
+
+
+def _child_blob(uri: str, parent: str, root_cid: str, name: str) -> bytes:
+    """实测子会话 blob 形态：1.1 工作区、4.1 worker 名、5 父 id、6 根 id。"""
+    return (_make_proto_field(1, 2, _make_proto_field(1, 2, uri))
+            + _make_proto_field(4, 2, _make_proto_field(1, 2, name))
+            + _make_proto_field(5, 2, parent)
+            + _make_proto_field(6, 2, root_cid))
+
+
+def test_new_worker_folds_without_restart(tmp_path: Path, monkeypatch):
+    """summaries 缓存按库签名失效：进程内先读过一次，后来派生的 worker 也要折叠。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    uri = "file:///C:/proj/live"
+    p = _build_db(conv / "p1.db", [_gen_row("gemini-3.8-flash", 100, 10, 0, "rp")], [])
+    _write_summaries_with_parent(tmp_path, [("p1", "", uri, 2)])
+    ref = antigravity_reader.resolve_project("live")
+    assert [x.stem for x in antigravity_reader.discover_sessions(ref)] == ["p1"]
+
+    # Swarm 运行中派生 worker：新 db + summaries 新行（无 blob 父指针，只靠 summaries）
+    _build_db(conv / "w1.db", [_gen_row("gemini-3.8-flash", 50, 5, 0, "rw")], [])
+    conn = sqlite3.connect(tmp_path / "conversation_summaries.db")
+    conn.execute("INSERT INTO conversation_summaries VALUES (?,?,?,?)", ("w1", json.dumps([uri]), 3, "p1"))
+    conn.commit()
+    conn.close()
+
+    ref = antigravity_reader.resolve_project("live")
+    assert [x.stem for x in antigravity_reader.discover_sessions(ref)] == ["p1"]
+    assert [x.stem for x in antigravity_reader.subagent_dbs(p)] == ["w1"]
+    assert antigravity_reader.aggregate_usage(p).input_tokens == 150
+
+
+def test_blob_parent_folds_child_missing_from_summaries(tmp_path: Path, monkeypatch):
+    """summaries 未刷入 worker 行时，子 db 自带的 blob 字段 5 仍能折叠。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    uri = "file:///C:/proj/blobby"
+    p = _build_db(conv / "p1.db", [_gen_row("gemini-3.8-flash", 100, 10, 0, "rp")], [])
+    _set_blob(p, _make_proto_field(1, 2, _make_proto_field(1, 2, uri)) + _make_proto_field(6, 2, "p1"))
+    c = _build_db(conv / "c1.db", [_gen_row("gemini-3.8-flash", 40, 4, 0, "rc")], [])
+    _set_blob(c, _child_blob(uri, "p1", "p1", "verifier"))
+    _write_summaries_with_parent(tmp_path, [("p1", "", uri, 2)])  # c1 不在目录里
+
+    ref = antigravity_reader.resolve_project("blobby")
+    assert [x.stem for x in antigravity_reader.discover_sessions(ref)] == ["p1"]
+    assert antigravity_reader.read_session_meta(c).is_subagent is True
+    assert antigravity_reader.read_session_meta(p).is_subagent is False
+    assert antigravity_reader.aggregate_usage(p).input_tokens == 140
+
+
+def test_title_prefers_client_summary_title(tmp_path: Path, monkeypatch):
+    """标题取 summaries.title（客户端显示的会话名），空则回退首条提问。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    a = _build_db(conv / "a.db", [], [(14, 3, _make_user_step_bytes("/swarm 1.结合你对本游戏的了解"))])
+    b = _build_db(conv / "b.db", [], [(14, 3, _make_user_step_bytes("首句回退"))])
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(tmp_path / "conversation_summaries.db")
+    conn.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, "
+                 "title TEXT, workspace_uris TEXT, last_modified_time INTEGER)")
+    conn.executemany("INSERT INTO conversation_summaries VALUES (?,?,?,?)", [
+        ("a", "Huawei AI Team Meeting Analysis", json.dumps(["file:///C:/proj/t"]), 2),
+        ("b", "", json.dumps(["file:///C:/proj/t"]), 1),
+    ])
+    conn.commit()
+    conn.close()
+    assert antigravity_reader.read_session_meta(a).title == "Huawei AI Team Meeting Analysis"
+    assert antigravity_reader.read_session_meta(b).title == "首句回退"
+
+
+def test_drive_letter_case_merges_workspace(tmp_path: Path, monkeypatch):
+    """App 写 file:///c%3A/、CLI 写 file:///C:/：同一工作区合成一个项目。"""
+    assert _normalize_workspace_uri("file:///c%3A/vg1/trunk/client") == r"C:\vg1\trunk\client"
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    _build_db(conv / "s1.db", [], [])
+    _build_db(conv / "s2.db", [], [])
+    _write_summaries(tmp_path, [("s1", "file:///c%3A/proj/Dual", 2), ("s2", "file:///C:/proj/Dual", 1)])
+    refs = [r for r in antigravity_reader.list_project_refs() if r.display_name == "Dual"]
+    assert len(refs) == 1
+    assert refs[0].cwd == r"C:\proj\Dual"
+    assert sorted(p.stem for p in refs[0].session_paths) == ["s1", "s2"]

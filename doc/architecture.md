@@ -151,6 +151,7 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 - **`file_cache._sig`**：`Path.resolve()` → `normcase(abspath())`，省掉 Windows 每次开句柄（≈28µs × 5000 次）；代价是符号链接别名最多多缓存一份，正确性不受影响。
 - **`metrics._is_code_search_tool`**：纯函数加 `lru_cache`（≈29 万次调用）。
 - **刻意不做**：项目级 ProjectAnalysis 缓存（热态全量仅 0.64s，而键需覆盖全部参数、每个会话及子代理/旁路文件签名、价表与 composite_baselines 配置版本，漏项即错数）；Claude 解码层替换（`scan_once` 仅省 ≈5% 且要重现 Extra data 判定；字节流会改变 `errors="replace"` 语义）。
+- **2026-11-17 Antigravity 父指针索引（运行期新 worker 折叠修复的配套性能验收）**：summaries 快照由进程级改为按库签名失效后，首版每次 `_parent_index` 都 `listdir` 全部根（一轮分析 ~570 次），热态 1.41s → 1.96s。改为键 = summaries 签名 + `conversations` 目录 mtime、父→子映射随索引缓存、blob 字段 5 只读 summaries 无该行的库、`subagent_dbs` 子树按 (索引 key, 父 cid) 记忆（跨根多副本仍逐次比 mtime），Antigravity 冷态 6.49/6.56s → 6.19/6.05s、热态 1.41/1.52s → 1.28/1.13s（old/new 交替各两次）。黄金快照：非 Antigravity 104 个稳定项目×模式逐字段 0 差异（排除 2 个活跃写入 Claude 项目）；Antigravity 按会话 id 展平比对，差异只有预期的 `meta.title`（改取客户端标题）与 `meta.cwd`（盘符大写），按 normcase 工作区汇总的 Token/LOC/成本完全守恒，项目 18 → 16（盘符大小写拆分合并）。
 - **实测（53 项目 / 934 会话文件）**：冷态 11.38s → 9.2s，热态 0.79s → 0.64s；Claude 冷态的 json 解码与逐行解析是当前下限。
 
 <a id="source-adapter"></a>
