@@ -515,14 +515,14 @@ ANTIGRAVITY_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
     "db.table": {
         "steps": (_H, "事件流：提问/工具调用/结果/压缩"),
         "gen_metadata": (_H, "逐生成 usage 与模型（权威）"),
-        "trajectory_metadata_blob": (_H, "工作区 URI"),
+        "trajectory_metadata_blob": (_H, "工作区 URI + 子代理父指针（字段 5）"),
         "trajectory_meta": (_I, "轨迹元数据，" + _NONUSE),
         "executor_metadata": (_I, "执行器元数据，" + _NONUSE),
-        "parent_references": (_I, "本机全空；子代理父指针取 summaries"),
+        "parent_references": (_I, "本机全空；子代理父指针取 summaries ∪ blob 字段 5"),
         "battle_mode_infos": (_I, "对战模式信息，" + _NONUSE),
     },
     "summaries.table": {
-        "conversation_summaries": (_H, "会话目录：工作区/父指针/worker 名/killed"),
+        "conversation_summaries": (_H, "会话目录：工作区/父指针/worker 名/killed/标题"),
         "conversation_parents": (_I, "2.32 新增，本机为空；父指针仍取 conversation_summaries"),
         "search_schema_version": (_I, "全文索引版本"),
         **{t: (_I, "全文索引") for t in (

@@ -55,6 +55,7 @@ from tcer.core.parse_util import (
     is_slash_command as _is_slash_command,
     is_windows_path as _is_windows_path,
     norm_path as _norm_path,
+    normcase_path as _normcase_path,
 )
 from tcer.core.paths import antigravity_conversations_dir, antigravity_roots
 
@@ -506,8 +507,12 @@ def _normalize_workspace_uri(uri: str) -> str:
     if _is_windows_path(unquoted):
         # Windows 盘符路径：在任何宿主 OS 下都按 Windows 语义规范化
         # （在 Windows 上与 Path.resolve() 结果一致；在 POSIX 上避免
-        # 把 "C:/..." 当相对路径拼到 cwd 上）。
-        return _norm_path(unquoted)
+        # 把 "C:/..." 当相对路径拼到 cwd 上）。盘符统一大写：App 写
+        # file:///c%3A/、CLI 写 file:///C:/，同一工作区不能拆成两份。
+        p = _norm_path(unquoted)
+        if len(p) >= 2 and p[1] == ":":
+            p = p[0].upper() + p[1:]
+        return p
     p = Path(unquoted)
     try:
         # Resolve to handle drive letters and backslashes uniformly
@@ -536,63 +541,189 @@ def _connect_ro(path: Path | str) -> sqlite3.Connection:
 # Project Discovery
 # --------------------------------------------------------------------------- #
 
-# 子代理折叠（2026-11 启用）：summaries 库的 parent_conversation_id 记录
-# invoke_subagent 派生的子会话（agent_name=self/research/named worker，
-# nesting_depth=1）。2026-10 基线时本机全空故未折叠，桌面 App 根现在已有数据
-# （CLI 根暂仍全空）。进程级缓存：与 paths.claude_config_dirs 同一先例——
-# TCER 运行期间新写入的 parent 指针不进索引，重启后生效。
-_SummariesInfo = namedtuple("_SummariesInfo", "parents names killed")
+# 子代理折叠（2026-11 启用）：父指针 = summaries.parent_conversation_id ∪
+# 子会话 db 自带的 trajectory_metadata_blob 字段 5（2026-11-17 实测两者
+# 120/120 逐条一致；字段 6 = 根会话 id，4.1 = worker 名）。blob 兜底覆盖
+# summaries 尚未刷入新 worker 行 / 被 GUI Language Server 刷回子集的情形。
+# 缓存按 summaries 库（含 -wal）签名失效——旧版进程级快照让 TCER 运行
+# 期间新派生的 Swarm worker 全部独立成「(无标题)」卡（用户截图 2026-11-17）。
+_SummariesInfo = namedtuple("_SummariesInfo", "parents names killed titles cids")
 
-_SUMMARIES_INFO: dict[str, _SummariesInfo] = {}  # normcase(root) → summaries 快照
+# normcase(root) → (签名, summaries 快照)
+_SUMMARIES_INFO: dict[str, tuple[tuple, _SummariesInfo]] = {}
+
+
+def _file_sig(p: Path) -> tuple[int, int] | None:
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _db_sig(db: Path) -> tuple:
+    """SQLite 库签名：主文件 + WAL（WAL 模式下写入先落 -wal，主文件不变）。"""
+    return (_file_sig(db), _file_sig(db.with_name(db.name + "-wal")))
 
 
 def _summaries_info(root: Path) -> _SummariesInfo:
-    """summaries 表的 (父指针, worker 名, killed 集) 一次读出、进程级缓存。
+    """summaries 表的 (父指针, worker 名, killed 集, 标题) 一次读出，按库签名缓存。
 
-    只缓存**确定性**结果：旧 schema 无 agent_name/killed 列等明确失败缓存空
-    快照（列按 PRAGMA 实际存在降级）；瞬时失败（Antigravity GUI 正在写库时的
-    database is locked 等）本次返回空、不缓存——缓存了会把「瞬时读不到」变成
-    整个进程禁用折叠，数值随启动时机漂移（code-review F4）。
+    只缓存**确定性**结果：旧 schema 缺列等明确失败缓存空快照（列按 PRAGMA
+    实际存在降级）；瞬时失败（Antigravity GUI 正在写库时的 database is
+    locked 等）本次返回空、不缓存——缓存了会把「瞬时读不到」固化，数值随
+    读取时机漂移（code-review F4）。
     """
     key = os.path.normcase(str(root))
+    summaries_db = root / "conversation_summaries.db"
+    sig = _db_sig(summaries_db)
     cached = _SUMMARIES_INFO.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == sig:
+        return cached[1]
     parents: dict[str, str] = {}
     names: dict[str, str] = {}
     killed: set[str] = set()
-    summaries_db = root / "conversation_summaries.db"
+    titles: dict[str, str] = {}
+    cids: set[str] = set()
     if summaries_db.is_file():
         try:
             with _connect_ro(summaries_db) as conn:
                 cols = {row[1] for row in conn.execute("PRAGMA table_info(conversation_summaries)")}
-                sel = "conversation_id"
-                for c in ("parent_conversation_id", "agent_name", "killed"):
-                    if c in cols:
-                        sel += f", {c}"
+                # 按列名取值（旧实现按位置取，缺中间列时会错位）
+                opt = [c for c in ("parent_conversation_id", "agent_name", "killed", "title") if c in cols]
+                sel = ", ".join(["conversation_id", *opt])
                 for row in conn.execute(f"SELECT {sel} FROM conversation_summaries"):
                     cid = row[0]
                     if not cid:
                         continue
-                    if len(row) > 1 and row[1] and row[1] != cid:
-                        parents[cid] = row[1]
-                    if len(row) > 2 and row[2]:
-                        names[cid] = str(row[2])
-                    if len(row) > 3 and row[3]:
+                    cids.add(cid)
+                    r = dict(zip(opt, row[1:]))
+                    par = r.get("parent_conversation_id")
+                    if par and par != cid:
+                        parents[cid] = par
+                    if r.get("agent_name"):
+                        names[cid] = str(r["agent_name"])
+                    if r.get("killed"):
                         killed.add(cid)
+                    t = r.get("title")
+                    if isinstance(t, str) and t.strip():
+                        titles[cid] = t.strip()
         except sqlite3.OperationalError as exc:
             msg = str(exc).lower()
             if "no such column" not in msg and "no such table" not in msg:
-                return _SummariesInfo(parents, names, killed)  # 锁冲突等瞬时错误：本次视作无，不写入缓存
+                return _SummariesInfo(parents, names, killed, titles, cids)  # 锁冲突等瞬时错误：不写入缓存
         except Exception:
-            return _SummariesInfo(parents, names, killed)  # 库损坏等未知错误：同样只影响本次
-    info = _SummariesInfo(parents, names, killed)
-    _SUMMARIES_INFO[key] = info
+            return _SummariesInfo(parents, names, killed, titles, cids)  # 库损坏等未知错误：同样只影响本次
+    info = _SummariesInfo(parents, names, killed, titles, cids)
+    _SUMMARIES_INFO[key] = (sig, info)
     return info
+
+
+# normcase(db) → (签名, 父 cid 或 "")；瞬时失败不缓存
+_BLOB_PARENT: dict[str, tuple[tuple, str]] = {}
+
+
+def _blob_parent(db: Path) -> str | None:
+    """子会话 db 自带的父指针：trajectory_metadata_blob 字段 5（主会话无此字段 → ""）。
+
+    瞬时读失败返回 None（调用方据此不缓存索引）。
+    """
+    key = os.path.normcase(str(db))
+    sig = _db_sig(db)
+    cached = _BLOB_PARENT.get(key)
+    if cached is not None and cached[0] == sig:
+        return cached[1]
+    par = ""
+    try:
+        with _connect_ro(db) as conn:
+            row = conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id='main'").fetchone()
+        if row and row[0]:
+            v = _find_field(_parse_proto_fields(row[0]), 5)
+            if isinstance(v, bytes):
+                par = v.decode("utf-8", errors="ignore").strip()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            return None  # 瞬时锁：本次视作无父指针，不缓存
+    except Exception:
+        return None
+    if par == db.stem:
+        par = ""
+    _BLOB_PARENT[key] = (sig, par)
+    return par
+
+
+# 全根父指针索引 [key, {cid: parent}, {parent: [cid, ...]}]
+# key = 各根 summaries 库签名 + conversations 目录 mtime（NTFS/ext4 在目录内
+# 增删改名条目时更新目录 mtime；SQLite 新建 -wal/-journal 同样会触发）。
+# 旧版每次调用 listdir 全部根（一轮分析 ~570 次）热态多花 ~0.5s。
+_PARENT_INDEX: list = [None, {}, {}]
+
+
+def _parent_index_full() -> tuple[dict[str, str], dict[str, list[str]]]:
+    """(cid → 父 cid, 父 cid → [子 cid])，跨全部根。
+
+    summaries 有该会话行则以其父指针为准（2026-11-17 普查与 blob 字段 5
+    逐条一致）；summaries 无该行（尚未刷入 / 被 Language Server 刷回子集 /
+    根无目录库）才读 db 自带 blob 字段 5 兜底——只读这一小撮，冷态不必
+    逐个打开全部会话库。任一读取瞬时失败时本次结果不缓存。
+    """
+    roots = antigravity_roots()
+    key = tuple(
+        (os.path.normcase(str(r)), _db_sig(r / "conversation_summaries.db"), _file_sig(r / "conversations"))
+        for r in roots
+    )
+    if _PARENT_INDEX[0] == key:
+        return _PARENT_INDEX[1], _PARENT_INDEX[2]
+    cacheable = True
+    parents: dict[str, str] = {}
+    known: set[str] = set()
+    for root in roots:
+        info = _summaries_info(root)
+        cached = _SUMMARIES_INFO.get(os.path.normcase(str(root)))
+        if (root / "conversation_summaries.db").is_file() and (cached is None or cached[1] is not info):
+            cacheable = False  # summaries 瞬时读失败
+        parents.update(info.parents)
+        known |= info.cids
+    for root in roots:
+        try:
+            names = os.listdir(root / "conversations")
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".db"):
+                continue
+            cid = name[:-3]
+            if cid in known or cid in parents:
+                continue
+            par = _blob_parent(root / "conversations" / name)
+            if par is None:
+                cacheable = False
+            elif par:
+                parents[cid] = par
+    children: dict[str, list[str]] = {}
+    for cid, par in parents.items():
+        children.setdefault(par, []).append(cid)
+    if cacheable:
+        _PARENT_INDEX[:] = [key, parents, children]
+    return parents, children
+
+
+def _parent_index() -> dict[str, str]:
+    """cid → 父 cid（跨全部根）。"""
+    return _parent_index_full()[0]
 
 
 def _summaries_parent_map(root: Path) -> dict[str, str]:
     return _summaries_info(root).parents
+
+
+def session_title(cid: str) -> str:
+    """客户端显示的会话标题（summaries.title，跨根任一非空即取）；无则空串。"""
+    for root in antigravity_roots():
+        t = _summaries_info(root).titles.get(cid)
+        if t:
+            return t
+    return ""
 
 
 def killed_subagent_cids() -> set[str]:
@@ -638,32 +769,32 @@ def subagent_names(path: Path) -> tuple[str, ...]:
 
 
 def reset_summaries_cache() -> None:
-    """清空 summaries 快照进程级缓存（测试用；生产语义见 _SUMMARIES_INFO 注释）。"""
+    """清空 summaries / blob 父指针缓存（测试用；生产按库签名自动失效）。"""
     _SUMMARIES_INFO.clear()
+    _BLOB_PARENT.clear()
+    _PARENT_INDEX[:] = [None, {}, {}]
+    _SUBTREE_MEMO.clear()
 
 
-def _is_subagent_cid(cid: str) -> bool:
+reset_parent_map_cache = reset_summaries_cache  # 旧名兼容（原实现引用已删除的 _PARENT_MAPS）
+
+
+def _is_subagent_cid(cid: str, index: dict[str, str] | None = None) -> bool:
     """cid 是否带 parent 指针且父 db 在任一根存在的子会话（**跨根**判定）。
 
     同一会话 id 跨根多副本（拷贝的 profile、summaries 被一侧刷掉）必须整体
     认定：只按副本所在根判定会一侧折叠、另一侧独立成卡 → Token/LOC 双计
-    （code-review F3；旧 best-by-cid 去重的保证不能丢）。
+    （code-review F3；旧 best-by-cid 去重的保证不能丢）。父指针来自全根
+    索引（summaries ∪ blob 字段 5），天然跨根。
     """
-    roots = antigravity_roots()
-    for root in roots:
-        par = _summaries_parent_map(root).get(cid)
-        if par:
-            return any((r / "conversations" / f"{par}.db").is_file() for r in roots)
-    return False
-
-
-def reset_parent_map_cache() -> None:
-    """清空 summaries 父指针进程级缓存（测试用；生产语义见 _PARENT_MAPS 注释）。"""
-    _PARENT_MAPS.clear()
+    par = (index if index is not None else _parent_index()).get(cid)
+    if not par:
+        return False
+    return any((r / "conversations" / f"{par}.db").is_file() for r in antigravity_roots())
 
 
 def subagent_dbs(path: Path) -> list[Path]:
-    """Child conversation dbs of ``path`` per summaries.parent_conversation_id.
+    """Child conversation dbs of ``path`` per the parent index (summaries ∪ blob 字段 5).
 
     children 从**所有根**枚举（best-by-mtime 选最新副本，与 `_workspace_sessions`
     的跨根去重语义一致——父副本在哪根不影响子会话发现，code-review F3）。
@@ -673,29 +804,41 @@ def subagent_dbs(path: Path) -> list[Path]:
     path = Path(path)
     if not path.is_file():
         return []
-    roots = antigravity_roots()
-    conv_dirs = [r / "conversations" for r in roots]
-    by_parent: dict[str, list[str]] = {}
-    for root in roots:
-        for cid, par in _summaries_parent_map(root).items():
-            by_parent.setdefault(par, []).append(cid)
-    out: list[Path] = []
-    visited = {path.stem}
-    stack = [path.stem]
-    while stack:
-        cur = stack.pop(0)
-        for cid in by_parent.get(cur, ()):
-            if cid in visited:
-                continue
-            visited.add(cid)
-            cands = [(c / f"{cid}.db") for c in conv_dirs]
-            cands = [c for c in cands if c.is_file()]
-            if cands:
-                newest = max(cands, key=lambda p: p.stat().st_mtime)
-                out.append(newest)
-                stack.append(cid)
+    by_parent = _parent_index_full()[1]
+    # 子树候选按索引版本记忆（目录 mtime 已覆盖候选文件的增删）；仅跨根
+    # 多副本时才逐次比较 mtime 选最新——单副本无可选，结果与逐次 stat 一致。
+    # 瞬时读失败时返回的是未缓存的新索引（by_parent 不是缓存对象）→ 不走记忆
+    memoable = by_parent is _PARENT_INDEX[2] and _PARENT_INDEX[0] is not None
+    memo_key = (_PARENT_INDEX[0], path.stem)
+    cand_lists = _SUBTREE_MEMO.get(memo_key) if memoable else None
+    if cand_lists is None:
+        roots = antigravity_roots()
+        conv_dirs = [r / "conversations" for r in roots]
+        cand_lists = []
+        visited = {path.stem}
+        stack = [path.stem]
+        while stack:
+            cur = stack.pop(0)
+            for cid in by_parent.get(cur, ()):
+                if cid in visited:
+                    continue
+                visited.add(cid)
+                cands = [c / f"{cid}.db" for c in conv_dirs]
+                cands = [c for c in cands if c.is_file()]
+                if cands:
+                    cand_lists.append(cands)
+                    stack.append(cid)
+        if memoable:
+            if len(_SUBTREE_MEMO) > 4096:
+                _SUBTREE_MEMO.clear()
+            _SUBTREE_MEMO[memo_key] = cand_lists
+    out = [c[0] if len(c) == 1 else max(c, key=lambda p: p.stat().st_mtime) for c in cand_lists]
     out.sort(key=lambda p: p.stem)
     return out
+
+
+# (索引 key, 父 cid) → 各子会话的候选副本列表；索引重建即自然失效
+_SUBTREE_MEMO: dict[tuple, list[list[Path]]] = {}
 
 
 def _is_subagent_path(path: Path) -> bool:
@@ -776,16 +919,17 @@ def _workspace_sessions() -> dict[str, list[Path]]:
     profiles (:func:`tcer.core.paths.antigravity_roots`). The same workspace across roots
     merges into one group. A conversation id present in several roots (copied
     profile) is counted once -- the most recently modified file wins.
-    子代理会话（summaries.parent_conversation_id 指向存在父 db 的）不单独成
+    子代理会话（父指针 = summaries ∪ blob 字段 5，指向存在父 db 的）不单独成
     卡：Token/LOC 由 aggregate_usage/session_loc_full 折叠进父会话（原 #5），
     父 db 缺失的孤儿仍独立展示。
     """
     entries: list[tuple[str, list[str]]] = []
     best: dict[str, tuple[int, Path]] = {}
+    index = _parent_index()
     for root in antigravity_roots():
         conv_dir = root / "conversations"
         for cid, wss in _root_entries(root):
-            if _is_subagent_cid(cid):
+            if _is_subagent_cid(cid, index):
                 continue  # 子会话（跨根判定，防副本一侧独立成卡双计）：折叠进父
             entries.append((cid, wss))
             p = conv_dir / f"{cid}.db"
@@ -799,10 +943,14 @@ def _workspace_sessions() -> dict[str, list[Path]]:
             if prev is None or mt > prev[0]:
                 best[cid] = (mt, p)
 
+    # 按 normcase 合并（CLI 写 file:///C:/、App 写 file:///c%3A/，同一工作区
+    # 曾因盘符大小写拆成两个项目）；分组键取首见写法（盘符已统一大写）。
     groups: dict[str, list[Path]] = {}
+    canon: dict[str, str] = {}
     for cid, wss in entries:
         chosen = best.get(cid)
         for ws in wss:
+            ws = canon.setdefault(_normcase_path(ws), ws)
             lst = groups.setdefault(ws, [])
             if chosen is not None and chosen[1] not in lst:
                 lst.append(chosen[1])
@@ -905,6 +1053,9 @@ def read_session_meta(path: Path) -> SessionMeta:
                 pass
     except Exception:
         pass
+
+    # 客户端显示的标题（summaries.title，LLM 生成的会话名）优先；无则回退首条提问。
+    title = session_title(session_id) or title
 
     return SessionMeta(
         session_id=session_id,
