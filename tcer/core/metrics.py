@@ -588,8 +588,8 @@ class ModelComparison:
     solo_session_count: int = 0
     mixed_only: bool = False
     _solo_cost: float = 0.0
-    _rbw_sum: float = 0.0
-    _rbw_count: int = 0
+    _read_first_files: int = 0
+    _write_edit_files: int = 0
     _tool_calls: dict = None
     _tool_errors: int = 0
     _code_added: int = 0
@@ -654,9 +654,9 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
                 mc._code_reworked += reworked or 0
                 mc._net_loc += r.net_loc or 0
                 mc._files_touched += r.files_touched or 0
-                if r.read_before_write is not None:
-                    mc._rbw_sum += r.read_before_write
-                    mc._rbw_count += 1
+                read_first_files, write_edit_files = _read_before_write_counts(u)
+                mc._read_first_files += read_first_files
+                mc._write_edit_files += write_edit_files
 
     # 同名消歧：per_model 按原始记录名分桶（见上），别名/内部实验桶落到同一
     # SKU 时 display_name 相同（gemini-pro-orchestrator 与 gemini-4-argon 都是
@@ -709,7 +709,7 @@ def compare_models(reports: list[SessionReport]) -> list[ModelComparison]:
                 mc.tool_error_rate = mc._tool_errors / total_tools
             # 代码质量 (self-rework, consistent with compute()/SessionReport.churn_ratio)
             mc.churn_ratio = mc._code_reworked / mc._code_added if mc._code_added > 0 else None
-            mc.read_before_write = mc._rbw_sum / mc._rbw_count if mc._rbw_count > 0 else None
+            mc.read_before_write = mc._read_first_files / mc._write_edit_files if mc._write_edit_files > 0 else None
             mc.files_per_session = mc._files_touched / mc.solo_session_count
     for mc in buckets.values():
         mc.cost_share = mc.cost / grand_cost * 100 if grand_cost else 0
@@ -1185,6 +1185,29 @@ def _is_code_search_tool(name: str) -> bool:
     return any(_leaf_has_keyword(leaf, k) for k in ("search", "grep", "find", "query", "map"))
 
 
+def _read_before_write_counts(u: TokenUsage) -> tuple[int, int]:
+    from collections import defaultdict
+
+    file_ops: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    for op in u.tool_ops:
+        if op.path:
+            file_ops[op.path].append((op.turn, op.tool))
+
+    write_edit_files = 0
+    read_first_files = 0
+    for ops in file_ops.values():
+        has_prior_read = False
+        for turn, tool in ops:
+            if tool == "Read":
+                has_prior_read = True
+            elif tool in {"Write", "Edit", "MultiEdit"}:
+                write_edit_files += 1
+                if has_prior_read:
+                    read_first_files += 1
+                break
+    return read_first_files, write_edit_files
+
+
 def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
     """Temporal search-edit and read-before-write analysis.
 
@@ -1200,33 +1223,10 @@ def file_quality_metrics(u: TokenUsage) -> dict[str, float | None]:
     read_before_write: fraction of Write/Edit targets where the same file was
     Read in a previous turn.
     """
-    from collections import defaultdict
-
     _WRITE_EDIT = {"Write", "Edit", "MultiEdit"}
     WINDOW = 3
 
-    # Group operations by file, preserving turn order
-    file_ops: dict[str, list[tuple[int, str]]] = defaultdict(list)
-    for op in u.tool_ops:
-        if op.path:
-            file_ops[op.path].append((op.turn, op.tool))
-
-    # Read-before-write: for each file, was there a Read before the first Write/Edit?
-    write_edit_files = 0
-    read_first_files = 0
-    for ops in file_ops.values():
-        first_write_turn = None
-        has_prior_read = False
-        for turn, tool in ops:
-            if tool == "Read" and first_write_turn is None:
-                has_prior_read = True
-            elif tool in _WRITE_EDIT:
-                if first_write_turn is None:
-                    first_write_turn = turn
-                    write_edit_files += 1
-                    if has_prior_read:
-                        read_first_files += 1
-                    break
+    read_first_files, write_edit_files = _read_before_write_counts(u)
     rbw = (read_first_files / write_edit_files) if write_edit_files else None
 
     # Search-edit ratio: a code-search is "productive" if any Write/Edit
