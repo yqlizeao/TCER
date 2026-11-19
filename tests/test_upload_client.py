@@ -289,10 +289,10 @@ def test_token_upload_anonymous_no_auth_and_pseudonym(monkeypatch):
 def _patch_readers(monkeypatch):
     """每个 reader 返回可辨认标记，用以检查分派。"""
     from tcer.core import (antigravity_reader, codex_reader, omp_reader,
-                           opencode_reader, pi_reader, reader, workbuddy_reader)
+                           opencode_reader, pi_reader, reader)
     calls = []
     for mod in (antigravity_reader, codex_reader, omp_reader, pi_reader,
-                workbuddy_reader, reader):
+                reader):
         name = mod.__name__.rsplit(".", 1)[-1]
         monkeypatch.setattr(mod, "read_conversation",
                             lambda p, n=name: calls.append((n, Path(p))) or [{"src": n}])
@@ -309,8 +309,7 @@ def _patch_readers(monkeypatch):
 
 @pytest.mark.parametrize("source,mod", [
     ("codex", "codex_reader"), ("omp", "omp_reader"), ("pi", "pi_reader"),
-    ("antigravity", "antigravity_reader"), ("workbuddy", "workbuddy_reader"),
-    ("codebuddy", "workbuddy_reader"),
+    ("antigravity", "antigravity_reader"),
 ])
 def test_dispatch_simple_sources(monkeypatch, tmp_path, source, mod):
     calls = _patch_readers(monkeypatch)

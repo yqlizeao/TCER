@@ -95,11 +95,10 @@ def _short_name(project_hash: str) -> str:
 def project_label(project) -> str:
     """Display label for a source-aware project ref or legacy Path."""
     source = getattr(project, "source", "claude")
-    if source in ("codex", "opencode", "omp", "pi", "antigravity", "workbuddy"):
+    if source in ("codex", "opencode", "omp", "pi", "antigravity"):
         default = {
             "codex": "Codex", "opencode": "OpenCode",
             "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
-            "workbuddy": "WorkBuddy",
         }.get(source, source)
         return getattr(project, "display_name", None) or getattr(project, "key", default)
     name = getattr(project, "name", None) or getattr(project, "key", str(project))
@@ -125,7 +124,6 @@ def project_drive(project) -> str | None:
 _SOURCE_DISPLAY = {
     "codex": "Codex", "opencode": "OpenCode",
     "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
-    "workbuddy": "WorkBuddy",
 }
 
 
@@ -334,9 +332,6 @@ def project_open_path(project) -> str:
     if source == "antigravity":
         from tcer.core.paths import antigravity_conversations_dir
         return str(antigravity_conversations_dir())
-    if source == "workbuddy":
-        from tcer.core.paths import workbuddy_sessions_dir
-        return str(workbuddy_sessions_dir())
     return str(path or cwd or project)
 
 
@@ -1139,7 +1134,6 @@ class FilterBar:
             "omp": "Oh My Pi",
             "pi": "Pi",
             "antigravity": "Antigravity",
-            "workbuddy": "WorkBuddy",
         }
         self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
 
@@ -1178,7 +1172,7 @@ class FilterBar:
                                         bg=theme.PANEL, outline=theme.BORDER_SUBTLE)
         self._src_capsule.pack(side="right", padx=(2, 4))
         self._src_lbl = self._src_capsule
-        Tooltip(self._src_capsule, "切换会话数据来源 (全部 / ClaudeCode / Codex / OpenCode / Oh My Pi / Pi / Antigravity / WorkBuddy)")
+        Tooltip(self._src_capsule, "切换会话数据来源 (全部 / ClaudeCode / Codex / OpenCode / Oh My Pi / Pi / Antigravity)")
 
         # 2. 紧随来源左侧：时间下拉胶囊
         def _on_time_click(_widget):
@@ -1359,8 +1353,7 @@ class ProjectColumn:
                      "~/.local/share/opencode（OpenCode）\n"
                      "~/.omp（Oh My Pi）\n"
                      "~/.pi（Pi）\n"
-                     "~/.gemini/antigravity-cli（Antigravity）\n"
-                     "~/.workbuddy-ai（WorkBuddy）\n\n"
+                     "~/.gemini/antigravity-cli（Antigravity）\n\n"
                      "或切换顶部「来源」筛选后重试。",
                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
                 justify="left", pady=theme.PAD_L * 2)
@@ -2045,7 +2038,7 @@ class SessionColumn:
         menu.add_separator()
 
         # Destructive action — last item, gated behind a二次确认对话框.
-        readonly = report.meta.source in ("codex", "opencode", "omp", "pi", "antigravity", "workbuddy")
+        readonly = report.meta.source in ("codex", "opencode", "omp", "pi", "antigravity")
         delete_state = "disabled" if readonly else "normal"
         delete_label = "删除会话…" if not readonly else f"删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(

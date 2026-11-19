@@ -4,7 +4,7 @@
 Codex 子代理会话 / OpenCode 子会话不并入。子代理只以 agent 类步骤出现，派发 prompt 只在该步骤的
 参数里。
 
-「用户提问」判定：Claude / WorkBuddy 经 :mod:`tcer.core.user_input`（SSOT），其它源复用各 reader
+「用户提问」判定：Claude 经 :mod:`tcer.core.user_input`（SSOT），其它源复用各 reader
 既有过滤（codex ``_events_with_user_messages``、omp ``_is_agent_attributed``、opencode
 synthetic/ignored、antigravity step_type 14），保证 ``Transcript.question_count`` 与
 ``user_input.read_user_messages`` 同口径。
@@ -2329,84 +2329,6 @@ def _agy_call(canon: str, raw_name: str, cid: str, args, args_json: str) -> Tool
 
 
 # --------------------------------------------------------------------------- #
-# WorkBuddy / CodeBuddy
-# --------------------------------------------------------------------------- #
-def _wb_build(path: Path, cancel) -> list[Message]:
-    from tcer.core import workbuddy_reader as wb
-    msgs: list[Message] = []
-    calls: dict[str, ToolCallBlock] = {}
-    n = 0
-    for n, obj in enumerate(wb.iter_records(path)):
-        if n % 512 == 0:
-            _check(cancel)
-        if not isinstance(obj, dict):
-            continue
-        t = obj.get("type")
-        ts = parse_timestamp_ms(obj.get("timestamp"))
-        if t == "message":
-            role = obj.get("role")
-            content = obj.get("content") or []
-            if isinstance(content, str):
-                txt = content
-            elif isinstance(content, list):
-                txt = "".join(c.get("text", "") for c in content if isinstance(c, dict))
-            else:
-                txt = ""
-            if role == "user":
-                clean = wb.clean_user_text(txt)
-                if clean:
-                    msgs.append(Message("user", ts, _opt_str(obj.get("id")), None, False, [TextBlock(clean)]))
-            elif role == "assistant":
-                if txt.strip():
-                    msgs.append(Message("assistant", ts, _opt_str(obj.get("id")), None, False,
-                                        [TextBlock(txt.strip())]))
-        elif t == "reasoning":
-            raw_c = obj.get("rawContent") or []
-            rtxt = ""
-            if isinstance(raw_c, list):
-                rtxt = "\n".join(c.get("text", "") for c in raw_c if isinstance(c, dict) and c.get("text"))
-            if not rtxt:
-                pd = obj.get("providerData")
-                if isinstance(pd, dict):
-                    rtxt = str(pd.get("reasoning", "") or "")
-            if rtxt.strip():
-                blk = make_thinking(rtxt.strip(), ref=ContentRef(
-                    "jsonl_idx", str(path), index=n, pointer="/rawContent", source="workbuddy"))
-                msgs.append(Message("assistant", ts, None, None, False, [blk]))
-        elif t == "function_call":
-            name = obj.get("name") or "tool"
-            args = obj.get("arguments")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except ValueError:
-                    pass
-            cid = _opt_str(obj.get("callId")) or _opt_str(obj.get("id")) or ""
-            call = make_tool_call("generic", cid, str(name), args)
-            if cid:
-                calls[cid] = call
-            msgs.append(Message("assistant", ts, None, None, False, [call]))
-        elif t == "function_call_result":
-            cid = _opt_str(obj.get("callId")) or _opt_str(obj.get("id")) or ""
-            out = obj.get("output")
-            if isinstance(out, dict):
-                out_txt = out.get("text") or ""
-            elif isinstance(out, str):
-                out_txt = out
-            elif isinstance(out, list):
-                out_txt = "\n".join(c.get("text", "") for c in out if isinstance(c, dict))
-            else:
-                out_txt = ""
-            lowered = out_txt.strip().lower()
-            is_err = (obj.get("status") != "completed" or lowered.startswith("error:")
-                      or lowered.startswith("error during") or lowered.startswith("failed:")
-                      or "traceback (most recent call last):" in lowered)
-            msgs.append(Message("tool", ts, None, None, False,
-                                [make_result(cid, ST_ERROR if is_err else ST_SUCCESS, out_txt)]))
-    return msgs
-
-
-# --------------------------------------------------------------------------- #
 # 分发
 # --------------------------------------------------------------------------- #
 def build_transcript(src: str, path: Path, session_id: str | None, cancel=None) -> Transcript:
@@ -2449,12 +2371,6 @@ def build_transcript(src: str, path: Path, session_id: str | None, cancel=None) 
         meta = antigravity_reader.read_session_meta(path)
         return finalize(src, path, session_id or meta.session_id or path.stem, msgs,
                         title=meta.title, cwd=meta.cwd, warnings=w)
-    if src == "workbuddy":
-        from tcer.core import workbuddy_reader
-        msgs = _wb_build(path, cancel)
-        meta = workbuddy_reader.read_session_meta(path)
-        return finalize(src, path, session_id or meta.session_id or path.stem, msgs,
-                        title=meta.title, cwd=meta.cwd)
     raise ValueError(f"未知数据源：{src}")
 
 
@@ -2487,8 +2403,6 @@ def _usage_of(src: str, path: Path, sid: str | None):
         return analyze._pi_usage_of(None, path)
     if src == "antigravity":
         return analyze._antigravity_usage_of(None, path)
-    if src == "workbuddy":
-        return analyze._workbuddy_usage_of(None, path)
     return None
 
 

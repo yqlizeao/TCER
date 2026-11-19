@@ -24,7 +24,6 @@ from tcer.core import (
     pi_reader,
     pricing,
     reader,
-    workbuddy_reader,
 )
 from tcer.core.models import ProjectRef, SessionMeta, SessionReport, TokenUsage
 from tcer.core.parse_util import normcase_path as _normcase_path
@@ -282,11 +281,6 @@ def real_projects(refs: list[ProjectRef]) -> list[RealProject]:
         if g is None:
             g = groups[key] = RealProject(key=key, display=_display_cwd(cwd))
         g.refs.append(ref)
-
-    # WorkBuddy 项目合并规则对齐：若一个分组全部为 workbuddy ref，缩减 display 为目录名
-    for g in groups.values():
-        if g.refs and all(getattr(r, "source", "") == "workbuddy" for r in g.refs):
-            g.display = g.refs[0].display_name or g.display
 
     out = list(groups.values()) + list(singles.values())
     out.sort(key=lambda g: (-len(g.refs), g.display.lower()))
@@ -1211,65 +1205,7 @@ def analyze_antigravity_project(
 
 
 
-# ---- workbuddy hooks ------------------------------------------------------- #
-def _workbuddy_usage_of(ref: ProjectRef, f: Path) -> TokenUsage:
-    from tcer.core import file_cache
-    return file_cache.get_or_compute(
-        f, "workbuddy_usage", lambda: workbuddy_reader.aggregate_usage(f)
-    )
-
-
-def _workbuddy_loc_of(ref: ProjectRef, f: Path, meta: SessionMeta):
-    from tcer.core import file_cache
-    return file_cache.get_or_compute(
-        f, "workbuddy_loc", lambda: workbuddy_reader._loc_scan(f)
-    )
-
-
-_WORKBUDDY = _SourceAdapter(
-    source="workbuddy",
-    entrypoint="workbuddy",
-    resolve=workbuddy_reader.resolve_project,
-    sessions=lambda ref: list(ref.session_paths) if ref.session_paths else workbuddy_reader.sessions_for_project(ref),
-    read_meta=lambda ref, f: workbuddy_reader.read_session_meta(f),
-    usage_of=_workbuddy_usage_of,
-    loc_of=_workbuddy_loc_of,
-    session_key=lambda ref, f: (workbuddy_reader.read_session_meta(f).session_id or f.stem),
-    not_found="workbuddy project '{project}' not found",
-    no_sessions="no workbuddy session files for '{name}'",
-    no_match="no workbuddy session matches '{session}'",
-)
-
-
-def analyze_workbuddy_project(
-    project: str | ProjectRef,
-    *,
-    session: str | None = None,
-    no_loc: bool = False,
-    task_type: str = metrics.DEFAULT_TASK_TYPE,
-    baseline_tcer: float | None = None,
-    baseline_cpe: float | None = None,
-    since: str | None = None,
-    until: str | None = None,
-    cancel_event: threading.Event | None = None,
-    auto_infer: bool = False,
-) -> ProjectAnalysis:
-    """Analyze one WorkBuddy project."""
-    return _analyze_source_project(
-        _WORKBUDDY,
-        project,
-        session=session,
-        no_loc=no_loc,
-        task_type=task_type,
-        baseline_tcer=baseline_tcer,
-        baseline_cpe=baseline_cpe,
-        since=since,
-        until=until,
-        cancel_check=_make_cancel_check(cancel_event),
-        auto_infer=auto_infer,
-    )
-
-_ADAPTERS = (_CODEX, _OPENCODE, _OMP, _PI, _ANTIGRAVITY, _WORKBUDDY)
+_ADAPTERS = (_CODEX, _OPENCODE, _OMP, _PI, _ANTIGRAVITY)
 
 
 def _synth_meta(session_id: str, sample: Path) -> SessionMeta:

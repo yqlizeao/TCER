@@ -1072,8 +1072,7 @@ class TcerGui:
                                                  r.meta.session_id)
 
         label = {"codex": "Codex", "opencode": "OpenCode",
-                 "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
-                 "workbuddy": "WorkBuddy"}.get(source, "ClaudeCode")
+                 "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity"}.get(source, "ClaudeCode")
 
         if is_agg:
             groups: list[tuple[str, list[str]]] = []

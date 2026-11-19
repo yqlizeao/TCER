@@ -252,7 +252,7 @@ def test_format_step_title_opencode_icon_and_generic_chinese():
 
 def test_get_style_source_mapping():
     assert S.get_style("omp").id == "pi" and S.get_style("pi").id == "pi"
-    assert S.get_style("workbuddy").id == "generic" and S.get_style("antigravity").id == "generic"
+    assert S.get_style("antigravity").id == "generic"
     assert S.get_style("claude").id == "claude" and S.get_style("nope").id == "generic"
 
 

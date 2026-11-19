@@ -145,7 +145,7 @@ GROUPS: list[Group] = [
                "各块最晚时间戳（要求有 stop_reason 且见到首块）；Codex = 按事件顺序推算"
                "（请求起点行 → token_count / token_usage_record）；OpenCode = time.streamed"
                "（缺则 completed）− created；Oh My Pi / Pi = 每响应自报 duration。"
-               "Antigravity / WorkBuddy 无此数据，显示「不适用」。",
+               "Antigravity 无此数据，显示「不适用」。",
                "basic", "up"),
         Metric("output_tps", "输出吞吐", "token/秒",
                "公式：Σ 输出 Token ÷ Σ 单次补全自报耗时（秒），不设输出/耗时门槛\n"
@@ -787,7 +787,6 @@ UNSUPPORTED_LABEL = "不适用"
 SOURCE_LABELS = {
     "claude": "ClaudeCode", "codex": "Codex", "opencode": "OpenCode",
     "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
-    "workbuddy": "WorkBuddy",
 }
 
 # key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
@@ -798,8 +797,8 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "killed_subagents": frozenset({"antigravity"}),
     "memory_files": frozenset({"claude"}),
     # Claude 的推理输出并入「输出」，不单独上报
-    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"}),
-    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"}),
+    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
+    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
     # Codex 运行时信号
     "context_window": frozenset({"codex"}),
     "context_window_used": frozenset({"codex"}),
@@ -811,7 +810,7 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "output_tps": frozenset({"omp", "pi"}),
     # 估算输出速度：逐响应「估算耗时」（含首字等待）过门槛后 Σ输出÷Σ耗时。Claude=日志时间戳
     # 链、Codex=事件顺序状态机、OpenCode=time.streamed/completed−created、omp/Pi=自报
-    # duration；Antigravity / WorkBuddy 无逐响应时间 → 不适用。
+    # duration；Antigravity 无逐响应时间 → 不适用。
     "est_output_tps": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
     # 平均延迟需要每请求耗时：omp 为每响应 duration。Claude 整轮墙钟 / Codex 任务级墙钟（实测高一个数量级）
     # → 不适用；OpenCode 无该字段（pi 有 duration，compute 门控含 pi）。
@@ -841,7 +840,7 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "rate_limit_hits": frozenset({"claude", "codex", "omp"}),
     "task_completion": frozenset({"codex"}),
     "compactions": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
-    "web_searches": frozenset({"claude", "codex", "omp", "pi", "antigravity", "workbuddy"}),
+    "web_searches": frozenset({"claude", "codex", "omp", "pi", "antigravity"}),
     "image_inputs": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
     # Codex 自 cache_write_input_tokens（input 的子集）起上报缓存写入；
     # 更早的 rollout 无该字段读 0（部分支持，不标注）。

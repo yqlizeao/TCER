@@ -44,7 +44,6 @@ def test_list_project_refs_filters_by_source(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path / "no-opencode"))
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "no-omp"))
     monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path / "no-antigravity"))
-    monkeypatch.setenv("WORKBUDDY_DIR", str(tmp_path / "no-workbuddy"))
 
     sdir = tmp_path / "sessions" / "2026" / "01" / "01"
     sdir.mkdir(parents=True)

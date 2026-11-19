@@ -690,7 +690,7 @@ AGENT_STYLES: dict[str, AgentStyle] = {
 # 数据源 → 风格（规格 §3.3 建议映射）
 SOURCE_STYLE = {
     "claude": "claude", "codex": "codex", "opencode": "opencode", "pi": "pi", "omp": "pi",
-    "antigravity": "generic", "workbuddy": "generic", "codebuddy": "generic",
+    "antigravity": "generic",
 }
 
 

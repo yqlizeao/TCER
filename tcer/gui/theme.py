@@ -284,7 +284,6 @@ TRANSCRIPT_AGENT_ACCENT = {
     "opencode": "#5eead4",
     "pi": "#c4b5fd",
     "omp": "#c4b5fd",
-    "workbuddy": "#ababb3",
     "generic": "#ababb3",
 }
 TRANSCRIPT_BUBBLE_BG = {
@@ -295,7 +294,6 @@ TRANSCRIPT_BUBBLE_BG = {
     "opencode": "#2e4142",     # color-mix(in srgb, #5eead4 14%, #26262a)
     "pi": "#3c3a48",           # color-mix(in srgb, #c4b5fd 14%, #26262a)
     "omp": "#3c3a48",
-    "workbuddy": "#39393d",
     "generic": "#39393d",
 }
 TRANSCRIPT_CODE_BG = "#2a2a2e"       # 行内代码 / 代码块正文底色（对齐 cc-switch bg-subtle）

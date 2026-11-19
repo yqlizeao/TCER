@@ -49,7 +49,6 @@ from tcer.core import (
     opencode_reader,
     pi_reader,
     reader,
-    workbuddy_reader,
 )
 from tcer.core.models import ProjectRef, TokenUsage
 from tcer.core.paths import list_project_refs, ref_root, resolve_project
@@ -485,13 +484,6 @@ def _audit_file_session(
             not bad,
             detail=f"raw antigravity tool names leaked: {bad} -- map via _ANTIGRAVITY_TOOL_MAP",
         ))
-    if source == "workbuddy":
-        bad = [k for k in report.usage.tool_calls if k in workbuddy_reader._WORKBUDDY_TOOL_MAP]
-        sa.checks.append(_truth(
-            "workbuddy_tools_canonical",
-            not bad,
-            detail=f"raw workbuddy tool names leaked: {bad} -- map via _WORKBUDDY_TOOL_MAP",
-        ))
     # LOC + self-rework rescan (guards rework_deleted / net_loc regressions).
     if report.net_loc is not None:
         try:
@@ -500,7 +492,6 @@ def _audit_file_session(
                 "omp": omp_reader.session_loc_full,
                 "pi": pi_reader.session_loc_full,
                 "antigravity": lambda p: antigravity_reader.session_loc_full(p)[0],
-                "workbuddy": workbuddy_reader.session_loc_full,
             }[source]
             sloc = _loc_fn(report.meta.path)
             sa.checks.append(_eq(
@@ -762,8 +753,6 @@ def audit_ref(
             sa = _audit_file_session(rep, source="pi", aggregate_fn=pi_reader.aggregate_usage)
         elif ref.source == "antigravity":
             sa = _audit_file_session(rep, source="antigravity", aggregate_fn=antigravity_reader.aggregate_usage)
-        elif ref.source == "workbuddy":
-            sa = _audit_file_session(rep, source="workbuddy", aggregate_fn=workbuddy_reader.aggregate_usage)
         else:
             sa = SessionAudit(
                 session_id="?",
@@ -833,7 +822,7 @@ def audit_many(
         # Prefer exact source when user said all + project name
         if source == "all":
             results = []
-            for s in ("claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"):
+            for s in ("claude", "codex", "opencode", "omp", "pi", "antigravity"):
                 pa = audit_project(project, source=s, top=top, task_type=task_type, no_loc=no_loc)
                 if pa.error and "not found" in (pa.error or ""):
                     continue
@@ -1014,7 +1003,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Closed-loop audit: analyze real local sessions and re-verify against raw files.",
     )
     p.add_argument("--source", default="all",
-                   choices=["all", "claude", "codex", "opencode", "omp", "pi", "antigravity", "workbuddy"],
+                   choices=["all", "claude", "codex", "opencode", "omp", "pi", "antigravity"],
                    help="Data source (default: all when --project set, else all)")
     p.add_argument("--project", default=None,
                    help="Project key or substring (e.g. TCER, c--GitHub-TCER)")
