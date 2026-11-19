@@ -321,20 +321,27 @@ def _aggregate_single(db_path: Path, session_id: str, *, is_subagent: bool = Fal
         if reported > 0:
             u.reported_cost_usd = reported
 
+    parts = [(part, _json_obj(part["data"])) for part in parts]
+    question_messages = {str(part["message_id"]) for part, data in parts
+                         if _is_user_text_part(data)}
+
     turn_by_message: dict[str, int] = {}
+    user_turn_by_message: dict[str, int] = {}
     msg_buckets: dict[str, list[int]] = {}  # model -> [input, cache_write, cache_read, output]
     assistant_seen = 0
     for msg in messages:
         data = _json_obj(msg["data"])
         role = _first_str(data.get("role"), msg["data"] if msg["data"] in ("user", "assistant") else None)
+        mid = str(msg["id"])
         if role == "user":
-            # A subagent's user message is the Task dispatch prompt, not a human turn.
-            if not is_subagent:
+            # A subagent's user message is the Task dispatch prompt, not a human turn;
+            # injected context / compaction / auto-continue rows carry no real text part.
+            if not is_subagent and mid in question_messages:
                 u.user_msgs += 1
         elif role == "assistant":
             assistant_seen += 1
-            mid = str(msg["id"])
             turn_by_message[mid] = assistant_seen - 1
+            user_turn_by_message[mid] = u.user_msgs
             mkey = _message_model_key(data) or model_key
             if mkey:
                 u.models.add(mkey)
@@ -371,8 +378,7 @@ def _aggregate_single(db_path: Path, session_id: str, *, is_subagent: bool = Fal
         u.assistant_msgs = max(u.assistant_msgs, assistant_seen)
 
     call_to_tool: dict[str, str] = {}
-    for part in parts:
-        data = _json_obj(part["data"])
+    for part, data in parts:
         ptype = _first_str(data.get("type"), data.get("kind"))
         mid = str(part["message_id"])
         turn = turn_by_message.get(mid, max(0, assistant_seen - 1))
@@ -406,7 +412,8 @@ def _aggregate_single(db_path: Path, session_id: str, *, is_subagent: bool = Fal
         elif ptype in ("step-finish", "step_finish"):
             # Live OpenCode: per-step token snapshot for peak window pressure.
             _note_step_input_peak(u, data)
-            _note_step_turn_stat(u, data, turn, parse_timestamp_ms(part["time_created"]))
+            _note_step_turn_stat(u, data, turn, parse_timestamp_ms(part["time_created"]),
+                                 user_turn_by_message.get(mid, u.user_msgs))
         elif ptype == "compaction":
             u.compaction_count += 1
 
@@ -452,16 +459,22 @@ def read_user_messages_timed(db_path: Path, session_id: str) -> list[tuple[str, 
         if role != "user":
             continue
         data = _json_obj(row["part_data"])
-        # synthetic=True：客户端注入的上下文（如 editor_context「用户打开了文件…」
-        # system-reminder），不是真人输入。
-        # ignored=True：被客户端标记忽略的片段（cc-switch 同口径丢弃）。
-        if (data.get("type") == "text" and not data.get("synthetic")
-                and not data.get("ignored")):
-            text = data.get("text")
-            if isinstance(text, str) and text.strip():
-                messages.append((truncate_summary(text.strip(), 500),
-                                 parse_timestamp_ms(row["message_time"])))
+        if _is_user_text_part(data):
+            messages.append((truncate_summary(data["text"].strip(), 500),
+                             parse_timestamp_ms(row["message_time"])))
     return messages
+
+
+def _is_user_text_part(data: dict) -> bool:
+    """user 消息里真人输入的 text part（``user_msgs`` 与用户消息列表共用此口径）。
+
+    synthetic=True：客户端注入的上下文（如 editor_context「用户打开了文件…」
+    system-reminder、压缩后的自动续接），不是真人输入。
+    ignored=True：被客户端标记忽略的片段（cc-switch 同口径丢弃）。
+    """
+    text = data.get("text")
+    return (data.get("type") == "text" and not data.get("synthetic")
+            and not data.get("ignored") and isinstance(text, str) and bool(text.strip()))
 
 
 def read_conversation(db_path: Path, session_id: str) -> list[dict]:
@@ -1038,7 +1051,8 @@ def _note_step_input_peak(u: TokenUsage, data: dict) -> None:
         u.peak_input_tokens = max(u.peak_input_tokens, step_in)
 
 
-def _note_step_turn_stat(u: TokenUsage, data: dict, turn: int, ts: int | None) -> None:
+def _note_step_turn_stat(u: TokenUsage, data: dict, turn: int, ts: int | None,
+                         user_turn: int) -> None:
     """step-finish 快照 → 时间线 TurnStat（仅展示用，不参与聚合 token）。"""
     tok = data.get("tokens")
     if not isinstance(tok, dict):
@@ -1053,7 +1067,7 @@ def _note_step_turn_stat(u: TokenUsage, data: dict, turn: int, ts: int | None) -
     u.turn_stats.append(TurnStat(
         turn=turn, ts=ts, input_tokens=i, cache_write=cw,
         cache_read=cr, output_tokens=o,
-        user_turn=u.user_msgs if u.user_msgs > 0 else 1,
+        user_turn=user_turn if user_turn > 0 else 1,
     ))
 
 
