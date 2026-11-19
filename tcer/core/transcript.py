@@ -1290,7 +1290,7 @@ def resume_command(source: str, session_id: str | None, path: str | Path | None 
         return f"omp --resume {sid}" if sid else None
     if src == "antigravity":
         return f"agy --conversation={sid}" if sid else None
-    return None   # workbuddy / 未知：无
+    return None   # 未知：无
 
 
 def cd_resume_command(cwd: str | None, command: str | None, shell: str = "posix") -> str | None:
@@ -1328,8 +1328,8 @@ def load_transcript(source: str, path: str | Path, session_id: str | None = None
                     cancel_event: threading.Event | None = None) -> Transcript:
     """读取一个会话的完整记录。
 
-    ``source`` ∈ claude / codex / opencode / omp / pi / antigravity / workbuddy（codebuddy 同
-    workbuddy）。``path``：JSONL 文件；OpenCode / Antigravity 为 SQLite 路径（OpenCode 另需
+    ``source`` ∈ claude / codex / opencode / omp / pi / antigravity。``path``：JSONL 文件；
+    OpenCode / Antigravity 为 SQLite 路径（OpenCode 另需
     ``session_id``）。**只读主会话**：子代理 / 子会话不并入，只以 agent 类步骤出现。
 
     ``with_usage``：用 reader 既有聚合（file_cache 命中时近零成本）填 token / 成本头信息；
@@ -1339,8 +1339,6 @@ def load_transcript(source: str, path: str | Path, session_id: str | None = None
     from tcer.core import transcript_sources as srcs
 
     src = (source or "claude").lower()
-    if src == "codebuddy":
-        src = "workbuddy"
     p = Path(path)
     key = _cache_key(src, p, session_id)
     base = None
@@ -1456,7 +1454,7 @@ def turn_to_markdown(turn: Turn, style: AgentStyle | str | None = None, *,
 
 
 _APP_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "omp": "omp",
-              "pi": "Pi", "antigravity": "Antigravity", "workbuddy": "WorkBuddy"}
+              "pi": "Pi", "antigravity": "Antigravity"}
 
 
 def transcript_to_markdown(t: Transcript, *, include_thinking: bool = False,

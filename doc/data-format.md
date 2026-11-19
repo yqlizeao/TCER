@@ -324,7 +324,7 @@ Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-ag
 ### 原 #15 用户消息懒加载
 
 - 分析只计 `user_msgs` 数量；正文在弹窗/周报/上传/LLM 回退时懒读。
-- **带时间版本**（2026-11-15）：`user_input.read_user_messages_timed(source, path, sid)` → `[(正文, epoch ms | None)]`，时间取自该条消息**自身**的记录（Claude/Codex/omp/pi/WorkBuddy 行 `timestamp`、OpenCode `message.time_created`、Antigravity step 元数据），不是回合推算。各源 `read_user_messages` 一律由其 `read_user_messages_timed` 派生（正文与条数逐条一致，本机 4102 条普查 0 差异、全部带时间）；两个 SSOT 入口共用 `_dispatch` 的源分发与主会话边界。周报按它把提问逐条切进区间。
+- **带时间版本**（2026-11-15）：`user_input.read_user_messages_timed(source, path, sid)` → `[(正文, epoch ms | None)]`，时间取自该条消息**自身**的记录（Claude/Codex/omp/pi 行 `timestamp`、OpenCode `message.time_created`、Antigravity step 元数据），不是回合推算。各源 `read_user_messages` 一律由其 `read_user_messages_timed` 派生（正文与条数逐条一致，本机 4102 条普查 0 差异、全部带时间）；两个 SSOT 入口共用 `_dispatch` 的源分发与主会话边界。周报按它把提问逐条切进区间。
 - **「用户提问」口径 SSOT：`core/user_input.py`**（2026-10 统一，规则移植自 cc-switch `push_user_texts`）。提问 = 真人发出、非注入、剥除注入片段后仍有可见文字（或内联图片）的 user 消息。Claude 首个非空文字块定类别：`[Request interrupted by user` → 中断事件；`<command-…>` 含 `<command-name>` → 斜杠命令事件（计 `slash_command_count`，不计提问）；`<bash-input>` → 用户 `!cmd`；`<bash-stdout/stderr>` → 命令输出；`<local-command-*>`/`<task-notification>` → 注入；其余剥除 `<system-reminder>` 与 IDE 上下文块（`<ide_opened_file>`/`<ide_selection>` 等）后剩余文字即提问，文字原样保留（用户粘贴的 HTML 不剥标签）；`isSidechain`/`isCompactSummary` 行与旧版「This session is being continued…」续接摘要不是提问。
   - 指标（`user_msgs`/`first_prompt_chars`/斜杠/纠正）、弹窗、标题回退、`read_dialogue`、`read_conversation` 的用户文字、会话记录阅读器全部经 `classify_claude_record`；跨源读正文统一走 `user_input.read_user_messages(source, path, sid)`。
   - **只读主会话**：子代理文件的 user 消息是派发 prompt（AI 写给 AI），Claude `subagents/`、omp/pi `<stem>/`、Codex/OpenCode 子会话一律不并入（上传的 `user_messages` 同样只含主会话；`conversation` 里子代理过程照常上传，但其派发 prompt 不再标成 user）。
@@ -420,7 +420,6 @@ Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-ag
       - **压缩**：3 次 step 23 无 5.28 用量（status 3），该次压缩调用的用量本地不可得，如实列为 info。
       - 旧工具名 `view_file`/`replace_file_content`/`write_to_file`/`read_url_content` 新会话不再出现（`read_file`/`edit_file`/`write_file` 已支持）；新模型名 `gemini-3.8-flash-tiered` 四级匹配落 `gemini-3.8-flash`。
       - **未验证**：11-13 之后 CLI 根无新会话，1.5.8/1.5.9 的新格式只在 App 2.32.0 上实测；字段 6/8/11、step 90/17 语义按样本推断，无上游 schema。
-  - ⑥**WorkBuddy**：无官方公开 transcript schema，reader 字段假设来自作者样本、**未经上游核实**；`paths.workbuddy_roots` 额外认产品自身的 `WORKBUDDY_CONFIG_DIR`/`CODEBUDDY_CONFIG_DIR`。依赖本机真实目录的测试在目录缺失时 skip。
 
 ## 补充：旧 AGENTS.md 独有的数据源条目
 
@@ -433,18 +432,6 @@ Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-ag
 
 **2026-10-27 全量核对（34 个会话）**：①**并行工具调用**：step 15 字段 20 下可重复多个字段 7，`_extract_tool_calls` 逐个计（只取首个曾漏 490 次调用，含 185 次编辑/写入）；②**step 132 字段 5.4 回显原调用**（call_id/名/参数，与 step 15 逐字节一致、按调用顺序到达）——LOC 改为按结果裁决（#32）：结果成功（status 0/3/5）才回放，status 7 失败编辑（`Could not successfully apply`）不计；③**step status**：3=完成、5=完成但 payload 被裁剪（step 15 调用体清空、step 14 只剩 19.3.1 提问副本，实测仅 703d5cd2 前 178 步）、7=失败；status 5 不算工具错误，调用由结果回显补回，提问取 19.3.1；提问兜底扫描严格解码并拒控制字符，不再把 protobuf 片段当正文；④**上下文压缩 step 23** 是一次真实 LLM 调用，usage 只在步骤元数据 5.28.2、不进 `gen_metadata`（实测 82 次全漏，计入后成本 +2.7%）：按响应 id 与 gen 去重后计入，记录不带模型 → 按前一次生成的模型计价（推断），同时填 `compaction_count/compaction_turns`；⑤`manage_task` 是后台命令（`run_command` 异步，任务号 `<会话id>/task-N`，结果以 step 101 系统消息回传）的查看/停止，**不是子代理**，不再映射为 `Task`；⑥`/resume` 续写同一会话 id 的同一个 .db（无 idx 断档、无重复响应 id），按文件计会话正确；子代理表 `parent_references` 与摘要库子代理字段本机全空；⑦辅助 LLM 调用（安全监控 `sir_flash_lite`/`severe_internal_risks_agy`、会话标题生成）不写会话库，经代理供应商时实测全部失败，无隐藏成本。纯 Python 零依赖轻量 Protobuf wire format 解码器（`_parse_proto_fields`）解析 SQLite 中的二进制 blob：`gen_metadata` 存储权威逐生成 usage（`uncached_input`、`cached_input`、`total_output`、`reasoning`，每响应一条；字段 2 = 未命中缓存输入、5 = 缓存命中、3 = 输出（= 9 思考 + 10 回复）。**口径**：`input_tokens` 只记未命中部分、缓存命中单列 `cache_read_input_tokens`（`total_input` 才是二者之和）——2026-10-23 前曾把二者之和记进 `input_tokens`，缓存被计两遍且按全价计费，实测单会话 Token ×2、成本 ×7.7，修正后与 cc-switch 逐位一致；`peak_input_tokens` 仍取逐生成全量输入），`steps` 表存储事件流（`step_type==14` 用户消息/斜杠命令/纠错检测；`step_type==15` 工具调用，映射 `view_file`→Read, `write_to_file`→Write, `replace_file_content`→Edit, `run_command`→Bash 等；`step_type==132` 工具结果输出与 exit code 检测）。LOC 回放：Write 与 Edit 经同一 `_LocAccumulator` 计算真实净增代码行与自返工率。能力映射：支持 reasoning/reasoning_ratio/slash_commands/web_searches，Gemini 无独立缓存写计费因此 cache_write 标注不适用。只读模式（`mode=ro`）连接 SQLite 避免干扰正在运行的 CLI 进程。⑧**ccusage #2026/#2027 三倍计数不适用**：同一 turn 的 usage 在库内有三份拷贝（`gen_metadata` field 4 + 同行 `retry_infos[0]` 镜像 + `steps` metadata field 9 `model_usage`），Gemini 经 ACP/localharness 时 usage 无 `response_id` 等 id 字段，ccusage 因同时读三处、去重失效而计 3x；TCER 只读 field 4（不解析 `retry_infos`；`steps` 只读 stype 23 压缩用量），按 issue 实际行形态合成复现（`tests/test_antigravity_reader.py::test_ccusage_2026_unkeyed_mirror_copies_count_once`）计 1x，无需行间去重；若将来读 `steps` 的 `model_usage` 或 `retry_infos`，必须先补去重。
 
-<a id="workbuddy"></a>
-### 原 AGENTS #34 WorkBuddy 数据格式与按目录项目级自动聚合（WorkBuddy / CodeBuddy）
-
-- 会话为 JSONL 流（默认 `~/.workbuddy` 或 `WORKBUDDY_DIR`/`WORKBUDDY_SESSIONS_DIR`）。行类型含：
-  - ①`session-meta` 与 `ai-title`（取末行权威标题；无则提取首条用户原话）；
-  - ②`message`（用户提问自动剔除 `<system-reminder>` 注入块、格式化 `<message_quote>` 引用、解开 `<user_query>` 纯净文本；助手文本响应）；
-  - ③`reasoning`（思考过程，提取 `rawContent` 或 `providerData.reasoning`）；
-  - ④`function_call`（每个步骤在 `providerData.rawUsage` 中携带权威 usage，按 `messageId` 去重累加，模型名归一到 `pricing` 表；工具映射含 `PowerShell`/`Bash`/`Read`/`Edit`/`Write`/`Grep`/`Glob`/`ToolSearch`/`present_files`/`DeferExecuteTool`）；
-  - ⑤`function_call_result`（执行状态与输出）。LOC：`Edit` 与 `Write` 经同一 `_LocAccumulator` 回放计算净增代码行与自返工率。
-  - **缓存输入口径**：`rawUsage.prompt_tokens` / `usage.inputTokens` 均包含缓存命中 Token；reader 以 `max(0, 原始输入 - cached_tokens)` 计非缓存输入，缓存另计，峰值上下文仍包含缓存。
-  - **按目录项目级自动聚合**：WorkBuddy 会话在运行时通常以时间戳沙箱目录为 `cwd`（如 `WorkBuddy\2026-10-16-...`），直接按 `cwd` 聚合会导致每个会话散落成独立时间戳单项。`extract_project_dir_from_session` 深度分析会话中工具操作与命令行中触及的业务文件路径，排除 WorkBuddy 沙箱和全局记忆目录后，提取各路径的最深共同业务工程根（如 `E:\slg`）；在项目发现（`list_project_refs`）时将同一真实工程目录下的所有会话自动合并归集进同一个 `ProjectRef`（`key="E--slg"`, `display_name="slg"`, `cwd="E:\slg"`），实现跨沙箱会话在项目级别的自动聚合与指标统算。
-
 - **omp 模型归属补充**（旧 AGENTS #26）：模型仅在产生真实 Token 的助手回合计入 `u.models`，避免初始切换或 400 报错的 0-token 模型变成看板「隐身模型」；全空会话回退当前模型。
 
 ## 历史与教训（数据源与 LOC）
@@ -455,6 +442,6 @@ Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-ag
 - **辅助用量别硬并**：omp `model_usage`、Pi 的 `compaction.usage` 等主对话外用量，并入会破坏 audit 的 `turn_stats_match_total`/`all_models_priced`，需先加辅助用量字段再谈。
 - **别为了「数字好看」换口径**：Claude `turn_duration` 是整轮墙钟，不能用来算输出吞吐（`output_tps` 对 Claude 显示「不适用」）；`totalCostUSD` 取会话内最大值而非末条/求和（实测有非单调样本）。「不适用」比一个误导性的数字诚实。
 - **脆弱的反解不要用**：Claude 项目目录编码把 `.`/空格折叠成 `-` 有损，不能从 key 反解 cwd，必须读会话 meta；读不到就不合并（宁可不合并，不错合并）。
-- **格式漂移要有基线**：各源版本基线记在 `#version-baseline`，升级时先对照再改；无官方 schema 的源（WorkBuddy）必须在文档里声明「字段假设未经上游核实」。
+- **格式漂移要有基线**：各源版本基线记在 `#version-baseline`，升级时先对照再改；无官方 schema 的源必须在文档里声明「字段假设未经上游核实」。
 - **大小写/路径折叠**：Windows 盘符大小写会让同一项目出现两个目录，`project_hash_key` 在根内 casefold 折叠，跨根不合并。
 

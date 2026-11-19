@@ -72,7 +72,7 @@ def _get_baselines_per_project() -> dict[str, dict]:
 
 
 def _get_baselines_per_source() -> dict[str, dict]:
-    """逐数据源个人基准（可选）。键为 source（claude/codex/opencode/omp/pi/antigravity/workbuddy），
+    """逐数据源个人基准（可选）。键为 source（claude/codex/opencode/omp/pi/antigravity），
     值 {tcer,cpe}。缺失时返回空 dict——回退到全局 baselines。"""
     return _load_composite_config().get("baselines_per_source", {}) or {}
 

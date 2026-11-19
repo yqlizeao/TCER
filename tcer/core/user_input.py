@@ -126,7 +126,7 @@ def classify_text_blocks(texts: list[str], *, images: int = 0,
 
 
 def classify_claude_record(obj: dict) -> UserInput | None:
-    """Claude（及同构的 WorkBuddy 以外）JSONL 行 → UserInput；非 user 行返回 None。"""
+    """Claude JSONL 行 → UserInput；非 user 行返回 None。"""
     msg = obj.get("message")
     if not isinstance(msg, dict) or msg.get("role") != "user":
         return None
@@ -180,7 +180,7 @@ def read_user_messages_timed(source: str | None, path: Path | None,
                              session_id: str | None = None) -> list[tuple[str, int | None]]:
     """同 :func:`read_user_messages`，每条附发出时间（epoch ms；源未记录为 None）。
 
-    时间取自该条用户消息自身的记录（Claude/Codex/omp/pi/WorkBuddy 行 ``timestamp``、
+    时间取自该条用户消息自身的记录（Claude/Codex/omp/pi 行 ``timestamp``、
     OpenCode ``message.time_created``、Antigravity step 元数据），不是回合推算。
     各源 ``read_user_messages`` 都由其 ``read_user_messages_timed`` 派生，正文与
     条数逐条一致；两个入口共用 :func:`_dispatch` 的同一套源分发与主会话边界。
@@ -211,9 +211,6 @@ def _dispatch(source: str | None, path: Path | None, session_id: str | None,
     if src == "antigravity":
         from tcer.core import antigravity_reader
         return getattr(antigravity_reader, fn)(path)
-    if src in ("workbuddy", "codebuddy"):
-        from tcer.core import workbuddy_reader
-        return getattr(workbuddy_reader, fn)(path)
     from tcer.core import reader
     try:
         _, main, _ = reader.session_artifacts(path)

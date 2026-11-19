@@ -542,7 +542,7 @@ def test_export_filename_and_resume_commands():
     assert T.resume_command("pi", "x", Path("C:/a b/s.jsonl")) == f"pi --session '{Path('C:/a b/s.jsonl')}'"
     assert T.resume_command("pi", "x", "/it's/s.jsonl") == "pi --session '/it'\\''s/s.jsonl'"
     assert T.resume_command("antigravity", "cid") == "agy --conversation=cid"
-    assert T.resume_command("workbuddy", "w") is None
+    assert T.resume_command("nope", "w") is None
     assert T.resume_command("claude", None) is None
     cmd = "claude --resume abc"
     assert T.cd_resume_command("/p/it's", cmd) == "cd '/p/it'\\''s' && claude --resume abc"
@@ -1723,45 +1723,6 @@ def test_antigravity_parallel_tool_calls_fifo_pairing_and_path_args(tmp_path):
     assert tools[1].call.title == "C:/GitHub/TCER/b.py" and tools[1].result.preview == "content of b.py"
     assert tools[2].call.kind == "edit" and tools[2].call.title == "C:/GitHub/TCER/b.py"
     assert tools[2].call.diff["added"] == 2 and tools[2].call.diff["removed"] == 1
-
-
-# =========================================================================== #
-# WorkBuddy adapter
-# =========================================================================== #
-def test_workbuddy_adapter(tmp_path):
-    lines = [
-        {"type": "message", "role": "user", "id": "m1", "timestamp": 1_790_000_000_000,
-         "content": [{"text": "<system-reminder>ctx</system-reminder>实现登录功能"}]},
-        {"type": "reasoning", "timestamp": 1_790_000_001_000, "rawContent": [{"text": "先想想"}]},
-        {"type": "function_call", "name": "write_file", "callId": "w1", "timestamp": 1_790_000_002_000,
-         "arguments": json.dumps({"path": "a.py", "content": "x\ny"})},
-        {"type": "function_call_result", "name": "write_file", "callId": "w1", "status": "completed",
-         "timestamp": 1_790_000_003_000, "output": {"text": "written"}},
-        {"type": "function_call", "name": "run_terminal", "callId": "r1", "timestamp": 1_790_000_004_000,
-         "arguments": {"command": "pytest"}},
-        {"type": "function_call_result", "name": "run_terminal", "callId": "r1", "status": "completed",
-         "timestamp": 1_790_000_005_000, "output": "Error: boom"},
-        {"type": "message", "role": "assistant", "timestamp": 1_790_000_006_000,
-         "content": [{"text": "已完成"}]},
-        {"type": "message", "role": "user", "timestamp": 1_790_000_007_000,
-         "content": [{"text": "<system-reminder>only</system-reminder>"}]},
-    ]
-    d = tmp_path / "wb"
-    d.mkdir()
-    p = d / "sess.jsonl"
-    p.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in lines) + "\n", encoding="utf-8")
-    tr = load("workbuddy", p)
-    from tcer.core import workbuddy_reader as wb
-    assert tr.question_count == 1 == len(wb.read_user_messages(p)) == len(UI.read_user_messages("workbuddy", p))
-    assert tr.resume_command is None and tr.style == "generic"
-    t = tr.turns[0]
-    assert t.question.text == "实现登录功能" and t.final.text == "已完成"
-    tools = [s for s in t.steps if s.kind == "tool"]
-    assert tools[0].call.kind == "write" and tools[0].call.title == "a.py" and tools[0].call.diff["added"] == 2
-    assert tools[0].status == "success" and tools[0].result.preview == "written"
-    assert tools[1].call.kind == "shell" and tools[1].status == "error"
-    assert [s.kind for s in t.steps][0] == "thinking"
-    assert T.load_transcript("codebuddy", p, use_cache=False, with_usage=False).source == "workbuddy"
 
 
 # =========================================================================== #

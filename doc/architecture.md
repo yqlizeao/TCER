@@ -10,8 +10,7 @@
 | `tcer/core/omp_reader.py` | omp（Oh My Pi）`~/.omp/agent/sessions` JSONL 发现/解析、header cwd 分组、`message.usage` 单响应聚合、子代理 `<stem>/` 折叠、edit/write LOC |
 | `tcer/core/pi_reader.py` | Pi（earendil-works/pi）`~/.pi/agent/sessions` 薄壳，复用 omp 解析层（`durationMs`、`provider`+`modelId`、`cacheWrite1h`/`reasoning`） |
 | `tcer/core/antigravity_reader.py` | Antigravity（CLI / 桌面 App / IDE）`~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide` 会话发现/解析、新旧两套工具参数名 LOC |
-| `tcer/core/workbuddy_reader.py` | WorkBuddy / CodeBuddy 会话发现/解析与按目录项目聚合 |
-| `tcer/core/paths.py` | 定位 `~/.claude`（含 `.zclaude` 等自定义 `CLAUDE_CONFIG_DIR` 兄弟目录自动识别）/ `~/.codex` / `~/.local/share/opencode` / `~/.omp` / `~/.pi` / `~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide` / WorkBuddy 根、项目哈希编解码、统一项目引用 |
+| `tcer/core/paths.py` | 定位 `~/.claude`（含 `.zclaude` 等自定义 `CLAUDE_CONFIG_DIR` 兄弟目录自动识别）/ `~/.codex` / `~/.local/share/opencode` / `~/.omp` / `~/.pi` / `~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide` 根、项目哈希编解码、统一项目引用 |
 | `tcer/core/loc.py` | git-free 代码量统计：session_loc（会话内工具调用回放，含 originalFile F1 修正；不读磁盘） |
 | `tcer/core/metrics.py` | 全部公式：TCER/CHR/CPE/CAF/TTAF/NTCER/churn + 综合效率分 v2（`score_axes`/`efficiency_score`）+ 评级 + 逐模型成本 |
 | `tcer/core/pricing.py` | 逐模型计价：从 `tcer/config/model_pricing.json`（≈350 模型，当前 347 条）解析 $/MTok |
@@ -28,12 +27,12 @@
 
 ### 非 Claude 源的 SourceAdapter
 
-Codex / OpenCode / omp / Pi / Antigravity / WorkBuddy 共享 `analyze._analyze_source_project` 一条「逐会话 → 聚合」流水线；源差异收敛为 `_SourceAdapter` 的六个钩子：`resolve`（项目解析）、`sessions`（会话句柄枚举——Codex/omp/Pi 等为文件 Path，OpenCode 为 session id）、`read_meta`、`usage_of`、`loc_of`、`session_key`（可选 `subagents_of` 统计折叠子代理数，omp 用之）。file_cache 的失效 key 在钩子内构造（如 Codex / omp 必须并入子代理文件签名，否则子代理追写后折叠结果不失效）。**新增数据源 = 实现一个 adapter**。Claude 因子代理折叠与 cwd-keyed 扫描保持独立路径，但复用 `_mk_report` / `_MetricCtx` / LOC 聚合等共享件。
+Codex / OpenCode / omp / Pi / Antigravity 共享 `analyze._analyze_source_project` 一条「逐会话 → 聚合」流水线；源差异收敛为 `_SourceAdapter` 的六个钩子：`resolve`（项目解析）、`sessions`（会话句柄枚举——Codex/omp/Pi 等为文件 Path，OpenCode 为 session id）、`read_meta`、`usage_of`、`loc_of`、`session_key`（可选 `subagents_of` 统计折叠子代理数，omp 用之）。file_cache 的失效 key 在钩子内构造（如 Codex / omp 必须并入子代理文件签名，否则子代理追写后折叠结果不失效）。**新增数据源 = 实现一个 adapter**。Claude 因子代理折叠与 cwd-keyed 扫描保持独立路径，但复用 `_mk_report` / `_MetricCtx` / LOC 聚合等共享件。
 
 
 ## omp 支持
 
-omp（[oh-my-pi](https://omp.sh)）会话按 `~/.omp/agent/sessions/<dir-encoded>/<ts>_<sessionId>.jsonl` 发现（`PI_CODING_AGENT_DIR` 重定位 agent 基目录、`PI_CONFIG_DIR` 重定位 `~/.omp` 根），按 header `cwd` 聚合为项目。GUI 默认统一展示 Claude/Codex/OpenCode/omp/Pi/Antigravity/WorkBuddy 七源混合。
+omp（[oh-my-pi](https://omp.sh)）会话按 `~/.omp/agent/sessions/<dir-encoded>/<ts>_<sessionId>.jsonl` 发现（`PI_CODING_AGENT_DIR` 重定位 agent 基目录、`PI_CONFIG_DIR` 重定位 `~/.omp` 根），按 header `cwd` 聚合为项目。GUI 默认统一展示 Claude/Codex/OpenCode/omp/Pi/Antigravity 六源混合。
 
 omp 的权威日志是该 JSONL：一个有序 `SessionEntry` 事件流。Token 用量来自每条 assistant 消息的 `usage`（`{input,output,cacheRead,cacheWrite,totalTokens,cost:{total}}`，语义同 Anthropic）——一次 API 响应一个，无 Claude 多行重复，直接累加；`contextSnapshot.promptTokens` 作 peak_input；`duration`/`ttft` 回填逐回合时间线与 TTFT（含 p95 样本）。`model_change.model` 为 `"provider/modelId"`，`pricing.normalize` 经 `rsplit("/")` 剥前缀后按模型分桶。
 
@@ -74,7 +73,7 @@ tcer/gui/
 2. **GUI 全中文、代码用缩写**：界面显示完整中文（如「缓存命中率」而非「CHR」），仅 TCER 保留英文缩写。代码标识符可用缩写（chr/cpe/ntcer…）。
 3. **运行方式**：`python -m tcer`（从仓库根目录，绿色免安装）。
 4. **库层不动**：tcer/core/ 下模块有完整测试覆盖，改动需谨慎。GUI 改动集中在 tcer/gui/。
-5. **纯离线**：不依赖任何版本管理工具（git 等）、不做任何联网操作。所有数据来自本地 `~/.claude/`、`~/.codex/`、`~/.local/share/opencode/`、`~/.omp/`、`~/.pi/`、`~/.gemini/antigravity-cli/` + `antigravity/` + `antigravity-ide/` 与 WorkBuddy 目录。
+5. **纯离线**：不依赖任何版本管理工具（git 等）、不做任何联网操作。所有数据来自本地 `~/.claude/`、`~/.codex/`、`~/.local/share/opencode/`、`~/.omp/`、`~/.pi/`、`~/.gemini/antigravity-cli/` + `antigravity/` + `antigravity-ide/` 目录。
 
 ## Codex 支持
 
@@ -157,14 +156,14 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 <a id="source-adapter"></a>
 ### 原 #21 SourceAdapter
 
-- 非 Claude 各源（Codex/OpenCode/omp/pi/antigravity/workbuddy）共用 `analyze._analyze_source_project` 骨架 + `_SourceAdapter` 钩子（resolve/sessions/read_meta/usage_of/loc_of/session_key），file_cache key 构造在钩子内（omp/Codex 必须并入子代理文件签名，否则子代理追写后折叠结果不失效）。新增数据源 = 写一个 adapter。共享小工具在 `core/parse_util`（as_int/first_str）。
+- 非 Claude 各源（Codex/OpenCode/omp/pi/antigravity）共用 `analyze._analyze_source_project` 骨架 + `_SourceAdapter` 钩子（resolve/sessions/read_meta/usage_of/loc_of/session_key），file_cache key 构造在钩子内（omp/Codex 必须并入子代理文件签名，否则子代理追写后折叠结果不失效）。新增数据源 = 写一个 adapter。共享小工具在 `core/parse_util`（as_int/first_str）。
 
 <a id="coverage-audit"></a>
 ### 覆盖与守恒审计（`core/coverage.py`，2026-10-27）
 
 闭环审计用同一套解析逻辑重算，只能证明自洽；格式漂移时解析器静默跳过、自洽检查照样全绿（agy 并行调用漏计 490 次即此类）。覆盖审计补这一块：直接 `json.loads` 原始行（不经 reader）普查每个维度的实际取值，逐项对照登记表——**已处理** / **已知忽略（必须写理由）** / **未知**；计价相关字段另有取值白名单（白名单外 = **取值异常**）。守恒检查：结果↔调用、有用量行↔message.id、快照输入只增、`iterations` 单项、子代理↔父会话、reader 工具调用数↔独立计数（warn 失败判 FAIL；进行中会话的未完成调用、请求↔回复差额等如实列为 info）。上游升级出现新类型/新字段 → 报告点名「未知」并给首见文件:行号，处理后登记入表、提升 `CLAUDE_CENSUS_VERSION`。反向测试 `tests/test_coverage.py` 逐类构造破损数据断言被抓到。
 
-- **Antigravity**（2026-11-15，`antigravity_coverage` / `--source antigravity`，`--source all` 两源一起跑）：普查只用 wire 解码器 `_parse_proto_fields` + 固定字段路径，不经 reader 的解释逻辑。维度：会话库表 / 摘要库表 / step 类型 / 状态（132 单列）/ `gen_metadata` 字段号 / usage 字段号 / 原始工具名（映射表 + 已知透传表 + `mcp_*` 拆分规则判定，未登记工具报未知——写文件类新工具会漏计 LOC）。守恒：输出 = 思考 + 回复、提问正文不得是纯 UUID（防元数据误入回归）、reader 工具调用数 ↔ 独立计数（step 15 字段 20.7 ∪ 132 回显 5.4 按 call id）、压缩步骤带用量、有用量的生成带响应 id、子代理父库存在；版本取各根 `log/*.log` 的 language server 版本，对照 `ANTIGRAVITY_CENSUS_VERSIONS`（按端分别登记）。其余源（Codex / OpenCode / omp / Pi / WorkBuddy）仍待按同一模式补登记表。
+- **Antigravity**（2026-11-15，`antigravity_coverage` / `--source antigravity`，`--source all` 两源一起跑）：普查只用 wire 解码器 `_parse_proto_fields` + 固定字段路径，不经 reader 的解释逻辑。维度：会话库表 / 摘要库表 / step 类型 / 状态（132 单列）/ `gen_metadata` 字段号 / usage 字段号 / 原始工具名（映射表 + 已知透传表 + `mcp_*` 拆分规则判定，未登记工具报未知——写文件类新工具会漏计 LOC）。守恒：输出 = 思考 + 回复、提问正文不得是纯 UUID（防元数据误入回归）、reader 工具调用数 ↔ 独立计数（step 15 字段 20.7 ∪ 132 回显 5.4 按 call id）、压缩步骤带用量、有用量的生成带响应 id、子代理父库存在；版本取各根 `log/*.log` 的 language server 版本，对照 `ANTIGRAVITY_CENSUS_VERSIONS`（按端分别登记）。其余源（Codex / OpenCode / omp / Pi）仍待按同一模式补登记表。
 
 <a id="guard-tests"></a>
 ### 原 #22 护栏测试

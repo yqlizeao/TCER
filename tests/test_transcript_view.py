@@ -457,10 +457,10 @@ def test_resume_button_disabled_with_reason_when_no_command(root, app, tmp_path,
     p = _write_session(tmp_path, n_filler=1)
     win = _right_click_open(app, root, monkeypatch, [_report(p)])
     assert _ready(root, win)
-    tr2 = dataclasses.replace(win._tr, resume_command=None, source="workbuddy")
+    tr2 = dataclasses.replace(win._tr, resume_command=None, source="nope")
     win._fill_info(tr2)
     assert str(win._resume_btn.cget("state")) == "disabled"
-    assert "WorkBuddy" in win._reason_lbl.cget("text") and win._reason_lbl.winfo_manager()
+    assert "无法恢复" in win._reason_lbl.cget("text") and win._reason_lbl.winfo_manager()
 
 
 def test_prefs_persist_via_controller_dict(root, app, tmp_path, monkeypatch):

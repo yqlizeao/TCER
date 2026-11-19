@@ -218,7 +218,6 @@ def _read_conversation(report: SessionReport) -> list[dict]:
         opencode_reader,
         pi_reader,
         reader,
-        workbuddy_reader,
     )
 
     meta = report.meta
@@ -239,8 +238,6 @@ def _read_conversation(report: SessionReport) -> list[dict]:
         "omp": omp_reader.read_conversation,
         "pi": pi_reader.read_conversation,
         "antigravity": antigravity_reader.read_conversation,
-        "workbuddy": workbuddy_reader.read_conversation,
-        "codebuddy": workbuddy_reader.read_conversation,
     }.get(source, reader.read_conversation)
 
     paths = list(getattr(meta, "session_paths", ()) or ())

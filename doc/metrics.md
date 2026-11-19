@@ -223,7 +223,7 @@ Claude 缓存写按 TTL 分档：1h 档单价 = 5m 档 × 1.6（`CACHE_1H_PREMIU
 借鉴 cc-switch「估算速度」（纯离线、从会话日志推算；代理实测的「精确速度」TCER 拿不到）。
 
 - **定义**：`est_output_tps = Σ est_gen_output_tokens ÷ (Σ est_gen_duration_ms / 1000)`，单位 token/秒，G2 组，越高越快。耗时**含首字等待**，所以低于代理实测的纯生成速度，两者不可直接比；仅作同口径横向参考。
-- **逐响应样本门槛**（`TokenUsage.add_est_gen_sample`，常量见 `models.EST_*`）：输出 ≥ 200 token 且耗时 ≥ 1s，且耗时落在 100ms–1h（再长多半夹了休眠/重试）。聚合一律 Σ/Σ（`est_gen_*` 两个计数字段可加，`merge` 直接求和），**不做逐条平均**。无合格样本 → None（显示 "-"）；数据源根本不产生（Antigravity/WorkBuddy）→「不适用」。
+- **逐响应样本门槛**（`TokenUsage.add_est_gen_sample`，常量见 `models.EST_*`）：输出 ≥ 200 token 且耗时 ≥ 1s，且耗时落在 100ms–1h（再长多半夹了休眠/重试）。聚合一律 Σ/Σ（`est_gen_*` 两个计数字段可加，`merge` 直接求和），**不做逐条平均**。无合格样本 → None（显示 "-"）；数据源根本不产生（Antigravity）→「不适用」。
 - **各源耗时口径**：
   - **Claude**（`reader.scan_session` 单次扫描内采集，独立路径 `aggregate_usage` 不涉及）：起点 = 该响应首块沿 `parentUuid` 向上第一个**非 attachment** 行的时间戳（最多 32 跳；`isMeta` 行也进链，否则起点解析不出）；终点 = 同 `message.id` 各行最晚时间戳；要求某一行带 `stop_reason` 且最先见到的块 `apiBlockIndex==0`（旧日志无此字段按首块处理）；输出取 `booked[mid].o`（流式快照补差后的最终值）。按 `message.id` 一个样本，rewind 重放同 id 不重复计，终点取所有重复行最晚值（与 cc-switch 同；重放行若时间戳更晚会拉长耗时，靠 1h 上限兜底）。子代理文件各自在文件内解析链，merge 求和。
   - **Codex**（`codex_reader._RequestTimer`，移植 cc-switch `RequestTimer` 的耗时部分）：起点 = 本次请求第一个输出项前最近的「起点行」（上次 token_count / 工具结果 / user·developer 消息 / turn_context）；终点 = 同请求的 `token_usage_record`（新版），否则 token_count 时刻，若 token_count 紧跟工具结果（等工具跑完才写，差 ≤100ms）则取最后一个输出项时刻；旧布局补写在上一 token_count 之后（≤100ms）的输出项忽略；`task_started`/`turn_aborted` 作废未结算请求。输出 = 该 token_count 的 total 差分输出增量；重复投递的 token_count（差分为 0）不结算。

@@ -31,7 +31,7 @@ const SOURCE_INFO = {
   pi: { name: "Pi", icon: "assets/pi.png" },
   opencode: { name: "OpenCode", icon: "assets/opencode.png" },
   antigravity: { name: "Antigravity", icon: "assets/antigravity.png" },
-  workbuddy: { name: "WorkBuddy", icon: "assets/workbuddy.png" },
+  workbuddy: { name: "WorkBuddy", icon: "assets/workbuddy.png" },  // 客户端已移除 WorkBuddy 数据源；保留以显示历史上传
   codebuddy: { name: "WorkBuddy", icon: "assets/workbuddy.png" },
 };
 function getSourceInfo(source) {

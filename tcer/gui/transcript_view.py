@@ -1793,8 +1793,7 @@ class TranscriptWindow:
         self._resume_menu_btn.configure(bg=act_bg)
         self._set_btn_state(self._resume_menu_btn, has_cmd)
         if not has_cmd:
-            why = ("WorkBuddy 暂无恢复命令" if tr.source == "workbuddy"
-                   else "此会话无法恢复（缺少会话 ID 或数据源不支持）")
+            why = "此会话无法恢复（缺少会话 ID 或数据源不支持）"
             self._reason_lbl.configure(text=why)
             self._reason_lbl.pack(fill="x", padx=theme.PAD_L, pady=(0, theme.PAD_S))
 
