@@ -91,6 +91,24 @@ def test_test_file_detection():
     assert not _is_test_file("/repo/src/contest.py")  # 不误伤普通文件
 
 
+@pytest.mark.parametrize("path,expected", [
+    ("tests/helpers.py", True), ("test/foo.py", True),
+    ("test_x.py", True), ("src/test_x.py", True),
+    ("foo_test.py", True), ("foo_tests.py", True),
+    ("foo.test.ts", True), ("foo.test.js", True),
+    ("foo.test.tsx", True), ("foo.test.jsx", True),
+    ("spec/helpers.rb", True), ("TESTS/helpers.py", True),
+    ("contest/x.py", False), ("latest.py", False),
+    ("attestation/x.py", False), ("src/testing_utils.py", False),
+    ("foo_test.go", False), ("__tests__/x.js", False),
+    ("", False),
+])
+@pytest.mark.parametrize("prefix", ["", "/repo/", "C:/repo/"])
+@pytest.mark.parametrize("separator", ["/", "\\"])
+def test_test_file_path_boundaries(path, expected, prefix, separator):
+    assert _is_test_file((prefix + path).replace("/", separator)) is expected
+
+
 def test_docs_dir_code_files_are_not_doc():
     """docs/ 目录下的源码（组件库文档站常见）是代码不是散文文档。"""
     from tcer.core.loc import _is_doc_file

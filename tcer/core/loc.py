@@ -96,11 +96,11 @@ _EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
 # Path patterns for test files (match any of these regexes)
 _TEST_PATTERNS = [
-    r'/tests?/',           # /test/ or /tests/
+    r'(?:^|/)tests?/',     # /test/ or /tests/
     r'_tests?\.py$',       # foo_test.py
-    r'/test_[^/]+\.py$',   # test_foo.py（pytest 前缀惯例）
+    r'(?:^|/)test_[^/]+\.py$',   # test_foo.py（pytest 前缀惯例）
     r'\.test\.(ts|js|tsx|jsx)$',  # foo.test.ts
-    r'/spec/',             # RSpec style
+    r'(?:^|/)spec/',       # RSpec style
 ]
 
 # 预编译：热路径上每工具调用都跑 _is_test_file/_is_doc_file，字符串 pattern
