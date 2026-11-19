@@ -773,3 +773,51 @@ def test_synthetic_user_parts_are_not_user_messages(tmp_path):
     assert msgs and not any("system-reminder" in m for m in msgs)
     convo = opencode_reader.read_conversation(db, "ses-1")
     assert not any("secret" in (b.get("text") or "") for b in convo)
+
+
+def _add_message(db: Path, mid: str, t: int, role: str, parts: list[tuple[str, dict]]):
+    con = sqlite3.connect(db)
+    con.execute("insert into message values (?, ?, ?, ?)", (mid, "ses-1", t, _j({"role": role})))
+    for i, (pid, payload) in enumerate(parts, 1):
+        con.execute("insert into part values (?, ?, ?, ?, ?)", (pid, "ses-1", mid, t + i, _j(payload)))
+    con.commit()
+    con.close()
+
+
+def _step(inp: int, out: int) -> dict:
+    return {"type": "step-finish",
+            "tokens": {"input": inp, "output": out, "reasoning": 0, "cache": {"read": 0, "write": 0}}}
+
+
+def _session_with_injected_user_rows(tmp_path) -> Path:
+    """真人 2 问，夹着注入上下文 / 压缩标记 / 自动续接 / 忽略片段 4 条非提问 user 行。"""
+    db = _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
+    con = sqlite3.connect(db)
+    con.execute("insert into part values (?, ?, ?, ?, ?)",
+                ("p-a1-step", "ses-1", "msg-assistant", 1782720002010, _j(_step(100, 10))))
+    con.commit()
+    con.close()
+    _add_message(db, "m-ctx", 1782720003000, "user", [("p-ctx", {
+        "type": "text", "synthetic": True,
+        "text": "<system-reminder>Note: The user opened the file app.py</system-reminder>"})])
+    _add_message(db, "m-compact", 1782720004000, "user", [("p-compact", {"type": "compaction", "auto": True})])
+    _add_message(db, "m-cont", 1782720005000, "user", [("p-cont", {
+        "type": "text", "synthetic": True, "text": "Continue if you have next steps"})])
+    _add_message(db, "m-ign", 1782720006000, "user", [("p-ign", {
+        "type": "text", "ignored": True, "text": "被忽略的片段"})])
+    _add_message(db, "m-user2", 1782720007000, "user", [("p-u2", {"type": "text", "text": "再补测试"})])
+    _add_message(db, "m-a2", 1782720008000, "assistant", [("p-a2-step", _step(200, 20))])
+    return db
+
+
+def test_injected_user_rows_are_not_counted_as_user_msgs(tmp_path):
+    db = _session_with_injected_user_rows(tmp_path)
+    questions = opencode_reader.read_user_messages(db, "ses-1")
+    assert questions == ["实现 OpenCode 支持", "再补测试"]
+    assert opencode_reader.aggregate_usage(db, "ses-1").user_msgs == len(questions)
+
+
+def test_turn_stats_user_turn_follows_real_questions(tmp_path):
+    db = _session_with_injected_user_rows(tmp_path)
+    u = opencode_reader.aggregate_usage(db, "ses-1")
+    assert [(t.output_tokens, t.user_turn) for t in u.turn_stats] == [(10, 1), (20, 2)]
