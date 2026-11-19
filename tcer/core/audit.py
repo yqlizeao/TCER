@@ -969,13 +969,17 @@ def _coverage_main(args) -> int:
     """``--coverage``：原始数据普查 + 登记表分类 + 守恒检查（见 core/coverage.py）。"""
     from tcer.core import coverage
     runners = {"claude": coverage.claude_coverage,
+               "codex": coverage.codex_coverage,
+               "opencode": coverage.opencode_coverage,
+               "omp": coverage.omp_coverage,
+               "pi": coverage.pi_coverage,
                "antigravity": coverage.antigravity_coverage}
     if args.source == "all":
         sources = list(runners)
     elif args.source in runners:
         sources = [args.source]
     else:
-        print(f"--coverage 支持 claude / antigravity / all（收到 --source {args.source}）",
+        print(f"--coverage 支持 {' / '.join(runners)} / all（收到 --source {args.source}）",
               file=sys.stderr)
         return 2
     reports = []

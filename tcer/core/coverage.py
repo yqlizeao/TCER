@@ -807,3 +807,820 @@ def antigravity_coverage(roots: Iterable[Path] | None = None, *,
             f"reader 工具调用数与独立计数不符的会话库 {len(reader_mismatch)} 个",
             reader_mismatch[:_EXAMPLES_PER_ISSUE]))
     return rep
+
+
+# =========================================================================== #
+# Codex 覆盖审计（2026-11-19 起；rollout JSONL / .jsonl.zst）
+# =========================================================================== #
+# 普查已覆盖到的最高版本：登记表按此版本及以下的真实数据整理。
+CODEX_CENSUS_VERSION = "0.163"
+
+CODEX_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
+    "type": {
+        "session_meta": (_H, "会话头：id/cwd/cli_version/子代理标记"),
+        "turn_context": (_H, "逐回合模型/窗口/权限"),
+        "event_msg": (_H, "运行时事件：按 event 维度分派"),
+        "response_item": (_H, "模型输出项：按 item 维度分派"),
+        "token_usage_record": (_H, "逐请求 usage 快照（估速终点）"),
+        "compacted": (_H, "压缩行"),
+        "ghost_snapshot": (_I, "undo 快照，无用量"),
+        "turn_diff": (_I, "diff 补丁存档（patch_apply_end 之外另计），无用量"),
+        "list_mcp_templates": (_I, "MCP 目录列表，无用量"),
+    },
+    "event": {  # event_msg payload.type
+        "user_message": (_H, "提问（user_input SSOT 一路；与 response_item 去重）"),
+        "task_started": (_H, "回合开始（权威回合边界）"),
+        "turn_started": (_H, "回合开始别名"),
+        "task_complete": (_H, "回合结束：耗时/TTFT"),
+        "turn_complete": (_H, "回合结束别名"),
+        "turn_aborted": (_H, "中断回合：aborted/abort_reasons"),
+        "context_compacted": (_H, "压缩事件计数"),
+        "web_search_end": (_H, "网页搜索次数兜底"),
+        "patch_apply_end": (_H, "补丁应用结果（LOC 兜底来源）"),
+        "token_count": (_H, "用量差分权威（total_token_usage）"),
+        "agent_message": (_I, "与 response_item.message 重复，仅作事件边界"),
+        "agent_reasoning": (_I, "与 reasoning 项重复，防双计忽略"),
+        "agent_reasoning_delta": (_I, "流式增量，存档去重后忽略"),
+        "agent_message_delta": (_I, "流式增量，存档去重后忽略"),
+        "exec_command_begin": (_I, "执行过程事件，无用量"),
+        "exec_command_end": (_I, "执行过程事件，无用量"),
+        "exec_command_output_delta": (_I, "流式输出增量"),
+        "exec_output_delta": (_I, "流式输出增量"),
+        "patch_apply_begin": (_I, "补丁开始事件"),
+        "web_search_begin": (_I, "搜索开始事件"),
+        "turn_aborted_notification": (_I, "中断通知"),
+        "task_complete_notification": (_I, "完成通知"),
+    },
+    "item": {  # response_item payload.type
+        "message": (_H, "用户/助手消息（按 role 维度分派）"),
+        "function_call": (_H, "工具调用"),
+        "function_call_output": (_H, "工具结果（exit code 权威）"),
+        "custom_tool_call": (_H, "自定义工具调用（同函数名映射）"),
+        "custom_tool_call_output": (_H, "自定义工具结果"),
+        "local_shell_call": (_H, "旧版 shell 调用 → Bash"),
+        "reasoning": (_H, "思考块计数"),
+        "web_search_call": (_H, "网页搜索"),
+        "item_reference": (_I, "跨项引用（item 重写器），无独立用量"),
+        "ghost_snapshot": (_I, "undo 快照，无用量"),
+    },
+    "role": {  # response_item message.role
+        "user": (_H, "提问（user_input SSOT 另一路；与 event 去重）"),
+        "assistant": (_H, "回复正文"),
+        "developer": (_I, "系统/权限前导，非真人输入"),
+        "system": (_I, "系统前导"),
+    },
+    "usage": {  # token_count.{last,total}_token_usage / token_usage_record.usage
+        "input_tokens": (_H, "输入（含缓存，按差分累加）"),
+        "cached_input_tokens": (_H, "缓存命中（input 子集）"),
+        "cache_write_input_tokens": (_H, "缓存写（input 子集，新版）"),
+        "output_tokens": (_H, "输出"),
+        "reasoning_output_tokens": (_H, "推理 Token（output 子集）"),
+        "total_tokens": (_I, "合计字段；差分按分量，不取它"),
+        "model_context_window": (_I, "窗口大小（_set_max 已消费）"),
+    },
+    "token_count": {  # token_count payload 顶层键
+        "info": (_H, "last/total_token_usage + model_context_window"),
+        "rate_limits": (_H, "配额峰值（primary/secondary）"),
+        "type": (_H, "固定 'token_count'"),
+    },
+}
+
+_CODEX_CALL_TYPES = ("function_call", "custom_tool_call", "local_shell_call")
+_CODEX_RESULT_TYPES = ("function_call_output", "custom_tool_call_output")
+
+
+def _codex_tool_status(name: str) -> tuple[str, str]:
+    from tcer.core import codex_reader as cr
+    if name in cr._CODEX_NAME_MAP:
+        return _H, f"映射为 {cr._CODEX_NAME_MAP[name]}"
+    if name in ("exec", "exec_command", "shell_command"):
+        return _H, "shell 命令经 _classify_shell_command 分派"
+    if name.startswith("mcp__") or name.startswith("mcp_"):
+        return _I, "MCP 原名计入工具画像（非读写类）"
+    return UNKNOWN, "未登记工具：若是写文件类会漏计 LOC，需判断"
+
+
+def codex_coverage(files: Iterable[Path] | None = None, *,
+                   cross_check_reader: bool = True) -> CoverageReport:
+    """Census raw Codex rollouts against :data:`CODEX_REGISTRY` + conservation checks."""
+    from tcer.core import codex_reader as cr
+    if files is None:
+        files = cr.discover_sessions()
+    rep = CoverageReport(source="codex", census_version=CODEX_CENSUS_VERSION)
+    tally = _Tally()
+
+    orphan_results: list[str] = []
+    pending_calls: list[str] = []
+    total_resets: list[str] = []
+    token_mismatch: list[str] = []
+    reader_mismatch: list[str] = []
+    no_session_meta: list[str] = []
+    missing_parent: list[str] = []
+    n_orphan = n_pending = n_reset = n_tok_bad = n_sub = 0
+    thread_ids: set[str] = set()
+    parents: dict[str, str] = {}  # thread_id -> parent_thread_id
+
+    for path in files:
+        rep.files += 1
+        uses: dict[str, str] = {}
+        results: set[str] = set()
+        prev_total: dict[str, int] = {}
+        expect = {k: 0 for k in cr._TOKEN_FIELDS}  # 独立重放的差分累加
+        saw_meta = False
+        try:
+            fh = cr._open_text(path)
+        except OSError:
+            continue
+        with fh:
+            for ln, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                rep.lines += 1
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    rep.bad_json += 1
+                    continue
+                if not isinstance(o, dict):
+                    continue
+                where = f"{path}:{ln}"
+                ver = ""
+                typ = o.get("type")
+                tally.add("type", typ, "", where)
+                pl = o.get("payload")
+                if not isinstance(pl, dict):
+                    continue
+                if typ == "session_meta":
+                    saw_meta = True
+                    ver = pl.get("cli_version") if isinstance(pl.get("cli_version"), str) else ""
+                    if ver and _vkey(ver) > _vkey(rep.max_version):
+                        rep.max_version = ver
+                    tid = _first = pl.get("id") or pl.get("session_id")
+                    if isinstance(tid, str) and tid:
+                        thread_ids.add(tid)
+                    par = pl.get("parent_thread_id")
+                    if isinstance(par, str) and par and isinstance(tid, str):
+                        parents[tid] = par
+                    elif isinstance(pl.get("source"), dict) and "subagent" in pl["source"]:
+                        n_sub += 1
+                if typ == "event_msg":
+                    tally.add("event", pl.get("type"), ver, where)
+                    if pl.get("type") == "token_count":
+                        for k in pl:
+                            if k != "type":
+                                tally.add("token_count", k, ver, where)
+                        info = pl.get("info")
+                        if isinstance(info, dict):
+                            for uk in info.get("last_token_usage") or {}:
+                                tally.add("usage", uk, ver, where)
+                            total = info.get("total_token_usage")
+                            if isinstance(total, dict):
+                                for uk in total:
+                                    tally.add("usage", uk, ver, where)
+                                # 独立重放差分算法（与 reader 同规则）
+                                delta = {k: cr._as_int(total.get(k)) - prev_total.get(k, 0)
+                                         for k in cr._TOKEN_FIELDS}
+                                if all(v >= 0 for v in delta.values()):
+                                    prev_total = {k: cr._as_int(total.get(k))
+                                                  for k in cr._TOKEN_FIELDS}
+                                    for k, v in delta.items():
+                                        expect[k] += v
+                                else:
+                                    n_reset += 1
+                                    if len(total_resets) < _EXAMPLES_PER_ISSUE:
+                                        total_resets.append(where)
+                                    prev_total = {k: cr._as_int(total.get(k))
+                                                  for k in cr._TOKEN_FIELDS}
+                                    last = info.get("last_token_usage")
+                                    if isinstance(last, dict):
+                                        for k in cr._TOKEN_FIELDS:
+                                            expect[k] += cr._as_int(last.get(k))
+                            else:
+                                last = info.get("last_token_usage")
+                                if isinstance(last, dict):
+                                    for k in cr._TOKEN_FIELDS:
+                                        expect[k] += cr._as_int(last.get(k))
+                    continue
+                if typ == "token_usage_record":
+                    us = pl.get("usage")
+                    if isinstance(us, dict):
+                        for uk in us:
+                            tally.add("usage", uk, ver, where)
+                    continue
+                if typ != "response_item":
+                    continue
+                pt = pl.get("type")
+                tally.add("item", pt, ver, where)
+                if pt == "message":
+                    tally.add("role", pl.get("role"), ver, where)
+                elif pt in _CODEX_CALL_TYPES:
+                    cid = pl.get("call_id") or pl.get("id")
+                    nm = pl.get("name")
+                    if pt == "local_shell_call":
+                        nm = "local_shell_call"
+                    if isinstance(nm, str) and nm:
+                        tally.add("tool", nm, ver, where)
+                    if isinstance(cid, str) and cid:
+                        uses[cid] = str(nm or pt)
+                elif pt in _CODEX_RESULT_TYPES:
+                    cid = pl.get("call_id") or pl.get("id")
+                    if isinstance(cid, str) and cid:
+                        results.add(cid)
+        if not saw_meta:
+            no_session_meta.append(str(path))
+        orphans = results - set(uses)
+        pend = set(uses) - results
+        n_orphan += len(orphans)
+        n_pending += len(pend)
+        if orphans and len(orphan_results) < _EXAMPLES_PER_ISSUE:
+            orphan_results.append(f"{path} ×{len(orphans)}")
+        if pend and len(pending_calls) < 10:
+            names = Counter(uses[t] for t in pend)
+            pending_calls.append(f"{path} {dict(names)}")
+
+        if cross_check_reader:
+            u = cr._aggregate_single(path)
+            got_calls = sum(u.tool_calls.values())
+            if got_calls != len(uses):
+                reader_mismatch.append(f"{path} reader={got_calls} 独立计数={len(uses)}")
+            got_tokens = (u.input_tokens, u.cache_read_input_tokens,
+                          u.cache_creation_input_tokens, u.output_tokens,
+                          u.reasoning_output_tokens)
+            exp_tokens = tuple(expect[k] for k in cr._TOKEN_FIELDS)
+            # reader 的 input_tokens 是减去缓存后的净输入；独立重放的是毛口径。
+            exp_net = (exp_tokens[0] - exp_tokens[1] - exp_tokens[2],
+                       exp_tokens[1], exp_tokens[2], exp_tokens[3], exp_tokens[4])
+            if got_tokens != exp_net:
+                n_tok_bad += 1
+                if len(token_mismatch) < _EXAMPLES_PER_ISSUE:
+                    token_mismatch.append(f"{path} reader={got_tokens} 独立重放={exp_net}")
+
+    for (dim, value), cnt in sorted(tally.counts.items(), key=lambda kv: (kv[0][0], -kv[1])):
+        if dim == "tool":
+            status, note = _codex_tool_status(value)
+        else:
+            status, note = CODEX_REGISTRY.get(dim, {}).get(
+                value, (UNKNOWN, "未登记：reader 未处理，需判断是否影响指标"))
+        rep.entries.append(CoverageEntry(
+            dim=dim, value=value, count=cnt, status=status, note=note,
+            example=tally.where.get((dim, value), "") if status in (UNKNOWN, UNEXPECTED) else ""))
+
+    missing_parent = sorted(
+        f"{tid} → 父 {p}" for tid, p in parents.items() if p not in thread_ids)
+    rep.checks += [
+        CoverageCheck("tool_results_have_calls", n_orphan == 0, "warn",
+                      f"找不到对应调用的工具结果 {n_orphan} 个", orphan_results),
+        CoverageCheck("calls_have_results", n_pending == 0, "info",
+                      f"没有结果的工具调用 {n_pending} 个（进行中/中断属正常）",
+                      pending_calls),
+        CoverageCheck("total_token_usage_monotonic", n_reset == 0, "info",
+                      f"total_token_usage 回退/重置 {n_reset} 次（差分口径回退 last）",
+                      total_resets),
+        CoverageCheck("reader_tokens_match", n_tok_bad == 0, "warn",
+                      f"reader Token 累计与独立差分重放不符的文件 {n_tok_bad} 个",
+                      token_mismatch),
+        CoverageCheck("session_meta_present", not no_session_meta, "info",
+                      f"无 session_meta 头的文件 {len(no_session_meta)} 个"
+                      f"（cwd/版本/子代理标记不可得）", no_session_meta[:_EXAMPLES_PER_ISSUE]),
+        CoverageCheck("subagent_parent_exists", not missing_parent, "info",
+                      f"父线程 rollout 缺失的子代理 {len(missing_parent)} 个（孤儿独立计）",
+                      missing_parent[:_EXAMPLES_PER_ISSUE]),
+        CoverageCheck("version_within_census", not rep.newer_than_census, "info",
+                      f"数据最高版本 {rep.max_version or '-'}，登记表普查版本 {rep.census_version}"
+                      + ("：有更新版本的数据" if rep.newer_than_census else "")),
+    ]
+    if cross_check_reader:
+        rep.checks.insert(2, CoverageCheck(
+            "reader_tool_calls_match", not reader_mismatch, "warn",
+            f"reader 工具调用数与独立计数不符的文件 {len(reader_mismatch)} 个",
+            reader_mismatch[:_EXAMPLES_PER_ISSUE]))
+    return rep
+
+
+# =========================================================================== #
+# omp / Pi 覆盖审计（2026-11-19 起；同族 JSONL，登记表共用、Pi 字段为超集）
+# =========================================================================== #
+OMP_CENSUS_VERSION = "18.10.4"
+PI_CENSUS_VERSION = ""  # Pi 无已知版本锚点（上游仓库未发版号到本地数据）
+
+OMP_PI_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
+    "type": {
+        "session": (_H, "会话头：id/cwd/title"),
+        "title": (_H, "定宽标题槽"),
+        "title_change": (_H, "标题变更（read_session_meta 消费）"),
+        "model_change": (_H, "活跃模型（model / provider+modelId 两形）"),
+        "thinking_level_change": (_H, "reasoning_effort"),
+        "message": (_H, "回合流：按 role 维度分派"),
+        "compaction": (_H, "压缩事件：tokensBefore/After → 次数/代价"),
+        "mode_change": (_H, "计划模式生命周期（mode=plan 计入）"),
+        "model_usage": (_I, "辅助模型用量（如 advisor）：刻意不并入——并入破 "
+                           "turn_stats_match_total，需先加辅助用量字段"),
+        "usage": (_I, "Pi 顶层辅助用量行：同上刻意不并入"),
+        "branch_summary": (_I, "分支摘要；其 usage 属辅助用量，不并入"),
+        "custom": (_I, "自定义事件，无用量"),
+        "custom_message": (_I, "自定义消息，无用量"),
+    },
+    "role": {
+        "user": (_H, "提问（agent 注入有 attribution/synthetic 标记，剔除）"),
+        "assistant": (_H, "回复：usage/模型/工具/思考/stopReason"),
+        "toolResult": (_H, "工具结果：isError/LOC 裁决/details"),
+    },
+    "block.assistant": {
+        "thinking": (_H, "思考块计数"),
+        "text": (_I, "回复正文，不计数"),
+        "toolCall": (_H, "工具调用/LOC 回放"),
+    },
+    "block.user": {
+        "text": (_H, "提问正文"),
+        "image": (_H, "内联 base64 图片输入"),
+        "image_url": (_H, "内联图片输入（image_count 同口径）"),
+        "input_image": (_H, "内联图片输入（image_count 同口径）"),
+    },
+    "usage": {  # assistant message.usage
+        "input": (_H, "未命中缓存输入"),
+        "output": (_H, "输出（Pi 含 reasoning 子集）"),
+        "cacheRead": (_H, "缓存命中输入"),
+        "cacheWrite": (_H, "缓存写输入"),
+        "cacheWrite1h": (_H, "Pi 1h 缓存写子集（溢价）"),
+        "totalTokens": (_H, "守恒锚点：input+output+cacheRead+cacheWrite"),
+        "cost": (_H, "自报成本（cost.total 求和 → reported_cost_usd）"),
+        "reasoning": (_H, "Pi 推理 Token（output 子集）"),
+        "reasoningTokens": (_H, "omp 18.x 推理 Token（output 子集）"),
+    },
+    "usage.cost": {
+        "total": (_H, "会话自报成本"),
+        "input": (_I, "明细（只取 total）"),
+        "output": (_I, "明细"),
+        "cacheRead": (_I, "明细"),
+        "cacheWrite": (_I, "明细"),
+        "cacheWrite1h": (_I, "明细"),
+    },
+    "stop_reason": {
+        "aborted": (_H, "中断 → aborted/abort_reasons"),
+        "error": (_H, "错误（仅 429 计 rate_limit）"),
+        "stop": (_I, "正常结束"),
+        "toolUse": (_I, "正常工具回合结束"),
+        "length": (_I, "输出截断"),
+        "end_turn": (_I, "正常结束"),
+        "max_tokens": (_I, "输出截断"),
+        "content_filter": (_I, "内容拦截"),
+        "pause": (_I, "暂停"),
+    },
+    "snapshot": {  # contextSnapshot 键（omp fork 字段；Pi 无）
+        "promptTokens": (_H, "整轮输入（peak_input）"),
+    },
+    "mode": {  # mode_change data.mode
+        "plan": (_H, "计划模式计入"),
+        "plan_paused": (_I, "退出不计"),
+        "none": (_I, "退出不计"),
+    },
+}
+
+
+def _omp_tool_status(name: str) -> tuple[str, str]:
+    from tcer.core import omp_reader as ompr
+    if name in ompr._OMP_TOOL_MAP:
+        return _H, f"映射为 {ompr._OMP_TOOL_MAP[name]}"
+    if name.startswith("mcp"):
+        return _I, "MCP 原名计入工具画像（非读写类）"
+    return UNKNOWN, "未登记工具：若是写文件类会漏计 LOC，需判断"
+
+
+def omp_pi_coverage(files: Iterable[Path], *, source: str,
+                    census_version: str,
+                    cross_check_reader: bool = True) -> CoverageReport:
+    """Census omp/Pi JSONL against :data:`OMP_PI_REGISTRY` + conservation checks."""
+    from tcer.core import omp_reader as ompr
+    rep = CoverageReport(source=source, census_version=census_version)
+    tally = _Tally()
+
+    orphan_results: list[str] = []
+    pending_calls: list[str] = []
+    total_bad: list[str] = []
+    reasoning_over: list[str] = []
+    no_session: list[str] = []
+    zero_usage: list[str] = []
+    reader_mismatch: list[str] = []
+    n_orphan = n_pending = n_total_bad = n_reason_over = n_zero = 0
+    stems: set[str] = set()
+    sub_files: list[Path] = []
+
+    files = list(files)
+    for p in files:
+        stems.add(p.stem)
+    for p in files:
+        if ompr._is_subagent_file(p):
+            sub_files.append(p)
+
+    for path in files:
+        rep.files += 1
+        uses: dict[str, str] = {}
+        results: set[str] = set()
+        saw_session = False
+        try:
+            fh = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for ln, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                rep.lines += 1
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    rep.bad_json += 1
+                    continue
+                if not isinstance(o, dict):
+                    continue
+                where = f"{path}:{ln}"
+                typ = o.get("type")
+                tally.add("type", typ, "", where)
+                if typ == "session":
+                    saw_session = True
+                    continue
+                if typ == "mode_change":
+                    data = o.get("data")
+                    tally.add("mode", data.get("mode") if isinstance(data, dict) else None,
+                              "", where)
+                    continue
+                if typ != "message":
+                    continue
+                mm = o.get("message")
+                if not isinstance(mm, dict):
+                    continue
+                role = mm.get("role")
+                tally.add("role", role, "", where)
+                if role in ("assistant", "user"):
+                    content = mm.get("content")
+                    if isinstance(content, list):
+                        for b in content:
+                            if not isinstance(b, dict):
+                                continue
+                            tally.add(f"block.{role}", b.get("type"), "", where)
+                            if role == "assistant" and b.get("type") == "toolCall":
+                                nm = b.get("name")
+                                cid = b.get("id")
+                                if isinstance(nm, str) and nm:
+                                    tally.add("tool", nm, "", where)
+                                if isinstance(cid, str) and cid:
+                                    uses[cid] = str(nm or "")
+                sr = mm.get("stopReason")
+                if sr is not None:
+                    tally.add("stop_reason", sr, "", where)
+                snap = mm.get("contextSnapshot")
+                if isinstance(snap, dict):
+                    for k in snap:
+                        tally.add("snapshot", k, "", where)
+                if role == "toolResult":
+                    cid = mm.get("toolCallId")
+                    if isinstance(cid, str) and cid:
+                        results.add(cid)
+                if role != "assistant":
+                    continue
+                usage = mm.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                vals: dict[str, int] = {}
+                for k, v in usage.items():
+                    tally.add("usage", k, "", where)
+                    if k == "cost" and isinstance(v, dict):
+                        for ck in v:
+                            tally.add("usage.cost", ck, "", where)
+                    elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                        vals[k] = int(v)
+                parts = (vals.get("input", 0) + vals.get("output", 0)
+                         + vals.get("cacheRead", 0) + vals.get("cacheWrite", 0))
+                if any(vals.get(k) for k in ("input", "output", "cacheRead", "cacheWrite",
+                                             "cacheWrite1h", "reasoning", "reasoningTokens")):
+                    tt = vals.get("totalTokens", 0)
+                    if tt > 0 and parts != tt:
+                        n_total_bad += 1
+                        if len(total_bad) < _EXAMPLES_PER_ISSUE:
+                            total_bad.append(
+                                f"{where} input+output+cacheR+cacheW={parts} total={tt}")
+                    reason = vals.get("reasoning", vals.get("reasoningTokens", 0))
+                    if reason > vals.get("output", 0):
+                        n_reason_over += 1
+                        if len(reasoning_over) < _EXAMPLES_PER_ISSUE:
+                            reasoning_over.append(
+                                f"{where} reasoning={reason} > output={vals.get('output', 0)}")
+                else:
+                    n_zero += 1
+                    if len(zero_usage) < _EXAMPLES_PER_ISSUE:
+                        zero_usage.append(where)
+        if not saw_session:
+            no_session.append(str(path))
+        orphans = results - set(uses)
+        pend = set(uses) - results
+        n_orphan += len(orphans)
+        n_pending += len(pend)
+        if orphans and len(orphan_results) < _EXAMPLES_PER_ISSUE:
+            orphan_results.append(f"{path} ×{len(orphans)}")
+        if pend and len(pending_calls) < 10:
+            names = Counter(uses[t] for t in pend)
+            pending_calls.append(f"{path} {dict(names)}")
+
+        if cross_check_reader:
+            u = ompr._usage_from_events(ompr.iter_events(path),
+                                        is_subagent=ompr._is_subagent_file(path))
+            got = sum(u.tool_calls.values())
+            if got != len(uses):
+                reader_mismatch.append(f"{path} reader={got} 独立计数={len(uses)}")
+
+    missing_parent = sorted(
+        str(p) for p in sub_files if p.parent.with_suffix(".jsonl") not in files
+        and p.parent.with_suffix(".jsonl").stem not in stems)
+    for (dim, value), cnt in sorted(tally.counts.items(), key=lambda kv: (kv[0][0], -kv[1])):
+        if dim == "tool":
+            status, note = _omp_tool_status(value)
+        else:
+            status, note = OMP_PI_REGISTRY.get(dim, {}).get(
+                value, (UNKNOWN, "未登记：reader 未处理，需判断是否影响指标"))
+        rep.entries.append(CoverageEntry(
+            dim=dim, value=value, count=cnt, status=status, note=note,
+            example=tally.where.get((dim, value), "") if status in (UNKNOWN, UNEXPECTED) else ""))
+
+    rep.checks += [
+        CoverageCheck("tool_results_have_calls", n_orphan == 0, "warn",
+                      f"找不到对应 toolCall 的 toolResult {n_orphan} 个", orphan_results),
+        CoverageCheck("calls_have_results", n_pending == 0, "info",
+                      f"没有 toolResult 的调用 {n_pending} 个（进行中/中断属正常）",
+                      pending_calls),
+        CoverageCheck("usage_total_consistency", n_total_bad == 0, "warn",
+                      f"input+output+cacheRead+cacheWrite ≠ totalTokens 的响应 "
+                      f"{n_total_bad} 条（上游守恒约定变了）", total_bad),
+        CoverageCheck("reasoning_within_output", n_reason_over == 0, "info",
+                      f"reasoning > output 的响应 {n_reason_over} 条"
+                      f"（已知代理路由口径异常；计价维持 output 原值）", reasoning_over),
+        CoverageCheck("session_header_present", not no_session, "warn",
+                      f"无 session 头的文件 {len(no_session)} 个（cwd/标题不可得）",
+                      no_session[:_EXAMPLES_PER_ISSUE]),
+        CoverageCheck("zero_usage_responses", True, "info",
+                      f"零用量 assistant 响应 {n_zero} 条（empty_usage_skipped 口径）",
+                      zero_usage[:_EXAMPLES_PER_ISSUE] if n_zero else []),
+        CoverageCheck("subagent_parent_exists", not missing_parent, "warn",
+                      f"找不到主文件的子代理 {len(missing_parent)} 个",
+                      missing_parent[:_EXAMPLES_PER_ISSUE]),
+        CoverageCheck("version_within_census", True, "info",
+                      f"普查版本 {census_version or '未登记'}（本地数据无版本字段）"),
+    ]
+    if cross_check_reader:
+        rep.checks.insert(2, CoverageCheck(
+            "reader_tool_calls_match", not reader_mismatch, "warn",
+            f"reader 工具调用数与独立计数不符的文件 {len(reader_mismatch)} 个",
+            reader_mismatch[:_EXAMPLES_PER_ISSUE]))
+    return rep
+
+
+def omp_coverage(files: Iterable[Path] | None = None, *,
+                 cross_check_reader: bool = True) -> CoverageReport:
+    """Census ``~/.omp`` sessions."""
+    if files is None:
+        from tcer.core import omp_reader as ompr
+        files = ompr.discover_sessions()
+    return omp_pi_coverage(files, source="omp", census_version=OMP_CENSUS_VERSION,
+                           cross_check_reader=cross_check_reader)
+
+
+def pi_coverage(files: Iterable[Path] | None = None, *,
+                cross_check_reader: bool = True) -> CoverageReport:
+    """Census ``~/.pi`` sessions."""
+    if files is None:
+        from tcer.core import pi_reader as pr
+        files = pr.discover_sessions()
+    return omp_pi_coverage(files, source="pi", census_version=PI_CENSUS_VERSION,
+                           cross_check_reader=cross_check_reader)
+
+
+# =========================================================================== #
+# OpenCode 覆盖审计（2026-11-19 起；仅 SQLite opencode.db）
+# =========================================================================== #
+OPENCODE_CENSUS_VERSION = "1.19.4"
+
+OPENCODE_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
+    "db.table": {
+        "session": (_H, "会话行：cwd/项目/parent_id/逐 token 列/cost"),
+        "message": (_H, "消息行：role/模型/tokens/time"),
+        "part": (_H, "部件行：按 part 维度分派"),
+        "project": (_H, "项目行：worktree/name"),
+        "session_v2": (_I, "上游 dev 分支 v2 存储，未发布未实现"),
+        "session_message": (_I, "v2 存储，未发布"),
+    },
+    "role": {
+        "user": (_H, "提问（合成/注入行有 synthetic/ignored 标记剔除）"),
+        "assistant": (_H, "回复：模型/tokens/time（est 速度、peak 补齐）"),
+    },
+    "part": {
+        "text": (_H, "正文（user 的是提问 SSOT）"),
+        "reasoning": (_H, "思考块 + time.start/end → 思考耗时"),
+        "file": (_H, "附件（图片计 image_count）"),
+        "tool": (_H, "工具调用（completed 才回放 LOC）"),
+        "tool-invocation": (_H, "工具调用旧形"),
+        "tool-call": (_H, "工具调用旧形"),
+        "tool-result": (_H, "工具结果（错误裁决）"),
+        "tool-output": (_H, "工具结果旧形"),
+        "step-finish": (_H, "步末 Token 快照（peak/逐回合时间线）"),
+        "step_finish": (_H, "步末快照旧形"),
+        "compaction": (_H, "压缩计数"),
+    },
+    "tokens": {  # message data.tokens
+        "input": (_H, "未命中缓存输入"),
+        "output": (_H, "输出"),
+        "reasoning": (_H, "推理 Token（折入 output）"),
+        "cache": (_H, "缓存子对象（read/write 维度）"),
+        "total": (_I, "合计字段，按分量计"),
+    },
+    "tokens.cache": {
+        "read": (_H, "缓存命中"),
+        "write": (_H, "缓存写"),
+    },
+}
+
+_OC_FTS = ("conversations_fts", "session_fts", "message_fts", "part_fts")
+
+
+def _oc_tool_status(name: str) -> tuple[str, str]:
+    from tcer.core import opencode_reader as ocr
+    canon = {"read", "edit", "write", "grep", "glob", "bash", "task",
+             "websearch", "webfetch", "todowrite"}
+    lower = name.lower().strip()
+    if lower in ocr._OPENCODE_TOOL_MAP:
+        return _H, f"映射为 {ocr._OPENCODE_TOOL_MAP[lower]}"
+    if lower in canon:
+        return _H, "原名即规范名"
+    if name.startswith("mcp"):
+        return _I, "MCP 原名计入工具画像（非读写类）"
+    return UNKNOWN, "未登记工具：若是写文件类会漏计 LOC，需判断"
+
+
+def opencode_coverage(db_paths: Iterable[Path] | None = None, *,
+                      cross_check_reader: bool = True) -> CoverageReport:
+    """Census OpenCode ``opencode.db`` against :data:`OPENCODE_REGISTRY`."""
+    from tcer.core import opencode_reader as ocr
+    if db_paths is None:
+        db_paths = ocr.discover_databases()
+    rep = CoverageReport(source="opencode", census_version=OPENCODE_CENSUS_VERSION)
+    tally = _Tally()
+
+    orphan_results: list[str] = []
+    pending_calls: list[str] = []
+    token_mismatch: list[str] = []
+    reader_mismatch: list[str] = []
+    n_orphan = n_pending = n_tok_bad = 0
+
+    for db in db_paths:
+        db = Path(db)
+        rep.files += 1
+        try:
+            conn = ocr._connect(db)
+        except Exception:  # noqa: BLE001
+            rep.bad_json += 1
+            continue
+        try:
+            tables = {r[0] for r in conn.execute(
+                "select name from sqlite_master where type='table'")}
+            for t in sorted(tables):
+                if t in OPENCODE_REGISTRY["db.table"]:
+                    tally.add("db.table", t, "", str(db))
+                elif any(t.startswith(p) for p in _OC_FTS) or "_fts" in t:
+                    continue  # 全文索引族，随消息表漂移，不逐表登记
+                else:
+                    tally.add("db.table", t, "", str(db))
+            if "session" not in tables or "message" not in tables:
+                continue
+
+            # ---- 逐会话普查 ----
+            sess_rows = conn.execute("select * from session").fetchall()
+            msg_rows = (conn.execute("select * from message").fetchall()
+                        if "message" in tables else [])
+            part_rows = (conn.execute("select * from part").fetchall()
+                         if "part" in tables else [])
+            msgs_by_session: dict[str, list] = {}
+            for m in msg_rows:
+                rep.lines += 1
+                msgs_by_session.setdefault(str(m["session_id"]), []).append(m)
+            parts_by_session: dict[str, list] = {}
+            for p in part_rows:
+                rep.lines += 1
+                parts_by_session.setdefault(str(p["session_id"]), []).append(p)
+
+            for sess in sess_rows:
+                sid = str(sess["id"])
+                for m in msgs_by_session.get(sid, []):
+                    data = ocr._json_obj(m["data"])
+                    role = ocr._first_str(
+                        data.get("role"),
+                        m["data"] if m["data"] in ("user", "assistant") else None)
+                    tally.add("role", role, "", f"{db}:msg#{m['id']}")
+                    tok = data.get("tokens")
+                    if isinstance(tok, dict):
+                        for k, v in tok.items():
+                            tally.add("tokens", k, "", f"{db}:msg#{m['id']}")
+                            if k == "cache" and isinstance(v, dict):
+                                for ck in v:
+                                    tally.add("tokens.cache", ck, "", f"{db}:msg#{m['id']}")
+
+                uses: dict[str, str] = {}
+                results: set[str] = set()
+                for p in parts_by_session.get(sid, []):
+                    data = ocr._json_obj(p["data"])
+                    pt = ocr._first_str(data.get("type"), data.get("kind"))
+                    tally.add("part", pt, "", f"{db}:part#{p['id']}")
+                    if pt in ("tool", "tool-invocation", "tool-call"):
+                        nm = ocr._first_str(data.get("tool"), data.get("toolName"),
+                                            data.get("name"), data.get("title"))
+                        if isinstance(nm, str) and nm:
+                            tally.add("tool", nm, "", f"{db}:part#{p['id']}")
+                        cid = ocr._first_str(data.get("callID"), data.get("call_id"),
+                                             data.get("toolCallId"), data.get("id"))
+                        if cid:
+                            uses[cid] = str(nm or "")
+                    elif pt in ("tool-result", "tool-output"):
+                        cid = ocr._first_str(data.get("callID"), data.get("call_id"),
+                                             data.get("toolCallId"))
+                        if cid:
+                            results.add(cid)
+
+                orphans = results - set(uses)
+                pend = set(uses) - results
+                n_orphan += len(orphans)
+                n_pending += len(pend)
+                if orphans and len(orphan_results) < _EXAMPLES_PER_ISSUE:
+                    orphan_results.append(f"{db}:{sid} ×{len(orphans)}")
+                if pend and len(pending_calls) < 10:
+                    names = Counter(uses[t] for t in pend)
+                    pending_calls.append(f"{db}:{sid} {dict(names)}")
+
+                # 守恒：session 列 == Σ assistant message tokens
+                s_cols = set(sess.keys())
+                if "tokens_input" in s_cols:
+                    sums = [0, 0, 0, 0, 0]
+                    saw_msg_tokens = False
+                    for m in msgs_by_session.get(sid, []):
+                        data = ocr._json_obj(m["data"])
+                        if ocr._first_str(data.get("role")) != "assistant":
+                            continue
+                        tok = data.get("tokens")
+                        if not isinstance(tok, dict):
+                            continue
+                        saw_msg_tokens = True
+                        cache = tok.get("cache") if isinstance(tok.get("cache"), dict) else {}
+                        sums[0] += ocr._as_int(tok.get("input"))
+                        sums[1] += ocr._as_int(tok.get("output"))
+                        sums[2] += ocr._as_int(tok.get("reasoning"))
+                        sums[3] += ocr._as_int(cache.get("read"))
+                        sums[4] += ocr._as_int(cache.get("write"))
+                    cols = (ocr._as_int(sess["tokens_input"]), ocr._as_int(sess["tokens_output"]),
+                            ocr._as_int(sess["tokens_reasoning"]),
+                            ocr._as_int(sess["tokens_cache_read"]),
+                            ocr._as_int(sess["tokens_cache_write"]))
+                    # 消息根本不写 tokens（旧格式）：总量只能取会话列，不算缺口；
+                    # 消息写了却对不上 → 分桶有静默差额，点名。
+                    if saw_msg_tokens and tuple(sums) != cols:
+                        n_tok_bad += 1
+                        if len(token_mismatch) < _EXAMPLES_PER_ISSUE:
+                            token_mismatch.append(f"{db}:{sid} 消息和={sums} 会话列={cols}")
+
+                if cross_check_reader:
+                    try:
+                        u = ocr._aggregate_single(db, sid)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    got = sum(u.tool_calls.values())
+                    if got != len(uses):
+                        reader_mismatch.append(f"{db}:{sid} reader={got} 独立计数={len(uses)}")
+        finally:
+            conn.close()
+
+    for (dim, value), cnt in sorted(tally.counts.items(), key=lambda kv: (kv[0][0], -kv[1])):
+        if dim == "tool":
+            status, note = _oc_tool_status(value)
+        else:
+            status, note = OPENCODE_REGISTRY.get(dim, {}).get(
+                value, (UNKNOWN, "未登记：reader 未处理，需判断是否影响指标"))
+        rep.entries.append(CoverageEntry(
+            dim=dim, value=value, count=cnt, status=status, note=note,
+            example=tally.where.get((dim, value), "") if status in (UNKNOWN, UNEXPECTED) else ""))
+
+    rep.checks += [
+        CoverageCheck("tool_results_have_calls", n_orphan == 0, "warn",
+                      f"找不到对应调用的工具结果 part {n_orphan} 个", orphan_results),
+        CoverageCheck("calls_have_results", n_pending == 0, "info",
+                      f"没有结果 part 的工具调用 {n_pending} 个（进行中属正常）",
+                      pending_calls),
+        CoverageCheck("session_tokens_equal_message_sum", n_tok_bad == 0, "warn",
+                      f"会话 token 列 ≠ Σ assistant 消息 tokens 的会话 {n_tok_bad} 个"
+                      f"（reader 用会话列取总、用消息分桶模型——不符即有静默差额）",
+                      token_mismatch),
+        CoverageCheck("version_within_census", True, "info",
+                      f"普查版本 {rep.census_version}（本地 db 无版本列）"),
+    ]
+    if cross_check_reader:
+        rep.checks.insert(2, CoverageCheck(
+            "reader_tool_calls_match", not reader_mismatch, "warn",
+            f"reader 工具调用数与独立计数不符的会话 {len(reader_mismatch)} 个",
+            reader_mismatch[:_EXAMPLES_PER_ISSUE]))
+    return rep

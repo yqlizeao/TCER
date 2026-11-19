@@ -29,7 +29,7 @@ python -m tcer.audit --source all --project TCER --json audit-out.json
 python -m tcer.audit --all-projects --top 2 --no-loc   # 批跑全部项目（可加 --source）
 python -m tcer.audit --all-projects --skip-empty --top 1 -q --summary-json -
 python -m tcer.audit --ci --summary-json audit-summary.json   # 等价 CI 预设
-python -m tcer.audit --coverage --source all   # 覆盖与守恒审计：原始数据逐值普查 vs 登记表（Claude / Antigravity）
+python -m tcer.audit --coverage --source all   # 覆盖与守恒审计：原始数据逐值普查 vs 登记表（六源全覆盖）
 # 退出码 0/1；cost_sum_per_model 校验逐模型成本加总
 ```
 
@@ -110,7 +110,7 @@ TCER/
 28. **`tool_variants`**：Skill/Agent 身份补录，仅 Claude 源；MCP 键自带服务器名。[data-format.md#tool-variants](doc/data-format.md#tool-variants)。
 31. **Pi 格式**：omp 的上游原生，`pi_reader` 是薄壳复用 omp 解析层；reasoning 是 output 子集，**不**再加进 output。[data-format.md#pi](doc/data-format.md#pi)。
 32. **LOC 按结果裁决**：编辑类调用等 tool_result 且**非 `is_error`** 才回放；`originalFile` 修正延迟一行；replace_all 少计是已知边界，由「LOC 可信度」暴露。[data-format.md#loc-outcome](doc/data-format.md#loc-outcome)。
-33. **数据源版本漂移基线**（2026-10-22；Claude 2026-10-27、Antigravity 2026-11-15 起由覆盖审计 `--coverage` 守护，登记表外的新类型/字段/取值一律报「未知」，见 [architecture.md#coverage-audit](doc/architecture.md#coverage-audit)）：Claude 2.1.311（11-17 复核至 2.1.326 无新增，仅第三方代理块待裁决）/ Codex 0.163 / OpenCode 1.19.4 / omp 18.10.4 / Antigravity CLI 1.5.9 · App 2.32.0；升级先比对基线再改。[data-format.md#version-baseline](doc/data-format.md#version-baseline)。
+33. **数据源版本漂移基线**（2026-10-22；2026-11-19 起六源全部由覆盖审计 `--coverage` 守护，登记表外的新类型/字段/取值一律报「未知」，见 [architecture.md#coverage-audit](doc/architecture.md#coverage-audit)）：Claude 2.1.311（11-17 复核至 2.1.326 无新增，仅第三方代理块待裁决）/ Codex 0.163 / OpenCode 1.19.4 / omp 18.10.4 / Antigravity CLI 1.5.9 · App 2.32.0；升级先比对基线再改。[data-format.md#version-baseline](doc/data-format.md#version-baseline)。
 
 ### 评分、指标族与基准
 

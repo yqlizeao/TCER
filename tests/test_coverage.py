@@ -256,3 +256,261 @@ def test_antigravity_reader_mismatch_detected(tmp_path, monkeypatch):
     monkeypatch.setattr(ar, "_aggregate_single", fake)
     rep = coverage.antigravity_coverage([root])
     assert not _check(rep, "reader_tool_calls_match").ok
+
+
+# --------------------------------------------------------------------------- #
+# Codex
+# --------------------------------------------------------------------------- #
+def _cx_rows() -> list[dict]:
+    return [
+        {"type": "session_meta", "payload": {"id": "thr-1", "cwd": "/repo/app",
+                                             "cli_version": "0.163.0"}},
+        {"type": "turn_context", "payload": {"model": "gpt-5.3"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "hi"}},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "shell_command",
+            "call_id": "c1", "arguments": "{}"}},
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "c1",
+            "output": "exit 0\nok"}},
+        {"type": "event_msg", "payload": {
+            "type": "token_count", "info": {
+                "last_token_usage": {"input_tokens": 100,
+                                     "cached_input_tokens": 40,
+                                     "output_tokens": 20},
+                "total_token_usage": {"input_tokens": 100,
+                                      "cached_input_tokens": 40,
+                                      "output_tokens": 20}}}},
+    ]
+
+
+def test_codex_clean_data_passes(tmp_path: Path):
+    rep = coverage.codex_coverage([_write(tmp_path / "r.jsonl", _cx_rows())])
+    assert rep.ok, coverage.format_report(rep)
+
+
+def test_codex_drift_is_named(tmp_path: Path):
+    rows = _cx_rows() + [
+        {"type": "futuristic_line", "payload": {"type": "x"}},
+        {"type": "event_msg", "payload": {"type": "quantum_tick"}},
+        {"type": "response_item", "payload": {"type": "holo_item"}},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "write_file", "call_id": "c9",
+            "arguments": "{}"}},
+        {"type": "event_msg", "payload": {
+            "type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": 200, "output_tokens": 30,
+                                      "brain_tokens": 5}}}},
+    ]
+    rep = coverage.codex_coverage([_write(tmp_path / "r.jsonl", rows)])
+    keys = _issue_keys(rep)
+    assert ("type", "futuristic_line", coverage.UNKNOWN) in keys
+    assert ("event", "quantum_tick", coverage.UNKNOWN) in keys
+    assert ("item", "holo_item", coverage.UNKNOWN) in keys
+    assert ("usage", "brain_tokens", coverage.UNKNOWN) in keys
+    assert ("tool", "write_file", coverage.UNKNOWN) in keys
+    assert not rep.ok
+
+
+def test_codex_orphan_result_and_reader_mismatch(tmp_path: Path):
+    rows = _cx_rows() + [
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "ghost", "output": "x"}},
+    ]
+    rep = coverage.codex_coverage([_write(tmp_path / "r.jsonl", rows)])
+    assert not _check(rep, "tool_results_have_calls").ok
+
+
+def test_codex_total_reset_is_info(tmp_path: Path):
+    rows = _cx_rows() + [
+        {"type": "event_msg", "payload": {
+            "type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": 10, "output_tokens": 3},
+                "last_token_usage": {"input_tokens": 10, "output_tokens": 3}}}},
+    ]
+    rep = coverage.codex_coverage([_write(tmp_path / "r.jsonl", rows)])
+    assert not _check(rep, "total_token_usage_monotonic").ok
+    # total 回退时独立重放走 last 兜底，与 reader 口径一致 → 不报 token 缺口
+    assert _check(rep, "reader_tokens_match").ok
+
+
+# --------------------------------------------------------------------------- #
+# omp / Pi（同族 JSONL，共用登记表）
+# --------------------------------------------------------------------------- #
+def _omp_rows() -> list[dict]:
+    return [
+        {"type": "session", "id": "s1", "cwd": "/repo/app",
+         "timestamp": "2026-07-29T06:18:21.927Z"},
+        {"type": "model_change", "model": "anthropic/claude-opus-4-6"},
+        {"type": "message", "timestamp": "2026-07-29T06:18:30.000Z",
+         "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}},
+        {"type": "message", "timestamp": "2026-07-29T06:18:35.000Z",
+         "message": {"role": "assistant", "model": "claude-opus-4-6",
+                     "content": [{"type": "text", "text": "ok"},
+                                 {"type": "toolCall", "id": "t1",
+                                  "name": "read", "arguments": {}}],
+                     "usage": {"input": 100, "output": 20, "cacheRead": 30,
+                               "cacheWrite": 10, "totalTokens": 160,
+                               "cost": {"total": 0.01}},
+                     "stopReason": "toolUse"}},
+        {"type": "message", "timestamp": "2026-07-29T06:18:40.000Z",
+         "message": {"role": "toolResult", "toolCallId": "t1",
+                     "toolName": "read", "content": "ok", "isError": False}},
+    ]
+
+
+def test_omp_clean_data_passes(tmp_path: Path):
+    f = _write(tmp_path / "c--repo-app" / "s1.jsonl", _omp_rows())
+    rep = coverage.omp_coverage([f])
+    assert rep.ok, coverage.format_report(rep)
+
+
+def test_pi_clean_data_passes(tmp_path: Path):
+    rows = _omp_rows()  # Pi 多 reasoning 字段
+    rows[3]["message"]["usage"]["reasoning"] = 5
+    f = _write(tmp_path / "c--repo-app" / "s1.jsonl", rows)
+    rep = coverage.pi_coverage([f])
+    assert rep.ok, coverage.format_report(rep)
+
+
+def test_omp_drift_is_named(tmp_path: Path):
+    rows = _omp_rows() + [
+        {"type": "warp_event", "data": {}},
+        {"type": "message", "message": {"role": "auditor"}},
+        {"type": "message", "message": {"role": "assistant",
+                                        "content": [{"type": "holo"}],
+                                        "stopReason": "vaporized",
+                                        "usage": {"flux": 9}}},
+        {"type": "message", "message": {"role": "assistant",
+                                        "content": [{"type": "toolCall",
+                                                     "id": "t9", "name": "rm_rf",
+                                                     "arguments": {}}]}},
+    ]
+    rep = coverage.omp_coverage([_write(tmp_path / "d" / "s.jsonl", rows)])
+    keys = _issue_keys(rep)
+    assert ("type", "warp_event", coverage.UNKNOWN) in keys
+    assert ("role", "auditor", coverage.UNKNOWN) in keys
+    assert ("block.assistant", "holo", coverage.UNKNOWN) in keys
+    assert ("stop_reason", "vaporized", coverage.UNKNOWN) in keys
+    assert ("usage", "flux", coverage.UNKNOWN) in keys
+    assert ("tool", "rm_rf", coverage.UNKNOWN) in keys
+    assert not rep.ok
+
+
+def test_omp_total_consistency_violation_flagged(tmp_path: Path):
+    rows = _omp_rows()
+    rows[3]["message"]["usage"]["totalTokens"] = 999  # 分量和对不上
+    rep = coverage.omp_coverage([_write(tmp_path / "d" / "s.jsonl", rows)])
+    assert not _check(rep, "usage_total_consistency").ok
+    assert not rep.ok
+
+
+def test_omp_orphan_result_and_missing_parent(tmp_path: Path):
+    rows = _omp_rows() + [
+        {"type": "message", "message": {"role": "toolResult",
+                                        "toolCallId": "ghost", "content": "x"}},
+    ]
+    rep = coverage.omp_coverage([_write(tmp_path / "d" / "s.jsonl", rows)])
+    assert not _check(rep, "tool_results_have_calls").ok
+    # <stem>/ 里的子代理：主文件在盘上但普查漏收 → 点名
+    _write(tmp_path / "d2" / "2026_x_s9.jsonl", _omp_rows())
+    sub = _write(tmp_path / "d2" / "2026_x_s9" / "sub.jsonl", _omp_rows())
+    rep2 = coverage.omp_coverage([sub])
+    assert not _check(rep2, "subagent_parent_exists").ok
+
+
+def test_omp_reasoning_over_output_is_info(tmp_path: Path):
+    rows = _omp_rows()
+    rows[3]["message"]["usage"]["reasoning"] = 999  # 已知代理路由口径异常
+    rows[3]["message"]["usage"]["totalTokens"] = 160  # 分量守恒不变 → 只触发 info
+    rep = coverage.omp_coverage([_write(tmp_path / "d" / "s.jsonl", rows)])
+    assert not _check(rep, "reasoning_within_output").ok
+    assert rep.ok  # info 级不判 FAIL
+
+
+# --------------------------------------------------------------------------- #
+# OpenCode（SQLite）
+# --------------------------------------------------------------------------- #
+def _oc_db(path: Path, *, with_msg_tokens: bool = True) -> Path:
+    import sqlite3
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.executescript("""
+        create table project (id text primary key, name text, worktree text);
+        create table session (id text primary key, parent_id text, project_id text,
+          directory text, title text, time_created integer, time_updated integer,
+          model text, permission text, tokens_input integer, tokens_output integer,
+          tokens_reasoning integer, tokens_cache_read integer,
+          tokens_cache_write integer, cost integer);
+        create table message (id text primary key, session_id text,
+          time_created integer, data text);
+        create table part (id text primary key, session_id text, message_id text,
+          time_created integer, data text);
+    """)
+    jd = lambda o: json.dumps(o, ensure_ascii=False)
+    con.execute("insert into project values (?,?,?)", ("prj", "app", "/repo/app"))
+    con.execute("insert into session values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("ses", None, "prj", "/repo/app", "t", 1, 2, jd({"modelID": "m"}),
+                 "{}", 100, 20, 5, 30, 10, 0))
+    msg_tokens = ({"tokens": {"input": 100, "output": 20, "reasoning": 5,
+                              "cache": {"read": 30, "write": 10}}}
+                  if with_msg_tokens else {})
+    con.execute("insert into message values (?,?,?,?)",
+                ("mu", "ses", 1, jd({"role": "user"})))
+    con.execute("insert into message values (?,?,?,?)",
+                ("ma", "ses", 2, jd({"role": "assistant", "modelID": "m",
+                                     **msg_tokens})))
+    con.executemany("insert into part values (?,?,?,?,?)", [
+        ("pu", "ses", "mu", 1, jd({"type": "text", "text": "hi"})),
+        ("pt", "ses", "ma", 2, jd({"type": "tool", "tool": "read", "callID": "c1",
+                                   "state": {"status": "completed"}})),
+        ("pr", "ses", "ma", 3, jd({"type": "tool-result", "callID": "c1"})),
+    ])
+    con.commit()
+    con.close()
+    return path
+
+
+def test_opencode_clean_data_passes(tmp_path: Path):
+    rep = coverage.opencode_coverage([_oc_db(tmp_path / "opencode.db")])
+    assert rep.ok, coverage.format_report(rep)
+
+
+def test_opencode_drift_is_named(tmp_path: Path):
+    import sqlite3
+    db = _oc_db(tmp_path / "opencode.db")
+    con = sqlite3.connect(db)
+    jd = lambda o: json.dumps(o, ensure_ascii=False)
+    con.execute("create table quantum (id text)")
+    con.execute("insert into message values (?,?,?,?)",
+                ("mx", "ses", 3, jd({"role": "oracle"})))
+    con.execute("insert into part values (?,?,?,?,?)",
+                ("px", "ses", "ma", 4, jd({"type": "vortex"})))
+    con.execute("insert into part values (?,?,?,?,?)",
+                ("px2", "ses", "ma", 5, jd({"type": "tool", "tool": "rm_rf",
+                                            "callID": "c9"})))
+    con.commit()
+    con.close()
+    rep = coverage.opencode_coverage([db])
+    keys = _issue_keys(rep)
+    assert ("db.table", "quantum", coverage.UNKNOWN) in keys
+    assert ("role", "oracle", coverage.UNKNOWN) in keys
+    assert ("part", "vortex", coverage.UNKNOWN) in keys
+    assert ("tool", "rm_rf", coverage.UNKNOWN) in keys
+    assert not rep.ok
+
+
+def test_opencode_token_gap_flagged_only_when_messages_carry_tokens(tmp_path: Path):
+    import sqlite3
+    # 消息带 tokens 但和会话列对不上 → warn
+    db = _oc_db(tmp_path / "a.db")
+    con = sqlite3.connect(db)
+    con.execute("update session set tokens_input=9999 where id='ses'")
+    con.commit()
+    con.close()
+    rep = coverage.opencode_coverage([db])
+    assert not _check(rep, "session_tokens_equal_message_sum").ok
+    # 消息无 tokens（旧格式）→ 不算缺口
+    db2 = _oc_db(tmp_path / "b.db", with_msg_tokens=False)
+    rep2 = coverage.opencode_coverage([db2])
+    assert _check(rep2, "session_tokens_equal_message_sum").ok
