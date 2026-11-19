@@ -88,7 +88,7 @@ TCER/
 
 1. **按 message.id 去重**：一个 API 响应被拆成多行重复携带 usage，必须按 id 只计一次（实测虚增 55.9%）；tool_use id 另行去重防 rewind 双计；`""` 视为无 id；零 usage 行释放 id 锁；`usage.estimated` 占位不计。Codex 对累计 `total_token_usage` 做差分（`last` 仅回退）；cache_write 是 input 的子集。OpenCode 多回合无 `step-finish` 时 peak 留 0。详见 [data-format.md#dedup](doc/data-format.md#dedup)。
 2. **LOC 不依赖 git、不读磁盘**：净增只来自会话内工具调用回放；首写假定 old=0 并 `unseen_writes++`，`originalFile` 到达再回溯修正。产出 = 代码 ∪ 文本(.md/.txt 等) ∪ 配置(.json/.yaml/.toml)；Office 二进制刻意排除。磁盘先验/tree_loc/git 校准已移除。详见 [data-format.md#loc](doc/data-format.md#loc)。
-3. **逐模型计价**：`TokenUsage.per_model` 按 message.model 分桶；价表录**标准价/闲时档**，多轨价记 `_note`；四级匹配（精确→归一化→前缀→反向前缀）；价差必须厂商官方页裁决，未匹配走 default 并提示。详见 [metrics.md#pricing](doc/metrics.md#pricing)。
+3. **逐模型计价**：`TokenUsage.per_model` 按 message.model 分桶；价表主价一律录**当前实际生效价**（2026-11-13 裁决，同 DeepSeek 高峰档先例），促销/未来档等多轨价记 `_note` 并写明翻价日期；四级匹配（精确→归一化→前缀→反向前缀）；价差必须厂商官方页裁决，未匹配走 default 并提示。详见 [metrics.md#pricing](doc/metrics.md#pricing)。
 4. **过滤 `<synthetic>`**：伪 assistant 消息（零 usage）在 reader 层丢弃，不进 `models`/`per_model`。[data-format.md#synthetic](doc/data-format.md#synthetic)。
 5. **子代理并入父会话**：Token/LOC 保留真实成本，不单独计 session；Codex/OpenCode/omp/Pi 各有折叠规则，file_cache key 必须并入子代理签名。[data-format.md#subagents](doc/data-format.md#subagents)。
 6. **时序分析**：`ToolOp(turn, tool, path)`；搜索后编辑比按回合就近（3 回合内）匹配、不绑文件；merge 时 rebase turn。[metrics.md#temporal](doc/metrics.md#temporal)。
