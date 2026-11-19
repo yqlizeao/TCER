@@ -3015,8 +3015,9 @@ class RealProjectsView:
             return
         width = self._container.winfo_width()
         cols = max(1, min(n, width // 460)) if width > 10 else 1
-        for i, card in enumerate(self._cards):
+        for card in self._cards:
             card.frame.pack_forget()
+        for i, card in enumerate(self._cards):
             card.frame.grid(row=i // cols, column=i % cols,
                             sticky="nsew", padx=2, pady=2)
         prev = self._grid_cols
@@ -7380,11 +7381,13 @@ class TermbaseView:
             "act_ent": act_ent,
         }
         self._misconception_rows.append(row_item)
+        self._edit_scroll.update_scroll()
 
     def _remove_misconception_row(self, row_item: dict) -> None:
         if row_item in self._misconception_rows:
             self._misconception_rows.remove(row_item)
             row_item["frame"].destroy()
+            self._edit_scroll.update_scroll()
 
     def _save_current_entry(self) -> bool:
         import re
