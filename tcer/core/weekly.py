@@ -463,7 +463,7 @@ def _aggregate(since: str, until: str, items: list[SessionItem],
     day_proj: dict[str, dict[str, int]] = {}
 
     for s in items:
-        key = normcase_path(s.cwd) if s.cwd else f"name:{s.project}"
+        key = normcase_path(s.cwd) if s.cwd else f"name:{s.source}:{s.project}"
         ps = groups.get(key)
         if ps is None:
             ps = groups[key] = ProjectSummary(name=s.project, source=s.source, cwd=s.cwd)
@@ -503,17 +503,22 @@ def _aggregate(since: str, until: str, items: list[SessionItem],
         for m in s.models:
             agg.model_counts[m] = agg.model_counts.get(m, 0) + 1
 
-    # 同名不同路径的项目：名字后补上级目录区分
+    # 同名项目：按上级目录或数据源区分
     by_name: dict[str, list[ProjectSummary]] = {}
     for ps in groups.values():
         by_name.setdefault(ps.name, []).append(ps)
+    used_names = set(by_name)
     for same in by_name.values():
         if len(same) > 1:
             for ps in same:
-                if ps.cwd:
-                    parent = _pure(ps.cwd).parent.name
-                    if parent:
-                        ps.name = f"{ps.name}（{parent}）"
+                suffix = (_pure(ps.cwd).parent.name if ps.cwd else "") or source_label(ps.source)
+                name = f"{ps.name}（{suffix}）"
+                index = 2
+                while name in used_names:
+                    name = f"{ps.name}（{suffix} {index}）"
+                    index += 1
+                ps.name = name
+                used_names.add(name)
 
     for key, ps in groups.items():
         counts = src_by_group[key]
