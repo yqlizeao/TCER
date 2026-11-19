@@ -14,8 +14,7 @@ from tcer.core import pricing
 from tcer.core.models import ProjectRef, SessionMeta, TokenUsage, ToolOp, TurnStat
 from tcer.core.parse_util import as_int as _as_int, first_str as _first_str
 from tcer.core.parse_util import basename_of as _basename_of
-from tcer.core.parse_util import is_windows_path as _is_windows_path
-from tcer.core.parse_util import norm_path as _norm_path
+from tcer.core.parse_util import normalize_cwd
 from tcer.core.paths import codex_dir, codex_sessions_dir, encode_hash
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
 
@@ -187,26 +186,6 @@ def _index_titles() -> dict[str, str]:
     return titles
 
 
-def _normalize_cwd(cwd: str | None) -> str | None:
-    """Normalize cwd path to avoid duplicates from drive-letter case differences.
-
-    On Windows ``c:\\GitHub`` and ``C:\\GitHub`` resolve to the same path;
-    ``Path.resolve()`` normalises the drive letter to uppercase. Windows
-    drive-letter paths get the same treatment on any host (normpath +
-    uppercase drive) instead of ``Path.resolve()``, which would misread
-    ``C:\\...`` as a relative path on POSIX and glue it onto the cwd.
-    """
-    if not cwd:
-        return cwd
-    if _is_windows_path(cwd):
-        p = _norm_path(cwd)
-        return p[0].upper() + p[1:]
-    try:
-        return str(Path(cwd).resolve())
-    except (OSError, ValueError):
-        return cwd
-
-
 def _head_payload(path: Path, max_lines: int = 16) -> dict | None:
     """Return the ``session_meta`` payload from a rollout's first lines (None if absent)."""
     try:
@@ -246,7 +225,7 @@ def _session_head_meta(
         return None
     sid = _first_str(pl.get("id"), pl.get("session_id"))
     cwd = pl.get("cwd") if isinstance(pl.get("cwd"), str) else None
-    return sid, _normalize_cwd(cwd)
+    return sid, normalize_cwd(cwd)
 
 
 def _parent_thread_id(pl: dict | None) -> str | None:
@@ -393,7 +372,7 @@ def list_project_refs() -> list[ProjectRef]:
         if head is None:  # rare: no session_meta in head → full scan
             meta = read_session_meta(p)
             sid_by_path[p] = meta.session_id
-            cwd_by_path[p] = _normalize_cwd(meta.cwd)
+            cwd_by_path[p] = normalize_cwd(meta.cwd)
         else:
             sid_by_path[p], cwd_by_path[p] = head
 

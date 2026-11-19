@@ -39,6 +39,7 @@ from tcer.core.parse_util import (
     first_str as _first_str,
     is_correction as _is_correction,
     is_slash_command as _is_slash_command,
+    normalize_cwd,
 )
 from tcer.core.paths import encode_hash, omp_sessions_dir
 from tcer.core.reader import parse_timestamp_ms, truncate_summary
@@ -144,22 +145,12 @@ def _session_line(path: Path) -> dict:
     return {}
 
 
-def _normalize_cwd(cwd: str | None) -> str | None:
-    """Normalize a cwd path to avoid drive-letter case duplicates (Windows)."""
-    if not cwd:
-        return cwd
-    try:
-        return str(Path(cwd).resolve())
-    except (OSError, ValueError):
-        return cwd
-
-
 def list_project_refs() -> list[ProjectRef]:
     """Group omp sessions by cwd for the unified project list."""
     groups: dict[str, list[Path]] = {}
     cwd_by_key: dict[str, str | None] = {}
     for p in discover_sessions():
-        cwd = _normalize_cwd(_session_line(p).get("cwd"))
+        cwd = normalize_cwd(_session_line(p).get("cwd"))
         key = encode_hash(cwd) if cwd else _NO_CWD_KEY
         groups.setdefault(key, []).append(p)
         cwd_by_key.setdefault(key, cwd)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tcer.core import analyze, omp_reader
 from tcer.core.models import ProjectRef
 
@@ -496,6 +498,26 @@ def test_list_project_refs_excludes_subagents(tmp_path, monkeypatch):
     # session_paths holds MAIN files only (subagent folded, not a separate session)
     assert len(ref.session_paths) == 1
     assert omp_reader.sessions_for_project(ref) == list(ref.session_paths)
+
+
+@pytest.mark.parametrize("cwds, expected_cwd", [
+    pytest.param((r"C:\repo\app",), r"C:\repo\app", id="windows"),
+    pytest.param((r"C:\repo\app", r"c:\repo\app"), r"C:\repo\app", id="drive-case"),
+    pytest.param(("repo/../app",), None, id="posix"),
+])
+def test_list_project_refs_normalizes_cwd(tmp_path, monkeypatch, cwds, expected_cwd):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "agent"))
+    project_dir = tmp_path / "agent" / "sessions" / "project"
+    files = tuple(
+        _write_omp(project_dir / f"{i}.jsonl", [_session(cwd=cwd, sid=str(i))])
+        for i, cwd in enumerate(cwds)
+    )
+
+    refs = omp_reader.list_project_refs()
+
+    assert [ref.cwd for ref in refs] == [expected_cwd or str((tmp_path / "app").resolve())]
+    assert refs[0].session_paths == files
 
 
 def test_analyze_project_folds_subagents_and_counts(tmp_path, monkeypatch):
