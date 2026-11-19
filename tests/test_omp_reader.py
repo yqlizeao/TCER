@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from tcer.core import analyze, omp_reader
@@ -11,7 +12,7 @@ from tcer.core.models import ProjectRef
 _ISO = "2026-07-29T06:18:21.927Z"
 
 
-def _write_omp(path: Path, entries: list[dict]) -> Path:
+def _write_omp(path: Path, entries: Sequence[object]) -> Path:
     """Write an omp session JSONL: fixed-width ``title`` slot + header + entries."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
@@ -95,6 +96,12 @@ def _usage(inp, out, cr=0, cw=0, cost=None) -> dict:
     if cost is not None:
         u["cost"] = {"total": cost}
     return u
+
+
+def test_read_user_messages_skips_non_object_lines(tmp_path):
+    p = _write_omp(tmp_path / "s.jsonl", [_session(), None, [], 3, _user("实现 omp 支持")])
+
+    assert omp_reader.read_user_messages(p) == ["实现 omp 支持"]
 
 
 def test_aggregate_usage_basic(tmp_path):

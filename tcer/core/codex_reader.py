@@ -52,16 +52,19 @@ def _open_text(path: Path):
 
 
 def iter_events(path: Path):
-    """Yield parsed Codex JSONL events, skipping malformed lines."""
+    """Yield parsed Codex JSONL objects, skipping malformed lines."""
     with _open_text(path) as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(obj, dict):
+                continue
+            yield obj
 
 
 def _user_message(obj: dict) -> dict | None:
@@ -220,6 +223,8 @@ def _head_payload(path: Path, max_lines: int = 16) -> dict | None:
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
                     continue
                 if obj.get("type") == "session_meta":
                     pl = obj.get("payload")
