@@ -145,7 +145,7 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
   - `reader.iter_messages`：去掉每行 `line.strip()` 整行复制（`json.loads` 本就容忍首尾空白；空行走 `JSONDecodeError` 分支跳过，逐行一致）。
   - `reader._scan_session_uncached`：每行 `obj.get("type")` 只取一次（旧实现各分支重复近 6 次）；行时间戳只解析一次（timings 与时间窗口共用）；模型名只取一次（TurnStat 与 per_model 桶共用）。
   - `reader._add_usage_delta`：快路径先算 6 个增量，全为 0 时零分配返回（流式快照重发行的绝大多数情形），有增量时走同一条记账分支。
-  - `reader._read_session_meta_uncached`：tail 行预过滤 `"ai-title"` 字面串才解析；大文件尾部 16 KiB 无 `b"ai-title"` 时跳过解码；头循环早停（全部元数据字段首个非空 wins + 回退标题首条提问 wins 都齐全时；注意 head_title 是最后一个 ai-title wins，不能做早停条件）；`_classify_user` 只对 user 行调用、已有任一标题时跳过。
+  - `reader._read_session_meta_uncached`：tail 行预过滤 `"ai-title"` 字面串才解析；大文件尾部 16 KiB 无 `b"ai-title"` 时跳过解码；头循环早停（全部元数据字段首个非空 wins 齐全且已有标题候选——回退标题或 head ai-title——时；head_title 是最后一个 ai-title wins，故早停后剩余头行仍走 `"ai-title"` 预过滤扫描，不能直接丢弃）；`_classify_user` 只对 user 行调用、已有任一标题时跳过。
   - `pricing.normalize`：早已是 `lru_cache`（与 `resolve`/`label` 同口径），本次只补文档说明，未改行为。
 - **刻意不做（本次复核）**：json 解码仍是冷态下限（实测约占冷态 1/3，纯标准库无可替代）；项目级 ProjectAnalysis 缓存仍不做（键覆盖漏项即错数）；`user_input.classify_*` 未动（单文本快路径需复制整条判定树，收益约 0.02s 不值得冒口径漂移风险）。
 - **`file_cache._sig`**：`Path.resolve()` → `normcase(abspath())`，省掉 Windows 每次开句柄（≈28µs × 5000 次）；代价是符号链接别名最多多缓存一份，正确性不受影响。
