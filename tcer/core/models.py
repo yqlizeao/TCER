@@ -1,7 +1,8 @@
 """Data classes used across the TCER pipeline."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from operator import attrgetter
 from pathlib import Path
 
@@ -253,28 +254,14 @@ class TokenUsage:
         merged_duration = (merged_end - merged_start) if (merged_start and merged_end) else None
 
         # Rebase other's tool_ops turns so they continue after self's last turn.
-        # （max 用 C 级 map(attrgetter)；other 无 ops 时整段跳过——聚合里大量会话无工具回合。）
-        if other.tool_ops:
-            self_max_turn = max(map(_TURN_OF, self.tool_ops), default=-1)
-            rebased_other_ops = [
-                ToolOp(op.turn + self_max_turn + 1, op.tool, op.path)
-                for op in other.tool_ops
-            ]
-        else:
-            rebased_other_ops = []
+        # （other 无 ops 时无需扫描 self 的工具回合。）
+        self_max_turn = max(map(_TURN_OF, self.tool_ops), default=-1) if other.tool_ops else -1
         # turn_stats 同步 rebase（拼接时间线；聚合对象的时间线是串接而非并发）。
         # self_max_ts_turn 还供 compaction_turns / turn_net_locs 使用，始终需要。
         self_max_ts_turn = max(map(_TURN_OF, self.turn_stats), default=-1)
-        if other.turn_stats:
-            rebased_other_stats = [
-                TurnStat(t.turn + self_max_ts_turn + 1, t.ts, t.input_tokens,
-                         t.cache_write, t.cache_read, t.output_tokens,
-                         t.duration_ms, t.tool_calls, t.errors, t.model,
-                         t.user_turn + self.user_msgs if t.user_turn is not None else None)
-                for t in other.turn_stats
-            ]
-        else:
-            rebased_other_stats = []
+        ops, stats, compactions, locs = _rebase_usage_turns(
+            other, self_max_turn + 1, self_max_ts_turn + 1, self.user_msgs,
+        )
 
         return TokenUsage(
             input_tokens=self.input_tokens + other.input_tokens,
@@ -296,8 +283,8 @@ class TokenUsage:
             tool_errors=self.tool_errors + other.tool_errors,
             tool_errors_by_tool=_merge_dicts(self.tool_errors_by_tool, other.tool_errors_by_tool),
             thinking_count=self.thinking_count + other.thinking_count,
-            tool_ops=self.tool_ops + rebased_other_ops,
-            turn_stats=self.turn_stats + rebased_other_stats,
+            tool_ops=self.tool_ops + ops,
+            turn_stats=self.turn_stats + stats,
             user_message_texts=self.user_message_texts + other.user_message_texts,
             reasoning_output_tokens=self.reasoning_output_tokens + other.reasoning_output_tokens,
             model_context_window=_max_ms(self.model_context_window, other.model_context_window),
@@ -312,16 +299,8 @@ class TokenUsage:
             compaction_pre_tokens_max=max(self.compaction_pre_tokens_max, other.compaction_pre_tokens_max),
             compaction_duration_ms_total=self.compaction_duration_ms_total + other.compaction_duration_ms_total,
             compaction_triggers=_merge_dicts(self.compaction_triggers, other.compaction_triggers),
-            compaction_turns=self.compaction_turns + [
-                t + self_max_ts_turn + 1 for t in other.compaction_turns
-            ],
-            # turn_net_locs 与 turn_stats 同一回合编号空间（reader 的 turn_idx），
-            # 必须按 turn_stats 的最大回合 rebase——按 tool_ops 的最大值会在
-            # 「末尾有无工具回合」时错位（self_max_turn < self_max_ts_turn），
-            # 分段 TCER 会把 LOC 记到错误的段。
-            turn_net_locs=self.turn_net_locs + [
-                (t + self_max_ts_turn + 1, a, d) for (t, a, d) in other.turn_net_locs
-            ],
+            compaction_turns=self.compaction_turns + compactions,
+            turn_net_locs=self.turn_net_locs + locs,
             web_search_count=self.web_search_count + other.web_search_count,
             web_search_end_count=self.web_search_end_count + other.web_search_end_count,
             image_count=self.image_count + other.image_count,
@@ -356,6 +335,62 @@ class TokenUsage:
             est_gen_output_tokens=self.est_gen_output_tokens + other.est_gen_output_tokens,
             est_gen_duration_ms=self.est_gen_duration_ms + other.est_gen_duration_ms,
         )
+
+    @classmethod
+    def merge_many(cls, usages: Iterable[TokenUsage]) -> TokenUsage:
+        """Merge in order without repeatedly copying or scanning accumulated lists."""
+        total = cls()
+        tool_ops: list[ToolOp] = []
+        turn_stats: list[TurnStat] = []
+        compaction_turns: list[int] = []
+        turn_net_locs: list[tuple[int, int, int]] = []
+        user_message_texts: list[str] = []
+        ttft_ms_samples: list[int] = []
+        max_op_turn = max_stat_turn = -1
+        for usage in usages:
+            op_offset = max_op_turn + 1
+            stat_offset = max_stat_turn + 1
+            ops, stats, compactions, locs = _rebase_usage_turns(
+                usage, op_offset, stat_offset, total.user_msgs,
+            )
+            if ops:
+                max_op_turn = max(max_op_turn, max(map(_TURN_OF, ops)))
+            if stats:
+                max_stat_turn = max(max_stat_turn, max(map(_TURN_OF, stats)))
+            tool_ops.extend(ops)
+            turn_stats.extend(stats)
+            compaction_turns.extend(compactions)
+            turn_net_locs.extend(locs)
+            user_message_texts.extend(usage.user_message_texts)
+            ttft_ms_samples.extend(usage.ttft_ms_samples)
+            total = total.merge(replace(
+                usage, tool_ops=[], turn_stats=[], compaction_turns=[],
+                turn_net_locs=[], user_message_texts=[], ttft_ms_samples=[],
+            ))
+        total.tool_ops = tool_ops
+        total.turn_stats = turn_stats
+        total.compaction_turns = compaction_turns
+        total.turn_net_locs = turn_net_locs
+        total.user_message_texts = user_message_texts
+        total.ttft_ms_samples = ttft_ms_samples
+        return total
+
+
+def _rebase_usage_turns(
+    usage: TokenUsage, op_offset: int, stat_offset: int, user_offset: int,
+) -> tuple[list[ToolOp], list[TurnStat], list[int], list[tuple[int, int, int]]]:
+    ops = [ToolOp(o.turn + op_offset, o.tool, o.path) for o in usage.tool_ops]
+    stats = [
+        TurnStat(t.turn + stat_offset, t.ts, t.input_tokens,
+                 t.cache_write, t.cache_read, t.output_tokens,
+                 t.duration_ms, t.tool_calls, t.errors, t.model,
+                 t.user_turn + user_offset if t.user_turn is not None else None)
+        for t in usage.turn_stats
+    ]
+    compactions = [t + stat_offset for t in usage.compaction_turns]
+    # LOC 和压缩位置与 turn_stats 共用回合编号，不按 tool_ops 的末回合偏移。
+    locs = [(t + stat_offset, a, d) for t, a, d in usage.turn_net_locs]
+    return ops, stats, compactions, locs
 
 
 def _merge_per_model(

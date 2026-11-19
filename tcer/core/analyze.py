@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass, field
-from functools import reduce
 from pathlib import Path
 from typing import Callable
 
@@ -723,18 +722,14 @@ def analyze_project(
     reports: list[SessionReport] = []
     totals = _empty_loc_totals()
     total_subs = 0
-    agg_u = TokenUsage()
+    usages: list[TokenUsage] = []
     for key, gfiles in groups.items():
         if cancel_check:
             cancel_check()
-        gu = reduce(
-            lambda a, b: a.merge(b),
-            (_scan_of(f)[0] for f in gfiles),
-            TokenUsage(),
-        )
+        gu = TokenUsage.merge_many(_scan_of(f)[0] for f in gfiles)
         n_sub = sum(1 for f in gfiles if reader.is_subagent(f))
         total_subs += n_sub
-        agg_u = agg_u.merge(gu)
+        usages.append(gu)
         if no_loc:
             reports.append(_mk_report(
                 metas[key], gu, None, None, None, ctx=ctx,
@@ -755,6 +750,7 @@ def analyze_project(
             set_subagent_density=True,
         ))
 
+    agg_u = TokenUsage.merge_many(usages)
     agg_meta = SessionMeta(
         session_id="(aggregate)", cwd=str(code_path) if code_path else None,
         title=None, path=proj, is_subagent=False,
@@ -890,7 +886,7 @@ def _analyze_source_project(
     )
 
     reports: list[SessionReport] = []
-    agg_u = TokenUsage()
+    usages: list[TokenUsage] = []
     totals = _empty_loc_totals()
 
     for h in handles:
@@ -898,7 +894,7 @@ def _analyze_source_project(
             cancel_check()
         meta = adapter.read_meta(ref, h)
         u = _usage_of(h)
-        agg_u = agg_u.merge(u)
+        usages.append(u)
         # 逐会话子代理数（omp/pi 折叠的 SubAgent 计入所属主会话；与 Claude
         # 路径及聚合层 n_subagents 口径一致，CSV 导出的 subagent_count 不再恒 0）。
         n_sub_h = (adapter.subagents_of(ref, h) if adapter.subagents_of else 0)
@@ -922,6 +918,7 @@ def _analyze_source_project(
             n_killed=n_killed_h, names=names_h,
         ))
 
+    agg_u = TokenUsage.merge_many(usages)
     first = handles[0] if handles else None
     agg_meta = SessionMeta(
         session_id="(aggregate)", cwd=str(code_path) if code_path else ref.cwd,
