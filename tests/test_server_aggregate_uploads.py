@@ -78,6 +78,17 @@ def test_project_private_hides_superseded_public_snapshots(db):
         ).fetchone()[0] == "private"
 
 
+
+def test_project_public_keeps_superseded_snapshots_private(db):
+    _upload(db)
+    _upload(db)
+    with db.connect() as conn:
+        old_id, latest_id = (r[0] for r in conn.execute(
+            "SELECT id FROM uploads ORDER BY id"))
+    assert db.set_project_visibility("alice", "project", "public") == 1
+    assert isinstance(db.session_detail(latest_id, viewer="bob"), dict)
+    assert db.session_detail(old_id, viewer="bob") == "forbidden"
+
 @pytest.mark.parametrize("times", [(1800000000, 1800000001),
                                    (1800000000, 1800000000),
                                    (1800000001, 1800000000)])

@@ -1163,8 +1163,9 @@ def set_project_visibility(viewer: str, project: str, visibility: str,
 
     Only rows owned by ``viewer`` (``uploaded_by``) are touched — a bulk action
     never flips someone else's session. Returns the number of selected rows.
-    Selected aggregates also propagate visibility to all snapshots with the
-    same raw (uploaded_by, person, project), including superseded snapshots.
+    Making a selected aggregate private also hides every superseded snapshot
+    with the same raw (uploaded_by, person, project); making it public never
+    exposes snapshots outside the selection.
     Scoping mirrors ``sessions_list`` (same canonical filters) so "this group"
     means exactly the group the user is looking at.
     """
@@ -1186,7 +1187,7 @@ def set_project_visibility(viewer: str, project: str, visibility: str,
             f"UPDATE uploads SET visibility=? WHERE id IN ({placeholders})",
             (visibility, *ids))
         for r in selected:
-            if r["kind"] == "aggregate":
+            if visibility == "private" and r["kind"] == "aggregate":
                 conn.execute(
                     "UPDATE uploads SET visibility=? WHERE kind='aggregate' "
                     "AND uploaded_by IS ? AND person IS ? AND project IS ?",
