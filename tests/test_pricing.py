@@ -304,8 +304,9 @@ def test_newly_added_models_and_current_time_pricing():
 
     # 价表口径（2026-11-13 用户裁决，同 DeepSeek 高峰档先例）：主价一律当前实际生效价，
     # 未来档/促销价记 _note 并写明翻价日期。
-    # GPT-5.6 Sol 促销价 4/20/0.4/5 至 2026-11-30，标准价 5/30/0.5/6.25 为主价
-    assert pricing.resolve("gpt-5.6-sol") == {"input": 5.0, "output": 30.0, "cache_read": 0.5, "cache_write": 6.25}
+    # GPT-5.6 Sol 促销现价 4/20/0.4/5 至 2026-11-30 为主价（2026-11-20 现价同步），
+    # 标准价 5/30/0.5/6.25 记 _note（到期须改表）
+    assert pricing.resolve("gpt-5.6-sol") == {"input": 4.0, "output": 20.0, "cache_read": 0.4, "cache_write": 5.0}
     # Gemini 3.8 Flash 当前生效介绍价 0.75/3.75/0.075 至 2026-12-31，标准价 1.5/7.5/0.15 记 _note
     assert pricing.resolve("gemini-3.8-flash") == {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0}
     # DeepSeek V4 Pro 恢复官方高峰档价（官方撤回路由公告）
@@ -402,7 +403,7 @@ def test_pricing_vendor_and_description():
     # description alias
     desc = pricing.description("claude-opus-5-5")
     assert desc is not None
-    assert "Anthropic 2026 前沿旗舰智能体模型" in desc
+    assert "1M 上下文" in desc and "缓存写 $8" in desc
 
 
 def test_model_price_tip_display():
@@ -418,7 +419,7 @@ def test_model_price_tip_display():
     assert "缓存创建　$3.75/百万" in tip
     assert "缓存命中　$0.3/百万" in tip
     assert "ℹ️ 描述：" in tip
-    assert "Anthropic" in tip and "混合推理模型" in tip
+    assert "Anthropic" in tip and "混合推理" in tip
     assert "  • " in tip
 
     # 未知模型应展示默认配置价警示
@@ -485,9 +486,9 @@ def test_upstream_synced_models_2026_10():
     assert pricing.resolve("gpt-5.6-terra") == {"input": 2.0, "output": 12.0, "cache_read": 0.2, "cache_write": 2.5}
     assert pricing.resolve("gpt-5.6-luna") == {"input": 0.2, "output": 1.2, "cache_read": 0.02, "cache_write": 0.25}
 
-    # 4. Step 5 Preview
+    # 4. Step 5 Preview（2026-11-20 缓存读由 0.35 元上调至 0.7 元≈$0.10）
     assert pricing.is_table_priced("step-5-preview")
-    assert pricing.resolve("step-5-preview") == {"input": 0.98, "output": 2.8, "cache_read": 0.05, "cache_write": 0.0}
+    assert pricing.resolve("step-5-preview") == {"input": 0.98, "output": 2.8, "cache_read": 0.1, "cache_write": 0.0}
     assert pricing.vendor("step-5-preview") == "StepFun"
 
     # 5. Hunyuan Hy4 Preview
@@ -533,9 +534,9 @@ def test_upstream_synced_models_2026_10():
     assert pricing.vendor("claude-haiku-5-5") == "Anthropic"
 
     # 12. Active frontier common models (Daybreak, LongCat, Qwen Omni)
-    # gpt-daybreak-blue-latest 跟随 GPT-5.6 Sol：2026-11-12 翻为标准价 5/30/0.5/6.25
-    #（促销价 4/20/0.4/5 至 2026-11-30 记 _note）
-    assert pricing.resolve("gpt-daybreak-blue-latest") == {"input": 5.0, "output": 30.0, "cache_read": 0.5, "cache_write": 6.25}
+    # gpt-daybreak-blue-latest 跟随 GPT-5.6 Sol：2026-11-20 翻为促销现价
+    # 4/20/0.4/5（至 2026-11-30，标准价 5/30/0.5/6.25 记 _note）
+    assert pricing.resolve("gpt-daybreak-blue-latest") == {"input": 4.0, "output": 20.0, "cache_read": 0.4, "cache_write": 5.0}
     assert pricing.resolve("gpt-daybreak-red-latest") == {"input": 12.5, "output": 75.0, "cache_read": 1.25, "cache_write": 15.625}
     assert pricing.resolve("longcat-2.0") == {"input": 0.75, "output": 2.95, "cache_read": 0.015, "cache_write": 0.0}
     assert pricing.vendor("longcat-2.0") == "Meituan"
@@ -604,13 +605,15 @@ def test_2026_11_12_standard_price_flips():
     assert "1.50/7.50/0.15" in (pricing.note_for("gemini-3.8-flash") or "")
     assert "介绍价 0.75/3.75/0.075 至 2026-12-31" in (pricing.note_for("gemini-3.8-flash") or "")
 
-    std_sol = {"input": 5.0, "output": 30.0, "cache_read": 0.5, "cache_write": 6.25}
+    # 2026-11-20 现价同步：促销价 4/20/0.4/5 为当前生效主价（至 2026-11-30），
+    # 标准价 5/30/0.5/6.25 记 _note（到期须改表与断言）
+    promo_sol = {"input": 4.0, "output": 20.0, "cache_read": 0.4, "cache_write": 5.0}
     for key in ("gpt-5.6", "gpt-5.6-sol", "gpt-5.6-low", "gpt-5.6-medium",
                 "gpt-5.6-high", "gpt-5.6-xhigh", "gpt-5.6-minimal",
                 "gpt-daybreak-blue-latest"):
-        assert pricing.resolve(key) == std_sol, key
+        assert pricing.resolve(key) == promo_sol, key
         assert "促销价" in (pricing.note_for(key) or ""), key
-    assert "4/20/0.4/5" in (pricing.note_for("gpt-5.6-sol") or "")
+    assert "5/30/0.5/6.25" in (pricing.note_for("gpt-5.6-sol") or "")
     # Terra/Luna 的 2026-07 降价是永久降价，不是促销——主价不动
     assert pricing.resolve("gpt-5.6-terra") == {"input": 2.0, "output": 12.0, "cache_read": 0.2, "cache_write": 2.5}
     assert pricing.resolve("gpt-5.6-luna") == {"input": 0.2, "output": 1.2, "cache_read": 0.02, "cache_write": 0.25}
