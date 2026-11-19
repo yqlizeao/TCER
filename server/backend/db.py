@@ -728,15 +728,23 @@ def _fetch_rows(
 ) -> list[dict]:
     """Fetch de-duplicated rows, resolve canonical person/project/model, filter.
 
-    De-dup rule: keep every session row, plus aggregate rows whose batch has no
-    session rows (aggregate-only uploads). SQL applies only the time filter;
+    De-dup rule: keep every session row, plus the latest aggregate per
+    (uploaded_by, person, project) with no session rows for that same key.
+    Latest means greatest uploaded_at, then id, independent of the time filter.
+    SQL applies de-duplication and the time filter;
     canonical person/project/model filtering is done in Python because those
     depend on alias maps + pricing normalization.
     """
     where = [
         "(kind='session' OR (kind='aggregate' AND NOT EXISTS ("
         "SELECT 1 FROM uploads s WHERE s.kind='session' "
-        "AND s.person IS u.person AND s.project IS u.project)))"
+        "AND s.person IS u.person AND s.project IS u.project "
+        "AND s.uploaded_by IS u.uploaded_by) AND NOT EXISTS ("
+        "SELECT 1 FROM uploads a WHERE a.kind='aggregate' "
+        "AND a.uploaded_by IS u.uploaded_by "
+        "AND a.person IS u.person AND a.project IS u.project "
+        "AND (a.uploaded_at > u.uploaded_at "
+        "OR (a.uploaded_at = u.uploaded_at AND a.id > u.id)))))"
     ]
     params: list = []
     if start_ts is not None:
@@ -1154,7 +1162,10 @@ def set_project_visibility(viewer: str, project: str, visibility: str,
     group (canonical). Overrides each session's prior per-session setting.
 
     Only rows owned by ``viewer`` (``uploaded_by``) are touched — a bulk action
-    never flips someone else's session. Returns the number of rows updated.
+    never flips someone else's session. Returns the number of selected rows.
+    Making a selected aggregate private also hides every superseded snapshot
+    with the same raw (uploaded_by, person, project); making it public never
+    exposes snapshots outside the selection.
     Scoping mirrors ``sessions_list`` (same canonical filters) so "this group"
     means exactly the group the user is looking at.
     """
@@ -1165,15 +1176,22 @@ def set_project_visibility(viewer: str, project: str, visibility: str,
     try:
         rows = _fetch_rows(conn, persons, [project] if project else None, models,
                            start_ts, end_ts, project_amap, model_amap, person_amap)
-        ids = [r["id"] for r in rows
-               if r.get("c_project") == project
-               and _get(r, "uploaded_by") == viewer]
+        selected = [r for r in rows
+                    if r.get("c_project") == project
+                    and _get(r, "uploaded_by") == viewer]
+        ids = [r["id"] for r in selected]
         if not ids:
             return 0
         placeholders = ",".join("?" * len(ids))
         conn.execute(
             f"UPDATE uploads SET visibility=? WHERE id IN ({placeholders})",
             (visibility, *ids))
+        for r in selected:
+            if visibility == "private" and r["kind"] == "aggregate":
+                conn.execute(
+                    "UPDATE uploads SET visibility=? WHERE kind='aggregate' "
+                    "AND uploaded_by IS ? AND person IS ? AND project IS ?",
+                    (visibility, r["uploaded_by"], r["person"], r["project"]))
         conn.commit()
         return len(ids)
     finally:
