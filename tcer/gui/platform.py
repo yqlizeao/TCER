@@ -8,10 +8,38 @@ from __future__ import annotations
 import sys
 
 PLATFORM = sys.platform  # 'win32', 'darwin', 'linux'
+SPI_GETWORKAREA = 0x0030
 
 # 可点击控件光标：Windows/Linux 用 hand2（手型，可点击反馈）；mac 的 Tk hand2 是
 # 低清位图小手、观感差，且 mac 原生按钮 hover 不变光标，故 mac 用默认（空串）。
 CLICK_CURSOR = "" if PLATFORM == "darwin" else "hand2"
+
+
+def dpi_pixels(widget, pixels: int) -> int:
+    """将 96 DPI 下的像素尺寸换算为当前屏幕像素。"""
+    return round(pixels * round(widget.winfo_fpixels("1i")) / 96)
+
+
+def window_client_bounds(root) -> tuple[int, int, int, int]:
+    """可用工作区内的客户区边界，Windows 预留缩放后的边框和标题栏。"""
+    left, top, right, bottom = 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+    if PLATFORM == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+            left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
+        right -= dpi_pixels(root, 16)
+        bottom -= dpi_pixels(root, 40)
+    return left, top, max(left + 1, right), max(top + 1, bottom)
+
+
+def fit_window(width, height, x, y, bounds) -> tuple[int, int, int, int]:
+    """限制窗口尺寸和位置，使含装饰的窗口留在可用工作区内。"""
+    left, top, right, bottom = bounds
+    width, height = min(width, right - left), min(height, bottom - top)
+    return width, height, min(max(x, left), right - width), min(max(y, top), bottom - height)
 
 # ---------------------------------------------------------------------------
 # Fonts — each OS picks its best CJK / monospace font; tkinter falls back

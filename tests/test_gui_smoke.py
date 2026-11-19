@@ -132,6 +132,34 @@ def test_metric_panel_renders(root, reports):
     frame.destroy()
 
 
+def test_metric_panel_hidpi_reflows(root, reports, monkeypatch):
+    from types import SimpleNamespace
+    from tcer.gui import views, widgets
+
+    monkeypatch.setattr(views, "dpi_pixels", lambda widget, pixels: pixels * 2)
+    monkeypatch.setattr(widgets, "dpi_pixels", lambda widget, pixels: pixels * 2)
+    frame = tk.Frame(root)
+    frame.pack()
+    controller = SimpleNamespace(**{name: lambda: None for name in (
+        "show_tool_calls", "show_models", "show_files_touched", "show_memory_files",
+        "show_cost_breakdown", "show_transcript",
+    )})
+    panel = views.MetricPanel(frame, controller)
+    panel.update(reports[0])
+    state = next(s for s in panel._grids if any(c.key == "chr" for c in s.cells))
+    monkeypatch.setattr(state.frame, "winfo_width", lambda: 350)
+    panel._apply_grid(state)
+    shown = [c for c in state.cells if c.frame.winfo_manager()]
+    assert any(int(c.frame.grid_info()["row"]) > 0 for c in shown)
+    cell = panel._cells["chr"]
+    cell.set_value("49.3901%")
+    cell._fit_wrap(SimpleNamespace(width=60))
+    assert float(cell.value.cget("wraplength")) == 0
+    assert cell.minimum_width() >= cell.title.winfo_reqwidth() + 2 * cell._pad_x
+    panel.clear()
+    frame.destroy()
+
+
 def test_metric_panel_group_collapse(root, reports):
     """MetricPanel 分组标题可点击折叠/展开整组（header 绑定 + body pack_forget）。"""
     from tcer.gui.views import MetricPanel

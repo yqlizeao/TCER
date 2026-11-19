@@ -26,6 +26,7 @@ from tcer.core.paths import (
 )
 from tcer.core.reader import discover_jsonl
 from . import html_report, popups, theme, views
+from .platform import dpi_pixels, fit_window, window_client_bounds
 from .views import FilterBar, MetricPanel, ModelCompareView, ProjectColumn, SessionColumn, TrendChart
 from .widgets import (RoundedFrame, Tooltip, flat_button,
                       ask_yes_no, ask_yes_no_cancel, message_dialog,
@@ -93,17 +94,24 @@ class TcerGui:
         self._flagged_keys = self._ui_prefs.setdefault("flagged_sessions", [])
         self._restore_project_uid = self._ui_prefs.get("last_project")
         sx, sy = root.winfo_screenwidth(), root.winfo_screenheight()
+        bounds = window_client_bounds(root)
+        min_w = min(dpi_pixels(root, 1080), bounds[2] - bounds[0])
+        min_h = min(dpi_pixels(root, 540), bounds[3] - bounds[1])
         fitted = clamp_geometry(self._ui_prefs.get("geometry") or "", sx, sy)
         if fitted is not None:
-            root.geometry(fitted)
+            size, x, y = fitted.split("+")
+            w, h = map(int, size.split("x"))
+            x, y = int(x), int(y)
         else:
             # 默认尺寸随屏幕收缩（小屏笔记本/部分 mac 放不下固定 1600×900）
             w, h = min(1600, int(sx * 0.92)), min(900, int(sy * 0.86))
-            root.geometry(f"{w}x{h}+{(sx - w) // 2}+{max(0, (sy - h) // 2 - 40)}")
+            x, y = (sx - w) // 2, max(0, (sy - h) // 2 - 40)
+        w, h, x, y = fit_window(max(w, min_w), max(h, min_h), x, y, bounds)
+        root.geometry(f"{w}x{h}+{x}+{y}")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
-        # 最小窗口尺寸：分栏 minsize 只约束 sash 拖动，窗口缩到极小时 panes 会被
-        # 挤过 minsize 产生重叠——VS Code 同样锁最小窗口（44 活动栏+260 侧栏+760 主区）。
-        root.minsize(min(1080, sx), min(540, sy))
+        # 分栏 minsize 只约束 sash 拖动；窗口最小尺寸随 DPI 放大，且给工作区内的
+        # 边框、标题栏和任务栏留位。屏幕不足时优先收缩编辑区。
+        root.minsize(min_w, min_h)
         # 全局快捷键（VS Code 习惯的最小集）：Ctrl+F 聚焦会话搜索（全选便于覆盖
         # 输入），F5/Ctrl+R 刷新项目。Entry 的 Ctrl+F 默认无绑定，bind_all 不受
         # takefocus=0 影响。
@@ -303,7 +311,7 @@ class TcerGui:
 
         # 左侧全高侧边栏 (Primary Sidebar，悬浮圆角细边框卡片)
         sidebar_wrap = tk.Frame(paned, bg=theme.BG)
-        paned.add(sidebar_wrap, minsize=180, width=240)
+        paned.add(sidebar_wrap, minsize=dpi_pixels(container, 180), width=dpi_pixels(container, 240))
         sidebar = RoundedFrame(
             sidebar_wrap, fill=theme.PANEL, parent_bg=theme.BG,
             outline=theme.BORDER, radius=theme.RADIUS_XL,
@@ -327,16 +335,17 @@ class TcerGui:
         self.sidebar_paned.pack(fill="both", expand=True, padx=4, pady=(0, 6))
 
         proj_pane = tk.Frame(self.sidebar_paned, bg=theme.PANEL)
-        self.sidebar_paned.add(proj_pane, minsize=120)
+        self.sidebar_paned.add(proj_pane, minsize=dpi_pixels(container, 120))
         self.project_col = ProjectColumn(proj_pane, self)
 
         sess_pane = tk.Frame(self.sidebar_paned, bg=theme.PANEL)
-        self.sidebar_paned.add(sess_pane, minsize=140)
+        self.sidebar_paned.add(sess_pane, minsize=dpi_pixels(container, 140))
         self.session_col = SessionColumn(sess_pane, self)
 
         # 右侧主工作区 (Editor Container)
         editor = tk.Frame(paned, bg=theme.BG)
-        paned.add(editor, minsize=760)
+        width_shortfall = max(0, dpi_pixels(container, 1080) - self.root.minsize()[0])
+        paned.add(editor, minsize=max(0, dpi_pixels(container, 760) - width_shortfall))
 
         nb = views.EditorWorkbench(editor, controller=self)
         nb.pack(fill="both", expand=True)
@@ -382,8 +391,9 @@ class TcerGui:
 
         self._paned = paned
         container.update_idletasks()
+        sidebar_width = dpi_pixels(container, 240)
         try:
-            paned.sash_place(0, 240, 0)
+            paned.sash_place(0, sidebar_width, 0)
             self.sidebar_paned.sash_place(0, 0, 220)
         except (TypeError, ValueError, tk.TclError):
             pass
@@ -393,9 +403,9 @@ class TcerGui:
             try:
                 if len(saved) >= 1:
                     s0 = int(saved[0])
-                    # 紧凑侧栏：仅作用户索引，若历史保存偏大（如过往设定的 350+），重置为紧凑的 240
-                    if s0 > 300:
-                        s0 = 240
+                    # 分栏位置以物理像素保存；过宽时恢复当前 DPI 下的紧凑侧栏。
+                    if s0 > dpi_pixels(container, 300):
+                        s0 = sidebar_width
                     paned.sash_place(0, s0, 0)
                 if len(saved) >= 2 and hasattr(self, "sidebar_paned"):
                     s1 = min(250, max(140, int(saved[1])))
