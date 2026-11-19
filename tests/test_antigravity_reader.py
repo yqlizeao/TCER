@@ -928,6 +928,49 @@ def test_subagent_folding_by_summaries_parent(tmp_path: Path, monkeypatch):
     assert len(antigravity_reader.subagent_dbs(parent)) == 2
 
 
+def test_nested_subagent_chain_folds_each_descendant_once(tmp_path: Path, monkeypatch):
+    """父 → 子 → 孙：subagent_dbs 已返回全部后代，每个后代只折叠一次。
+
+    逐层递归再叠加全后代列表会让孙会话的 Token/LOC 计两次（depth ≥ 2 才暴露）。
+    """
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    uri = "file:///C:/proj/nested"
+    w = {"Path": r"C:\t\b.py", "Content": "x=1\ny=2\nz=3\n"}
+    parent = _build_db(conv / "p1.db", [
+        _gen_row("gemini-3.8-flash", 100, 10, 200, "rid-p"),
+    ], [
+        (14, 3, _make_user_step_bytes("拆成两层子代理")),
+    ])
+    _build_db(conv / "c1.db", [_gen_row("gemini-3.8-flash", 100, 10, 200, "rid-c1")], [])
+    _build_db(conv / "g1.db", [
+        _gen_row("gemini-3.8-flash", 100, 10, 200, "rid-g1"),
+    ], [
+        (15, 3, _multi_call_step([("w1", "write_file", w)])),
+        (132, 3, _result_step("w1", "write_file", w)),
+    ])
+    _write_summaries_with_parent(tmp_path, [
+        ("p1", "", uri, 3),
+        ("c1", "p1", uri, 2),
+        ("g1", "c1", uri, 1),
+    ])
+
+    assert [p.stem for p in antigravity_reader.subagent_dbs(parent)] == ["c1", "g1"]
+
+    u = antigravity_reader.aggregate_usage(parent)
+    assert u.input_tokens == 300          # 父 + 子 + 孙各 100，孙只计一次
+    assert u.output_tokens == 30
+    assert u.cache_read_input_tokens == 600
+
+    sloc, has_sig = antigravity_reader.session_loc_full(parent)
+    assert has_sig is True
+    assert sloc.added == 3                # 孙写的 3 行只回放一次
+
+    pa = analyze.analyze_project("nested", source="antigravity")
+    assert pa.n_sessions == 1 and pa.n_subagents == 2
+    assert pa.aggregate.usage.input_tokens == 300
+
+
 def test_killed_subagents_and_names(tmp_path: Path, monkeypatch):
     """killed worker 计数与具名 worker 名单：killed=1 计入父卡、名字非空才收。
 
