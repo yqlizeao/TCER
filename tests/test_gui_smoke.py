@@ -1833,6 +1833,40 @@ def test_dashboard_draws_sparklines_on_real_canvas(root, reports):
     frame.destroy()
 
 
+@pytest.mark.parametrize("key, expected", [
+    ("added", 400),
+    ("input", 600_000),
+    ("subagent", 5),
+    ("cost", 4),
+    ("chr", 50),
+    ("cpe", 20),
+    ("context_window", 150_000),
+])
+def test_dashboard_daily_aggregation(root, key, expected):
+    from tcer.gui.charts import DashboardChart
+
+    first, second = _report("s1"), _report("s2")
+    first.meta.source = second.meta.source = "codex"
+    first.code_added, second.code_added = 100, 300
+    first.usage.input_tokens, second.usage.input_tokens = 200_000, 400_000
+    first.subagent_count, second.subagent_count = 2, 3
+    first.cost, second.cost = 1.25, 2.75
+    first.chr, second.chr = 0.25, 0.75
+    first.cpe, second.cpe = 10, 30
+    first.usage.model_context_window, second.usage.model_context_window = 100_000, 200_000
+
+    frame = tk.Frame(root)
+    try:
+        dashboard = DashboardChart(frame)
+        dashboard.update([first, second])
+        assert len(dashboard._series(key)) == 2
+
+        dashboard._daily.set(True)
+        assert dashboard._series(key) == [expected]
+    finally:
+        frame.destroy()
+
+
 def test_session_column_batched_build_and_pending_select(root):
     """分批构建：首批同步可见、后续批经主循环补齐；构建期选中请求建完补发。"""
     from types import SimpleNamespace
