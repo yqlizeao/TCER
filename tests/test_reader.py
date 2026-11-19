@@ -364,6 +364,32 @@ def test_session_meta_tail_title_beats_stale_head_title(tmp_path):
     assert meta.session_id == "sess-x"
 
 
+def test_session_meta_head_ai_title_after_metadata_complete(tmp_path):
+    """A head ai-title after all metadata + the first question must still win.
+
+    cc 2.x stamps every line with sessionId/cwd/version/gitBranch/effort/
+    permissionMode, so the head scan's early stop fires on the first prompt;
+    an ai-title written a few lines later (and absent from the tail) must not
+    be skipped, or the list shows the raw prompt instead of the AI title.
+    """
+    meta_fields = {"sessionId": "sess-h", "cwd": "/tmp/p", "entrypoint": "cli",
+                   "version": "2.1.326", "gitBranch": "main", "effort": "high",
+                   "permissionMode": "default"}
+    lines: list[dict] = [
+        {"type": "user", **meta_fields,
+         "message": {"role": "user", "content": "原始问题"}},
+        {**_assistant(_usage(1, 0, 0, 1)), **meta_fields},
+        {"type": "ai-title", "sessionId": "sess-h", "aiTitle": "生成的标题"},
+    ]
+    # Pad past the tail window so the ai-title lives only in the head.
+    for _ in range(50):
+        lines.append({**_assistant(_usage(1, 0, 0, 1)), **meta_fields})
+    meta = reader.read_session_meta(write_session(tmp_path, lines))
+    assert meta.title == "生成的标题"
+    assert meta.session_id == "sess-h"
+    assert meta.cli_version == "2.1.326"
+
+
 def test_session_meta_falls_back_to_user_message_without_ai_title(tmp_path):
     """No ai-title anywhere → first real user message is used as the title."""
     lines = [

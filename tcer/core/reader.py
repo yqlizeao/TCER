@@ -1125,6 +1125,27 @@ def read_session_meta(path: Path) -> SessionMeta:
         path, ("claude_meta",), lambda: _read_session_meta_uncached(path))
 
 
+def _last_ai_title(lines: list[str]) -> str | None:
+    """Return the last non-empty ``aiTitle`` among ``lines`` (newest wins).
+
+    预过滤：只有含 "ai-title" 字面串的行才可能是 ai-title 行（type 值本身
+    就含该串），其余行跳过 json.loads；判定仍以解析后的 type 为准。
+    """
+    title: str | None = None
+    for line in lines:
+        if "ai-title" not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "ai-title":
+            t = obj.get("aiTitle")
+            if isinstance(t, str) and t.strip():
+                title = t.strip()
+    return title
+
+
 def _read_session_meta_uncached(path: Path) -> SessionMeta:
     """Ports cc-switch's ``read_head_tail_lines`` + ``parse_session``: read the first
     ``head_n`` lines and last ``tail_n`` lines only, so listing hundreds of sessions
@@ -1148,34 +1169,20 @@ def _read_session_meta_uncached(path: Path) -> SessionMeta:
     reasoning_effort: str | None = None
     permission_mode: str | None = None
 
-    # Newest ai-title in the tail wins. Keep overwriting → the last non-empty
-    # aiTitle in the tail is the freshest the file has.
-    # 预过滤：只有含 "ai-title" 字面串的行才可能是 ai-title 行（type 值本身
-    # 就含该串），其余行跳过 json.loads；判定仍以解析后的 type 为准。
-    tail_title: str | None = None
-    for line in tail:
-        if "ai-title" not in line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and obj.get("type") == "ai-title":
-            t = obj.get("aiTitle")
-            if isinstance(t, str) and t.strip():
-                tail_title = t.strip()
+    # Newest ai-title in the tail wins.
+    tail_title = _last_ai_title(tail)
 
     head_title: str | None = None
     fallback_title: str | None = None
-    for line in head:
-        # 早停：全部元数据字段（首个非空 wins）+ 回退标题（首条提问 wins）都
-        # 已齐全时，后面的头行不再提供新信息。注意 head_title 是「最后一个
-        # ai-title wins」，不能拿它做早停条件——已设 head_title 时只跳过
-        # classify（回退标题已无用），仍继续扫后面的 ai-title 行。
+    for i, line in enumerate(head):
+        # 早停：全部元数据字段（首个非空 wins）已齐全且已有标题候选时，剩余
+        # 头行只可能再贡献更新的 ai-title（「最后一个 wins」），改走预过滤
+        # 扫描，不再逐行 json.loads。
         if (session_id is not None and cwd is not None and entrypoint is not None
                 and cli_version is not None and git_branch is not None
                 and reasoning_effort is not None and permission_mode is not None
-                and fallback_title is not None):
+                and (fallback_title is not None or head_title is not None)):
+            head_title = _last_ai_title(head[i:]) or head_title
             break
         try:
             obj = json.loads(line)
