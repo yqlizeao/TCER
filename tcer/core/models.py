@@ -1,7 +1,8 @@
 """Data classes used across the TCER pipeline."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from collections.abc import Iterable
 from operator import attrgetter
 from pathlib import Path
 
@@ -356,6 +357,52 @@ class TokenUsage:
             est_gen_output_tokens=self.est_gen_output_tokens + other.est_gen_output_tokens,
             est_gen_duration_ms=self.est_gen_duration_ms + other.est_gen_duration_ms,
         )
+
+    @classmethod
+    def merge_many(cls, usages: Iterable[TokenUsage]) -> TokenUsage:
+        """Merge in order without repeatedly copying or scanning accumulated lists."""
+        total = cls()
+        tool_ops: list[ToolOp] = []
+        turn_stats: list[TurnStat] = []
+        compaction_turns: list[int] = []
+        turn_net_locs: list[tuple[int, int, int]] = []
+        user_message_texts: list[str] = []
+        ttft_ms_samples: list[int] = []
+        max_op_turn = max_stat_turn = -1
+        for usage in usages:
+            op_offset = max_op_turn + 1
+            stat_offset = max_stat_turn + 1
+            ops = [ToolOp(o.turn + op_offset, o.tool, o.path) for o in usage.tool_ops]
+            stats = [
+                TurnStat(t.turn + stat_offset, t.ts, t.input_tokens,
+                         t.cache_write, t.cache_read, t.output_tokens,
+                         t.duration_ms, t.tool_calls, t.errors, t.model,
+                         t.user_turn + total.user_msgs if t.user_turn is not None else None)
+                for t in usage.turn_stats
+            ]
+            if ops:
+                incoming_max = max(map(_TURN_OF, ops))
+                max_op_turn = max(max_op_turn, incoming_max) if tool_ops else incoming_max
+            if stats:
+                incoming_max = max(map(_TURN_OF, stats))
+                max_stat_turn = max(max_stat_turn, incoming_max) if turn_stats else incoming_max
+            tool_ops.extend(ops)
+            turn_stats.extend(stats)
+            compaction_turns.extend(t + stat_offset for t in usage.compaction_turns)
+            turn_net_locs.extend((t + stat_offset, a, d) for t, a, d in usage.turn_net_locs)
+            user_message_texts.extend(usage.user_message_texts)
+            ttft_ms_samples.extend(usage.ttft_ms_samples)
+            total = total.merge(replace(
+                usage, tool_ops=[], turn_stats=[], compaction_turns=[],
+                turn_net_locs=[], user_message_texts=[], ttft_ms_samples=[],
+            ))
+        total.tool_ops = tool_ops
+        total.turn_stats = turn_stats
+        total.compaction_turns = compaction_turns
+        total.turn_net_locs = turn_net_locs
+        total.user_message_texts = user_message_texts
+        total.ttft_ms_samples = ttft_ms_samples
+        return total
 
 
 def _merge_per_model(

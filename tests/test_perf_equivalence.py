@@ -171,6 +171,41 @@ def test_merge_rebases_turns_and_skips_empty_other():
     assert [t.turn for t in f.turn_stats] == [0]
 
 
+@pytest.mark.parametrize("count", [0, 1, 100])
+def test_merge_many_matches_sequential_merge(count):
+    usages = []
+    expected = TokenUsage()
+    for i in range(count):
+        usage = TokenUsage(
+            input_tokens=i, user_msgs=i % 3, first_prompt_chars=i,
+            tool_ops=[ToolOp(4, "Read", "x"), ToolOp(0, "Edit", "x")] if i % 2 else [],
+            turn_stats=[TurnStat(7, user_turn=1), TurnStat(2)] if i % 3 else [],
+            compaction_turns=[3], turn_net_locs=[(2, 5, 1)],
+            user_message_texts=[str(i)], ttft_ms_samples=[i],
+            tool_calls={"Read": i}, models={"model"},
+        )
+        usage.bucket("model").add(i, 0, 0, 0)
+        usages.append(usage)
+        expected = expected.merge(usage)
+    before = repr(usages)
+    actual = TokenUsage.merge_many(iter(usages))
+    assert actual == expected
+    assert repr(usages) == before
+    actual.tool_ops.append(ToolOp(999, "Write", "y"))
+    actual.turn_stats.append(TurnStat(999))
+    actual.ttft_ms_samples.append(999)
+    assert repr(usages) == before
+
+
+def test_merge_many_propagates_iteration_errors():
+    def usages():
+        yield TokenUsage(input_tokens=1)
+        raise ValueError("broken input")
+
+    with pytest.raises(ValueError, match="broken input"):
+        TokenUsage.merge_many(usages())
+
+
 # --------------------------------------------------------------------------- #
 # 2026-11-05 冷态扫描优化（loc 分类缓存 / iter_messages 去 strip /
 # _add_usage_delta 快路径 / meta 采样预过滤与早停）的等价性护栏。
