@@ -1813,9 +1813,6 @@ class DashboardChart:
         ("G6", "tcer"),
     ]
 
-    # 按日聚合时可直接求和的代表指标；其余按日取均值。
-    _ADDITIVE = frozenset({"turns", "total_tokens", "net_loc", "cost"})
-
     # key → 所属组 id（自定义指标后表头仍按所属组着色）。
     _KEY_GROUP = {m.key: g.id for g in GROUPS for m in g.metrics}
 
@@ -1830,7 +1827,7 @@ class DashboardChart:
         CheckRow(
             bar, "按日聚合（会话密度不均时曲线更真实）", self._daily,
             on_toggle=self._draw, font=theme.FONT_UI_SMALL,
-            tooltip="开启后按日聚合：会话密度不均时曲线更真实（计数/金额求和，比率求均值）",
+            tooltip="开启后按日聚合：可累加的计数和总成本求和，其余指标取会话均值。",
         )
         tk.Label(bar, text="右键格子换指标", bg=theme.BG, fg=theme.MUTED,
                  font=theme.FONT_UI_SMALL).pack(side="right", padx=8)
@@ -1886,7 +1883,7 @@ class DashboardChart:
         self._draw()
 
     def _series(self, key: str) -> list[float | None]:
-        """会话序列或按日聚合序列（计数/金额求和，比率求均值）。"""
+        """会话序列或按日聚合序列（可累加指标求和，其余取均值）。"""
         if not self._daily.get():
             return [metric_raw_value(r, key) for r in self._reports]
         from datetime import datetime
@@ -1898,7 +1895,8 @@ class DashboardChart:
                 continue
             day = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
             buckets.setdefault(day, []).append(v)
-        additive = key in self._ADDITIVE
+        metric = _metric_by_key.get(key)
+        additive = metric is not None and metric.additive
         return [
             (sum(vs) if additive else sum(vs) / len(vs))
             for _day, vs in sorted(buckets.items())

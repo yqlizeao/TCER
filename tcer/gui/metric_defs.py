@@ -28,6 +28,7 @@ class Metric:
     sentiment: str = ""  # "up"=越高越好, "down"=越低越好, ""=中性
     fmt: str = ""        # format spec token (filled from _SESSION_FMT / _MODEL_FMT at
                          # import); drives format_value. "" / "text" = pass-through string.
+    additive: bool = False  # session values can be summed for daily dashboard totals
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ GROUPS: list[Group] = [
         Metric("turns", "请求数", "",
                "会话内向模型 API 发起的请求总数（成功返回且带用量的；与 cc-switch 的"
                "「请求数」同口径——一次请求对应一条助手响应）。\n"
-               "括号内为跳过的零 usage 桩（thinking stub / 占位行）。", "basic"),
+               "括号内为跳过的零 usage 桩（thinking stub / 占位行）。", "basic", additive=True),
         Metric("started", "开始时间", "", "会话首个事件的时间戳（Claude 为首条助手回复；其余源含会话头/首条用户消息）。", "basic"),
         Metric("last_time", "结束时间", "", "会话最后事件的时间戳（Claude 为末条助手回复；其余源含收尾事件），配合「开始时间」可判断活跃时段。", "basic"),
         Metric("duration", "持续时长", "小时",
@@ -73,7 +74,7 @@ GROUPS: list[Group] = [
                "说明：Codex / Oh My Pi 提供单次补全精确耗时；Claude 仅记录整轮墙钟，显示「不适用」。", "basic"),
         Metric("models", "模型", "", "该会话使用的 AI 模型（友好名），同一会话可能混用多个。", "basic"),
         Metric("tools", "工具调用", "",
-               "Claude Code 调用的工具及次数，点击查看详细列表。", "basic"),
+               "Claude Code 调用的工具及次数，点击查看详细列表。", "basic", additive=True),
         Metric("latency", "平均延迟", "毫秒",
                "公式：各次 API 请求耗时的平均值（逐请求 duration 求均值）\n"
                "推荐：越低越好（编程模型一次补全含长思考，几十秒属常见）\n"
@@ -100,33 +101,33 @@ GROUPS: list[Group] = [
         Metric("reasoning_effort", "推理强度", "",
                "本地代理记录中的 reasoning effort；不同模型或配置可能为空。", "basic"),
         Metric("plan_modes", "计划模式", "",
-               "会话中进入计划模式（plan mode）的次数——先规划后动手的工作流信号。", "basic"),
+               "会话中进入计划模式（plan mode）的次数——先规划后动手的工作流信号。", "basic", additive=True),
         Metric("slash_commands", "斜杠命令", "",
-               "以 / 开头或经命令面板发送的用户消息数——工作流自动化程度的信号。", "basic"),
+               "以 / 开头或经命令面板发送的用户消息数——工作流自动化程度的信号。", "basic", additive=True),
         Metric("hook_overhead", "钩子开销", "",
                "stop hook（lint/test 等用户配置的钩子）的累计耗时与失败次数——"
                "「你自己装的钩子拖慢了多少」。", "basic", "down"),
         Metric("subagent", "子代理", "",
                "并入该会话的子代理数量。子代理是代理为复杂任务自动拆出的并行助手"
                "（Claude Code 的 Task / Antigravity 的 invoke_subagent 等），"
-               "其 Token 与代码行合并计入父会话。Antigravity 具名 worker 在括号内列出。", "basic"),
+               "其 Token 与代码行合并计入父会话。Antigravity 具名 worker 在括号内列出。", "basic", additive=True),
         Metric("killed_subagents", "被移除子代理", "",
                "协调者主动移除的子代理数（Antigravity Swarm 的 killed worker）——"
-               "其产出被丢弃、已消耗的 Token 全部浪费，是编排失控/返工的直接信号。", "basic", "down"),
+               "其产出被丢弃、已消耗的 Token 全部浪费，是编排失控/返工的直接信号。", "basic", "down", additive=True),
     ]),
     Group("G2", "Token 用量", [
         Metric("total_tokens", "总 Token", "",
                "公式：输入 + 输出 + 缓存\n"
                "推荐：视任务而定\n"
-               "说明：约 1 英文词≈1.3 Token、1 中文字≈2 Token。", "basic"),
-        Metric("input", "输入", "", "非缓存的输入 Token，按全价计费。单价随模型而定（Anthropic 通用回退价约 $3/百万，mimo/glm 等更低），实际逐模型计价。", "basic"),
-        Metric("output", "输出", "", "AI 生成的输出 Token（代码、文字、思考），单价最高。随模型而定（Anthropic 回退价约 $15/百万），实际逐模型计价。", "basic"),
+               "说明：约 1 英文词≈1.3 Token、1 中文字≈2 Token。", "basic", additive=True),
+        Metric("input", "输入", "", "非缓存的输入 Token，按全价计费。单价随模型而定（Anthropic 通用回退价约 $3/百万，mimo/glm 等更低），实际逐模型计价。", "basic", additive=True),
+        Metric("output", "输出", "", "AI 生成的输出 Token（代码、文字、思考），单价最高。随模型而定（Anthropic 回退价约 $15/百万），实际逐模型计价。", "basic", additive=True),
         Metric("cache_write", "缓存创建", "",
-               "首次写入缓存的 Token 数。单价随模型而定（Anthropic 回退价约 $3.75/百万，部分路由模型为 0）。", "basic"),
+               "首次写入缓存的 Token 数。单价随模型而定（Anthropic 回退价约 $3.75/百万，部分路由模型为 0）。", "basic", additive=True),
         Metric("cache_read", "缓存命中", "",
-               "从缓存读取的 Token 数，单价远低于普通输入（Anthropic 回退价约 $0.30/百万，为输入的 1/10），命中越多越省。", "basic"),
+               "从缓存读取的 Token 数，单价远低于普通输入（Anthropic 回退价约 $0.30/百万，为输入的 1/10），命中越多越省。", "basic", additive=True),
         Metric("reasoning_tokens", "推理输出", "",
-               "本地代理单独暴露的推理输出 Token；它已包含在「输出」中，这里只作为推理占比分析，不重复计费。", "basic"),
+               "本地代理单独暴露的推理输出 Token；它已包含在「输出」中，这里只作为推理占比分析，不重复计费。", "basic", additive=True),
         Metric("context_window", "上下文窗口", "",
                "本地代理上报的 model_context_window，表示当前模型上下文窗口大小。", "basic"),
         Metric("context_window_used", "窗口使用率", "",
@@ -184,22 +185,22 @@ GROUPS: list[Group] = [
                    "公式：写入行 − 删除行\n"
                    "推荐：视任务而定（正值=增长，负值=重构/精简）\n"
                    "说明：会话内 Write/Edit/MultiEdit 工具调用逐条统计的真实产出行数，"
-                   "不依赖 git。", "basic"),
-            Metric("added", "写入行", "", "工具调用写入的总行数（代码/文档/配置，含重写/覆盖）。", "basic"),
-            Metric("deleted", "删除行", "", "工具调用删除的总行数（代码/文档/配置）。", "basic"),
+                   "不依赖 git。", "basic", additive=True),
+            Metric("added", "写入行", "", "工具调用写入的总行数（代码/文档/配置，含重写/覆盖）。", "basic", additive=True),
+            Metric("deleted", "删除行", "", "工具调用删除的总行数（代码/文档/配置）。", "basic", additive=True),
             Metric("files_touched", "涉及文件", "",
                    "会话中读取、写入或编辑过的独立文件数，点击查看列表。", "basic"),
             Metric("code_loc", "代码行", "",
                    "公式：净增行 − 文档行 − 测试行\n"
                    "推荐：视任务而定（正值=增长，负值=重构/精简）\n"
                    "说明：纯代码源文件的净增行（.py/.gd/.tscn 等产出，扣除文档与测试）；"
-                   "与「文档行」对偶。", "basic"),
+                   "与「文档行」对偶。", "basic", additive=True),
             Metric("test_loc", "测试行", "",
-                   "测试文件（*test*.py、*/tests/ 等）的净增行，反映测试投入。", "basic"),
+                   "测试文件（*test*.py、*/tests/ 等）的净增行，反映测试投入。", "basic", additive=True),
             Metric("doc_loc", "文档行", "",
                    "文档/策划文本（*.md、*.txt、*.rst、*/docs/ 等）的净增行，反映文档投入。\n"
                    "注：Word/Excel 等二进制文件不计——AI 的编辑是文本行模型，无法对其产出行数；"
-                   "策划通常在 .md/.txt 起草后再转成 Office。", "basic"),
+                   "策划通常在 .md/.txt 起草后再转成 Office。", "basic", additive=True),
         ]),
         Subgroup("行为", [
             Metric("read_write_ratio", "读写比", "",
@@ -234,30 +235,30 @@ GROUPS: list[Group] = [
                    "说明：衡量「搜完是否跟进修改」的工作流;按回合就近匹配(不绑定具体文件，因 Grep 的 path 多为目录)；偏低=搜索后未动手(探索过度)。", "basic", "up"),
             Metric("read_truncations", "读取截断", "",
                    "Read 结果因过长被截断的次数——每次截断都读入了用不上的内容又要重读，"
-                   "是上下文浪费的直接信号。", "basic", "down"),
+                   "是上下文浪费的直接信号。", "basic", "down", additive=True),
             Metric("reasoning_time", "思考耗时", "秒",
                    "推理（reasoning）内容块的累计生成耗时。", "basic"),
             Metric("thinking_count", "思考次数", "",
-                   "AI 输出 thinking（推理）内容块的次数,消耗 output token。⚠️ 对推理类模型(mimo/glm/带思考的 Claude)几乎每回合都有,≈回合数,并非「复杂度」信号;关闭思考的会话则恒为 0。", "basic"),
+                   "AI 输出 thinking（推理）内容块的次数,消耗 output token。⚠️ 对推理类模型(mimo/glm/带思考的 Claude)几乎每回合都有,≈回合数,并非「复杂度」信号;关闭思考的会话则恒为 0。", "basic", additive=True),
             Metric("reasoning_ratio", "推理输出占比", "",
                    "公式：推理输出 Token ÷ 输出 Token\n"
                    "说明：部分本地代理会把推理输出 Token 单独上报，比例越高通常表示更多输出预算用于推理。", "basic"),
             Metric("compactions", "上下文压缩", "",
-                   "本地代理记录中的上下文压缩次数；数值高表示会话发生过上下文压缩或窗口替换。", "basic"),
+                   "本地代理记录中的上下文压缩次数；数值高表示会话发生过上下文压缩或窗口替换。", "basic", additive=True),
             Metric("compaction_cost", "压缩代价", "",
                    "公式：Σ 压缩丢弃 Token（Claude compactMetadata 的 cumulativeDroppedTokens 或 pre−post；Oh My Pi / Pi 为 compaction 条目的 tokensBefore−tokensAfter）；"
                    "括号内为压缩前上下文峰值与压缩总耗时。\n"
                    "说明：回答「压缩到底丢了多少、值不值」——丢弃量 × 重新读入单价即压缩的隐性成本；"
-                   "部分版本只记 preTokens（无丢弃量字段）时显示 0，仅括号信息可用。", "basic", "down"),
+                   "部分版本只记 preTokens（无丢弃量字段）时显示 0，仅括号信息可用。", "basic", "down", additive=True),
             Metric("loc_confidence", "LOC 可信度", "",
                    "公式：1 − |回放−patch| ÷ patch 行数（回放 added/deleted vs Claude 自算 structuredPatch）\n"
                    "说明：给「净增行」标置信度——吻合率低提示回放假设失效（如 replace_all 多处替换只计一次），"
                    "该会话的 LOC 类指标需谨慎读。", "basic", "up"),
             Metric("web_searches", "网页搜索", "",
-                   "本地代理记录中的网页搜索数量；旧格式仅有结束事件时用结束事件兜底。", "basic"),
+                   "本地代理记录中的网页搜索数量；旧格式仅有结束事件时用结束事件兜底。", "basic", additive=True),
             Metric("image_inputs", "图片输入", "",
                    "用户消息中携带的远程图片和本地图片数量合计。\n"
-                   "Codex 来自 images/local_images；OpenCode 来自 image file part；omp/pi 来自内联 image 内容块。", "basic"),
+                   "Codex 来自 images/local_images；OpenCode 来自 image file part；omp/pi 来自内联 image 内容块。", "basic", additive=True),
         ]),
         Subgroup("质量", [
             Metric("churn", "返工率", "",
@@ -275,7 +276,7 @@ GROUPS: list[Group] = [
             Metric("retry_loops", "重试循环", "",
                    "公式：同工具对同一路径连续重复调用 ≥3 次的循环个数\n"
                    "推荐：0，越少越好\n"
-                   "说明：卡死信号——错误率只给比例，循环给结构：同一文件反复 Edit 失败、反复 Read 同一大文件，往往是陷入死循环的回合级证据。无路径的工具（Bash）不参与。", "basic", "down"),
+                   "说明：卡死信号——错误率只给比例，循环给结构：同一文件反复 Edit 失败、反复 Read 同一大文件，往往是陷入死循环的回合级证据。无路径的工具（Bash）不参与。", "basic", "down", additive=True),
             Metric("retry_loop_max", "最长重试", "",
                    "公式：最长一次重试循环的连续重复次数\n"
                    "推荐：≤3，越低越好\n"
@@ -291,7 +292,7 @@ GROUPS: list[Group] = [
             Metric("unseen_writes", "盲写文件", "",
                    "公式：Write 写入「此前未读取/未接触」文件的次数\n"
                    "推荐：越低越可靠\n"
-                   "说明：既反映「盲写」习惯，也是净增行高估的上界——覆写已有文件会把旧内容计为新增。", "basic", "down"),
+                   "说明：既反映「盲写」习惯，也是净增行高估的上界——覆写已有文件会把旧内容计为新增。", "basic", "down", additive=True),
             Metric("task_completion", "任务完成率", "",
                    "公式：task_complete ÷ task_started\n"
                    "说明：本地代理任务开始 / 完成 / 中断事件给出的任务完成情况。", "basic", "up"),
@@ -309,21 +310,21 @@ GROUPS: list[Group] = [
                    "说明：本地代理补丁应用事件的成功率，能解释 Edit 失败或工具错误率。", "basic", "up"),
             Metric("aborted_tasks", "中断任务", "",
                    "本地代理任务中断次数。用户中断、取消或运行中止时会增加。\n"
-                   "Codex 来自 turn_aborted 事件；omp/pi 来自 stopReason=='aborted' 的回合。", "basic", "down"),
+                   "Codex 来自 turn_aborted 事件；omp/pi 来自 stopReason=='aborted' 的回合。", "basic", "down", additive=True),
             Metric("rate_limit_hits", "限流命中", "",
-                   "限流命中次数：Claude 为 429 API 错误行，Codex 为限流快照记录。", "basic", "down"),
+                   "限流命中次数：Claude 为 429 API 错误行，Codex 为限流快照记录。", "basic", "down", additive=True),
             Metric("user_modified", "人工修正", "",
                    "AI 写入文件后被用户手动修改过的工具结果数（toolUseResult.userModified）。\n"
-                   "偏高说明 AI 产出常需要人再加工——最直接的产出质量信号之一。", "basic", "down"),
+                   "偏高说明 AI 产出常需要人再加工——最直接的产出质量信号之一。", "basic", "down", additive=True),
             Metric("revert_events", "回退事件", "",
-                   "用户回退（revert/rewind）AI 改动的事件数——「产出被拒绝」的显式信号。", "basic", "down"),
+                   "用户回退（revert/rewind）AI 改动的事件数——「产出被拒绝」的显式信号。", "basic", "down", additive=True),
         ]),
     ]),
     Group("G5", "成本分析", [
         Metric("cost", "总成本", "美元",
                "公式：各模型 Token × 官方标价，求和\n"
                "推荐：视任务而定（越低越好，无绝对基准）\n"
-               "说明：按 API list price 估算的理论成本，非订阅实际扣费。", "basic", "down"),
+               "说明：按 API list price 估算的理论成本，非订阅实际扣费。", "basic", "down", additive=True),
         Metric("cost_per_mt", "每百万Token成本", "美元/百万",
                "公式：总成本 ÷ 总 Token（百万）\n"
                "推荐：典型 $0.5–5/百万（视 CHR 与输出占比）\n"
