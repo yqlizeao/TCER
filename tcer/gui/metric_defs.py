@@ -57,6 +57,11 @@ def _subgrouped(gid: str, name: str, subgroups: list[Subgroup]) -> Group:
 # 的 approx 参数与 format.fmt_approx_cn）。大数可读性辅助，精确值照常展示。
 APPROX_KEYS = frozenset({"total_tokens"})
 
+# 看板焦点指标：数值用更大字阶（theme.FONT_VALUE_LG），在等宽网格里成为视觉锚点。
+# 只收数字型核心口径——会话规模（Token）、吞吐（缓存命中）、产出（净增行）、
+# 代价（成本）、效率（TCER）；文字型/比率型小指标一律常规字阶。
+FEATURED_KEYS = frozenset({"total_tokens", "chr", "net_loc", "cost", "tcer"})
+
 
 GROUPS: list[Group] = [
     Group("G1", "会话概况", [
@@ -433,7 +438,7 @@ _SESSION_FMT: dict[str, str] = {
     "context_window": "int", "context_window_used": "pct",
     "output_tps": "float:0.0", "est_output_tps": "float:0.0",
     # G3
-    "chr": "pct4", "io_ratio": "float:0.1", "caf": "float:0.00",
+    "chr": "pct", "io_ratio": "float:0.1", "caf": "float:0.00",
     "cache_efficiency": "float:0.00", "cache_write_ratio": "pct",
     "non_cached_input_ratio": "pct",
     # G4
@@ -522,9 +527,6 @@ def _format_native(fmt_spec: str, v) -> str:
         return fmt.fmt_int(round(v) if isinstance(v, float) else v)
     if fmt_spec == "pct":
         return fmt.fmt_pct(v)
-    if fmt_spec == "pct4":
-        # 百分比保留四位小数（缓存命中率：对比聚合口径时需要更高分辨率）
-        return f"{v * 100:.4f}%" if v is not None else "-"
     if fmt_spec.startswith("float:"):
         return fmt.fmt_float(v, fmt_spec.split(":", 1)[1])
     if fmt_spec == "money":

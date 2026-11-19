@@ -1319,10 +1319,12 @@ class ProjectColumn:
         Tooltip(self._search_box.entry, "按项目名称 / 路径 / 来源过滤 · Esc 清空")
         Tooltip(self._search_box, "按项目名称 / 路径 / 来源过滤 · Esc 清空")
         self._filter_var.trace_add("write", lambda *_a: self._render_filter())
-        sf = ScrollFrame(col, bg=theme.PANEL)
+        sf = ScrollFrame(col, bg=theme.PANEL, fill_viewport=True)
         sf.canvas.pack(fill="both", expand=True, padx=6, pady=(1, 4))
         self.scroll = sf
         self.container = sf.inner
+        self._empty_hint = None
+        self._filter_hint = None
 
     def update(self, projects, empty_projects: set | None = None,
                preferred_uid: str | None = None,
@@ -1333,6 +1335,9 @@ class ProjectColumn:
         if getattr(self, "_empty_hint", None) is not None:
             self._empty_hint.destroy()
             self._empty_hint = None
+        if getattr(self, "_filter_hint", None) is not None:
+            self._filter_hint.destroy()
+            self._filter_hint = None
         self._selected = None
         self._selected_idx = None
         self._projects = projects
@@ -1357,7 +1362,8 @@ class ProjectColumn:
                      "或切换顶部「来源」筛选后重试。",
                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
                 justify="left", pady=theme.PAD_L * 2)
-            self._empty_hint.pack(padx=theme.PAD_M)
+            # 视口中心（ScrollFrame 已把 inner 撑满视口高，place 居中即整窗居中）
+            self._empty_hint.place(relx=0.5, rely=0.5, anchor="center")
         self.scroll.update_scroll(reset=True)
         # 选中项目：优先恢复上次选中（启动时），否则第一个有数据且未隐藏的项目。
         if self._cards:
@@ -1488,6 +1494,25 @@ class ProjectColumn:
             self._count_badge.set_text(str(n_vis))
             self._count_tip.text = f"当前活跃 {n_vis} 项 / 隐藏 {h} 项 / 总计 {n_total} 个项目"
 
+        # 全部被隐藏（时间/来源过滤）或搜索无匹配时的居中提示——
+        # 「无项目」空态由 update() 的 _empty_hint 负责，两者互斥。
+        want_hint = bool(self._projects) and (n_vis == 0 or n_matched == 0)
+        if want_hint and self._filter_hint is None:
+            self._filter_hint = tk.Label(
+                self.container,
+                text=("无匹配项目，按 Esc 清空搜索框" if tokens
+                      else "当前筛选范围内无项目活动"),
+                bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
+                justify="center")
+            self._filter_hint.place(relx=0.5, rely=0.5, anchor="center")
+        elif not want_hint and self._filter_hint is not None:
+            self._filter_hint.destroy()
+            self._filter_hint = None
+        elif want_hint and self._filter_hint is not None:
+            self._filter_hint.configure(
+                text=("无匹配项目，按 Esc 清空搜索框" if tokens
+                      else "当前筛选范围内无项目活动"))
+
         self._refresh_count_label()
         self.scroll.update_scroll()
     def _on_right_click(self, event, idx, project_dir):
@@ -1594,7 +1619,7 @@ class SessionColumn:
         self._pinned: set[str] = set()
         self._flagged: set[str] = set()
 
-        sf = ScrollFrame(col, bg=theme.PANEL)
+        sf = ScrollFrame(col, bg=theme.PANEL, fill_viewport=True)
         sf.canvas.pack(fill="both", expand=True, padx=6, pady=(1, 4))
         self.scroll = sf
         self.container = sf.inner
@@ -1741,9 +1766,9 @@ class SessionColumn:
                     else "该项目暂无会话\n（或尚未完成分析）")
             self._empty_hint = tk.Label(self.container, text=hint,
                                         bg=theme.PANEL, fg=theme.MUTED,
-                                        font=theme.FONT_UI, justify="center",
-                                        pady=theme.PAD_L * 2)
-            self._empty_hint.pack(padx=theme.PAD_M)
+                                        font=theme.FONT_UI, justify="center")
+            # 视口中心（ScrollFrame 已把 inner 撑满视口高，place 居中即整窗居中）
+            self._empty_hint.place(relx=0.5, rely=0.5, anchor="center")
         n_all = len(self._all_reports)
         n_cur = len(self._reports)
         if needle or flag_only:
@@ -2882,6 +2907,8 @@ class RealProjectsView:
         self._rows: list[dict] = []
         self._sort_col = "n"
         self._expanded: set[str] = set()
+        self._cards: list = []
+        self._grid_cols = 1
 
         head = RoundedFrame(
             parent, fill=theme.SURFACE_CARD, parent_bg=theme.PANEL,
@@ -2915,6 +2942,8 @@ class RealProjectsView:
                        padx=theme.PAD_M, pady=(theme.PAD_S, theme.PAD_M))
         self._sf = sf
         self._container = sf.inner
+        # 响应式多列：容器宽度重算列数（宽窗不再是一列长条 + 大块留白）
+        self._container.bind("<Configure>", self._on_container_configure, add="+")
 
     # -- controller hooks -------------------------------------------------
     def on_show(self) -> None:
@@ -2949,17 +2978,54 @@ class RealProjectsView:
         self._expanded &= {g["key"] for g in rows}
         self._hint.pack_forget()
         if not rows:
+            # 隐藏空滚动区，提示接管整页并居中（Label anchor=center）
+            self._sf.vbar.pack_forget()
+            self._sf.canvas.pack_forget()
             self._hint.config(text="没有可聚合的项目（各数据源均无会话）。")
-            self._hint.pack(expand=True)
+            self._hint.pack(fill="both", expand=True)
             return
+        if not self._sf.canvas.winfo_manager():
+            self._sf.vbar.pack(side="right", fill="y")
+            self._sf.canvas.pack(side="left", fill="both", expand=True,
+                                 padx=theme.PAD_M, pady=(theme.PAD_S, theme.PAD_M))
         self._render()
+
+    def _on_container_configure(self, event) -> None:
+        n = len(self._cards)
+        if not n:
+            return
+        width = event.width
+        cols = max(1, min(n, width // 460)) if width > 10 else 1
+        if cols != self._grid_cols:
+            self._layout_cards()
 
     def _render(self) -> None:
         for w in self._container.winfo_children():
             w.destroy()
+        self._cards = []
         for g in self._ordered():
-            self._make_card(g)
+            self._cards.append(self._make_card(g))
+        self._layout_cards()
         self._sf.update_scroll(reset=True)
+
+    def _layout_cards(self) -> None:
+        """按容器宽把卡片铺成多列网格（单列≈460px），填满横向留白。"""
+        n = len(self._cards)
+        if not n:
+            return
+        width = self._container.winfo_width()
+        cols = max(1, min(n, width // 460)) if width > 10 else 1
+        for card in self._cards:
+            card.frame.pack_forget()
+        for i, card in enumerate(self._cards):
+            card.frame.grid(row=i // cols, column=i % cols,
+                            sticky="nsew", padx=2, pady=2)
+        prev = self._grid_cols
+        for c in range(max(cols, prev)):
+            self._container.grid_columnconfigure(
+                c, weight=1 if c < cols else 0,
+                uniform="agg" if c < cols else "")
+        self._grid_cols = cols
 
     def _ordered(self) -> list[dict]:
         key = self._sort_col
@@ -2972,7 +3038,7 @@ class RealProjectsView:
 
         return sorted(self._rows, key=lambda g: (-rk(g), g["display"].lower()))
 
-    def _make_card(self, g: dict) -> None:
+    def _make_card(self, g: dict):
         t = g["totals"]
         expanded = g["key"] in self._expanded
 
@@ -3013,6 +3079,21 @@ class RealProjectsView:
         card.bind_to(row2)
         for r in g["refs"]:
             self._icon_chip(row2, card, r)
+        # 右侧关键产出摘要（净增行 · 平均TCER · 平均缓存命中率，口径同展开明细）
+        kpis = []
+        if t.get("net") is not None:
+            kpis.append(f"净增 {fmt.fmt_int(t.get('net'))} 行")
+        k_tcer = self._f(t.get("tcer"))
+        if k_tcer != "-":
+            kpis.append(f"TCER {k_tcer}")
+        k_chr = fmt.fmt_pct(t.get("chr"))
+        if k_chr != "-":
+            kpis.append(f"缓存 {k_chr}")
+        if kpis:
+            kpi_lbl = tk.Label(row2, text="  ·  ".join(kpis), bg=theme.PANEL_2,
+                               fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
+            kpi_lbl.pack(side="right", padx=(4, 2))
+            card.bind_to(kpi_lbl)
 
         # 第 3 行：摘要（会话/请求/用户消息/Token，空格分隔；效率与成本细节在展开明细里）。
         stat = tk.Label(
@@ -3083,6 +3164,7 @@ class RealProjectsView:
                     tk.Label(detail, text=txt, bg=theme.PANEL, fg=theme.MUTED,
                              font=theme.FONT_UI_SMALL, anchor=anchor
                              ).grid(row=ri, column=ci, sticky="e", padx=2, pady=1)
+        return card
 
     def _icon_chip(self, parent, card, r: dict) -> None:
         """卡片头的 agent 图标（16px，与项目卡同款）；无资源回退小字来源名。"""
@@ -6738,13 +6820,13 @@ class TermbaseView:
         # 词条列表容器
         left_list_frame = tk.Frame(left, bg=theme.BG)
         left_list_frame.pack(fill="both", expand=True)
-        self._scroll = ScrollFrame(left_list_frame, bg=theme.BG)
+        self._scroll = ScrollFrame(left_list_frame, bg=theme.BG, fill_viewport=True)
         self._list_container = self._scroll.inner
 
         # --- 右侧编辑区 ---
         right_edit_frame = tk.Frame(right, bg=theme.BG)
         right_edit_frame.pack(fill="both", expand=True)
-        self._edit_scroll = ScrollFrame(right_edit_frame, bg=theme.BG)
+        self._edit_scroll = ScrollFrame(right_edit_frame, bg=theme.BG, fill_viewport=True)
         self._edit_container = self._edit_scroll.inner
 
         self.on_show()
@@ -6816,10 +6898,13 @@ class TermbaseView:
         if not filtered:
             if not terms:
                 # 提示空库并引导运行考古或新建
-                empty_frame = tk.Frame(self._list_container, bg=theme.BG, pady=30)
-                empty_frame.pack(fill="x", padx=14)
+                empty_frame = tk.Frame(self._list_container, bg=theme.BG)
+                empty_frame.pack(fill="both", expand=True)
+                # ScrollFrame 已把 inner 撑满视口高：内层 place 居中，整块内容居中
+                center = tk.Frame(empty_frame, bg=theme.BG)
+                center.place(relx=0.5, rely=0.5, anchor="center")
                 tk.Label(
-                    empty_frame,
+                    center,
                     text="当前术语库为空。\n\n"
                          "您可以点击上方「新建」录入新词条，\n"
                          "从操作菜单中「从考古报告合入新词」，\n"
@@ -6831,7 +6916,7 @@ class TermbaseView:
                 ).pack(pady=(0, 12))
                 from .widgets import flat_button
 
-                btn_row = tk.Frame(empty_frame, bg=theme.BG)
+                btn_row = tk.Frame(center, bg=theme.BG)
                 btn_row.pack()
                 flat_button(
                     btn_row,
@@ -6853,8 +6938,8 @@ class TermbaseView:
                     bg=theme.BG,
                     fg=theme.MUTED,
                     font=theme.FONT_UI,
-                    pady=20,
-                ).pack()
+                ).place(relx=0.5, rely=0.5, anchor="center")
+            self._scroll.update_scroll(reset=True)
             return
 
         for t in filtered:
@@ -6863,6 +6948,7 @@ class TermbaseView:
             self._card_map[t.slug] = card
             if t.slug == self._selected_slug:
                 card.set_selected(True)
+        self._scroll.update_scroll()
 
     def _make_term_card(self, term) -> Card:
         from .widgets import Card
@@ -7046,7 +7132,7 @@ class TermbaseView:
 
         term = next((t for t in self._termbase.terms if t.slug == self._selected_slug), None)
         if not term:
-            empty = tk.Frame(self._edit_container, bg=theme.BG, pady=60)
+            empty = tk.Frame(self._edit_container, bg=theme.BG)
             empty.pack(fill="both", expand=True)
             tk.Label(
                 empty,
@@ -7054,7 +7140,8 @@ class TermbaseView:
                 bg=theme.BG,
                 fg=theme.MUTED,
                 font=theme.FONT_UI,
-            ).pack()
+            ).place(relx=0.5, rely=0.5, anchor="center")
+            self._edit_scroll.update_scroll(reset=True)
             return
 
         # 头部控制栏（大气留白页头 + 保存主按钮）
@@ -7237,6 +7324,7 @@ class TermbaseView:
 
         # 记录基线快照供防丢脏检查
         self._baseline_snapshot = self._get_form_snapshot()
+        self._edit_scroll.update_scroll()
 
     def _add_misconception_row(self, data: dict | None = None) -> None:
         from .widgets import RoundedEntry, flat_button
@@ -7293,11 +7381,13 @@ class TermbaseView:
             "act_ent": act_ent,
         }
         self._misconception_rows.append(row_item)
+        self._edit_scroll.update_scroll()
 
     def _remove_misconception_row(self, row_item: dict) -> None:
         if row_item in self._misconception_rows:
             self._misconception_rows.remove(row_item)
             row_item["frame"].destroy()
+            self._edit_scroll.update_scroll()
 
     def _save_current_entry(self) -> bool:
         import re
