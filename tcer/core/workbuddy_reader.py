@@ -155,9 +155,9 @@ def extract_project_dir_from_session(path: Path) -> str | None:
                     file_paths.extend(m)
 
     if cwd and cwd.startswith("/") and not re.match(r"^/[a-zA-Z]/", cwd):
-        norm_cwd = os.path.normpath(cwd)
-        if not _TS_RE.search(norm_cwd) and not any(k in norm_cwd.lower() for k in ("workbuddy", "codebuddy")):
-            return norm_cwd
+        project_cwd = _usable_cwd(cwd)
+        if project_cwd:
+            return project_cwd
 
     candidate_roots: list[str] = []
     for fp in file_paths:
@@ -186,12 +186,15 @@ def extract_project_dir_from_session(path: Path) -> str | None:
         best_root = counts.most_common(1)[0][0]
         return os.path.normpath(best_root)
 
-    if cwd:
-        norm_cwd = os.path.normpath(cwd)
-        if not _TS_RE.search(norm_cwd) and not any(k in norm_cwd.lower() for k in ("workbuddy", "codebuddy")):
-            return norm_cwd
+    return _usable_cwd(cwd) if cwd else None
 
-    return None
+
+def _usable_cwd(cwd: str) -> str | None:
+    """Normalized cwd, unless it is a WorkBuddy-managed scratch dir."""
+    norm_cwd = os.path.normpath(cwd)
+    if _TS_RE.search(norm_cwd) or any(k in norm_cwd.lower() for k in ("workbuddy", "codebuddy")):
+        return None
+    return norm_cwd
 
 
 def derive_project_name(project_dir: str | None) -> str:
