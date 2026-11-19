@@ -142,6 +142,7 @@
 
 ## 历史与教训（GUI）
 
+- **高 DPI 指标文本折行须固定请求宽度**：值标签用 `width=1` + `fill="x"`，列数仍按 `minimum_width()` 量词元；否则折行改变请求宽度、等宽网格再改分配宽度，可在未映射容器中无限振荡。
 - **高 DPI/聚焦环这类问题必须像素级实测**：Windows 经典 `tk.Button` 的蚂蚁线由系统 `DrawFocusRect` 绘制，`highlightthickness=0` 挡不住，只有 `takefocus=0`；`style.map` 优先级高于 `configure`。凭直觉修会反复被用户打回。
 - **不要用 `after_idle` 分批**：`update_idletasks` 会把 idle 批同步全跑完；逐实例 `update_idletasks` 曾让效率榜刷新卡 2s，改为合并结算 + 单定时器。
 - **跨线程不要裸 `root.after`**：无 mainloop 时抛 `RuntimeError`（不是 `TclError`），一律走 `queue.Queue` + 主线程 60ms 轮询；失败路径必须清任务表并给状态栏红字，有回归测试钉住。

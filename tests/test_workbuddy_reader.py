@@ -31,6 +31,39 @@ def test_db(tmp_path, monkeypatch):
     return mod
 
 
+@pytest.mark.parametrize("name", ["Write", "Edit"])
+@pytest.mark.parametrize("result, expected", [
+    ({"status": "completed", "output": "File written successfully"}, 2),
+    ({"status": "failed", "output": "Permission denied"}, 0),
+    ({"status": "completed", "is_error": True}, 0),
+    ({"status": "completed", "output": {"text": "Error: permission denied"}}, 0),
+    ({"status": "completed", "output": [{"text": "Failed: permission denied"}]}, 0),
+    (None, 2),
+])
+def test_loc_tool_result(tmp_path, name, result, expected):
+    path = tmp_path / "result.jsonl"
+    args = {"file_path": "/project/main.py", "content": "x = 1\ny = 2\n",
+            "old_string": "", "new_string": "x = 1\ny = 2\n"}
+    id_key = "callId" if name == "Write" else "id"
+    records = [{"type": "function_call", "name": name, id_key: "call-1",
+                "arguments": json.dumps(args)}]
+    if result is not None:
+        records.append({"type": "function_call_result", "name": name,
+                        id_key: "call-1", **result})
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+    sloc = workbuddy_reader.session_loc_full(path)
+    assert sloc.added == expected
+    assert sloc.deleted == 0
+    assert workbuddy_reader.has_loc_signal(path)
+    assert workbuddy_reader.aggregate_usage(path).tool_errors == int(expected == 0)
+    convo = workbuddy_reader.read_conversation(path)
+    assert convo[0]["id"] == "call-1"
+    if result is not None:
+        assert convo[1]["tool_use_id"] == "call-1"
+        assert convo[1]["is_error"] == (expected == 0)
+
+
 def test_clean_user_text():
     # 1. System reminder stripping with attributes
     raw1 = (
@@ -177,6 +210,66 @@ def test_cached_input_is_not_double_counted(tmp_path, usage_key, raw_input, cach
     expected_cost = (non_cached * rates["input"] + cached * rates["cache_read"]
                      + 50 * rates["output"]) / 1_000_000
     assert metrics.cost_usd(u) == pytest.approx(expected_cost)
+
+
+@pytest.mark.parametrize("tool_data", ["valid", "empty", "malformed"])
+def test_unix_recorded_cwds_stay_separate_projects(tmp_path, tool_data):
+    for name in ("alpha", "beta"):
+        cwd = f"/home/alice/repos/{name}"
+        records = [
+            {"type": "session-meta", "sessionId": name, "cwd": cwd},
+            {"type": "function_call", "name": "Read",
+             "arguments": {"file_path": f"{cwd}/src/main.py"}},
+        ]
+        if tool_data == "empty":
+            records.pop()
+        elif tool_data == "malformed":
+            records[-1]["arguments"] = "{"
+        (tmp_path / f"{name}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    refs = workbuddy_reader.list_project_refs(tmp_path)
+
+    assert len(refs) == 2
+    assert {ref.cwd for ref in refs} == {"/home/alice/repos/alpha", "/home/alice/repos/beta"}
+    assert {ref.display_name for ref in refs} == {"alpha", "beta"}
+    assert all(len(ref.session_paths) == 1 for ref in refs)
+
+
+def test_unix_same_named_repos_in_different_parents_stay_separate(tmp_path):
+    cwds = ("/home/alice/client-a/api", "/home/alice/client-b/api")
+    for i, cwd in enumerate(cwds):
+        records = [
+            {"type": "session-meta", "sessionId": f"s{i}", "cwd": cwd},
+            {"type": "function_call", "name": "Read",
+             "arguments": {"file_path": f"{cwd}/main.py"}},
+        ]
+        (tmp_path / f"s{i}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    refs = workbuddy_reader.list_project_refs(tmp_path)
+
+    assert sorted(ref.cwd for ref in refs) == list(cwds)
+    assert {ref.display_name for ref in refs} == {"api"}
+    assert all(len(ref.session_paths) == 1 for ref in refs)
+
+
+@pytest.mark.parametrize("file_path, expected", [
+    (r"e:\repos\alpha\src\main.py", "E:/repos/alpha"),
+    ("E:/my_game/Source/Player.cpp", "E:/my_game"),
+    ("/e/repos/alpha/src/main.py", "E:/repos/alpha"),
+])
+def test_windows_touched_paths_override_recorded_cwd(tmp_path, file_path, expected):
+    session = tmp_path / "session.jsonl"
+    records = [
+        {"type": "session-meta", "cwd": r"C:\Users\User\WorkBuddy\2026-10-16-10-00-00"},
+        {"type": "function_call", "name": "Read", "arguments": {"file_path": file_path}},
+    ]
+    session.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    assert workbuddy_reader.extract_project_dir_from_session(session).replace("\\", "/") == expected
+    assert workbuddy_reader.classify_workbuddy_project(session, {}) == (
+        expected.rsplit("/", 1)[-1].lower(), expected.rsplit("/", 1)[-1], expected.replace("/", "\\"))
 
 
 def test_synthetic_session(tmp_path):

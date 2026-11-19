@@ -108,6 +108,47 @@ def test_duplicate_project_names_disambiguated():
     assert sorted(p.name for p in agg.project_summaries) == ["app（w1）", "app（w2）"]
 
 
+def test_no_cwd_same_name_projects_separated_by_source():
+    a = _item("a", "2026-09-22", "10:00", ["修复周报"],
+              project="app", cwd=None, net=10)
+    b = _item("b", "2026-09-22", "11:00", ["补测试", "更新文档"],
+              project="app", source="codex", cwd=None, net=20)
+    agg = weekly._aggregate("2026-09-21", "2026-09-27", [a, b], [])
+
+    assert len(agg.project_summaries) == 2
+    by_source = {p.source: p for p in agg.project_summaries}
+    for source, item, name, net, prompts in (
+        ("claude", a, "app（Claude Code）", 10, 1),
+        ("codex", b, "app（Codex）", 20, 2),
+    ):
+        ps = by_source[source]
+        assert ps.name == name and item.project == name
+        assert ps.sources == [source] and ps.sessions == [item]
+        assert ps.total_net_loc == net and ps.total_prompts == prompts
+    assert agg.day_index == {"2026-09-22": ["app（Claude Code）", "app（Codex）"]}
+    assert agg.total_sessions == 2 and agg.total_net_loc == 30
+    assert agg.total_prompts == 3
+
+
+def test_duplicate_project_suffixes_remain_unique():
+    items = [
+        _item("a", "2026-09-22", "10:00", ["修复周报"], project="app", cwd=None),
+        _item("b", "2026-09-22", "11:00", ["补测试"], project="app",
+              source="codex", cwd=None),
+        _item("c", "2026-09-22", "12:00", ["更新文档"], project="app",
+              cwd="/one/Codex/app"),
+        _item("d", "2026-09-22", "13:00", ["修复路径"], project="app",
+              cwd="/two/Codex/app"),
+        _item("e", "2026-09-22", "14:00", ["检查结果"], project="app（Codex）",
+              cwd=None),
+    ]
+    agg = weekly._aggregate("2026-09-21", "2026-09-27", items, [])
+    names = [p.name for p in agg.project_summaries]
+    assert len(set(names)) == len(items)
+    assert set(agg.day_index["2026-09-22"]) == set(names)
+    assert {s.project for s in items} == set(names)
+
+
 def test_markdown_escapes_renderer_marks_in_prompts():
     s = _item("a", "2026-09-22", "10:00", ["把 `foo` 改成 **bar** 和 a*b"])
     md = weekly.generate_offline_markdown(weekly._aggregate("2026-09-21", "2026-09-27", [s], []))

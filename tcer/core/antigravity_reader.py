@@ -1079,21 +1079,11 @@ def aggregate_usage(
     rebase（turn_stats/compaction_turns/turn_net_locs）由 TokenUsage.merge
     统一处理。子会话的 step 14 实测为空，user 信号另在解析层按 is_sub 跳过
     作防御（同 omp _aggregate_single(is_subagent=True) 口径）。
+    subagent_dbs 已含全部嵌套后代，逐个折叠一次即可，不再递归。
     """
     u = _aggregate_single(path, cancel_check)
     for sub in subagent_dbs(path):
-        u = u.merge(_fold_subtree_usage(sub, cancel_check))
-    return u
-
-
-def _fold_subtree_usage(
-    path: Path,
-    cancel_check: Callable[[], None] | None = None,
-) -> TokenUsage:
-    """Fold one subagent subtree: parse as sub-agent, recurse into nested children."""
-    u = _aggregate_single(path, cancel_check, is_sub=True)
-    for nested in subagent_dbs(path):
-        u = u.merge(_fold_subtree_usage(nested, cancel_check))
+        u = u.merge(_aggregate_single(sub, cancel_check, is_sub=True))
     return u
 
 
@@ -1310,6 +1300,7 @@ def session_loc_full(
     缺失时按 step 15 调用的出现顺序配对（实测结果严格按调用顺序到达）。
     子代理会话经 loc.merge_session_locs 并入父会话（原 #13：合并后重算
     high_churn；与 omp scan_folded 同构，无信号子会话不产出空 LOC）。
+    subagent_dbs 已含全部嵌套后代，逐个回放一次即可，不再递归。
 
     Returns (SessionLoc, has_loc_signal).
     """
@@ -1320,7 +1311,7 @@ def session_loc_full(
     slocs = [sloc] if has_signal else []
     any_signal = has_signal
     for sub in subs:
-        sl, hs = session_loc_full(sub, cancel_check)
+        sl, hs = _loc_single(sub, cancel_check)
         if hs:
             slocs.append(sl)
             any_signal = True
