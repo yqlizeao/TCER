@@ -670,6 +670,9 @@ class MetricCell:
         self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
                               fg=value_fg, font=theme.FONT_VALUE, anchor="w")
         self.value.pack(anchor="w", padx=self._pad_x, pady=(1, 6))
+        if dpi_pixels(self.value, 96) > 96 and metric.fmt in ("", "text"):
+            self.value.configure(width=1)
+            self.value.pack_configure(fill="x")
 
         # 辅助说明行（独立在数值下方一行：≈ 4.17亿、+2 跳过等）
         self.sub_lbl = tk.Label(self.frame, text="", bg=theme.PANEL, fg=theme.MUTED,

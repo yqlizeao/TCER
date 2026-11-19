@@ -160,6 +160,54 @@ def test_metric_panel_hidpi_reflows(root, reports, monkeypatch):
     frame.destroy()
 
 
+def test_metric_panel_hidpi_wrap_converges(root):
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent('''
+        import runpy
+        import tkinter as tk
+        from tcer.gui import views, widgets
+
+        views.dpi_pixels = widgets.dpi_pixels = lambda widget, pixels: pixels * 2
+        root = tk.Tk()
+        root.withdraw()
+        root.tk.call("tk", "scaling", 4 / 3)
+        class Controller:
+            def __getattr__(self, name):
+                return lambda *args, **kwargs: None
+        frame = tk.Frame(root)
+        frame.pack()
+        panel = views.MetricPanel(frame, Controller())
+        report = runpy.run_path("tests/test_gui_smoke.py")["_report"]("wrap")
+        panel.update(report)
+        root.update_idletasks()
+        for cell in panel._cells.values():
+            if cell.metric.fmt in ("", "text"):
+                assert int(str(cell.value.cget("width"))) == 1
+                assert cell.value.pack_info()["fill"] == "x"
+        for text in ("Claude Opus 4.8", "", "不适用"):
+            panel._cells["models"].set_value(text)
+            root.update_idletasks()
+        cell = panel._cells["chr"]
+        cell.set_value("49.3901%")
+        root.update_idletasks()
+        assert float(cell.value.cget("wraplength")) == 0
+        panel.clear()
+        root.update_idletasks()
+        root.destroy()
+        print("layout converged")
+    ''')
+    try:
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                                text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        pytest.fail("High-DPI metric wrapping did not converge within 10 seconds")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "layout converged" in result.stdout
+
+
 def test_metric_panel_group_collapse(root, reports):
     """MetricPanel 分组标题可点击折叠/展开整组（header 绑定 + body pack_forget）。"""
     from tcer.gui.views import MetricPanel
