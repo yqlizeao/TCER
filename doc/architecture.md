@@ -163,7 +163,11 @@ TokenUsage.per_model 按 message.model 分桶，merge 自动合并。cost_usd �
 
 闭环审计用同一套解析逻辑重算，只能证明自洽；格式漂移时解析器静默跳过、自洽检查照样全绿（agy 并行调用漏计 490 次即此类）。覆盖审计补这一块：直接 `json.loads` 原始行（不经 reader）普查每个维度的实际取值，逐项对照登记表——**已处理** / **已知忽略（必须写理由）** / **未知**；计价相关字段另有取值白名单（白名单外 = **取值异常**）。守恒检查：结果↔调用、有用量行↔message.id、快照输入只增、`iterations` 单项、子代理↔父会话、reader 工具调用数↔独立计数（warn 失败判 FAIL；进行中会话的未完成调用、请求↔回复差额等如实列为 info）。上游升级出现新类型/新字段 → 报告点名「未知」并给首见文件:行号，处理后登记入表、提升 `CLAUDE_CENSUS_VERSION`。反向测试 `tests/test_coverage.py` 逐类构造破损数据断言被抓到。
 
-- **Antigravity**（2026-11-15，`antigravity_coverage` / `--source antigravity`，`--source all` 两源一起跑）：普查只用 wire 解码器 `_parse_proto_fields` + 固定字段路径，不经 reader 的解释逻辑。维度：会话库表 / 摘要库表 / step 类型 / 状态（132 单列）/ `gen_metadata` 字段号 / usage 字段号 / 原始工具名（映射表 + 已知透传表 + `mcp_*` 拆分规则判定，未登记工具报未知——写文件类新工具会漏计 LOC）。守恒：输出 = 思考 + 回复、提问正文不得是纯 UUID（防元数据误入回归）、reader 工具调用数 ↔ 独立计数（step 15 字段 20.7 ∪ 132 回显 5.4 按 call id）、压缩步骤带用量、有用量的生成带响应 id、子代理父库存在；版本取各根 `log/*.log` 的 language server 版本，对照 `ANTIGRAVITY_CENSUS_VERSIONS`（按端分别登记）。其余源（Codex / OpenCode / omp / Pi）仍待按同一模式补登记表。
+- **Antigravity**（2026-11-15，`antigravity_coverage` / `--source antigravity`，`--source all` 六源一起跑）：普查只用 wire 解码器 `_parse_proto_fields` + 固定字段路径，不经 reader 的解释逻辑。维度：会话库表 / 摘要库表 / step 类型 / 状态（132 单列）/ `gen_metadata` 字段号 / usage 字段号 / 原始工具名（映射表 + 已知透传表 + `mcp_*` 拆分规则判定，未登记工具报未知——写文件类新工具会漏计 LOC）。守恒：输出 = 思考 + 回复、提问正文不得是纯 UUID（防元数据误入回归）、reader 工具调用数 ↔ 独立计数（step 15 字段 20.7 ∪ 132 回显 5.4 按 call id）、压缩步骤带用量、有用量的生成带响应 id、子代理父库存在；版本取各根 `log/*.log` 的 language server 版本，对照 `ANTIGRAVITY_CENSUS_VERSIONS`（按端分别登记）。
+
+- **Codex**（`codex_coverage`，2026-11）：普查 rollout JSONL 原始行的 `type` / `event_msg` / `item` / `role` / usage 字段；工具名经 `_codex_tool_status` 登记（映射命中=已处理、`mcp__`/透传=已知忽略、其余报未知——新写文件工具会漏计 LOC）。守恒：`total_token_usage` 单调（回退时走 `last` 兜底）、调用↔结果、reader 工具调用数↔独立计数、reader Token↔独立重放差分（input 净出 cached/cache_write 子集）、`session_meta` 在、子代理父线程在。
+- **omp / Pi**（`omp_coverage` / `pi_coverage`，同族 JSONL 共用 `OMP_PI_REGISTRY`）：普查 `type` / `role` / assistant·user 块 / usage 键 / `stopReason` / 工具名（含 `mcp__` 前缀透传）。守恒：上游约定 `input+output+cacheRead+cacheWrite == totalTokens`（warn）、`reasoning ≤ output`（info——已知代理路由口径异常，计价维持 output 原值）、session 头在、子代理↔主文件、reader 工具调用数↔独立计数；辅助用量行（`model_usage` 等）登记为已知忽略（并入会破坏 `turn_stats_match_total` / `all_models_priced`）。
+- **OpenCode**（`opencode_coverage`）：普查 `opencode.db` 的表清单 / 消息 `role` / `part.type` / session 与消息级 `tokens` 键；fts 附属表前缀已知忽略。守恒：调用↔结果、reader 工具调用数↔独立计数、**会话 tokens 列 == 消息 tokens 和**（仅当消息带 tokens——旧格式不带不算缺口）。
 
 <a id="guard-tests"></a>
 ### 原 #22 护栏测试
