@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tcer.core import analyze, loc, metrics, workbuddy_reader
+from tcer.core import analyze, loc, metrics, pricing, workbuddy_reader
 from tcer.core.models import ProjectRef
 from tcer.core.paths import encode_hash
 
@@ -178,6 +178,40 @@ def test_project_root_detection_and_aggregation(tmp_path):
     assert analysis.aggregate.usage.total == 2290  # (1000+50) + (1200+40)
 
 
+@pytest.mark.parametrize("usage_key", ["rawUsage", "usage"])
+@pytest.mark.parametrize("raw_input,cached", [(1000, 800), (1000, 0), (0, 0), (100, 800)])
+def test_cached_input_is_not_double_counted(tmp_path, usage_key, raw_input, cached):
+    model = "gpt-4o"
+    usage = (
+        {"prompt_tokens": raw_input, "completion_tokens": 50,
+         "prompt_tokens_details": {"cached_tokens": cached}}
+        if usage_key == "rawUsage" else
+        {"inputTokens": raw_input, "outputTokens": 50,
+         "inputTokensDetails": [{"cached_tokens": cached}]}
+    )
+    p = tmp_path / "cached.jsonl"
+    p.write_text(json.dumps({
+        "type": "message", "role": "assistant",
+        "providerData": {"messageId": "cached-1", "model": model, usage_key: usage},
+    }) + "\n", encoding="utf-8")
+
+    u = workbuddy_reader.aggregate_usage(p)
+    non_cached = max(0, raw_input - cached)
+    assert u.input_tokens == non_cached
+    assert u.cache_read_input_tokens == cached
+    assert u.peak_input_tokens == non_cached + cached
+    bucket = u.per_model[model]
+    assert bucket.input_tokens == non_cached
+    assert bucket.cache_read_input_tokens == cached
+    assert len(u.turn_stats) == 1
+    assert u.turn_stats[0].input_tokens == non_cached
+    assert u.turn_stats[0].cache_read == cached
+    rates = pricing.resolve(model)
+    expected_cost = (non_cached * rates["input"] + cached * rates["cache_read"]
+                     + 50 * rates["output"]) / 1_000_000
+    assert metrics.cost_usd(u) == pytest.approx(expected_cost)
+
+
 @pytest.mark.parametrize("tool_data", ["valid", "empty", "malformed"])
 def test_unix_recorded_cwds_stay_separate_projects(tmp_path, tool_data):
     for name in ("alpha", "beta"):
@@ -315,7 +349,7 @@ def test_synthetic_session(tmp_path):
 
     # Usage
     u = workbuddy_reader.aggregate_usage(p)
-    assert u.input_tokens == 2100
+    assert u.input_tokens == 400
     assert u.output_tokens == 90
     assert u.cache_read_input_tokens == 1700
     assert u.reasoning_output_tokens == 30

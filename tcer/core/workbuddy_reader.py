@@ -469,6 +469,8 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 elif usg.get("inputTokensDetails"):
                     cached = _as_int(usg["inputTokensDetails"][0].get("cached_tokens"))
 
+                inp = max(0, inp - cached)
+
                 reasoning = 0
                 ct_details = ru.get("completion_tokens_details") or {}
                 if ct_details.get("reasoning_tokens") is not None:
@@ -480,7 +482,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
                 u.output_tokens += out
                 u.cache_read_input_tokens += cached
                 u.reasoning_output_tokens += reasoning
-                u.peak_input_tokens = max(u.peak_input_tokens, inp)
+                u.peak_input_tokens = max(u.peak_input_tokens, inp + cached)
 
                 m = pd.get("model") or pd.get("requestModelName") or "gemini-3.8-flash"
                 norm_m = pricing.normalize(str(m))
