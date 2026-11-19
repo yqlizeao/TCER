@@ -7,10 +7,11 @@ imports tkinter (only happens when the GUI actually launches).
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 
 from . import theme
 from .metric_defs import Metric, UNSUPPORTED_LABEL
-from .platform import PLATFORM, CLICK_CURSOR
+from .platform import PLATFORM, CLICK_CURSOR, dpi_pixels
 
 
 class Tooltip:
@@ -637,6 +638,7 @@ class MetricCell:
                  approx: bool = False) -> None:
         self.metric = metric
         self._approx = approx
+        self._pad_x = dpi_pixels(parent, 10)
         p_bg = str(parent.cget("bg")) if hasattr(parent, "cget") else theme.SURFACE_CARD
         self.frame = RoundedFrame(
             parent, fill=theme.PANEL, parent_bg=p_bg,
@@ -651,7 +653,7 @@ class MetricCell:
         # 会被裁断或词中断裂；分层排版后各自行内完整显示。
         self.title = tk.Label(self.frame, text=metric.name, bg=theme.PANEL, fg=title_fg,
                               font=theme.FONT_UI, anchor="w")
-        self.title.pack(anchor="w", padx=10, pady=(6, 0))
+        self.title.pack(anchor="w", padx=self._pad_x, pady=(6, 0))
 
         # 中间小字行：单位（美元、小时等）或次级说明（2026-10-28、7 种工具等）
         # 视觉哲学：“两头大、小字放中间”——标题(10pt)与数值(12pt Consolas bold)醒目，中间弱化灰(10pt/9pt)
@@ -659,7 +661,7 @@ class MetricCell:
         self.mid_lbl = tk.Label(self.frame, text=init_mid, bg=theme.PANEL,
                                 fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="w")
         if init_mid:
-            self.mid_lbl.pack(anchor="w", padx=10, pady=(0, 0))
+            self.mid_lbl.pack(anchor="w", padx=self._pad_x, pady=(0, 0))
         self._unit_lbl = self.mid_lbl
 
         self.var = tk.StringVar(value="-")
@@ -667,14 +669,14 @@ class MetricCell:
 
         self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
                               fg=value_fg, font=theme.FONT_VALUE, anchor="w")
-        self.value.pack(anchor="w", padx=10, pady=(1, 6))
+        self.value.pack(anchor="w", padx=self._pad_x, pady=(1, 6))
 
         # 辅助说明行（独立在数值下方一行：≈ 4.17亿、+2 跳过等）
         self.sub_lbl = tk.Label(self.frame, text="", bg=theme.PANEL, fg=theme.MUTED,
                                 font=theme.FONT_UI_SMALL, anchor="w")
         if approx:
             self.value.pack_configure(pady=(1, 0))
-            self.sub_lbl.pack(anchor="w", padx=10, pady=(0, 6))
+            self.sub_lbl.pack(anchor="w", padx=self._pad_x, pady=(0, 6))
         self.approx_lbl = self.sub_lbl
 
         widgets = [self.frame, self.title, self.mid_lbl, self.value, self.sub_lbl]
@@ -708,9 +710,23 @@ class MetricCell:
         if getattr(e, "width", 0) < 60:
             return
         wl = max(60, e.width - 16)
+        if dpi_pixels(self.value, 96) > 96:
+            wl = max(1, e.width - 2 * self._pad_x - 4)
+            if self.metric.fmt not in ("", "text"):
+                wl = 0
         curr = to_int(self.value.cget("wraplength") or 0)
         if abs(curr - wl) >= 4:
             self.value.config(wraplength=wl, justify="left")
+
+    def minimum_width(self) -> int:
+        """完整标题、说明及最长数值词元所需的格宽。"""
+        widths = []
+        for label in (self.title, self.mid_lbl, self.sub_lbl, self.value):
+            font = tkfont.Font(font=label.cget("font"))
+            text = self.var.get() if label is self.value else str(label.cget("text"))
+            parts = text.split() if label is self.value else [text]
+            widths.extend(font.measure(part) for part in parts)
+        return max(widths, default=0) + 2 * self._pad_x + 4
 
     @property
     def key(self) -> str:
@@ -756,7 +772,7 @@ class MetricCell:
         )
         if display_text:
             if not self.mid_lbl.winfo_manager():
-                self.mid_lbl.pack(anchor="w", padx=10, pady=(0, 0), before=self.value)
+                self.mid_lbl.pack(anchor="w", padx=self._pad_x, pady=(0, 0), before=self.value)
         else:
             if self.mid_lbl.winfo_manager():
                 self.mid_lbl.pack_forget()
@@ -770,7 +786,7 @@ class MetricCell:
         if text:
             self.value.pack_configure(pady=(1, 0))
             if not self.sub_lbl.winfo_manager():
-                self.sub_lbl.pack(anchor="w", padx=10, pady=(0, 6))
+                self.sub_lbl.pack(anchor="w", padx=self._pad_x, pady=(0, 6))
         else:
             if not self._approx:
                 if self.sub_lbl.winfo_manager():

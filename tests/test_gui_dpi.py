@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from tcer.gui.platform import dpi_pixels, fit_window, window_client_bounds
+from tcer.gui.views import metric_columns
 
 
 @pytest.mark.parametrize("dpi, expected", [(96, 148), (96.1, 148), (144, 222), (192, 296), (120, 185)])
@@ -26,3 +27,10 @@ def test_window_client_bounds_fallback(monkeypatch):
     monkeypatch.setattr("tcer.gui.platform.PLATFORM", "linux")
     root = SimpleNamespace(winfo_screenwidth=lambda: 1600, winfo_screenheight=lambda: 1200)
     assert window_client_bounds(root) == (0, 0, 1600, 1200)
+
+
+@pytest.mark.parametrize("width, minimum, expected", [
+    (1200, 150, 6), (900, 200, 4), (599, 200, 2), (0, 200, 1), (100, 0, 6),
+])
+def test_metric_columns(width, minimum, expected):
+    assert metric_columns(width, minimum) == expected

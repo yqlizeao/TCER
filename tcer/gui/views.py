@@ -59,6 +59,11 @@ from .platform import CLICK_CURSOR, dpi_pixels
 _PER_ROW = 6  # metric tiles per grid row inside a group
 
 
+def metric_columns(width: int, minimum_width: int) -> int:
+    """在可用宽度内最多排六列，窄屏至少保留一列。"""
+    return max(1, min(_PER_ROW, width // max(1, minimum_width)))
+
+
 def dominant_model_label(usage) -> str:
     """会话主模型短名（``per_model`` 中 token 量最大者，经价表归一化）。
 
@@ -2100,6 +2105,7 @@ class _MetricGrid:
     expander: tk.Label
     expander_row: int
     expanded: bool = False
+    width: int = 0
 
 
 @dataclass
@@ -2345,6 +2351,8 @@ class MetricPanel:
                             expander_row=exp_row, expanded=False)
         expander.bind("<Button-1>", lambda e, s=state: self._toggle(s))
         self._grids.append(state)
+        if dpi_pixels(grid, 96) > 96:
+            grid.bind("<Configure>", lambda e, s=state: self._resize_grid(s, e.width))
 
     def update(self, report) -> None:
         vals = report_values(report)
@@ -2451,6 +2459,11 @@ class MetricPanel:
             state.expanded = self._full_mode
             self._apply_grid(state)
 
+    def _resize_grid(self, state: _MetricGrid, width: int) -> None:
+        if width != state.width:
+            state.width = width
+            self._apply_grid(state)
+
     def _apply_grid(self, state: _MetricGrid) -> None:
         """Reflow one grid: hide non-brief or empty (「-」) cells in 简要版,
         or show all in 完整版."""
@@ -2463,9 +2476,17 @@ class MetricPanel:
                      if c.key in BRIEF_METRIC_KEYS and c.var.get() not in ("-", UNSUPPORTED_LABEL)]
             hidden = [c for c in state.cells if c not in shown]
 
+        columns = _PER_ROW
+        if dpi_pixels(state.frame, 96) > 96 and shown:
+            minimum_width = max(c.minimum_width() for c in shown) + 4
+            columns = metric_columns(state.frame.winfo_width() - 4, minimum_width)
+        for column in range(_PER_ROW):
+            state.frame.grid_columnconfigure(column, weight=int(column < columns),
+                                             uniform="metric" if column < columns else "")
         for i, c in enumerate(shown):
-            c.frame.grid(row=i // _PER_ROW, column=i % _PER_ROW,
-                         sticky="nsew", padx=2, pady=2)
+            span = columns if columns < _PER_ROW and i == len(shown) - 1 and i % columns == 0 else 1
+            c.frame.grid(row=i // columns, column=i % columns,
+                         columnspan=span, sticky="nsew", padx=2, pady=2)
         for c in hidden:
             c.frame.grid_remove()
 
