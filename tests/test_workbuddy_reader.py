@@ -169,6 +169,24 @@ def test_unix_recorded_cwds_stay_separate_projects(tmp_path, tool_data):
     assert all(len(ref.session_paths) == 1 for ref in refs)
 
 
+def test_unix_same_named_repos_in_different_parents_stay_separate(tmp_path):
+    cwds = ("/home/alice/client-a/api", "/home/alice/client-b/api")
+    for i, cwd in enumerate(cwds):
+        records = [
+            {"type": "session-meta", "sessionId": f"s{i}", "cwd": cwd},
+            {"type": "function_call", "name": "Read",
+             "arguments": {"file_path": f"{cwd}/main.py"}},
+        ]
+        (tmp_path / f"s{i}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    refs = workbuddy_reader.list_project_refs(tmp_path)
+
+    assert sorted(ref.cwd for ref in refs) == list(cwds)
+    assert {ref.display_name for ref in refs} == {"api"}
+    assert all(len(ref.session_paths) == 1 for ref in refs)
+
+
 @pytest.mark.parametrize("file_path, expected", [
     (r"e:\repos\alpha\src\main.py", "E:/repos/alpha"),
     ("E:/my_game/Source/Player.cpp", "E:/my_game"),

@@ -291,7 +291,9 @@ def classify_workbuddy_project(p: Path, known_cwds: dict[str, str] | None = None
         # Ensure it's not a bare drive root like "C:\" or timestamped sandbox
         if dname and not _TS_RE.search(dname) and _has_parent_dir(norm_dir):
             if dname.lower() not in ("workbuddy", "workbuddy ai", "codebuddy", "default", "projects"):
-                return dname.lower(), dname, norm_dir
+                # POSIX 路径大小写敏感、同名目录常见：按完整路径分组，避免误并。
+                key = norm_dir if norm_dir.startswith("/") else dname.lower()
+                return key, dname, norm_dir
 
     folder_name = p.parent.name
     is_ts = bool(_TS_RE.search(folder_name))
