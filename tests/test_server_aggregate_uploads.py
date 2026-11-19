@@ -58,6 +58,26 @@ def test_different_uploaders_aggregates_both_count(db):
     assert _total(db) == 1200
 
 
+def test_project_private_hides_superseded_public_snapshots(db):
+    _upload(db)
+    with db.connect() as conn:
+        old_id = conn.execute("SELECT id FROM uploads").fetchone()[0]
+    assert db.set_session_visibility(old_id, "alice", "public") == "ok"
+    _upload(db)
+    with db.connect() as conn:
+        latest_id = conn.execute("SELECT MAX(id) FROM uploads").fetchone()[0]
+    assert db.set_session_visibility(latest_id, "alice", "public") == "ok"
+    assert isinstance(db.session_detail(old_id, viewer="bob"), dict)
+    _upload(db, "bob", 200)
+    assert db.set_project_visibility("alice", "project", "private") == 1
+    assert db.session_detail(old_id, viewer="bob") == "forbidden"
+    assert db.session_detail(latest_id, viewer="bob") == "forbidden"
+    with db.connect() as conn:
+        assert conn.execute(
+            "SELECT visibility FROM uploads WHERE uploaded_by='bob'"
+        ).fetchone()[0] == "private"
+
+
 @pytest.mark.parametrize("times", [(1800000000, 1800000001),
                                    (1800000000, 1800000000),
                                    (1800000001, 1800000000)])

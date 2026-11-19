@@ -1162,7 +1162,9 @@ def set_project_visibility(viewer: str, project: str, visibility: str,
     group (canonical). Overrides each session's prior per-session setting.
 
     Only rows owned by ``viewer`` (``uploaded_by``) are touched — a bulk action
-    never flips someone else's session. Returns the number of rows updated.
+    never flips someone else's session. Returns the number of selected rows.
+    Selected aggregates also propagate visibility to all snapshots with the
+    same raw (uploaded_by, person, project), including superseded snapshots.
     Scoping mirrors ``sessions_list`` (same canonical filters) so "this group"
     means exactly the group the user is looking at.
     """
@@ -1173,15 +1175,22 @@ def set_project_visibility(viewer: str, project: str, visibility: str,
     try:
         rows = _fetch_rows(conn, persons, [project] if project else None, models,
                            start_ts, end_ts, project_amap, model_amap, person_amap)
-        ids = [r["id"] for r in rows
-               if r.get("c_project") == project
-               and _get(r, "uploaded_by") == viewer]
+        selected = [r for r in rows
+                    if r.get("c_project") == project
+                    and _get(r, "uploaded_by") == viewer]
+        ids = [r["id"] for r in selected]
         if not ids:
             return 0
         placeholders = ",".join("?" * len(ids))
         conn.execute(
             f"UPDATE uploads SET visibility=? WHERE id IN ({placeholders})",
             (visibility, *ids))
+        for r in selected:
+            if r["kind"] == "aggregate":
+                conn.execute(
+                    "UPDATE uploads SET visibility=? WHERE kind='aggregate' "
+                    "AND uploaded_by IS ? AND person IS ? AND project IS ?",
+                    (visibility, r["uploaded_by"], r["person"], r["project"]))
         conn.commit()
         return len(ids)
     finally:
