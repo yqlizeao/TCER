@@ -91,6 +91,7 @@ TCER 全面重构为 VS Code 标准四区工作台架构（**顶部页签栏已�
   - `FONT_UI_SMALL = (FONT_CJK, 9)`
   - `FONT_UI_SMALL_BOLD = (FONT_CJK, 9, "bold")`
   - `FONT_VALUE = (FONT_MONO_NAME, 12, "bold")`（Consolas 12 bold，专业级指标看板数值醒目有力）
+  - `FONT_VALUE_LG = (FONT_MONO_NAME, 14, "bold")` / `FONT_UI_LG_BOLD = (FONT_CJK, 13, "bold")`：焦点指标（`metric_defs.FEATURED_KEYS`——Token 总量/缓存命中/净增行/成本/TCER）数值用的大字阶，中文回退字体配套；仍属数字型核心口径的受控放大，其余格子一律 `FONT_VALUE`。
   - `FONT_MONO = (FONT_MONO_NAME, 10)`
   - `FONT_STAT = (FONT_CJK, 9)`
 - **间距**：`PAD_XS/S/M/L = 2/4/8/12`，容器 / 组件 padding 统一从这四档取。
@@ -149,6 +150,7 @@ TCER 全面重构为 VS Code 标准四区工作台架构（**顶部页签栏已�
 - **表头排序方向指示**：可排序 Treeview（效率榜 / LLM 报告列表）当前排序列标题尾缀 `▾` 降序 / `▴` 升序，点击翻转，其余列无符号；
 - **hover 全局唯一 token**：MetricCell 网格 hover 与 chip/卡片同走 `HOVER_BG`（不再用 PANEL_2 充当 hover）；
 - **滚轮假 Leave 守卫**：`ScrollFrame` 在指针仍处 canvas 矩形内（移入嵌入子窗）不解绑滚轮；
+- **空态垂直居中**：`ScrollFrame(fill_viewport=True)` 时内容不足一屏会把 inner 撑到视口高，空态提示 `place(relx=0.5, rely=0.5)` 即整窗居中；仅放大不缩小（回落用 `height=0` 恢复自然高，瞬态 reqheight 误裁会把内容变 unmapped、连合成事件都被吞）。渲染后必须显式 `update_scroll()`——纯 place 子控件不触发 inner `<Configure>`；
 - **窗口最小尺寸** `1080×540`——分栏 minsize 不约束窗口缩放，极小窗口会挤压重叠。
 
 ### 对标调研结论（2026-09-16，**Monokai Dimmed 官方主题文件**逐 token 对照）

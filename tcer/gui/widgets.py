@@ -10,7 +10,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 
 from . import theme
-from .metric_defs import Metric, UNSUPPORTED_LABEL
+from .metric_defs import FEATURED_KEYS, Metric, UNSUPPORTED_LABEL
 from .platform import PLATFORM, CLICK_CURSOR, dpi_pixels
 
 
@@ -323,9 +323,12 @@ class ScrollFrame:
     monolith duplicated for the project list, session list, and tool popup.
     """
 
-    def __init__(self, parent, bg: str = theme.PANEL) -> None:
+    def __init__(self, parent, bg: str = theme.PANEL, *, fill_viewport: bool = False) -> None:
         from tkinter import ttk as _ttk
 
+        # fill_viewport：内容不足一屏时把 inner 撑到视口高（空态垂直居中用）；
+        # 默认关——弹窗等滚动区不需要，也避免瞬态需求高误裁内容。
+        self._fill_viewport = fill_viewport
         self.canvas = tk.Canvas(parent, bg=bg, highlightthickness=0)
         self.inner = tk.Frame(self.canvas, bg=bg)
         self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
@@ -349,11 +352,24 @@ class ScrollFrame:
     def _apply_scrollregion(self) -> None:
         """设 scrollregion；内容高仅略超 canvas（<=6px 容差）时钳到 canvas 高，
         yview 自然 (0,1) 锁定，避免滑块满槽却能滚几像素、把卡片带偏。"""
+        # 视口高度填充（fill_viewport=True 才生效）：内容不足一屏时把 inner
+        # 撑到视口高，内部 expand/place 的空态布局才能真正垂直居中（inner 默
+        # 认只取内容需求高，贴顶即「空态挤在左上角」）。仅放大不缩小——回落
+        # 用 height=0 恢复自然需求高，避免瞬态读数把内容裁掉。
+        ch = self.canvas.winfo_height()
+        if self._fill_viewport and ch > 1:
+            need = self.inner.winfo_reqheight()
+            if need < ch:
+                if getattr(self, "_last_win_height", None) != ch:
+                    self._last_win_height = ch
+                    self.canvas.itemconfig(self._win, height=ch)
+            elif getattr(self, "_last_win_height", None) is not None:
+                self._last_win_height = None
+                self.canvas.itemconfig(self._win, height=0)
         bbox = self.canvas.bbox("all")
         if not bbox:
             return
         x0, y0, x1, y1 = bbox
-        ch = self.canvas.winfo_height()
         if ch > 1 and (y1 - y0) <= ch + 6:
             y1 = y0 + ch  # scrollregion 高钳到 canvas 高 → yview (0,1) 锁定
         region = (x0, y0, x1, y1)
@@ -638,6 +654,8 @@ class MetricCell:
                  approx: bool = False) -> None:
         self.metric = metric
         self._approx = approx
+        # 焦点指标（metric_defs.FEATURED_KEYS）数值用大字阶，做看板视觉锚点
+        self._featured = metric.key in FEATURED_KEYS
         self._pad_x = dpi_pixels(parent, 10)
         p_bg = str(parent.cget("bg")) if hasattr(parent, "cget") else theme.SURFACE_CARD
         self.frame = RoundedFrame(
@@ -668,7 +686,9 @@ class MetricCell:
         value_fg = theme.VALUE_NEUTRAL
 
         self.value = tk.Label(self.frame, textvariable=self.var, bg=theme.PANEL,
-                              fg=value_fg, font=theme.FONT_VALUE, anchor="w")
+                              fg=value_fg,
+                              font=theme.FONT_VALUE_LG if self._featured else theme.FONT_VALUE,
+                              anchor="w")
         self.value.pack(anchor="w", padx=self._pad_x, pady=(1, 6))
         if dpi_pixels(self.value, 96) > 96 and metric.fmt in ("", "text"):
             self.value.configure(width=1)
@@ -742,7 +762,11 @@ class MetricCell:
         ``sub_text`` 位于数值下方一行展示辅助说明（如 ≈ 4.17亿、+2 跳过、18 种工具）。
         """
         self.var.set(text)
-        self.value.config(font=theme.value_font(text))
+        if self._featured:
+            self.value.config(font=theme.value_font(
+                text, mono=theme.FONT_VALUE_LG, cjk=theme.FONT_UI_LG_BOLD))
+        else:
+            self.value.config(font=theme.value_font(text))
         if sub_text is not None:
             self.set_sub_text(sub_text)
         elif self._approx:

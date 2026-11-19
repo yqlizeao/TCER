@@ -65,7 +65,7 @@ def test_every_metric_has_a_format_spec():
 
 def test_format_value_tokens():
     assert metric_defs.format_value("total_tokens", 5_000_000) == "5,000,000"
-    assert metric_defs.format_value("chr", 0.959) == "95.9000%"    # pct4 ×100 保留四位
+    assert metric_defs.format_value("chr", 0.959) == "95.9%"       # pct ×100 一位小数
     assert metric_defs.format_value("cost", 1.2345) == "$1.2345"   # money 4dp
     assert metric_defs.format_value("cost_per_mt", 1.6) == "$1.60"  # money2 2dp
     assert metric_defs.format_value("tcer", 60.13) == "60.1"        # float:0.0
@@ -99,7 +99,7 @@ def test_report_values_golden_strings():
     assert v["total_tokens"] == "5,000,000"
     assert v["input"] == "20,000"
     assert v["cache_read"] == "4,700,000"
-    assert v["chr"] == "95.9184%"             # 4.7M / 4.9M（四位小数显真值）
+    assert v["chr"] == "95.9%"               # 4.7M / 4.9M（统一一位小数）
     assert v["net_loc"] == "400"
     assert v["added"] == "420"
     assert v["deleted"] == "20"
@@ -220,7 +220,7 @@ def test_model_display_golden():
     assert md(mc, "m_cost_share") == "33.3%"
     assert md(mc, "m_tokens_per_dollar") == "1,600,000/$"
     assert md(mc, "m_code_per_dollar") == "42.0 行/$"
-    assert md(mc, "m_cache_hit_ratio") == "87.6000%"
+    assert md(mc, "m_cache_hit_ratio") == "87.6%"
     assert md(mc, "m_session_count") == "7"
     assert md(mc, "m_churn") == "8.2%"
 
