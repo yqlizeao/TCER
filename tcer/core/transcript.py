@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Iterable
 
+from tcer.core import file_cache
 from tcer.core import tool_summary as ts_
 from tcer.core.tool_summary import (  # noqa: F401  (re-export 供 GUI 一处导入)
     AGENT_STYLES, EV_ABORTED, EV_COMPACTION, EV_ERROR, EV_HOOK, EV_INFO, EV_MODEL_CHANGE,
@@ -1315,18 +1316,10 @@ def clear_cache() -> None:
         _CACHE.clear()
 
 
-def _sig_of(p: Path) -> tuple:
-    try:
-        st = p.stat()
-        return (int(st.st_mtime_ns), int(st.st_size))
-    except OSError:
-        return (0, 0)
-
-
 def _cache_key(source: str, path: Path, session_id: str | None) -> tuple:
-    sigs = [_sig_of(path)]
-    if path.suffix == ".db":      # SQLite：WAL 里可能有尚未 checkpoint 的写入
-        sigs.append(_sig_of(path.with_name(path.name + "-wal")))
+    sigs = [file_cache.stat_signature(path)]
+    if path.suffix == ".db":
+        sigs.append(file_cache.sqlite_wal_signature(path))
     return (source, os.path.normcase(os.path.abspath(path)), session_id or "", tuple(sigs))
 
 

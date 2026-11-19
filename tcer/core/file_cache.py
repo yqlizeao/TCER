@@ -41,17 +41,29 @@ def stats() -> dict[str, int]:
     return {"entries": len(_CACHE), "max_entries": _MAX_ENTRIES}
 
 
-def _sig(path: Path) -> tuple[str, int, int] | None:
+def stat_signature(path: Path) -> tuple[int, int] | None:
     try:
         st = path.stat()
     except OSError:
+        return None
+    return int(st.st_mtime_ns), int(st.st_size)
+
+
+def sqlite_wal_signature(path: Path) -> tuple[int, int] | None:
+    """Track writes SQLite has committed but not yet checkpointed."""
+    return stat_signature(path.with_name(path.name + "-wal"))
+
+
+def _sig(path: Path) -> tuple[str, int, int] | None:
+    sig = stat_signature(path)
+    if sig is None:
         return None
     # 键只需「同一文件 → 同一字符串」：abspath+normcase（纯字符串运算，Windows 下
     # 折叠盘符/大小写与斜杠）。原先的 Path.resolve() 在 Windows 上每次要开句柄
     # （nt._getfinalpathname，5000 次 ≈ 0.14s/轮）；符号链接别名最多多缓存一份，
     # 不影响正确性（mtime/size 仍在键内）。
     resolved = os.path.normcase(os.path.abspath(path))
-    return resolved, int(st.st_mtime_ns), int(st.st_size)
+    return resolved, *sig
 
 
 def get_or_compute(
