@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from tcer.core import analyze, codex_reader
 
 
-def _write_jsonl(path: Path, lines: list[dict]) -> Path:
+def _write_jsonl(path: Path, lines: Sequence[object]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         for obj in lines:
@@ -127,6 +128,22 @@ def test_discover_sessions_recurses_codex_home(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     p = _write_jsonl(tmp_path / "sessions" / "2026" / "06" / "29" / "s.jsonl", [])
     assert codex_reader.discover_sessions() == [p]
+
+
+def test_read_user_messages_skips_non_object_lines(tmp_path):
+    lines = _codex_lines()
+    p = _write_jsonl(tmp_path / "s.jsonl", [*lines[:2], None, [], 3, *lines[2:]])
+
+    assert codex_reader.read_user_messages(p) == ["实现 Codex 支持"]
+
+
+def test_list_project_refs_skips_non_object_lines_before_session_meta(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    p = _write_jsonl(tmp_path / "sessions" / "s.jsonl", [None, *_codex_lines()])
+
+    (ref,) = codex_reader.list_project_refs()
+    assert ref.cwd == r"C:\repo\app"
+    assert ref.session_paths == (p,)
 
 
 def test_aggregate_usage_maps_codex_tokens_and_tools(tmp_path):

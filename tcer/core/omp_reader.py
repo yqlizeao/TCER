@@ -91,16 +91,19 @@ def _is_agent_attributed(mm: dict) -> bool:
 
 
 def iter_events(path: Path):
-    """Yield parsed omp session JSONL lines, skipping malformed ones."""
+    """Yield parsed omp session JSONL objects, skipping malformed lines."""
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(obj, dict):
+                continue
+            yield obj
 
 
 def discover_sessions() -> list[Path]:
