@@ -8,6 +8,7 @@ from __future__ import annotations
 import sys
 
 PLATFORM = sys.platform  # 'win32', 'darwin', 'linux'
+SPI_GETWORKAREA = 0x0030
 
 # 可点击控件光标：Windows/Linux 用 hand2（手型，可点击反馈）；mac 的 Tk hand2 是
 # 低清位图小手、观感差，且 mac 原生按钮 hover 不变光标，故 mac 用默认（空串）。
@@ -27,7 +28,7 @@ def window_client_bounds(root) -> tuple[int, int, int, int]:
         from ctypes import wintypes
 
         rect = wintypes.RECT()
-        if ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0):
+        if ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
             left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
         right -= dpi_pixels(root, 16)
         bottom -= dpi_pixels(root, 40)
