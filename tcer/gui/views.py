@@ -54,7 +54,7 @@ from .widgets import (Card, FlatMenu, FlowRow, fit_label,
                       SegmentedControl, StatusBadge, ToggleSwitch, RoundedEntry,
                       ask_yes_no, ask_yes_no_cancel, show_error, show_info,
                       get_rounded_rect_img, draw_rounded_box)
-from .platform import CLICK_CURSOR
+from .platform import CLICK_CURSOR, dpi_pixels
 
 _PER_ROW = 6  # metric tiles per grid row inside a group
 
@@ -889,7 +889,7 @@ class ActivityBar:
         self.controller = controller
         prefs = getattr(controller, "_ui_prefs", None)
         self._collapsed: bool = bool(prefs.get("nav_collapsed", False)) if isinstance(prefs, dict) else False
-        init_w = self._W_COLLAPSED if self._collapsed else self._W_EXPANDED
+        init_w = dpi_pixels(parent, self._W_COLLAPSED if self._collapsed else self._W_EXPANDED)
 
         self.frame = tk.Frame(parent, bg=theme.BG, width=init_w)
         self.frame.pack(side="left", fill="y")
@@ -977,7 +977,7 @@ class ActivityBar:
 
     def _apply_collapse_layout(self) -> None:
         target_w = self._W_COLLAPSED if self._collapsed else self._W_EXPANDED
-        self.frame.configure(width=target_w)
+        self.frame.configure(width=dpi_pixels(self.frame, target_w))
         if self._collapsed:
             self._brand_dot.pack_forget()
             self._brand_lbl.pack_forget()
