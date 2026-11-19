@@ -31,6 +31,39 @@ def test_db(tmp_path, monkeypatch):
     return mod
 
 
+@pytest.mark.parametrize("name", ["Write", "Edit"])
+@pytest.mark.parametrize("result, expected", [
+    ({"status": "completed", "output": "File written successfully"}, 2),
+    ({"status": "failed", "output": "Permission denied"}, 0),
+    ({"status": "completed", "is_error": True}, 0),
+    ({"status": "completed", "output": {"text": "Error: permission denied"}}, 0),
+    ({"status": "completed", "output": [{"text": "Failed: permission denied"}]}, 0),
+    (None, 2),
+])
+def test_loc_tool_result(tmp_path, name, result, expected):
+    path = tmp_path / "result.jsonl"
+    args = {"file_path": "/project/main.py", "content": "x = 1\ny = 2\n",
+            "old_string": "", "new_string": "x = 1\ny = 2\n"}
+    id_key = "callId" if name == "Write" else "id"
+    records = [{"type": "function_call", "name": name, id_key: "call-1",
+                "arguments": json.dumps(args)}]
+    if result is not None:
+        records.append({"type": "function_call_result", "name": name,
+                        id_key: "call-1", **result})
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+    sloc = workbuddy_reader.session_loc_full(path)
+    assert sloc.added == expected
+    assert sloc.deleted == 0
+    assert workbuddy_reader.has_loc_signal(path)
+    assert workbuddy_reader.aggregate_usage(path).tool_errors == int(expected == 0)
+    convo = workbuddy_reader.read_conversation(path)
+    assert convo[0]["id"] == "call-1"
+    if result is not None:
+        assert convo[1]["tool_use_id"] == "call-1"
+        assert convo[1]["is_error"] == (expected == 0)
+
+
 def test_clean_user_text():
     # 1. System reminder stripping with attributes
     raw1 = (

@@ -76,6 +76,27 @@ _TS_RE = re.compile(
 )
 
 
+def _result_text(obj: dict) -> str:
+    out = obj.get("output")
+    if isinstance(out, dict):
+        return out.get("text") or ""
+    if isinstance(out, str):
+        return out
+    if isinstance(out, list):
+        return "\n".join(c.get("text", "") for c in out if isinstance(c, dict))
+    return ""
+
+
+def _result_is_error(obj: dict) -> bool:
+    lowered = _result_text(obj).strip().lower()
+    return bool(
+        obj.get("is_error")
+        or obj.get("status") != "completed"
+        or lowered.startswith(("error:", "error during", "failed:"))
+        or "traceback (most recent call last):" in lowered
+    )
+
+
 def clean_user_text(raw: str) -> str:
     """Clean system reminders and unwrap user queries from WorkBuddy user input."""
     if not raw:
@@ -493,25 +514,7 @@ def aggregate_usage(path: Path) -> TokenUsage:
 
         elif t == "function_call_result":
             raw_name = obj.get("name") or "tool"
-            status = obj.get("status")
-            out = obj.get("output")
-            out_txt = ""
-            if isinstance(out, dict):
-                out_txt = out.get("text") or ""
-            elif isinstance(out, str):
-                out_txt = out
-            elif isinstance(out, list):
-                out_txt = "\n".join(c.get("text", "") for c in out if isinstance(c, dict))
-
-            lowered = out_txt.strip().lower()
-            is_err = (
-                status != "completed"
-                or lowered.startswith("error:")
-                or lowered.startswith("error during")
-                or lowered.startswith("failed:")
-                or "traceback (most recent call last):" in lowered
-            )
-            if is_err:
+            if _result_is_error(obj):
                 u.tool_errors += 1
                 u.tool_errors_by_tool[raw_name] = u.tool_errors_by_tool.get(raw_name, 0) + 1
 
@@ -553,6 +556,7 @@ def _loc_scan(path: Path) -> tuple[loc.SessionLoc, bool]:
     acc = loc._LocAccumulator()
     has_signal = False
     turn_idx = 0
+    pending: dict[str, tuple[str, dict, int]] = {}
 
     for obj in iter_records(path):
         t = obj.get("type")
@@ -571,7 +575,22 @@ def _loc_scan(path: Path) -> tuple[loc.SessionLoc, bool]:
                     fp = args.get("file_path") or args.get("path")
                     if fp and loc._is_code(fp):
                         has_signal = True
-                        acc.on_tool_use(name, args, turn=turn_idx)
+                        call_id = obj.get("callId") or obj.get("id")
+                        if isinstance(call_id, str) and call_id:
+                            pending[call_id] = (name, args, turn_idx)
+                        else:
+                            acc.on_tool_use(name, args, turn=turn_idx)
+        elif t == "function_call_result":
+            call_id = obj.get("callId") or obj.get("id")
+            if not isinstance(call_id, str) or call_id not in pending:
+                continue
+            name, args, turn = pending.pop(call_id)
+            if _result_is_error(obj):
+                continue
+            acc.on_tool_use(name, args, turn=turn)
+
+    for name, args, turn in pending.values():
+        acc.on_tool_use(name, args, turn=turn)
 
     return acc.finish(), has_signal
 
@@ -670,31 +689,13 @@ def read_conversation(path: Path) -> list[dict]:
         elif t == "function_call_result":
             name = obj.get("name") or "tool"
             call_id = obj.get("callId") or obj.get("id")
-            status = obj.get("status")
-            out = obj.get("output")
-            out_txt = ""
-            if isinstance(out, dict):
-                out_txt = out.get("text") or ""
-            elif isinstance(out, str):
-                out_txt = out
-            elif isinstance(out, list):
-                out_txt = "\n".join(c.get("text", "") for c in out if isinstance(c, dict))
-
-            lowered = out_txt.strip().lower()
-            is_err = (
-                status != "completed"
-                or lowered.startswith("error:")
-                or lowered.startswith("error during")
-                or lowered.startswith("failed:")
-                or "traceback (most recent call last):" in lowered
-            )
             convo.append({
                 "role": "tool",
                 "type": "tool_result",
                 "name": name,
                 "tool_use_id": call_id,
-                "is_error": is_err,
-                "text": out_txt,
+                "is_error": _result_is_error(obj),
+                "text": _result_text(obj),
                 "ts": ts,
             })
 
