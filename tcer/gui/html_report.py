@@ -350,7 +350,7 @@ def _timeline_section(report: SessionReport) -> str:
     max_tok = max((t.input_tokens + t.cache_write + t.cache_read
                    + t.output_tokens) for t in stats) or 1
     rows = []
-    for i, t in enumerate(stats):
+    for t in stats:
         total = t.input_tokens + t.cache_write + t.cache_read + t.output_tokens
         segs = "".join(
             f'<span style="display:inline-block;height:10px;width:{v / max_tok * 200:.0f}px;'
@@ -363,7 +363,7 @@ def _timeline_section(report: SessionReport) -> str:
         dur = fmt.fmt_duration_ms(t.duration_ms, short=True)
         err = f'<span style="color:{theme.ERROR}">⚠ {t.errors}</span>' if t.errors else ""
         rows.append(
-            f"<tr><td class='v'>{i + 1}</td>"
+            f"<tr><td class='v'>{t.turn + 1}</td>"
             f"<td>{_esc(fmt.fmt_dt(t.ts, fmt.FMT_SHORT_SECOND) if t.ts else '-')}</td>"
             f"<td>{segs}</td>"
             + _num_td(total, f"{total:,}")

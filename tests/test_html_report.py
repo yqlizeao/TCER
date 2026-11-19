@@ -136,3 +136,16 @@ def test_project_html_section_selection():
     assert "会话明细" not in only_kpi
     # 默认（None）与全选等价
     assert "模型对比" in full
+
+
+def test_session_timeline_uses_real_turn_numbers():
+    """回合号有空洞（如回合 2 无用量）时，时间线表必须与缩略条/LLM 报告一样用真实回合号。"""
+    from tcer.core.models import TurnStat
+
+    r = _report(300, sid="gap")
+    r.usage.turn_stats = [TurnStat(0, input_tokens=100, output_tokens=50),
+                          TurnStat(2, input_tokens=200, output_tokens=80)]
+    out = html_report.render_session_html(r, project_name="P")
+    assert "<tr><td class='v'>1</td>" in out
+    assert "<tr><td class='v'>3</td>" in out
+    assert "<tr><td class='v'>2</td>" not in out
