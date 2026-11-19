@@ -442,6 +442,7 @@ Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-ag
   - ③`reasoning`（思考过程，提取 `rawContent` 或 `providerData.reasoning`）；
   - ④`function_call`（每个步骤在 `providerData.rawUsage` 中携带权威 usage，按 `messageId` 去重累加，模型名归一到 `pricing` 表；工具映射含 `PowerShell`/`Bash`/`Read`/`Edit`/`Write`/`Grep`/`Glob`/`ToolSearch`/`present_files`/`DeferExecuteTool`）；
   - ⑤`function_call_result`（执行状态与输出）。LOC：`Edit` 与 `Write` 经同一 `_LocAccumulator` 回放计算净增代码行与自返工率。
+  - **缓存输入口径**：`rawUsage.prompt_tokens` / `usage.inputTokens` 均包含缓存命中 Token；reader 以 `max(0, 原始输入 - cached_tokens)` 计非缓存输入，缓存另计，峰值上下文仍包含缓存。
   - **按目录项目级自动聚合**：WorkBuddy 会话在运行时通常以时间戳沙箱目录为 `cwd`（如 `WorkBuddy\2026-10-16-...`），直接按 `cwd` 聚合会导致每个会话散落成独立时间戳单项。`extract_project_dir_from_session` 深度分析会话中工具操作与命令行中触及的业务文件路径，排除 WorkBuddy 沙箱和全局记忆目录后，提取各路径的最深共同业务工程根（如 `E:\slg`）；在项目发现（`list_project_refs`）时将同一真实工程目录下的所有会话自动合并归集进同一个 `ProjectRef`（`key="E--slg"`, `display_name="slg"`, `cwd="E:\slg"`），实现跨沙箱会话在项目级别的自动聚合与指标统算。
 
 - **omp 模型归属补充**（旧 AGENTS #26）：模型仅在产生真实 Token 的助手回合计入 `u.models`，避免初始切换或 400 报错的 0-token 模型变成看板「隐身模型」；全空会话回退当前模型。
