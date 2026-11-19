@@ -728,15 +728,23 @@ def _fetch_rows(
 ) -> list[dict]:
     """Fetch de-duplicated rows, resolve canonical person/project/model, filter.
 
-    De-dup rule: keep every session row, plus aggregate rows whose batch has no
-    session rows (aggregate-only uploads). SQL applies only the time filter;
+    De-dup rule: keep every session row, plus the latest aggregate per
+    (uploaded_by, person, project) with no session rows for that same key.
+    Latest means greatest uploaded_at, then id, independent of the time filter.
+    SQL applies de-duplication and the time filter;
     canonical person/project/model filtering is done in Python because those
     depend on alias maps + pricing normalization.
     """
     where = [
         "(kind='session' OR (kind='aggregate' AND NOT EXISTS ("
         "SELECT 1 FROM uploads s WHERE s.kind='session' "
-        "AND s.person IS u.person AND s.project IS u.project)))"
+        "AND s.person IS u.person AND s.project IS u.project "
+        "AND s.uploaded_by IS u.uploaded_by) AND NOT EXISTS ("
+        "SELECT 1 FROM uploads a WHERE a.kind='aggregate' "
+        "AND a.uploaded_by IS u.uploaded_by "
+        "AND a.person IS u.person AND a.project IS u.project "
+        "AND (a.uploaded_at > u.uploaded_at "
+        "OR (a.uploaded_at = u.uploaded_at AND a.id > u.id)))))"
     ]
     params: list = []
     if start_ts is not None:
