@@ -4,8 +4,8 @@
     "source": "farion1231/cc-switch — seed_model_pricing()",
     "source_url": "https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/database/schema.rs",
     "source_raw": "https://raw.githubusercontent.com/farion1231/cc-switch/main/src-tauri/src/database/schema.rs",
-    "fetched_at": "2026-10-09",
-    "ref": "main @ 2026-10-09（上游定价同步与 2026 前沿模型库升级）：新增 GPT-6.1 Sol（2/10/0.1/2.5）、GPT-5.6 Cyber（12.5/75/1.25/15.625）、Step 5 Preview、Hunyuan Hy4 Preview、GLM-5.3-FlashX、Qwen3.8（2.4T A95B / 27B）、Grok 4.7、MiMo V2.6 家族（Pro / Flash / UltraSpeed）；更正 GPT-6 Sol 与 Luna 官方标准短上下文价（2/10/0.2/2.5 与 0.1/0.5/0.01/0.125）、更正 GPT-5.6 Terra 与 Luna 官方降价值（2/12/0.2/2.5 与 0.2/1.2/0.02/0.25）、恢复 DeepSeek V4 Pro 官方高峰档价（官方撤回路由公告后保持 1.32/3.96/0.044）、更正 DeepSeek Chat / Reasoner（0.44/1.32/0.014）、o3-mini（1.1/4.4/0.55）与 o1-mini（缓存读 0.55）及 MiMo V2.5（输出 0.28）官方标价；规范所有新模型 _note 备注与 vendor。",
+    "fetched_at": "2026-11-20",
+    "ref": "main @ 2026-11-20（现价同步）：新增 gemini-4-neon（3/15/0.15）；GPT-5.6 全系（sol/low/medium/high/xhigh/minimal + 裸名别名）降至促销现价 4/20/0.4/5（至 2026-11-30，标准价 5/30/0.5/6.25 记入 _note）；k3 缓存写补录 $3.00；step-5-preview 缓存读上调至 $0.10；qwen3.7-flash 缓存读 $0.006；全部 _note 重写为简要口径（定位一句 + 计费事实）",
     "unit": "USD per 1,000,000 tokens (厂商官方 list 价；CNY 按官方汇率折算)",
     "pricing_policy": "只录厂商标准价（非限时促销/介绍价，无时间相关性）；峰谷分时录闲时档；促销价/峰时价/Batch/Priority 等多轨一律记入条目 _note（GUI 价表悬浮可见）；价差以厂商官方页裁决。选型跟 cc-switch seed_model_pricing() 热门常用列表走，旗舰 GA 模型 + 标准价已定可破例（Gemini 4 Carbon / Claude Fable 5.2 先例，2026-11-11）。",
     "fields": {
@@ -16,7 +16,7 @@
       "_note": "（可选）模型定位描述与计费特性注解，GUI 悬浮展示",
       "vendor": "模型所属厂商（如 Anthropic、OpenAI、Google、xAI、DeepSeek、Alibaba 等）"
     },
-    "model_count": 364,
+    "model_count": 365,
     "note": "可自由增删 models 条目；未匹配到的模型回退到 default（Anthropic 通用 list 价）。"
   },
   "default": {
@@ -33,7 +33,16 @@
       "output": 10.0,
       "cache_read": 0.1,
       "cache_write": 0.0,
-      "_note": "Google DeepMind Gemini 4 代首发模型（2026-10-13；官方定价页 2026-11-13 核对）；当前生效价 2/10/0.10（介绍价，至 2026-11-30），2026-12-01 起翻标准价 4/20/0.2（到期须改表）；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 1/5（缓存读 0.05）；不提供免费档",
+      "_note": "介绍价至 2026-11-30，12-01 起标准价 4/20/0.2（到期须改表）；缓存仅隐式；Batch 1/5",
+      "vendor": "Google"
+    },
+    "gemini-4-neon": {
+      "display_name": "Gemini 4 Neon",
+      "input": 3.0,
+      "output": 15.0,
+      "cache_read": 0.15,
+      "cache_write": 0.0,
+      "_note": "Gemini 4 标准档（Global）；输出含思考；缓存仅隐式（写入不计价）",
       "vendor": "Google"
     },
     "gemini-4-carbon": {
@@ -42,7 +51,7 @@
       "output": 10.0,
       "cache_read": 0.1,
       "cache_write": 0.0,
-      "_note": "Google Gemini 4 代旗舰（2026-10-28 发布，2026-11-10 上公开 API 付费档；官方定价页 2026-11-13 核对）；当前生效价 2/10/0.10（介绍价，至 2026-11-30），2026-12-01 起翻标准价 4/20/0.2（到期须改表）；缓存仅隐式（无显式缓存写入计价）；Batch 优惠 1/5（缓存读 0.05）；不提供免费档；思考 token 全计费",
+      "_note": "Gemini 4 旗舰；介绍价至 2026-11-30，12-01 起标准价 4/20/0.2；缓存仅隐式；Batch 1/5；思考全计费",
       "vendor": "Google"
     },
     "gemini-4-hydrogen": {
@@ -51,7 +60,7 @@
       "output": 7.5,
       "cache_read": 0.075,
       "cache_write": 0.0,
-      "_note": "Gemini 4 Flash 代（内部代号 Hydrogen；2026-11-12 Google Cloud 计费 SKU 公开标准价 1.5/7.5/0.075，尚未正式发布——官方 models/定价页与 Vertex 定价页均未列出，cc-switch 未收录，发布后以官方定价页复核；Batch/Flex 0.75/3.75，Priority 2.70/13.50；缓存仅隐式）",
+      "_note": "Gemini 4 Flash 代；SKU 已公开未正式发布，发布后按官方定价页复核；Batch/Flex 0.75/3.75，Priority 2.70/13.50",
       "vendor": "Google"
     },
     "gemini-flash-worker-agy": {
@@ -60,7 +69,7 @@
       "output": 7.5,
       "cache_read": 0.075,
       "cache_write": 0.0,
-      "_note": "别名跟随：Antigravity Orchestrator 模式的实现 worker 记录名（agy=Antigravity 后缀，本机 12 会话实测，占实现大头）；官方文档：Orchestrator = 规划模型（Carbon/Argon）+ Gemini 4 Hydrogen（Flash 代）动态协作，文件编辑/构建/测试等实现工作由 Hydrogen 执行并记在该名下；计价同 gemini-4-hydrogen（SKU 公开未正式发布，发布后随主条目复核）",
+      "_note": "别名：Antigravity Orchestrator 的实现 worker 记录名；计价同 gemini-4-hydrogen",
       "vendor": "Google"
     },
     "gemini-pro-orchestrator": {
@@ -69,7 +78,7 @@
       "output": 10.0,
       "cache_read": 0.1,
       "cache_write": 0.0,
-      "_note": "别名跟随：Antigravity 编排（Orchestrator）模式的包装记录名（本机唯一出现于 01072736 编排父会话，与规划主体 gemini-4-carbon 1230 条及实现 worker 同会话同现，用户亲证其编排为 Carbon 版——名字里的 pro 是产品线名不指 Pro 方案）；官方文档：编排 = 规划模型（Carbon 或 Argon）+ Hydrogen 实现动态协作，规划/审查/重规划由规划模型执行并另记 gemini-4-carbon 等主名下，本名只承包装/协调调用；计价同 gemini-4-carbon",
+      "_note": "别名：Antigravity 编排模式包装名（pro 指产品线）；计价同 gemini-4-carbon",
       "vendor": "Google"
     },
     "gemini-decision-1": {
@@ -78,7 +87,7 @@
       "output": 0.0,
       "cache_read": 0.0,
       "cache_write": 0.0,
-      "_note": "Google 2026-11-11 发布（Decisions API 专用）；决策/评分模型，不逐 token 生成文本：单次前向给最多 1000 个问题打分（yes/no、选择 2–255 项、rubric），返回概率与置信度，150–250ms；输入 $0.10/MTok，输出 $0（不产生输出 token）；共享输入按请求计一次；不支持上下文缓存与 Batch；有免费档（AI Studio 原型）；256K 多模态输入（文本/图像/音频/视频/PDF）",
+      "_note": "Decisions API 评分模型：单次给 ≤1000 题打分，不产输出 token；输入 $0.10 输出 $0；无缓存/Batch；有免费档",
       "vendor": "Google"
     },
     "pg-gemini-4-argon": {
@@ -87,7 +96,7 @@
       "output": 10.0,
       "cache_read": 0.1,
       "cache_write": 0.0,
-      "_note": "别名跟随：代理网关加 pg- 前缀的 gemini-4-argon（本机会话实测出现）；计价同 gemini-4-argon",
+      "_note": "别名：代理网关 pg- 前缀的 gemini-4-argon；计价相同",
       "vendor": "Google"
     },
     "gemini-3.8-flash": {
@@ -96,7 +105,7 @@
       "output": 3.75,
       "cache_read": 0.075,
       "cache_write": 0.0,
-      "_note": "Google DeepMind 2026 前沿主力智能体模型；专为高通量软件工程与长周期知识工作流优化；支持多档思考深度调节（Effort），具备原生多模态理解与极低延迟执行能力；当前生效介绍价 0.75/3.75/0.075 至 2026-12-31，2027-01-01 起翻标准价 1.50/7.50/0.15（到期须改表）；Batch/Flex 档 0.375/1.875/0.0375、Priority 档 1.35/6.75/0.135（2027-01-01 起分别 0.75/3.75/0.075 与 2.7/13.5/0.27）；缓存存储 $0.50/MTok/小时（2027-01-01 起 $1.00）",
+      "_note": "介绍价 0.75/3.75/0.075 至 2026-12-31，2027-01-01 起标准价 1.50/7.50/0.15；Batch/Flex、Priority 另有档；缓存存储 $0.50/MTok/h",
       "vendor": "Google"
     },
     "gemini-3.8-flash-high": {
@@ -105,7 +114,7 @@
       "output": 3.75,
       "cache_read": 0.075,
       "cache_write": 0,
-      "_note": "Google DeepMind 2026 高思考档位智能体模型；在保持 Flash 级别高通量的同时施加更深度的逻辑思辨；当前生效介绍价 0.75/3.75/0.075 至 2026-12-31，2027-01-01 起翻标准价 1.5/7.5/0.15（到期须改表）；计价同 gemini-3.8-flash",
+      "_note": "高思考档；价同 gemini-3.8-flash（介绍价至 2026-12-31，2027-01-01 起 1.50/7.50/0.15）",
       "vendor": "Google"
     },
     "gemini-2.5-pro": {
@@ -114,7 +123,7 @@
       "output": 10,
       "cache_read": 0.125,
       "cache_write": 0,
-      "_note": "Google 经典长上下文专业模型；分段计费：上下文 >200k 时单价翻倍（输入 2.5 / 输出 15 / 缓存读 0.25）",
+      "_note": "分段计费：上下文 >200k 翻倍（2.5/15/0.25）",
       "vendor": "Google"
     },
     "gemini-2.5-flash": {
@@ -139,7 +148,7 @@
       "output": 50,
       "cache_read": 0.25,
       "cache_write": 12.5,
-      "_note": "Anthropic 2026 高度对齐与高安全性研究模型；缓存读优惠倍率 0.025×（$0.25/MTok）；1h 缓存写 $20（2×，5m 写 12.5 为本表 cache_write）；Batch 优惠：5/25；数据驻留（inference_geo=us）全品类 1.1×",
+      "_note": "缓存读 0.025×；1h 缓存写 $20（2×）；Batch 5/25；inference_geo=us 全品类 1.1×",
       "vendor": "Anthropic"
     },
     "claude-fable-5-2": {
@@ -148,7 +157,7 @@
       "output": 40.0,
       "cache_read": 0.2,
       "cache_write": 10.0,
-      "_note": "Anthropic 2026-11-09 GA；较 Fable 5.1（10/50）降价 20%；缓存读优惠倍率 0.025×（$0.20/MTok）；1h 缓存写 $16（2×，5m 写 10 为本表 cache_write）；Fast mode 16/80（约 2.5× 生成速度，不可与 Batch 叠加）；Batch 优惠：4/20；数据驻留（inference_geo=us）全品类 1.1×",
+      "_note": "缓存读 0.025×；1h 缓存写 $16（2×）；Fast 16/80；Batch 4/20；inference_geo=us 1.1×",
       "vendor": "Anthropic"
     },
     "claude-mythos-5-1": {
@@ -157,7 +166,7 @@
       "output": 50,
       "cache_read": 0.25,
       "cache_write": 12.5,
-      "_note": "Anthropic 2026 极限推理探索模型（Limited Availability）；缓存读倍率 0.025×；1h 缓存写 $20；Batch 优惠：5/25",
+      "_note": "LA 探索模型；缓存读 0.025×；1h 缓存写 $20；Batch 5/25",
       "vendor": "Anthropic"
     },
     "claude-mythos-5-2": {
@@ -166,7 +175,7 @@
       "output": 40.0,
       "cache_read": 0.2,
       "cache_write": 10.0,
-      "_note": "与 Fable 5.2 同款模型，仅限 Anthropic 网络与生命科学验证项目成员组织；缓存读倍率 0.025×（$0.20/MTok）；1h 缓存写 $16；Fast mode 16/80；Batch 优惠：4/20；数据驻留（inference_geo=us）全品类 1.1×",
+      "_note": "同 Fable 5.2，限验证项目成员；缓存读 0.025×；1h 写 $16；Fast 16/80；Batch 4/20；inference_geo=us 1.1×",
       "vendor": "Anthropic"
     },
     "claude-fable-5": {
@@ -192,7 +201,7 @@
       "cache_read": 0.5,
       "cache_write": 6.25,
       "vendor": "Anthropic",
-      "_note": "Anthropic 5 代旗舰基座模型；全任务端到端复杂规划与多智能体协同能力拔尖；1h 缓存写 $10（2×）；Batch 优惠：2.5/12.5"
+      "_note": "旗舰基座；1h 缓存写 $10（2×）；Batch 2.5/12.5"
     },
     "claude-opus-4-8": {
       "display_name": "Claude Opus 4.8",
@@ -217,7 +226,7 @@
       "output": 10,
       "cache_read": 0.2,
       "cache_write": 2.5,
-      "_note": "别名跟随：网关把 claude-sonnet-5 写成 claude-5-sonnet（本机会话实测出现，推定指 Sonnet 5）；计价同 claude-sonnet-5",
+      "_note": "别名：网关拼写变体；计价同 claude-sonnet-5",
       "vendor": "Anthropic"
     },
     "claude-opus-4-7": {
@@ -330,7 +339,7 @@
       "output": 50.0,
       "cache_read": 1.0,
       "cache_write": 12.5,
-      "_note": "OpenAI 2026 前沿旗舰智能体模型；针对高复杂度端到端专业交付物（幻灯片、三维建模、PCB/硬件布线、软件工程）精调；具备业界顶尖对齐安全性与 1.05M 超大上下文；Fast 模式倍率 2×；Batch 优惠：半价",
+      "_note": "1.05M 上下文；Fast 2×；Batch 半价",
       "vendor": "OpenAI"
     },
     "gpt-6": {
@@ -362,65 +371,65 @@
     },
     "gpt-5.6": {
       "display_name": "GPT-5.6 Sol",
-      "input": 5.0,
-      "output": 30.0,
-      "cache_read": 0.5,
-      "cache_write": 6.25,
-      "_note": "别名跟随：裸名跟随 GPT-5.6 Sol；标准价 5/30/0.5/6.25；促销价 4/20/0.4/5 至 2026-11-30",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "别名：裸名跟随 GPT-5.6 Sol；现行为促销价（至 2026-11-30），标准价 5/30/0.5/6.25（到期须改表）",
       "vendor": "OpenAI"
     },
     "gpt-5.6-sol": {
       "display_name": "GPT-5.6 Sol",
-      "input": 5.0,
-      "output": 30.0,
-      "cache_read": 0.5,
-      "cache_write": 6.25,
-      "_note": "OpenAI 2026 前沿基座；网络安全渗透、漏洞挖掘与自动化工程加速拔尖；标准价 5/30/0.5/6.25；促销价 4/20/0.4/5 至 2026-11-30（OpenAI 官方定价页；11-03 邮件通知促销到期恢复标准价）；分段计费：长上下文（>272k）单价约 1.5×–2×",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "促销价至 2026-11-30，标准价 5/30/0.5/6.25（到期须改表）；分段计费：>272k 约 1.5–2×",
       "vendor": "OpenAI"
     },
     "gpt-5.6-low": {
       "display_name": "GPT-5.6 Sol (Low)",
-      "input": 5.0,
-      "output": 30.0,
-      "cache_read": 0.5,
-      "cache_write": 6.25,
-      "_note": "别名跟随：跟随 Sol 标准价 5/30/0.5/6.25；促销价 4/20/0.4/5 至 2026-11-30",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "别名：跟随 Sol；现行为促销价（至 2026-11-30），标准价 5/30/0.5/6.25（到期须改表）",
       "vendor": "OpenAI"
     },
     "gpt-5.6-medium": {
       "display_name": "GPT-5.6 Sol (Medium)",
-      "input": 5.0,
-      "output": 30.0,
-      "cache_read": 0.5,
-      "cache_write": 6.25,
-      "_note": "别名跟随：跟随 Sol 标准价 5/30/0.5/6.25；促销价 4/20/0.4/5 至 2026-11-30",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "别名：跟随 Sol；现行为促销价（至 2026-11-30），标准价 5/30/0.5/6.25（到期须改表）",
       "vendor": "OpenAI"
     },
     "gpt-5.6-high": {
       "display_name": "GPT-5.6 Sol (High)",
-      "input": 5.0,
-      "output": 30.0,
-      "cache_read": 0.5,
-      "cache_write": 6.25,
-      "_note": "别名跟随：跟随 Sol 标准价 5/30/0.5/6.25；促销价 4/20/0.4/5 至 2026-11-30",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "别名：跟随 Sol；现行为促销价（至 2026-11-30），标准价 5/30/0.5/6.25（到期须改表）",
       "vendor": "OpenAI"
     },
     "gpt-5.6-xhigh": {
       "display_name": "GPT-5.6 Sol (XHigh)",
-      "input": 5.0,
-      "output": 30.0,
-      "cache_read": 0.5,
-      "cache_write": 6.25,
-      "_note": "别名跟随：跟随 Sol 标准价 5/30/0.5/6.25；促销价 4/20/0.4/5 至 2026-11-30",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "别名：跟随 Sol；现行为促销价（至 2026-11-30），标准价 5/30/0.5/6.25（到期须改表）",
       "vendor": "OpenAI"
     },
     "gpt-5.6-minimal": {
       "display_name": "GPT-5.6 Sol (Minimal)",
-      "input": 5.0,
-      "output": 30.0,
-      "cache_read": 0.5,
-      "cache_write": 6.25,
-      "_note": "别名跟随：跟随 Sol 标准价 5/30/0.5/6.25；促销价 4/20/0.4/5 至 2026-11-30",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "别名：跟随 Sol；现行为促销价（至 2026-11-30），标准价 5/30/0.5/6.25（到期须改表）",
       "vendor": "OpenAI"
     },
     "gpt-5.6-luna": {
@@ -429,7 +438,7 @@
       "output": 1.2,
       "cache_read": 0.02,
       "cache_write": 0.25,
-      "_note": "OpenAI 5.6 代高效变体；2026-07 降价 80%（当前生效）；分段计费：长上下文（>200k）单价翻倍（输入 0.4 / 输出 2.4 / 缓存读 0.04）",
+      "_note": "分段计费：>200k 翻倍（0.4/2.4/0.04）",
       "vendor": "OpenAI"
     },
     "gpt-5.6-terra": {
@@ -438,7 +447,7 @@
       "output": 12.0,
       "cache_read": 0.2,
       "cache_write": 2.5,
-      "_note": "OpenAI 5.6 代多模态变体；2026-07 降价 20%（当前生效）；分段计费：长上下文（>200k）单价翻倍（输入 4 / 输出 24 / 缓存读 0.4）",
+      "_note": "分段计费：>200k 翻倍（4/24/0.4）",
       "vendor": "OpenAI"
     },
     "gpt-5.5": {
@@ -447,7 +456,7 @@
       "output": 30,
       "cache_read": 0.5,
       "cache_write": 0,
-      "_note": "分段计费：上下文 >272k 时输入/缓存读单价翻倍、输出 1.5×（输入 10 / 输出 45 / 缓存读 1；官方定价页 2026-10-22 核对）",
+      "_note": "分段计费：>272k 输入/缓存读翻倍、输出 1.5×（10/45/1）",
       "vendor": "OpenAI"
     },
     "gpt-5.5-low": {
@@ -505,7 +514,7 @@
       "output": 15,
       "cache_read": 0.25,
       "cache_write": 0,
-      "_note": "分段计费：上下文 >272k 时输入/缓存读单价翻倍、输出 1.5×（输入 5 / 输出 22.5 / 缓存读 0.5；官方定价页 2026-10-22 核对）",
+      "_note": "分段计费：>272k 输入/缓存读翻倍、输出 1.5×（5/22.5/0.5）",
       "vendor": "OpenAI"
     },
     "gpt-5.4-mini": {
@@ -901,7 +910,7 @@
       "output": 3.75,
       "cache_read": 0.075,
       "cache_write": 0,
-      "_note": "Google DeepMind 前沿混合推理模型；当前生效介绍价 0.75/3.75/0.075 至 2026-12-31，2027-01-01 起翻标准价 1.5/7.5/0.15（到期须改表）；Batch/Flex 档 0.375/1.875/0.0375、Priority 档 1.35/6.75/0.135；缓存存储 $0.50/MTok/小时（2027-01-01 起 $1.00）",
+      "_note": "介绍价 0.75/3.75/0.075 至 2026-12-31，2027-01-01 起标准价 1.50/7.50/0.15；Batch/Flex、Priority 另有档；缓存存储 $0.50/MTok/h",
       "vendor": "Google"
     },
     "gemini-3.6-flash": {
@@ -910,7 +919,7 @@
       "output": 3.75,
       "cache_read": 0.075,
       "cache_write": 0,
-      "_note": "Google DeepMind 经典高通量模型；当前生效介绍价 0.75/3.75/0.075 至 2026-12-31（官方定价页 2026-11-13 核对），2027-01-01 起翻标准价 1.5/7.5/0.15（到期须改表）；Batch/Flex 档 0.375/1.875/0.0375、Priority 档 1.35/6.75/0.135；缓存存储 $0.50/MTok/小时（2027-01-01 起 $1.00）",
+      "_note": "介绍价 0.75/3.75/0.075 至 2026-12-31，2027-01-01 起标准价 1.50/7.50/0.15；Batch/Flex、Priority 另有档；缓存存储 $0.50/MTok/h",
       "vendor": "Google"
     },
     "gemini-3.5-flash": {
@@ -1139,7 +1148,7 @@
       "output": 1.32,
       "cache_read": 0.014,
       "cache_write": 0.0,
-      "_note": "DeepSeek 官方高峰档标准价（CNY 3/9/0.1）；legacy 别名；与上游基准表完全一致；无独立缓存写入计价",
+      "_note": "高峰档标准价（CNY 3/9/0.1），闲时半价；legacy 别名",
       "vendor": "DeepSeek"
     },
     "deepseek-reasoner": {
@@ -1148,7 +1157,7 @@
       "output": 1.32,
       "cache_read": 0.014,
       "cache_write": 0.0,
-      "_note": "DeepSeek 官方高峰档标准价（CNY 3/9/0.1）；legacy 别名；与上游基准表完全一致；无独立缓存写入计价",
+      "_note": "高峰档标准价（CNY 3/9/0.1），闲时半价；legacy 别名",
       "vendor": "DeepSeek"
     },
     "deepseek-flash": {
@@ -1157,7 +1166,7 @@
       "output": 1.2,
       "cache_read": 0.006,
       "cache_write": 0.0,
-      "_note": "深度求索 V4.1 Flash 官方标准计价模型；具备高通量与毫秒级首字延迟；承接原退役之 V4 Flash 与 V4 Pro 请求；官方定价页（2026-10-22 核对）峰谷分时：高峰档（工作日 UTC 01:00–04:00、06:00–10:00，中国法定假日除外）为本表价；其余时段（含周末）半价（0.15/0.6/0.003）",
+      "_note": "V4.1 Flash 计价名；峰谷分时：高峰为本表价，闲时半价（0.15/0.6/0.003）",
       "vendor": "DeepSeek"
     },
     "deepseek-v4.1-flash": {
@@ -1166,7 +1175,7 @@
       "output": 1.2,
       "cache_read": 0.006,
       "cache_write": 0.0,
-      "_note": "DeepSeek-V4.1-Flash-1017，官方 API 名 deepseek-flash；计价同 deepseek-flash；官方定价页（2026-10-22 核对）峰谷分时：高峰档（工作日 UTC 01:00–04:00、06:00–10:00，中国法定假日除外）为本表价；其余时段（含周末）半价（0.15/0.6/0.003）；支持视觉与思考/非思考模式；1M 上下文",
+      "_note": "官方名 deepseek-flash，计价相同；峰谷闲时半价（0.15/0.6/0.003）；视觉+思考；1M 上下文",
       "vendor": "DeepSeek"
     },
     "deepseek-v4-flash": {
@@ -1175,7 +1184,7 @@
       "output": 1.2,
       "cache_read": 0.006,
       "cache_write": 0.0,
-      "_note": "下线路由：2026-09-11 起 V4 Flash 退役，由 V4.1 Flash 承接并按 Flash 价计费（当前生效）；旧峰谷分时已作废；官方定价页（2026-10-22 核对）峰谷分时：高峰档（工作日 UTC 01:00–04:00、06:00–10:00，中国法定假日除外）为本表价；其余时段（含周末）半价（0.15/0.6/0.003）",
+      "_note": "2026-09-11 起 V4 Flash 退役，由 V4.1 Flash 承接计费；峰谷闲时半价（0.15/0.6/0.003）",
       "vendor": "DeepSeek"
     },
     "deepseek-v4-flash-0731": {
@@ -1193,7 +1202,7 @@
       "output": 3.96,
       "cache_read": 0.044,
       "cache_write": 0.0,
-      "_note": "DeepSeek 官方撤回路由降价公告；定价页确认继续提供 V4 Pro API 且计费方式保持不变；当前按高峰档标准价 1.32/3.96/0.044（CNY 9/27/0.3）执行；无独立缓存写入计价；官方定价页（2026-10-22 核对）峰谷分时：高峰档（工作日 UTC 01:00–04:00、06:00–10:00，中国法定假日除外）为本表价；其余时段（含周末）半价（0.66/1.98/0.022）",
+      "_note": "官方撤回路由降价，V4 Pro 续供；峰谷分时：高峰价（CNY 9/27/0.3），闲时半价",
       "vendor": "DeepSeek"
     },
     "deepseek-v4-flash-vision-exp": {
@@ -1212,16 +1221,16 @@
       "cache_read": 0.3,
       "cache_write": 3.0,
       "vendor": "Moonshot AI",
-      "_note": "输入/缓存命中/输出价（3/0.3/15）来自 Kimi 官方资源页转述与第三方站点，Moonshot 官方定价表未能直接核实；缓存写按 TTL 分档计费，5min 默认档 $3.00（= 输入价；cc-switch/models.dev/LiteLLM 三方一致，Moonshot 官方页确认 K3 系列缓存写按 TTL 单独计费），1h 档 $6.00（K3 系列 TTL 结构：1h 为 5min 档 2 倍，同 K3.1 Pro）"
+      "_note": "缓存写 TTL 分档：5min $3.00、1h $6.00（官方页多站核实）；Batch 不适用"
     },
     "k3": {
       "display_name": "Kimi K3",
       "input": 3,
       "output": 15,
       "cache_read": 0.3,
-      "cache_write": 0,
+      "cache_write": 3.0,
       "vendor": "Moonshot AI",
-      "_note": "输入/缓存命中/输出价（3/0.3/15）来自 Kimi 官方资源页转述与第三方站点，Moonshot 官方定价表未能直接核实；K3 缓存写按 TTL（5min/1h）分档计费，具体价未核实，本表缓存写记 0（cc-switch 记 3.0）"
+      "_note": "别名：Kimi For Coding 裸名，同 kimi-k3；缓存写 5min $3.00、1h $6.00"
     },
     "kimi-k2-thinking": {
       "display_name": "Kimi K2 Thinking",
@@ -1365,7 +1374,7 @@
       "output": 1.2,
       "cache_read": 0.06,
       "cache_write": 0,
-      "_note": "MiniMax 3 代基座模型；分段计费：上下文 >512k 时单价翻倍（输入 0.6 / 输出 2.4 / 缓存读 0.12）；官方永久五折后标准价（2026-10-22 核对）；Priority 档 1.5×（≤512k：0.45/1.8/0.09）",
+      "_note": "分段计费：>512k 翻倍（0.6/2.4/0.12）；Priority 1.5×（0.45/1.8/0.09）",
       "vendor": "MiniMax"
     },
     "minimax-m3.1-flash": {
@@ -1374,7 +1383,7 @@
       "output": 0.6,
       "cache_read": 0.015,
       "cache_write": 0,
-      "_note": "MiniMax 3.1 代极速轻量模型（2026-10-19）；官方定价页（2026-10-22 核对）；无独立缓存写入计价",
+      "_note": "极速轻量版；无独立缓存写入计价",
       "vendor": "MiniMax"
     },
     "glm-4.7": {
@@ -1457,7 +1466,7 @@
       "output": 4,
       "cache_read": 0.24,
       "cache_write": 0,
-      "_note": "智谱 AI 视觉多模态模型；第一方标准计价；第三方云托管版按输入长度分段计费（<32k 为 0.7/3.08/0.168）",
+      "_note": "视觉多模态；第三方云托管按输入长分段（<32k 为 0.7/3.08/0.168）",
       "vendor": "Zhipu AI"
     },
     "glm-5.3-flash": {
@@ -1534,7 +1543,7 @@
       "output": 0.47,
       "cache_read": 0.016,
       "cache_write": 0.2,
-      "_note": "通义千问 3.8 高通量轻量版；国际站标准标价（0<Token≤1M）；国内百炼刊例价约 ¥0.8/¥2.7（折合 $0.11/$0.38）",
+      "_note": "国际站标准价（≤1M）；国内百炼约 ¥0.8/¥2.7",
       "vendor": "Alibaba"
     },
     "qwen3.7-max": {
@@ -1575,7 +1584,7 @@
       "output": 3.6,
       "cache_read": 0,
       "cache_write": 0,
-      "_note": "通义千问 3.6 代 27B 开源推理模型；阿里国际站（新加坡）标准价 $0.60/$3.60（0<Token≤256K，思考与非思考输出同价）；价页未列缓存价，缓存两列记 0；无免费额度",
+      "_note": "开源 27B 推理；国际站 $0.60/$3.60（≤256K，思考同价）；缓存价未公布记 0",
       "vendor": "Alibaba"
     },
     "qwen3.5-plus": {
@@ -1690,7 +1699,7 @@
       "output": 6.0,
       "cache_read": 0.5,
       "cache_write": 0,
-      "_note": "xAI 2026 前沿旗舰智能体模型；聚焦长程自主智能体与高复杂度跨代码库工程开发；具备业界顶尖的多步交互式软件构建与端到端交付能力；分段计费：上下文 >200k 时单价翻倍（输入 4 / 输出 12 / 缓存读 1）",
+      "_note": "分段计费：>200k 翻倍（4/12/1）",
       "vendor": "xAI"
     },
     "grok-4.5-build": {
@@ -1789,7 +1798,7 @@
       "cache_read": 0,
       "cache_write": 0,
       "vendor": "Mistral AI",
-      "_note": "已弃用：2026-10-31 起弃用，2027-04-30 退役（Mistral 官方定价页已移除）；替代品为 Mistral Large 4"
+      "_note": "已弃用（2026-10-31），2027-04-30 退役；替代为 Mistral Large 4"
     },
     "mistral-medium-2604": {
       "display_name": "Mistral Medium 2604",
@@ -1878,7 +1887,7 @@
       "output": 2.1,
       "cache_read": 0.07,
       "cache_write": 0,
-      "_note": "Mistral 2026-10-29 开放权重并重置价目（GA v26.10）：标准价 $0.70/$2.10，缓存读 $0.07（Mistral 官方 docs 模型页，无折扣标注）；此前预览期挂牌价 $1.36/$4.18 已失效",
+      "_note": "开放权重 GA v26.10 重置价目；预览期 $1.36/$4.18 已失效",
       "vendor": "Mistral AI"
     },
     "mistral-medium-3.1": {
@@ -1952,7 +1961,7 @@
       "output": 4.4,
       "cache_read": 0.55,
       "cache_write": 0.0,
-      "_note": "OpenAI 高效推理小模型；官方标准挂牌价（1.10/4.40/0.55）；支持推理深度档位调节；Batch 优惠：半价（0.55/2.20/0.275）",
+      "_note": "Batch 半价（0.55/2.20/0.275）",
       "vendor": "OpenAI"
     },
     "o1": {
@@ -2028,7 +2037,7 @@
       "output": 15.0,
       "cache_read": 0.3,
       "cache_write": 3.75,
-      "_note": "Anthropic 混合推理模型；原生支持自适应 Extended Thinking 思考深度调节；1h 缓存写 $6（2×，5m 写 3.75 为本表 cache_write）；Batch 优惠：1.5/7.5",
+      "_note": "混合推理；1h 缓存写 $6（2×）；Batch 1.5/7.5",
       "vendor": "Anthropic"
     },
     "claude-3-7-sonnet-20250219": {
@@ -2046,7 +2055,7 @@
       "output": 15.0,
       "cache_read": 0.3,
       "cache_write": 3.75,
-      "_note": "别名跟随：指向 claude-3-5-sonnet-20241022；1h 缓存写 $6；Batch 优惠：1.5/7.5",
+      "_note": "别名：指向 claude-3-5-sonnet-20241022；1h 写 $6；Batch 1.5/7.5",
       "vendor": "Anthropic"
     },
     "claude-3-5-haiku": {
@@ -2055,7 +2064,7 @@
       "output": 4.0,
       "cache_read": 0.08,
       "cache_write": 1.0,
-      "_note": "别名跟随：指向 claude-3-5-haiku-20241022；1h 缓存写 $1.6；Batch 优惠：0.4/2",
+      "_note": "别名：指向 -20241022；1h 写 $1.6；Batch 0.4/2",
       "vendor": "Anthropic"
     },
     "claude-3-opus": {
@@ -2100,7 +2109,7 @@
       "output": 15.0,
       "cache_read": 0.3,
       "cache_write": 3.75,
-      "_note": "别名跟随：指向 claude-sonnet-4-5-20250929；1h 缓存写 $6；Batch 优惠：1.5/7.5",
+      "_note": "别名：指向 -20250929；1h 写 $6；Batch 1.5/7.5",
       "vendor": "Anthropic"
     },
     "claude-opus-4-5": {
@@ -2109,7 +2118,7 @@
       "output": 25.0,
       "cache_read": 0.5,
       "cache_write": 6.25,
-      "_note": "别名跟随：指向 claude-opus-4-5-20251101；1h 缓存写 $10；Batch 优惠：2.5/12.5",
+      "_note": "别名：指向 -20251101；1h 写 $10；Batch 2.5/12.5",
       "vendor": "Anthropic"
     },
     "claude-haiku-4-5": {
@@ -2118,7 +2127,7 @@
       "output": 5.0,
       "cache_read": 0.1,
       "cache_write": 1.25,
-      "_note": "别名跟随：指向 claude-haiku-4-5-20251001；1h 缓存写 $2；Batch 优惠：0.5/2.5",
+      "_note": "别名：指向 -20251001；1h 写 $2；Batch 0.5/2.5",
       "vendor": "Anthropic"
     },
     "gpt-4o": {
@@ -2217,7 +2226,7 @@
       "output": 10.0,
       "cache_read": 0.125,
       "cache_write": 0.0,
-      "_note": "Google DeepMind 2026 深度推理与专业全模态旗舰；专精复杂工程架构审查、长篇学术/技术文档归纳与高保真图表多模态分析；分段计费：上下文 >200k 时单价翻倍（输入 2.5 / 输出 15 / 缓存读 0.25）；Batch/Flex 档半价",
+      "_note": "分段计费：>200k 翻倍（2.5/15/0.25）；Batch/Flex 半价",
       "vendor": "Google"
     },
     "gemini-3.8-pro-preview": {
@@ -2271,7 +2280,7 @@
       "output": 5.0,
       "cache_read": 0.3125,
       "cache_write": 0.0,
-      "_note": "分段计费：上下文 >128k 时输入 2.5 / 输出 10 / 缓存读 0.625；缓存存储 $4.5/MTok/小时",
+      "_note": "分段计费：>128k（2.5/10/0.625）；缓存存储 $4.5/MTok/h",
       "vendor": "Google"
     },
     "gemini-1.5-flash": {
@@ -2280,7 +2289,7 @@
       "output": 0.3,
       "cache_read": 0.01875,
       "cache_write": 0.0,
-      "_note": "分段计费：上下文 >128k 时输入 0.15 / 输出 0.6 / 缓存读 0.0375；缓存存储 $1.0/MTok/小时",
+      "_note": "分段计费：>128k（0.15/0.6/0.0375）；缓存存储 $1.0/MTok/h",
       "vendor": "Google"
     },
     "gemini-pro-latest": {
@@ -2298,7 +2307,7 @@
       "output": 2.19,
       "cache_read": 0.14,
       "cache_write": 0.0,
-      "_note": "深度求索官方前沿开源强化学习推理旗舰；原生展现端到端完整思考链，在数学、代码与严密逻辑推理任务中表现拔尖；缓存命中 $0.14",
+      "_note": "开源推理旗舰；缓存命中 $0.14",
       "vendor": "DeepSeek"
     },
     "deepseek-v4": {
@@ -2460,7 +2469,7 @@
       "output": 6,
       "cache_read": 0.5,
       "cache_write": 0.0,
-      "_note": "xAI Grok Build CLI 官方专用编码版；取基础档单价（<200k）$2/$6，缓存读 $0.50；分段计费：prompt ≥200k 时单价翻倍（$4/$12，缓存读 $1）；无独立缓存写入计价",
+      "_note": "Grok Build 专用；分段：≥200k 翻倍（$4/$12，缓存读 $1）",
       "vendor": "xAI"
     },
     "glm-4-plus": {
@@ -2649,7 +2658,7 @@
       "output": 1.2,
       "cache_read": 0.03,
       "cache_write": 0.375,
-      "_note": "MiniMax 2026 前沿主力旗舰大模型；全模态原生处理能力拔尖，在文本创作、复杂逻辑推导与音视频协同上具备突出表现；分段计费：上下文 >512k 时单价翻倍",
+      "_note": "分段计费：>512k 翻倍",
       "vendor": "MiniMax"
     },
     "minimax-m3.5-highspeed": {
@@ -2667,7 +2676,7 @@
       "output": 20.0,
       "cache_read": 0.2,
       "cache_write": 5.0,
-      "_note": "Anthropic 2026 前沿旗舰智能体模型；专为长程自主智能体编码与复杂知识工程设计；具备业界顶尖的多步大型代码库重构、Bug 深度挖掘与图表视觉分析能力；原生集成自适应深度思考（Adaptive Thinking）与 1M 上下文；1h 缓存写 $8（2×，5m 写 5 为本表 cache_write）；Batch 优惠：2/10；Fast 模式倍率 2×；缓存读优惠倍率 0.05×（$0.20/MTok）",
+      "_note": "1M 上下文；1h 缓存写 $8（2×）；Batch 2/10；Fast 2×；缓存读 0.05×（$0.20）",
       "vendor": "Anthropic"
     },
     "claude-opus-5-5-20260922": {
@@ -2685,7 +2694,7 @@
       "output": 10.0,
       "cache_read": 0.1,
       "cache_write": 2.5,
-      "_note": "Anthropic 2026 前沿中坚主力模型；兼顾强悍的代码执行力、高吞吐与成本效益；专为日常高频多回合编码与文档分析设计；官方定价页（2026-10-22 核对）：$2/$10，缓存读 0.05×输入价（$0.10，非 Sonnet 5 的 $0.20）；1h 缓存写 $4（2×，5m 写 2.5 为本表 cache_write）；Batch 优惠：半价（1/5）",
+      "_note": "缓存读 0.05×（$0.10）；1h 写 $4（2×）；Batch 半价 1/5",
       "vendor": "Anthropic"
     },
     "claude-5-5-sonnet": {
@@ -2694,7 +2703,7 @@
       "output": 10.0,
       "cache_read": 0.1,
       "cache_write": 2.5,
-      "_note": "别名跟随：中转/网关把 claude-sonnet-5-5 写成 claude-5-5-sonnet（本机会话实测出现）；计价同 claude-sonnet-5-5",
+      "_note": "别名：网关拼写变体；计价同 claude-sonnet-5-5",
       "vendor": "Anthropic"
     },
     "claude-haiku-5-5": {
@@ -2703,7 +2712,7 @@
       "output": 0.5,
       "cache_read": 0.01,
       "cache_write": 0.125,
-      "_note": "Anthropic 2026 极速轻量模型；2026-10-07 官方降价至 $0.1/$0.5（当前生效）；专为低延迟检索、日常补全与高通量流水线打造；缓存读取 0.1×、缓存写入 1.25× 输入价；分段计费：prompt >100k tokens 时单价 0.5/2.5/0.05/0.625（输入/输出/缓存读/缓存写，官方定价页），本表取 ≤100k 档",
+      "_note": "分段计费：>100k 为 0.5/2.5/0.05/0.625（本表取 ≤100k 档）",
       "vendor": "Anthropic"
     },
     "gpt-6-sol": {
@@ -2712,7 +2721,7 @@
       "output": 10.0,
       "cache_read": 0.2,
       "cache_write": 2.5,
-      "_note": "OpenAI 2026 深度推理 Sol 旗舰；专为重度代码构建、架构重构与前沿科学排障设计；官方标准短上下文价；缓存读取 0.1×、缓存写入 1.25× 输入价；分段计费：长上下文（>272k）为 4/20/0.4/5；Batch 优惠：半价",
+      "_note": "缓存读 0.1×、缓存写 1.25×；分段：>272k 为 4/20/0.4/5；Batch 半价",
       "vendor": "OpenAI"
     },
     "gpt-6-luna": {
@@ -2721,7 +2730,7 @@
       "output": 0.5,
       "cache_read": 0.01,
       "cache_write": 0.125,
-      "_note": "OpenAI 2026 高效轻量 Luna 变体；针对低延迟响应与日常编码优化；官方标准短上下文价；缓存读取 0.1×、缓存写入 1.25× 输入价；分段计费：长上下文（>272k）为 0.2/1.0/0.02/0.25；Batch 优惠：半价",
+      "_note": "缓存读 0.1×、缓存写 1.25×；分段：>272k 为 0.2/1.0/0.02/0.25；Batch 半价",
       "vendor": "OpenAI"
     },
     "gpt-6-terra": {
@@ -2730,7 +2739,7 @@
       "output": 40.0,
       "cache_read": 0.8,
       "cache_write": 10.0,
-      "_note": "OpenAI 2026 多模态增强 Terra 变体；专精图形视觉、空间感知与跨模态工程文档解析；分段计费：长上下文（>272k）单价翻倍",
+      "_note": "分段计费：>272k 翻倍",
       "vendor": "OpenAI"
     },
     "gpt-6-codex": {
@@ -2739,7 +2748,7 @@
       "output": 25.0,
       "cache_read": 0.5,
       "cache_write": 6.25,
-      "_note": "OpenAI Codex CLI 专用 6 代编码旗舰；深度融合终端环境操作、自动化补丁应用与单元测试验证；分段计费：长上下文（>272k）单价约 1.5×–2×",
+      "_note": "Codex 专用；分段计费：>272k 约 1.5–2×",
       "vendor": "OpenAI"
     },
     "gpt-6-codex-spark": {
@@ -2757,7 +2766,7 @@
       "output": 20.0,
       "cache_read": 0.25,
       "cache_write": 0.0,
-      "_note": "Google DeepMind 2026 顶级多模态与超深推理旗舰；专为前沿物理、算法攻关与大规模跨系统决策打造；分段计费：上下文 >200k 时单价翻倍",
+      "_note": "分段计费：>200k 翻倍",
       "vendor": "Google"
     },
     "gemini-3.9-pro": {
@@ -2784,7 +2793,7 @@
       "output": 20.0,
       "cache_read": 1.0,
       "cache_write": 0.0,
-      "_note": "xAI 2026 前沿高并发多智能体基座模型；原生集成实时联网与端到端代码验证；支持分布式多智能体并行问题求解；128k 上下文",
+      "_note": "多智能体并行求解；128k 上下文",
       "vendor": "xAI"
     },
     "grok-5-thinking": {
@@ -2802,7 +2811,7 @@
       "output": 1.4,
       "cache_read": 0.007,
       "cache_write": 0.0,
-      "_note": "深度求索 2026 前沿旗舰大模型；在保持超高性价比的同时大幅强化复杂代码逻辑合成、数学证明与跨文件自主编码能力；缓存命中 $0.007",
+      "_note": "缓存命中 $0.007",
       "vendor": "DeepSeek"
     },
     "deepseek-v4.5-pro": {
@@ -2820,7 +2829,7 @@
       "output": 7.2,
       "cache_read": 0.18,
       "cache_write": 0.0,
-      "_note": "阿里巴巴通义千问 2026 演进版超大基座旗舰；支持 128k 窗口与复杂跨模态交互，专为重度知识密集与复杂工具调用场景构建",
+      "_note": "128k 窗口",
       "vendor": "Alibaba"
     },
     "qwen3.9-flash": {
@@ -2847,7 +2856,7 @@
       "output": 4.5,
       "cache_read": 0.075,
       "cache_write": 1.875,
-      "_note": "阿里巴巴通义千问 4 代旗舰；2026-11-16 正式发布；1M 上下文；新加坡国际站标准价，北京与 Global 地区 1.413/4.24；缓存写入为 5 分钟档 1.875，1 小时档 3.00；无输入长度分档，思考与非思考同价",
+      "_note": "1M 上下文；国际站价，北京/Global 1.413/4.24；缓存写 5min 1.875、1h 3.00；思考同价",
       "vendor": "Alibaba"
     },
     "glm-5.5": {
@@ -2856,7 +2865,7 @@
       "output": 4.0,
       "cache_read": 0.2,
       "cache_write": 0.0,
-      "_note": "智谱 AI 2026 下半年最新主力旗舰模型；全面升级 Agent 调度、长文本结构化解析与自动化工具链深度编排能力；128k 上下文",
+      "_note": "128k 上下文",
       "vendor": "Zhipu AI"
     },
     "glm-5.5-flash": {
@@ -2874,7 +2883,7 @@
       "output": 10.0,
       "cache_read": 0.2,
       "cache_write": 2.0,
-      "_note": "Moonshot 2026-10-23 发布；1.05M 上下文；标准价 input/output/cache-hit $2/$10/$0.20（Moonshot 官方定价页，多站点核实一致）；全上下文无长文加价；缓存写按 TTL 分档计费：5min $2.00（主价）、1h $4.00（Moonshot 官方定价页）；Batch 优惠仅 K2.7 Code/K2.6（60%），K3.1 Pro 不适用",
+      "_note": "1.05M 上下文；缓存写 TTL 分档：5min $2.00、1h $4.00；Batch 不适用",
       "vendor": "Moonshot AI"
     },
     "kimi-k3.1-pro-highspeed": {
@@ -2883,7 +2892,7 @@
       "output": 20.0,
       "cache_read": 0.2,
       "cache_write": 4.0,
-      "_note": "Moonshot Kimi K3.1 Pro 极速版（2-3× 速度）；标准价为基准版 2×：$4/$20，缓存命中 $0.20（Moonshot 官方定价页，多站点核实一致）；缓存写按 TTL 分档计费：5min $4.00（主价）、1h $8.00（Moonshot 官方定价页）",
+      "_note": "极速版（2–3×），价为基准 2×；缓存写 5min $4.00、1h $8.00",
       "vendor": "Moonshot AI"
     },
     "k3.1-pro": {
@@ -2892,7 +2901,7 @@
       "output": 10.0,
       "cache_read": 0.2,
       "cache_write": 2.0,
-      "_note": "别名行：Kimi Code 套餐里的裸名，与 kimi-k3.1-pro 同价；标准价 $2/$10，缓存命中 $0.20；缓存写按 TTL 分档（5min $2.00、1h $4.00），主价取 5min 默认档",
+      "_note": "别名：Kimi Code 裸名，同 kimi-k3.1-pro（缓存写 5min $2.00、1h $4.00）",
       "vendor": "Moonshot AI"
     },
     "k3.1-pro-highspeed": {
@@ -2901,7 +2910,7 @@
       "output": 20.0,
       "cache_read": 0.2,
       "cache_write": 4.0,
-      "_note": "别名行：Kimi Code 套餐里的裸名，与 kimi-k3.1-pro-highspeed 同价；标准价 $4/$20，缓存命中 $0.20；缓存写按 TTL 分档（5min $4.00、1h $8.00），主价取 5min 默认档",
+      "_note": "别名：同 kimi-k3.1-pro-highspeed（缓存写 5min $4.00、1h $8.00）",
       "vendor": "Moonshot AI"
     },
     "kimi-k3.5": {
@@ -2946,7 +2955,7 @@
       "output": 10.0,
       "cache_read": 0.1,
       "cache_write": 2.5,
-      "_note": "OpenAI 2026 前沿代码与深度推理旗舰模型；标准短上下文价格；缓存读取按 0.05× 输入价（$0.10）；分段计费：长上下文（>272k）为 4/20/0.2/5；Batch 优惠：半价",
+      "_note": "缓存读 0.05×（$0.10）；分段：>272k 为 4/20/0.2/5；Batch 半价",
       "vendor": "OpenAI"
     },
     "gpt-6.2-sol": {
@@ -2955,7 +2964,7 @@
       "output": 10.0,
       "cache_read": 0.1,
       "cache_write": 2.5,
-      "_note": "OpenAI 2026-11-17 发布；日常工作主力模型，编码与大规模智能体；标准短上下文价格；缓存写入为 30 分钟档 2.50，12 小时档 5.00；分段计费：长上下文（>272k）输入与缓存价翻倍、输出 1.5×；Batch 半价",
+      "_note": "缓存写 30min $2.50、12h $5.00；分段：>272k 输入/缓存翻倍、输出 1.5×；Batch 半价",
       "vendor": "OpenAI"
     },
     "gpt-6.2-astra": {
@@ -2964,7 +2973,7 @@
       "output": 40.0,
       "cache_read": 0.4,
       "cache_write": 10.0,
-      "_note": "OpenAI 2026-11-17 发布；最强模型，面向最难的端到端项目；标准短上下文价格；缓存写入为 30 分钟档 10.00，12 小时档 20.00；分段计费：长上下文（>272k）输入与缓存价翻倍、输出 1.5×；Batch 半价",
+      "_note": "缓存写 30min $10.00、12h $20.00；分段：>272k 输入/缓存翻倍、输出 1.5×；Batch 半价",
       "vendor": "OpenAI"
     },
     "gpt-6.1": {
@@ -2982,7 +2991,7 @@
       "output": 5.0,
       "cache_read": 0.05,
       "cache_write": 1.25,
-      "_note": "OpenAI 2026-10-26 发布；视觉推理/精确计算机操作/自然写作；1.05M 上下文，128K 最大输出，知识截止 2026-06；标准价（30 分钟缓存写 $1.25，12 小时档 $2.50）；Batch/Flex 半价；Fast mode 2 倍不入表；分段计费：>272K 输入 token 整单输入/缓存读 2x、输出 1.5x",
+      "_note": "1.05M 上下文；缓存写 30min $1.25、12h $2.50；分段：>272k 输入/缓存读 2×、输出 1.5×；Batch/Flex 半价",
       "vendor": "OpenAI"
     },
     "gpt-5.6-cyber": {
@@ -2991,16 +3000,16 @@
       "output": 75.0,
       "cache_read": 1.25,
       "cache_write": 15.625,
-      "_note": "OpenAI 2026 Daybreak 计划网安模型；专为漏洞挖掘、网络防御与安全代码审查设计；需 Trusted Access 权限；官方标准短上下文价；分段计费：长上下文单价约 2×",
+      "_note": "网安专用，需 Trusted Access；分段计费：>272k 约 2×",
       "vendor": "OpenAI"
     },
     "step-5-preview": {
       "display_name": "Step 5 Preview",
       "input": 0.98,
       "output": 2.8,
-      "cache_read": 0.05,
+      "cache_read": 0.1,
       "cache_write": 0.0,
-      "_note": "阶跃星辰 2026 前沿预览模型；官方输入/输出/缓存读取：7/20/0.35 元（按汇率折算为 USD）；无独立缓存写入计价",
+      "_note": "官方 CNY 7/20/0.7 折算；无独立缓存写计价",
       "vendor": "StepFun"
     },
     "hy4-preview": {
@@ -3009,7 +3018,7 @@
       "output": 2.52,
       "cache_read": 0.042,
       "cache_write": 0.0,
-      "_note": "腾讯混元 2026 前沿预览模型；官方广州地域 6/18/0.3 元（按汇率折算为 USD）；无阶梯计价；无独立缓存写入计价",
+      "_note": "官方广州地域 CNY 6/18/0.3 折算；无阶梯",
       "vendor": "Tencent"
     },
     "hunyuan-hy4-preview": {
@@ -3054,7 +3063,7 @@
       "output": 6.0,
       "cache_read": 0.5,
       "cache_write": 0.0,
-      "_note": "xAI 2026 推理智能体模型；取基础档单价（<200k）；分段计费：prompt ≥200k 时单价翻倍（4/12，缓存亦翻倍）；无独立缓存写入计价",
+      "_note": "分段计费：≥200k 翻倍（4/12，缓存亦翻倍）",
       "vendor": "xAI"
     },
     "grok-4.7-build": {
@@ -3063,7 +3072,7 @@
       "output": 6,
       "cache_read": 0.5,
       "cache_write": 0,
-      "_note": "xAI Grok Build 专用编码版，与 grok-4.7 同价；基础档（prompt <200k）$2/$6，缓存读 $0.50；≥200k 时单价翻倍（$4/$12，缓存读 $1）；无独立缓存写入计价；Batch 8 折、Priority 2x、美国区端点 1.1x",
+      "_note": "同 grok-4.7；≥200k 翻倍（4/12，缓存读 $1）；Batch 8 折、Priority 2×、美区 1.1×",
       "vendor": "xAI"
     },
     "grok-4.7-build-fast": {
@@ -3072,7 +3081,7 @@
       "output": 12,
       "cache_read": 1.0,
       "cache_write": 0,
-      "_note": "xAI Grok 4.7 Fast（仅 Cursor / Grok Build，不上公共 API）；基础档（prompt <200k）$4/$12，缓存读 $1；>200k 时 $6/$18，缓存读 $1.50；无独立缓存写入计价；无 Batch 折扣",
+      "_note": "仅 Cursor/Grok Build；基础档 $4/$12，>200k 时 $6/$18（缓存读 $1.50）；无 Batch",
       "vendor": "xAI"
     },
     "mimo-v2.6-pro": {
@@ -3104,11 +3113,11 @@
     },
     "gpt-daybreak-blue-latest": {
       "display_name": "GPT Daybreak Blue",
-      "input": 5.0,
-      "output": 30.0,
-      "cache_read": 0.5,
-      "cache_write": 6.25,
-      "_note": "OpenAI 2026 Daybreak 计划动态别名；当前指向 GPT-5.6 Sol；标准价 5/30/0.5/6.25；促销价 4/20/0.4/5 至 2026-11-30；指向变动时计费随之调整",
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "_note": "动态别名，现指 GPT-5.6 Sol；现行为促销价（至 11-30），标准价 5/30/0.5/6.25",
       "vendor": "OpenAI"
     },
     "gpt-daybreak-red-latest": {
@@ -3117,7 +3126,7 @@
       "output": 75.0,
       "cache_read": 1.25,
       "cache_write": 15.625,
-      "_note": "OpenAI 2026 Daybreak 计划动态别名；当前指向 GPT-5.6 Cyber；网安攻防与红队渗透专用；需 Trusted Access 权限",
+      "_note": "动态别名，现指 GPT-5.6 Cyber；网安/红队；需 Trusted Access",
       "vendor": "OpenAI"
     },
     "longcat-2.0": {
@@ -3142,7 +3151,7 @@
       "display_name": "Qwen3.7 Flash",
       "input": 0.03,
       "output": 0.13,
-      "cache_read": 0.003,
+      "cache_read": 0.006,
       "cache_write": 0.0375,
       "_note": "通义千问 3.7 代极速轻量模型；极低成本高通量推理；无阶梯计价",
       "vendor": "Alibaba"
