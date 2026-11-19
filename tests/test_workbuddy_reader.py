@@ -145,6 +145,48 @@ def test_project_root_detection_and_aggregation(tmp_path):
     assert analysis.aggregate.usage.total == 2290  # (1000+50) + (1200+40)
 
 
+@pytest.mark.parametrize("tool_data", ["valid", "empty", "malformed"])
+def test_unix_recorded_cwds_stay_separate_projects(tmp_path, tool_data):
+    for name in ("alpha", "beta"):
+        cwd = f"/home/alice/repos/{name}"
+        records = [
+            {"type": "session-meta", "sessionId": name, "cwd": cwd},
+            {"type": "function_call", "name": "Read",
+             "arguments": {"file_path": f"{cwd}/src/main.py"}},
+        ]
+        if tool_data == "empty":
+            records.pop()
+        elif tool_data == "malformed":
+            records[-1]["arguments"] = "{"
+        (tmp_path / f"{name}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    refs = workbuddy_reader.list_project_refs(tmp_path)
+
+    assert len(refs) == 2
+    assert {ref.cwd for ref in refs} == {"/home/alice/repos/alpha", "/home/alice/repos/beta"}
+    assert {ref.display_name for ref in refs} == {"alpha", "beta"}
+    assert all(len(ref.session_paths) == 1 for ref in refs)
+
+
+@pytest.mark.parametrize("file_path, expected", [
+    (r"e:\repos\alpha\src\main.py", "E:/repos/alpha"),
+    ("E:/my_game/Source/Player.cpp", "E:/my_game"),
+    ("/e/repos/alpha/src/main.py", "E:/repos/alpha"),
+])
+def test_windows_touched_paths_override_recorded_cwd(tmp_path, file_path, expected):
+    session = tmp_path / "session.jsonl"
+    records = [
+        {"type": "session-meta", "cwd": r"C:\Users\User\WorkBuddy\2026-10-16-10-00-00"},
+        {"type": "function_call", "name": "Read", "arguments": {"file_path": file_path}},
+    ]
+    session.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    assert workbuddy_reader.extract_project_dir_from_session(session).replace("\\", "/") == expected
+    assert workbuddy_reader.classify_workbuddy_project(session, {}) == (
+        expected.rsplit("/", 1)[-1].lower(), expected.rsplit("/", 1)[-1], expected.replace("/", "\\"))
+
+
 def test_synthetic_session(tmp_path):
     p = tmp_path / "test_session.jsonl"
     lines = [

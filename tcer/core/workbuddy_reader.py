@@ -154,6 +154,11 @@ def extract_project_dir_from_session(path: Path) -> str | None:
                     m = re.findall(r'[a-zA-Z]:[\\/][^"\'\s;|,]+|/[a-zA-Z]/[^"\'\s;|,]+', txt)
                     file_paths.extend(m)
 
+    if cwd and cwd.startswith("/") and not re.match(r"^/[a-zA-Z]/", cwd):
+        norm_cwd = os.path.normpath(cwd)
+        if not _TS_RE.search(norm_cwd) and not any(k in norm_cwd.lower() for k in ("workbuddy", "codebuddy")):
+            return norm_cwd
+
     candidate_roots: list[str] = []
     for fp in file_paths:
         sp = sanitize_path(fp)
