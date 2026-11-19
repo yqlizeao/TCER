@@ -302,7 +302,7 @@ def test_prompt_signals_skip_subagent(tmp_path):
     assert u.slash_command_count == 0
     assert u.correction_msg_count == 0
     assert u.first_prompt_chars == 0
-    assert u.user_msgs == 2  # 成本计数仍保留
+    assert u.user_msgs == 0  # #15: 派发 prompt 不是用户提问
 
 
 def test_aborted_turns(tmp_path):
@@ -478,6 +478,19 @@ def _seed_omp_project(root: Path, *, cwd=r"C:\repo\app", with_subagent=False) ->
     return main
 
 
+@pytest.mark.parametrize("text", ["sub task", "", "/review task"])
+def test_subagent_user_message_not_counted(tmp_path, text):
+    main = _seed_omp_project(tmp_path, with_subagent=True)
+    sub = main.parent / _STEM / "SubAgent.jsonl"
+    _write_omp(sub, [_session(), _user(text, imgs=1),
+                     _assistant([_text("reply")], _usage(200, 20))])
+    direct = omp_reader._aggregate_single(sub, is_subagent=True)
+    assert direct.user_msgs == 0
+    assert direct.image_count == 1
+    assert direct.assistant_msgs == 1
+    assert omp_reader.aggregate_usage(main).user_msgs == 1
+
+
 def test_subagent_detection_and_folding(tmp_path, monkeypatch):
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "agent"))
     main = _seed_omp_project(tmp_path / "agent", with_subagent=True)
@@ -492,7 +505,7 @@ def test_subagent_detection_and_folding(tmp_path, monkeypatch):
     assert u.input_tokens == 300          # 100 main + 200 sub
     assert u.output_tokens == 30
     assert abs(u.reported_cost_usd - 0.7) < 1e-9
-    assert u.user_msgs == 2               # main + sub user msgs
+    assert u.user_msgs == 1               # #15: subagent dispatch prompt is not a user question
 
 
 def test_list_project_refs_excludes_subagents(tmp_path, monkeypatch):

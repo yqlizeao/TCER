@@ -401,10 +401,10 @@ def _usage_from_events(events, *, is_subagent: bool = False) -> TokenUsage:
                 continue
             text = _message_text(mm.get("content")).strip()
             if text:
-                u.user_msgs += 1
                 # prompt 行为信号：只计数，不存正文（隐私边界与懒加载一致）。
                 # 子代理的 user 消息是 Task 派发 prompt，非真人输入 → 不计。
                 if not is_subagent:
+                    u.user_msgs += 1
                     if _is_slash_command(text):
                         u.slash_command_count += 1
                     elif _is_correction(text):

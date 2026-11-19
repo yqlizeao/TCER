@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tcer.core import analyze, pi_reader
+from tcer.core import analyze, omp_reader, pi_reader
 from tcer.core.models import ProjectRef
 
 # Pi (upstream earendil-works/pi) uses ISO-8601 timestamps like omp.
@@ -120,6 +120,21 @@ def test_aggregate_usage_pi_fields(tmp_path):
     # The 1h subset flows into the per-model bucket (priced at premium downstream).
     assert sum(mu.cache_write_1h_tokens for mu in u.per_model.values()) == 4
     assert len(u.turn_stats) == 1
+
+
+def test_subagent_user_message_not_counted(tmp_path):
+    main = _write_pi(tmp_path / "main.jsonl", [
+        _session(), _user("main question"),
+        _assistant([_text("reply")], _usage(100, 10)),
+    ])
+    sub = _write_pi(tmp_path / "main" / "SubAgent.jsonl", [
+        _session(), _user("dispatch task"),
+        _assistant([_text("reply")], _usage(200, 20)),
+    ])
+    assert omp_reader._aggregate_single(sub, is_subagent=True).user_msgs == 0
+    folded = pi_reader.aggregate_usage(main)
+    assert folded.user_msgs == 1
+    assert folded.input_tokens == 300
 
 
 def test_first_line_session_header_no_title_slot(tmp_path):

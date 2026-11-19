@@ -263,7 +263,7 @@ user `content` 里的 `{type:"image", mimeType, data}`（内联 base64 图片）
 
 ### 子代理折叠
 
-omp 子代理会话存于主文件同名的 `<stem>/` 子目录，`_is_subagent_file` 识别后由 `aggregate_usage`/`_loc_scan`/`read_user_messages` 合并入父（真实成本保留，不单独计 session）。
+omp 子代理会话存于主文件同名的 `<stem>/` 子目录，`_is_subagent_file` 识别后由 `aggregate_usage`/`_loc_scan` 合并入父（真实成本保留，不单独计 session）；子代理派发 prompt 不计入 `user_msgs`，`read_user_messages` 只读主会话。
 
 
 ## Pi 数据格式（earendil-works/pi 上游）
