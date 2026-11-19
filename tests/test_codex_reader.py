@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tcer.core import analyze, codex_reader
 
 
@@ -324,6 +326,43 @@ def test_apply_patch_loc_counts_only_patch_hunks(tmp_path):
     assert sloc.file_edit_counts == {"app.py": 1, "README.md": 1}
     # First touch of app.py deletes pre-session "old" — not self-rework.
     assert sloc.rework_deleted == 0
+
+
+@pytest.mark.parametrize("call_type", ["function_call", "custom_tool_call"])
+@pytest.mark.parametrize("result_type", ["patch_apply_end", "function_call_output", "custom_tool_call_output"])
+@pytest.mark.parametrize("success", [False, True, None])
+def test_apply_patch_loc_waits_for_result(tmp_path, call_type, result_type, success):
+    patch = "*** Begin Patch\n*** Add File: app.py\n+one\n+two\n*** End Patch\n"
+    call = {"type": call_type, "name": "apply_patch", "call_id": "patch-1"}
+    call["arguments" if call_type == "function_call" else "input"] = patch
+    events = [{"type": "response_item", "payload": call}]
+    if success is not None:
+        result = {"type": result_type, "call_id": "patch-1", "success": success}
+        if result_type != "patch_apply_end":
+            result["output"] = "Success" if success else "Error: patch rejected"
+            del result["success"]
+        events.append({"type": "event_msg" if result_type == "patch_apply_end" else "response_item",
+                       "payload": result})
+    p = _write_jsonl(tmp_path / "s.jsonl", events)
+    sloc = codex_reader.session_loc_full(p)
+    assert sloc.added == (0 if success is False else 2)
+    assert sloc.deleted == 0
+    assert sloc.file_edit_counts == ({} if success is False else {"app.py": 1})
+
+
+def test_apply_patch_failed_call_does_not_pollute_rework(tmp_path):
+    events = []
+    for cid, body in [("failed", "*** Add File: app.py\n+one\n+two"),
+                      ("ok", "*** Update File: app.py\n@@\n-one\n+new")]:
+        events.append({"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "apply_patch", "call_id": cid,
+            "input": f"*** Begin Patch\n{body}\n*** End Patch\n"}})
+    for cid, success in [("ok", True), ("failed", False)]:
+        events.append({"type": "event_msg", "payload": {
+            "type": "patch_apply_end", "call_id": cid, "success": success}})
+    sloc = codex_reader.session_loc_full(_write_jsonl(tmp_path / "s.jsonl", events))
+    assert (sloc.added, sloc.deleted, sloc.rework_deleted) == (1, 1, 0)
+    assert sloc.file_edit_counts == {"app.py": 1}
 
 
 def test_planner_text_files_count_as_output(tmp_path):

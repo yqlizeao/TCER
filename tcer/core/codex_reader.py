@@ -1043,23 +1043,36 @@ def _loc_scan_single(path: Path):
     # ``patch_apply_end`` result event, so counting both double-counts —
     # prefer the response_item source and fall back to patch_apply_end only
     # when no parseable ``apply_patch`` response_item exists.
-    ri_deltas: list[tuple[str, int, int]] = []      # response_item apply_patch
+    patch_calls: list[tuple[str | None, list[tuple[str, int, int]]]] = []
+    failed_calls: set[str] = set()
     pae_deltas: list[tuple[str, int, int]] = []      # patch_apply_end.changes
     for obj in iter_events(path):
         payload = obj.get("payload")
         if not isinstance(payload, dict):
             continue
         typ = obj.get("type")
+        cid = payload.get("call_id") or payload.get("id")
+        cid = cid if isinstance(cid, str) else None
         if typ == "event_msg":
             if payload.get("type") != "patch_apply_end":
                 continue
             if payload.get("success") is False or payload.get("status") == "failed":
+                if cid:
+                    failed_calls.add(cid)
                 continue
             pae_deltas.extend(_patch_apply_end_deltas(payload.get("changes")))
             continue
         if typ != "response_item":
             continue
         ptype = payload.get("type")
+        if ptype in ("function_call_output", "custom_tool_call_output"):
+            out_s = _output_text(payload.get("output"))
+            code = _exit_code(out_s)
+            is_err = (code != 0) if code is not None else _output_is_error(out_s)
+            if cid and (is_err or payload.get("success") is False
+                        or payload.get("status") == "failed"):
+                failed_calls.add(cid)
+            continue
         name = payload.get("name")
         # Live Codex often records apply_patch as custom_tool_call with the
         # patch text in ``input`` (not function_call / arguments).
@@ -1073,10 +1086,15 @@ def _loc_scan_single(path: Path):
             continue
         if not patch:
             continue
-        ri_deltas.extend(_patch_file_deltas(patch))
+        patch_calls.append((cid, _patch_file_deltas(patch)))
 
-    deltas = ri_deltas if ri_deltas else pae_deltas
-    has_signal = bool(ri_deltas or pae_deltas)
+    # Preserve call order for self-rework; unresolved calls follow Claude's
+    # end-of-file convention and are replayed unless a failure was recorded.
+    ri_deltas = [delta for cid, deltas in patch_calls if cid not in failed_calls
+                 for delta in deltas]
+    has_response_patch = any(deltas for _, deltas in patch_calls)
+    deltas = ri_deltas if has_response_patch else pae_deltas
+    has_signal = has_response_patch or bool(pae_deltas)
     for fp, a, d in deltas:
         if not _is_code(fp):
             continue
