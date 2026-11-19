@@ -175,6 +175,11 @@ def extract_project_dir_from_session(path: Path) -> str | None:
                     m = re.findall(r'[a-zA-Z]:[\\/][^"\'\s;|,]+|/[a-zA-Z]/[^"\'\s;|,]+', txt)
                     file_paths.extend(m)
 
+    if cwd and cwd.startswith("/") and not re.match(r"^/[a-zA-Z]/", cwd):
+        project_cwd = _usable_cwd(cwd)
+        if project_cwd:
+            return project_cwd
+
     candidate_roots: list[str] = []
     for fp in file_paths:
         sp = sanitize_path(fp)
@@ -202,12 +207,15 @@ def extract_project_dir_from_session(path: Path) -> str | None:
         best_root = counts.most_common(1)[0][0]
         return os.path.normpath(best_root)
 
-    if cwd:
-        norm_cwd = os.path.normpath(cwd)
-        if not _TS_RE.search(norm_cwd) and not any(k in norm_cwd.lower() for k in ("workbuddy", "codebuddy")):
-            return norm_cwd
+    return _usable_cwd(cwd) if cwd else None
 
-    return None
+
+def _usable_cwd(cwd: str) -> str | None:
+    """Normalized cwd, unless it is a WorkBuddy-managed scratch dir."""
+    norm_cwd = os.path.normpath(cwd)
+    if _TS_RE.search(norm_cwd) or any(k in norm_cwd.lower() for k in ("workbuddy", "codebuddy")):
+        return None
+    return norm_cwd
 
 
 def derive_project_name(project_dir: str | None) -> str:
@@ -304,7 +312,9 @@ def classify_workbuddy_project(p: Path, known_cwds: dict[str, str] | None = None
         # Ensure it's not a bare drive root like "C:\" or timestamped sandbox
         if dname and not _TS_RE.search(dname) and _has_parent_dir(norm_dir):
             if dname.lower() not in ("workbuddy", "workbuddy ai", "codebuddy", "default", "projects"):
-                return dname.lower(), dname, norm_dir
+                # POSIX 路径大小写敏感、同名目录常见：按完整路径分组，避免误并。
+                key = norm_dir if norm_dir.startswith("/") else dname.lower()
+                return key, dname, norm_dir
 
     folder_name = p.parent.name
     is_ts = bool(_TS_RE.search(folder_name))
