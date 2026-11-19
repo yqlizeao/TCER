@@ -40,6 +40,7 @@ from pathlib import Path
 
 from tcer.core import omp_reader
 from tcer.core.models import ProjectRef, SessionMeta
+from tcer.core.parse_util import normalize_cwd
 from tcer.core.paths import encode_hash, pi_sessions_dir
 
 # -- 解析层:与 omp 同族 JSONL,逐函数复用(不重写) --------------------------- #
@@ -73,7 +74,7 @@ def list_project_refs() -> list[ProjectRef]:
     groups: dict[str, list[Path]] = {}
     cwd_by_key: dict[str, str | None] = {}
     for p in discover_sessions():
-        cwd = omp_reader._normalize_cwd(omp_reader._session_line(p).get("cwd"))
+        cwd = normalize_cwd(omp_reader._session_line(p).get("cwd"))
         key = encode_hash(cwd) if cwd else _NO_CWD_KEY
         groups.setdefault(key, []).append(p)
         cwd_by_key.setdefault(key, cwd)

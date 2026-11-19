@@ -8,6 +8,7 @@ from __future__ import annotations
 import ntpath
 import os
 import re
+from pathlib import Path
 
 # 纠正措辞（保守清单）：用户对上一轮输出不满意的显式信号。只在消息前 200 字符
 # 内匹配，避免长引用文本误报；命中即计入 correction_msg_count。跨源共享（Claude/
@@ -67,6 +68,19 @@ def norm_path(p: str) -> str:
     return os.path.normpath(p)
 
 
+def normalize_cwd(cwd: str | None) -> str | None:
+    """Normalize a session cwd without resolving Windows drive paths on the host."""
+    if not cwd:
+        return cwd
+    if is_windows_path(cwd):
+        p = norm_path(cwd)
+        return p[0].upper() + p[1:]
+    try:
+        return str(Path(cwd).resolve())
+    except (OSError, ValueError):
+        return cwd
+
+
 def normcase_path(p: str) -> str:
     """与宿主 OS 无关的 normcase+normpath（项目聚合 key 用）。
 
@@ -93,6 +107,4 @@ def has_parent_dir(p: str) -> bool:
     if is_windows_path(p):
         _drive, rest = ntpath.splitdrive(norm_path(p))
         return rest not in ("", "\\", "/")
-    from pathlib import Path
-
     return len(Path(p).parts) > 1
