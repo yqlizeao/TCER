@@ -405,7 +405,7 @@ def test_metric_cell_fit_wrap_survives_tcl_obj_cget(root, monkeypatch):
     monkeypatch.setattr(cell.value, "cget", lambda key: _FakeTclObj(original_cget(key)))
     cell.value.config(wraplength=999)
     cell._fit_wrap(type("E", (), {"width": 200})())
-    expected = max(1, 200 - 2 * dpi_pixels(top, 10) - 4) if dpi_pixels(top, 96) > 96 else 184
+    expected = max(1, 200 - 2 * cell._pad_x - 4) if dpi_pixels(top, 96) > 96 else 184
     assert str(cell.value.cget("wraplength")) == str(expected)
     top.destroy()  # 勿泄漏到共享 root（后续测试会扫描 root 的全部子 Label）
 
