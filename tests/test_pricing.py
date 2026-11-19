@@ -337,6 +337,10 @@ def test_expanded_models_and_consistent_notes():
     assert pricing.resolve("gpt-6-sol") == {"input": 2.0, "output": 10.0, "cache_read": 0.2, "cache_write": 2.5}
     assert pricing.is_table_priced("gpt-6.1-sol")
     assert pricing.resolve("gpt-6.1-sol") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5}
+    assert pricing.is_table_priced("gpt-6.2-sol")
+    assert pricing.resolve("gpt-6.2-sol") == {"input": 2.0, "output": 10.0, "cache_read": 0.1, "cache_write": 2.5}
+    assert pricing.is_table_priced("gpt-6.2-astra")
+    assert pricing.resolve("gpt-6.2-astra") == {"input": 8.0, "output": 40.0, "cache_read": 0.4, "cache_write": 10.0}
     assert pricing.is_table_priced("gpt-6-codex")
     assert pricing.is_table_priced("gpt-6-luna")
     assert pricing.resolve("gpt-6-luna") == {"input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write": 0.125}
@@ -360,6 +364,7 @@ def test_expanded_models_and_consistent_notes():
     assert pricing.is_table_priced("qwen4-coder")
     assert pricing.resolve("qwen4-coder") == {"input": 0.3, "output": 0.9, "cache_read": 0.03, "cache_write": 0.0}
     assert pricing.is_table_priced("qwen4-max")
+    assert pricing.resolve("qwen4-max") == {"input": 1.5, "output": 4.5, "cache_read": 0.075, "cache_write": 1.875}
 
     # 7. Meta LLaMA 4 Series
     assert pricing.is_table_priced("llama-4-scion")
