@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -411,6 +412,29 @@ def test_analyze_opencode_project(tmp_path, monkeypatch):
     assert result.aggregate.usage.total == 1590
     assert result.reports[0].net_loc == 9
     assert result.aggregate.net_loc == 9
+
+
+def test_analyze_opencode_project_refreshes_after_wal_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path))
+    db = _make_db(tmp_path / "opencode.db", str(tmp_path / "repo"))
+    wal = db.with_name(db.name + "-wal")
+
+    with closing(sqlite3.connect(db)) as writer:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        ref = opencode_reader.list_project_refs()[0]
+        before = analyze.analyze_project(ref.key, source="opencode", project_ref=ref).reports[0]
+        assert (before.usage.input_tokens, before.net_loc) == (1000, 9)
+        db_before, wal_before = db.stat(), wal.stat()
+
+        writer.execute("UPDATE session SET tokens_input=11000, summary_additions=22 WHERE id='ses-1'")
+        writer.commit()
+
+        db_after = db.stat()
+        assert (db_after.st_mtime_ns, db_after.st_size) == (db_before.st_mtime_ns, db_before.st_size)
+        assert wal.stat().st_size > wal_before.st_size
+        after = analyze.analyze_project(ref.key, source="opencode", project_ref=ref).reports[0]
+        assert (after.usage.input_tokens, after.net_loc) == (11000, 19)
 
 
 def test_global_worktree_slash_groups_by_session_directory(tmp_path, monkeypatch):

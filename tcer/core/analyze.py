@@ -1003,23 +1003,17 @@ _CODEX = _SourceAdapter(
 
 
 # ---- OpenCode hooks -------------------------------------------------------- #
-def _opencode_cache_file(ref: ProjectRef, sid: str) -> Path:
-    # SQLite sessions key on the db file (coarse: any write invalidates all,
-    # which also covers subagent child sessions living in the same db).
-    return ref.path
-
-
 def _opencode_usage_of(ref: ProjectRef, sid: str) -> TokenUsage:
     from tcer.core import file_cache
     return file_cache.get_or_compute(
-        _opencode_cache_file(ref, sid), ("opencode_usage", sid),
+        ref.path, ("opencode_usage", sid, file_cache.sqlite_wal_signature(ref.path)),
         lambda: opencode_reader.aggregate_usage(ref.path, sid))
 
 
 def _opencode_loc_of(ref: ProjectRef, sid: str, meta: SessionMeta):
     from tcer.core import file_cache
     return file_cache.get_or_compute(
-        _opencode_cache_file(ref, sid), ("opencode_loc", sid),
+        ref.path, ("opencode_loc", sid, file_cache.sqlite_wal_signature(ref.path)),
         lambda: opencode_reader._loc_scan(ref.path, sid))
 
 
