@@ -893,7 +893,7 @@ def _codex_tool_status(name: str) -> tuple[str, str]:
     from tcer.core import codex_reader as cr
     if name in cr._CODEX_NAME_MAP:
         return _H, f"映射为 {cr._CODEX_NAME_MAP[name]}"
-    if name in ("exec", "exec_command", "shell_command"):
+    if name in ("exec", "exec_command", "shell_command", "local_shell_call"):
         return _H, "shell 命令经 _classify_shell_command 分派"
     if name.startswith("mcp__") or name.startswith("mcp_"):
         return _I, "MCP 原名计入工具画像（非读写类）"
@@ -959,8 +959,9 @@ def codex_coverage(files: Iterable[Path] | None = None, *,
                     tid = _first = pl.get("id") or pl.get("session_id")
                     if isinstance(tid, str) and tid:
                         thread_ids.add(tid)
-                    par = pl.get("parent_thread_id")
-                    if isinstance(par, str) and par and isinstance(tid, str):
+                    # 与 reader 同一路径提取父线程（顶层或 source.subagent.thread_spawn）
+                    par = cr._parent_thread_id(pl)
+                    if par and isinstance(tid, str) and tid:
                         parents[tid] = par
                     elif isinstance(pl.get("source"), dict) and "subagent" in pl["source"]:
                         n_sub += 1
@@ -1210,7 +1211,9 @@ def omp_pi_coverage(files: Iterable[Path], *, source: str,
     for p in files:
         stems.add(p.stem)
     for p in files:
-        if ompr._is_subagent_file(p):
+        # 嵌套判定只看布局：文件位于会话目录下一级（<stem>/ 内）。
+        # 不依赖主文件是否存在——主文件被删/漏收正是要点名的孤儿情形。
+        if any(p.parent.parent.glob("*.jsonl")):
             sub_files.append(p)
 
     for path in files:
@@ -1293,14 +1296,15 @@ def omp_pi_coverage(files: Iterable[Path], *, source: str,
                         vals[k] = int(v)
                 parts = (vals.get("input", 0) + vals.get("output", 0)
                          + vals.get("cacheRead", 0) + vals.get("cacheWrite", 0))
+                # totalTokens 存在且数值型就必须对账（含全零分量 vs 正 total 的双向缺口）
+                if "totalTokens" in vals and parts != vals["totalTokens"]:
+                    n_total_bad += 1
+                    if len(total_bad) < _EXAMPLES_PER_ISSUE:
+                        total_bad.append(
+                            f"{where} input+output+cacheR+cacheW={parts} "
+                            f"total={vals['totalTokens']}")
                 if any(vals.get(k) for k in ("input", "output", "cacheRead", "cacheWrite",
                                              "cacheWrite1h", "reasoning", "reasoningTokens")):
-                    tt = vals.get("totalTokens", 0)
-                    if tt > 0 and parts != tt:
-                        n_total_bad += 1
-                        if len(total_bad) < _EXAMPLES_PER_ISSUE:
-                            total_bad.append(
-                                f"{where} input+output+cacheR+cacheW={parts} total={tt}")
                     reason = vals.get("reasoning", vals.get("reasoningTokens", 0))
                     if reason > vals.get("output", 0):
                         n_reason_over += 1
@@ -1529,6 +1533,16 @@ def opencode_coverage(db_paths: Iterable[Path] | None = None, *,
                     data = ocr._json_obj(p["data"])
                     pt = ocr._first_str(data.get("type"), data.get("kind"))
                     tally.add("part", pt, "", f"{db}:part#{p['id']}")
+                    if pt in ("step-finish", "step_finish"):
+                        # 步末快照的 tokens 也走同一张登记表（peak/逐回合口径）
+                        tok = data.get("tokens")
+                        if isinstance(tok, dict):
+                            for k, v in tok.items():
+                                tally.add("tokens", k, "", f"{db}:part#{p['id']}")
+                                if k == "cache" and isinstance(v, dict):
+                                    for ck in v:
+                                        tally.add("tokens.cache", ck, "",
+                                                  f"{db}:part#{p['id']}")
                     if pt in ("tool", "tool-invocation", "tool-call"):
                         nm = ocr._first_str(data.get("tool"), data.get("toolName"),
                                             data.get("name"), data.get("title"))

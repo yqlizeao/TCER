@@ -514,3 +514,74 @@ def test_opencode_token_gap_flagged_only_when_messages_carry_tokens(tmp_path: Pa
     db2 = _oc_db(tmp_path / "b.db", with_msg_tokens=False)
     rep2 = coverage.opencode_coverage([db2])
     assert _check(rep2, "session_tokens_equal_message_sum").ok
+
+
+def test_codex_nested_parent_pointer_flagged(tmp_path: Path):
+    rows = _cx_rows()
+    rows[0] = {"type": "session_meta", "payload": {
+        "id": "child-1", "cwd": "/repo/app",
+        "source": {"subagent": {"thread_spawn": {"parent_thread_id": "missing"}}}}}
+    rep = coverage.codex_coverage([_write(tmp_path / "r.jsonl", rows)])
+    assert not _check(rep, "subagent_parent_exists").ok
+
+
+def test_codex_local_shell_call_is_handled(tmp_path: Path):
+    rows = _cx_rows() + [
+        {"type": "response_item", "payload": {
+            "type": "local_shell_call", "call_id": "c7",
+            "action": {"command": ["ls", "-la"]}}},
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "c7", "output": "ok"}},
+    ]
+    rep = coverage.codex_coverage([_write(tmp_path / "r.jsonl", rows)])
+    ent = {e.value: e.status for e in rep.entries if e.dim == "tool"}
+    assert ent.get("local_shell_call") == coverage.HANDLED
+    assert rep.ok, coverage.format_report(rep)
+
+
+def test_omp_zero_vs_positive_total_flagged_both_ways(tmp_path: Path):
+    rows = _omp_rows()
+    # 分量全零但 totalTokens 为正 → 守恒违约（此前被 tt>0 + 分量非零双门槛漏掉）
+    rows[3]["message"]["usage"] = {"input": 0, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "totalTokens": 100}
+    rep = coverage.omp_coverage([_write(tmp_path / "a" / "s.jsonl", rows)])
+    assert not _check(rep, "usage_total_consistency").ok
+    # totalTokens 显式为 0 但分量为正 → 同样违约
+    rows = _omp_rows()
+    rows[3]["message"]["usage"]["totalTokens"] = 0
+    rep = coverage.omp_coverage([_write(tmp_path / "b" / "s.jsonl", rows)])
+    assert not _check(rep, "usage_total_consistency").ok
+    # 全部一致为零 → 正常 zero-usage 分类，不误报
+    rows = _omp_rows()
+    rows[3]["message"]["usage"] = {"input": 0, "output": 0, "cacheRead": 0,
+                                   "cacheWrite": 0, "totalTokens": 0}
+    rep = coverage.omp_coverage([_write(tmp_path / "c" / "s.jsonl", rows)])
+    assert _check(rep, "usage_total_consistency").ok
+
+
+def test_omp_orphan_subagent_parent_deleted(tmp_path: Path):
+    # <stem>/ 内的文件是子代理；<stem>.jsonl 已从盘上删除 → 真孤儿要点名
+    _write(tmp_path / "proj" / "other.jsonl", _omp_rows())
+    sub = _write(tmp_path / "proj" / "dead_stem" / "sub.jsonl", _omp_rows())
+    rep = coverage.omp_coverage([sub])
+    assert not _check(rep, "subagent_parent_exists").ok
+
+
+def test_opencode_step_finish_token_drift_named(tmp_path: Path):
+    import sqlite3
+    db = _oc_db(tmp_path / "opencode.db")
+    con = sqlite3.connect(db)
+    con.execute("insert into part values (?,?,?,?,?)",
+                ("ps", "ses", "ma", 6, json.dumps(
+                    {"type": "step-finish",
+                     "tokens": {"input": 10, "output": 5, "reasoning": 1,
+                                "cache": {"read": 3, "write": 2, "aged": 1},
+                                "new_billed_tokens": 50}},
+                    ensure_ascii=False)))
+    con.commit()
+    con.close()
+    rep = coverage.opencode_coverage([db])
+    keys = _issue_keys(rep)
+    assert ("tokens", "new_billed_tokens", coverage.UNKNOWN) in keys
+    assert ("tokens.cache", "aged", coverage.UNKNOWN) in keys
+    assert not rep.ok
