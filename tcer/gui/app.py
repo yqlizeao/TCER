@@ -391,8 +391,9 @@ class TcerGui:
 
         self._paned = paned
         container.update_idletasks()
+        sidebar_width = dpi_pixels(container, 240)
         try:
-            paned.sash_place(0, 240, 0)
+            paned.sash_place(0, sidebar_width, 0)
             self.sidebar_paned.sash_place(0, 0, 220)
         except (TypeError, ValueError, tk.TclError):
             pass
@@ -402,9 +403,9 @@ class TcerGui:
             try:
                 if len(saved) >= 1:
                     s0 = int(saved[0])
-                    # 紧凑侧栏：仅作用户索引，若历史保存偏大（如过往设定的 350+），重置为紧凑的 240
-                    if s0 > 300:
-                        s0 = 240
+                    # 分栏位置以物理像素保存；过宽时恢复当前 DPI 下的紧凑侧栏。
+                    if s0 > dpi_pixels(container, 300):
+                        s0 = sidebar_width
                     paned.sash_place(0, s0, 0)
                 if len(saved) >= 2 and hasattr(self, "sidebar_paned"):
                     s1 = min(250, max(140, int(saved[1])))
