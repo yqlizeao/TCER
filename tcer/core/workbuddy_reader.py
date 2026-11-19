@@ -553,6 +553,7 @@ def _loc_scan(path: Path) -> tuple[loc.SessionLoc, bool]:
     acc = loc._LocAccumulator()
     has_signal = False
     turn_idx = 0
+    pending: dict[str, tuple[str, dict, int]] = {}
 
     for obj in iter_records(path):
         t = obj.get("type")
@@ -571,7 +572,34 @@ def _loc_scan(path: Path) -> tuple[loc.SessionLoc, bool]:
                     fp = args.get("file_path") or args.get("path")
                     if fp and loc._is_code(fp):
                         has_signal = True
-                        acc.on_tool_use(name, args, turn=turn_idx)
+                        call_id = obj.get("callId")
+                        if isinstance(call_id, str) and call_id:
+                            pending[call_id] = (name, args, turn_idx)
+                        else:
+                            acc.on_tool_use(name, args, turn=turn_idx)
+        elif t == "function_call_result":
+            call_id = obj.get("callId")
+            if not isinstance(call_id, str) or call_id not in pending:
+                continue
+            name, args, turn = pending.pop(call_id)
+            out = obj.get("output")
+            if isinstance(out, dict):
+                out_txt = out.get("text") or ""
+            elif isinstance(out, str):
+                out_txt = out
+            elif isinstance(out, list):
+                out_txt = "\n".join(c.get("text", "") for c in out if isinstance(c, dict))
+            else:
+                out_txt = ""
+            lowered = out_txt.strip().lower()
+            if (obj.get("is_error") or obj.get("status") != "completed"
+                    or lowered.startswith(("error:", "error during", "failed:"))
+                    or "traceback (most recent call last):" in lowered):
+                continue
+            acc.on_tool_use(name, args, turn=turn)
+
+    for name, args, turn in pending.values():
+        acc.on_tool_use(name, args, turn=turn)
 
     return acc.finish(), has_signal
 

@@ -31,6 +31,32 @@ def test_db(tmp_path, monkeypatch):
     return mod
 
 
+@pytest.mark.parametrize("name", ["Write", "Edit"])
+@pytest.mark.parametrize("result, expected", [
+    ({"status": "completed", "output": "File written successfully"}, 2),
+    ({"status": "failed", "output": "Permission denied"}, 0),
+    ({"status": "completed", "is_error": True}, 0),
+    ({"status": "completed", "output": {"text": "Error: permission denied"}}, 0),
+    ({"status": "completed", "output": [{"text": "Failed: permission denied"}]}, 0),
+    (None, 2),
+])
+def test_loc_tool_result(tmp_path, name, result, expected):
+    path = tmp_path / "result.jsonl"
+    args = {"file_path": "/project/main.py", "content": "x = 1\ny = 2\n",
+            "old_string": "", "new_string": "x = 1\ny = 2\n"}
+    records = [{"type": "function_call", "name": name, "callId": "call-1",
+                "arguments": json.dumps(args)}]
+    if result is not None:
+        records.append({"type": "function_call_result", "name": name,
+                        "callId": "call-1", **result})
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+    sloc = workbuddy_reader.session_loc_full(path)
+    assert sloc.added == expected
+    assert sloc.deleted == 0
+    assert workbuddy_reader.has_loc_signal(path)
+
+
 def test_clean_user_text():
     # 1. System reminder stripping with attributes
     raw1 = (
