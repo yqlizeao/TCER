@@ -6,6 +6,7 @@ NameError / 签名漂移 / 组件构建崩溃这类回归——此前靠手工�
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -362,7 +363,7 @@ def test_fit_label_survives_tcl_obj_cget(root):
     lbl.pack(fill="x")
     top.geometry("120x40")
     root.update()
-    long_text = "标题很长很长很长很长很长需要截断加省略号"
+    long_text = "abcdefghijklmnopqrstuvwxyz" * 4
     fit_label(lbl, long_text)
     root.update()
     txt = str(lbl.cget("text"))
@@ -391,23 +392,21 @@ def test_flow_row_survives_tcl_obj_cget(root):
     top.destroy()
 
 
-def test_metric_cell_fit_wrap_survives_tcl_obj_cget(root):
+def test_metric_cell_fit_wrap_survives_tcl_obj_cget(root, monkeypatch):
     """回归：cget('wraplength') 为 Tcl_Obj 时 _fit_wrap 的 int() 抛
     TypeError；修后应照常把格宽写回 wraplength。"""
     from tcer.gui.widgets import MetricCell
+    from tcer.gui.metric_defs import Metric
+    from tcer.gui.platform import dpi_pixels
 
     top = tk.Toplevel(root)
-
-    class _TclObjValue(tk.Label):
-        def cget(self, key):
-            return _FakeTclObj(super().cget(key))
-
-    class _Cell:
-        value = _TclObjValue(top, text="x")
-
-    _Cell.value.config(wraplength=999)
-    MetricCell._fit_wrap(_Cell(), type("E", (), {"width": 200})())
-    assert str(_Cell.value.cget("wraplength")) == "184"  # max(60, 200-16)
+    cell = MetricCell(top, Metric("test", "测试", "", "测试说明", "basic", fmt="text"))
+    original_cget = cell.value.cget
+    monkeypatch.setattr(cell.value, "cget", lambda key: _FakeTclObj(original_cget(key)))
+    cell.value.config(wraplength=999)
+    cell._fit_wrap(type("E", (), {"width": 200})())
+    expected = max(1, 200 - 2 * dpi_pixels(top, 10) - 4) if dpi_pixels(top, 96) > 96 else 184
+    assert str(cell.value.cget("wraplength")) == str(expected)
     top.destroy()  # 勿泄漏到共享 root（后续测试会扫描 root 的全部子 Label）
 
 
@@ -1238,6 +1237,13 @@ def test_llm_timeline_button_and_interpret(root, reports, monkeypatch, tmp_path)
     from tcer.core import llm_client, llm_prefs, llm_reports
     from tcer.gui.popups import SessionTimelinePopup
 
+    def wait_done(popup):
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and (popup._llm_busy or not popup._ui_queue.empty()):
+            root.update()
+            time.sleep(0.02)
+        assert not popup._llm_busy and popup._ui_queue.empty()
+
     monkeypatch.setattr(llm_reports, "_path",
                         lambda: tmp_path / "llm_reports.json")
     r = reports[0]
@@ -1273,11 +1279,9 @@ def test_llm_timeline_button_and_interpret(root, reports, monkeypatch, tmp_path)
     monkeypatch.setattr(_pa, "ask_yes_no", lambda *a, **k: True)
     p2._on_llm_interpret()   # 占位提示已 pack、busy 置位（也起了真 daemon 线程）
     assert p2._llm_busy is True
-    # 同意路径：同步直调 worker（测试 root 无 mainloop，跨线程 after 注册不了，
-    # _on_llm_interpret 的线程包装由生产 mainloop 保证；上面的 daemon 线程与本
-    # 次调用都会进 called——故下方断言用 any）。
+    # 同步 worker 与后台 worker 都会进 called，故下方断言用 any。
     p2._llm_work("dialog", p2._llm_derived())
-    root.update()  # 处理 after 回调 → _llm_done 落盘 + 回调
+    wait_done(p2)
 
     assert called and all(c["model"] == "test-model" for c in called)
     assert any("用户意图消息" in c["user"] for c in called)  # loader 在 worker 内生效
@@ -1304,7 +1308,7 @@ def test_llm_timeline_button_and_interpret(root, reports, monkeypatch, tmp_path)
                               load_user_texts=lambda: ["回退消息"],
                               load_dialogue=lambda: ["[用户] 完整对话意图"])
     p3._llm_work("dialog", p3._llm_derived())
-    root.update()
+    wait_done(p3)
     assert any("完整对话意图" in c["user"] for c in called)
     assert all("回退消息" not in c["user"] for c in called)
 

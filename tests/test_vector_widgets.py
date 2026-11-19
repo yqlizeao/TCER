@@ -250,6 +250,7 @@ def test_var_trace_released_on_destroy(tk_root):
 def test_rounded_frame_and_activity_bar_pill_collapse(tk_root):
     """RoundedFrame 原生几何主容器与 ActivityBar 悬浮圆角胶囊导航 + 一键收起/展开契约。"""
     from tcer.gui import views
+    from tcer.gui.platform import dpi_pixels
 
     top = tk.Toplevel(tk_root)
     top.geometry("900x600")
@@ -275,7 +276,7 @@ def test_rounded_frame_and_activity_bar_pill_collapse(tk_root):
 
     # 默认展开态：宽度 148，胶囊文字标签已挂载（6 页：效率榜已移除）
     assert bar._collapsed is False
-    assert widgets.to_int(bar.frame.cget("width")) == views.ActivityBar._W_EXPANDED
+    assert widgets.to_int(bar.frame.cget("width")) == dpi_pixels(bar.frame, views.ActivityBar._W_EXPANDED)
     assert bar._brand_lbl.winfo_manager() == "pack"
     assert len(bar._page_keys) == 6  # 效率榜页签已移除
 
@@ -289,13 +290,13 @@ def test_rounded_frame_and_activity_bar_pill_collapse(tk_root):
     bar.toggle_collapse()
     assert bar._collapsed is True
     assert ctrl._ui_prefs["nav_collapsed"] is True
-    assert widgets.to_int(bar.frame.cget("width")) == views.ActivityBar._W_COLLAPSED
+    assert widgets.to_int(bar.frame.cget("width")) == dpi_pixels(bar.frame, views.ActivityBar._W_COLLAPSED)
     assert bar._brand_lbl.winfo_manager() == ""
 
     # 再次点击恢复展开
     bar.toggle_collapse()
     assert bar._collapsed is False
-    assert widgets.to_int(bar.frame.cget("width")) == views.ActivityBar._W_EXPANDED
+    assert widgets.to_int(bar.frame.cget("width")) == dpi_pixels(bar.frame, views.ActivityBar._W_EXPANDED)
     assert bar._brand_lbl.winfo_manager() == "pack"
     top.destroy()
 
