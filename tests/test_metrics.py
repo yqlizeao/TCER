@@ -470,6 +470,32 @@ def test_compare_models_aggregates_per_model_fields():
     assert comps["model-y"].net_loc_per_session == pytest_approx(90)
 
 
+def test_compare_models_read_before_write_pools_file_counts():
+    reports = []
+    for ops in (
+        [ToolOp(0, "Read", "/a.py"), ToolOp(1, "Edit", "/a.py"),
+         ToolOp(1, "Write", "/b.py")],
+        [ToolOp(1, "Edit", f"/{i}.py") for i in range(8)],
+    ):
+        u = _u(i=100, o=10)
+        u.models.add("model-x")
+        u.bucket("model-x").input_tokens = 100
+        u.bucket("model-x").output_tokens = 10
+        u.tool_ops = ops
+        reports.append(metrics.compute(META, u, net_loc=0))
+
+    assert [r.read_before_write for r in reports] == [0.5, 0.0]
+    assert metrics.compare_models(reports)[0].read_before_write == pytest_approx(0.1)
+
+
+@pytest.mark.parametrize("ops", [[], [ToolOp(0, "Read", "/a.py")]])
+def test_compare_models_read_before_write_without_edits(ops):
+    r = _single_model_report("model-x", added=0, deleted=0)
+    r.usage.tool_ops = ops
+    r = metrics.compute(META, r.usage, net_loc=0)
+    assert metrics.compare_models([r])[0].read_before_write is None
+
+
 def test_compare_models_mixed_session_does_not_fabricate_loc_or_behavior():
     """Mixed-model session: per-model tokens/cost/CHR are exact, but session-level
     LOC & behavior metrics must not be cloned/pro-rated onto both models."""
