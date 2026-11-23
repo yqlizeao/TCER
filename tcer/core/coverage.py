@@ -1638,3 +1638,516 @@ def opencode_coverage(db_paths: Iterable[Path] | None = None, *,
             f"reader 工具调用数与独立计数不符的会话 {len(reader_mismatch)} 个",
             reader_mismatch[:_EXAMPLES_PER_ISSUE]))
     return rep
+
+
+# --------------------------------------------------------------------------- #
+# Devin — sessions.db (metering) + acp-messages transcripts (no metering)
+# --------------------------------------------------------------------------- #
+
+DEVIN_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
+    "db.table": {
+        "sessions": (_H, "会话行：id/working_directory/model/title/created_at"),
+        "message_nodes": (_H, "消息森林：chat_message JSON（metrics 按 request_id 去重）"),
+        "tool_call_state": (_H, "ACP ToolCall JSON + update（diff 回放 LOC）"),
+        "subagent_heads": (_H, "子代理链头（折叠进父会话）"),
+        "prompt_history": (_I, "输入框历史，非会话事件"),
+        "app_state": (_I, "应用状态"),
+        "live_row_times": (_I, "UI 行时间缓存"),
+        "message_search": (_I, "全文搜索索引"),
+        "message_search_config": (_I, "全文搜索配置"),
+        "message_search_docsize": (_I, "全文搜索索引"),
+        "refinery_schema_history": (_I, "schema 迁移历史"),
+        "rendered_commits": (_I, "渲染缓存"),
+    },
+    "msg.role": {
+        "user": (_H, "提问（is_user_input+telemetry.source==user 口径）"),
+        "assistant": (_H, "回复：metadata.metrics 逐响应用量"),
+        "tool": (_H, "工具结果消息（计量在 tool_call_state）"),
+        "system": (_I, "系统消息，非计量"),
+    },
+    "metrics": {
+        "input_tokens": (_H, "未命中缓存输入"),
+        "output_tokens": (_H, "输出"),
+        "cache_read_tokens": (_H, "缓存命中"),
+        "cache_creation_tokens": (_H, "缓存写"),
+        "context_input_tokens": (_H, "峰值上下文（peak）"),
+        "ttft_ms": (_H, "首字延迟"),
+        "total_time_ms": (_H, "逐响应耗时（est/output_tps）"),
+        "tokens_per_sec": (_H, "自报速率（随 total_time_ms 同粒度）"),
+        "tpot_ms": (_H, "每输出 token 耗时（随 total_time_ms 同粒度）"),
+        "generation_model": (_H, "per_model 分桶键"),
+        "request_id": (_H, "去重锚点"),
+    },
+    "tool.status": {
+        "completed": (_H, "成功（回放 LOC）"),
+        "in_progress": (_H, "进行中（计调用不计 LOC）"),
+        "pending": (_H, "排队"),
+        "failed": (_H, "工具错误"),
+        "error": (_H, "工具错误"),
+    },
+    "acp.kind": {
+        "user_message": (_H, "提问（转录会话 user_msgs）"),
+        "agent_message": (_H, "回复（无 token 计量）"),
+        "agent_thought": (_H, "思考块 → thinking_count"),
+        "tool_call": (_H, "工具调用（toolCallId 去重）"),
+        "plan": (_H, "计划更新"),
+        "progress_marker": (_I, "进度标记，非会话事件"),
+        "scripted_run": (_I, "脚本运行记录"),
+        "subagent": (_I, "子代理事件（acp 转录暂不折叠，数量另行统计）"),
+    },
+    "ms.key": {
+        "devin-cli": (_H, "本地会话转录索引"),
+        "devin-cloud": (_H, "云端会话转录索引（云图标 + thread_source=cloud）"),
+    },
+}
+
+_DEVIN_CENSUS_VERSION = ""  # Devin 本地库无版本列
+
+
+def _devin_tool_status(name: str) -> tuple[str, str]:
+    from tcer.core import devin_reader as dr
+    lower = name.lower().strip()
+    if lower in dr._DEVIN_TOOL_MAP:
+        return _H, f"映射为 {dr._DEVIN_TOOL_MAP[lower]}"
+    canon = {"read", "edit", "write", "grep", "glob", "bash", "task",
+             "websearch", "webfetch", "todowrite", "skill", "askuserquestion",
+             "notebookedit", "mcp", "computer_use", "image_generation",
+             "browser_preview", "close_browser_preview", "get_output",
+             "kill_shell", "write_to_process", "read_subagent",
+             "request_scope", "code_search", "exec", "edit", "find", "ls"}
+    if lower in canon:
+        return _H, "原名即规范名"
+    if lower.startswith(("mcp__", "mcp_")):
+        return _I, "MCP 原名计入工具画像"
+    return UNKNOWN, "未登记工具：若是写文件类会漏计 LOC，需判断"
+
+
+def devin_coverage(db_paths: Iterable[Path] | None = None, *,
+                   cross_check_reader: bool = True) -> CoverageReport:
+    """Census Devin ``sessions.db`` ∪ ``acp-messages`` against DEVIN_REGISTRY."""
+    from tcer.core import devin_reader as dr
+    if db_paths is None:
+        db_paths = dr.discover_databases()
+    rep = CoverageReport(source="devin", census_version=_DEVIN_CENSUS_VERSION)
+    tally = _Tally()
+
+    usage_bad: list[str] = []
+    tool_bad: list[str] = []
+    n_usage_bad = n_tool_bad = 0
+
+    for db in db_paths:
+        db = Path(db)
+        rep.files += 1
+        try:
+            con = dr._connect(db)
+        except Exception:  # noqa: BLE001
+            rep.bad_json += 1
+            continue
+        try:
+            tables = {r[0] for r in con.execute(
+                "select name from sqlite_master where type='table'")}
+            for t in sorted(tables):
+                if t.endswith("_fts") or "_idx" in t or "_data" in t \
+                        or t.startswith("sqlite_"):
+                    continue
+                tally.add("db.table", t, "", str(db))
+            if "sessions" not in tables or "message_nodes" not in tables:
+                continue
+            sess_ids = [r[0] for r in con.execute("select id from sessions")]
+            for sid in sess_ids:
+                nodes = con.execute(
+                    "select chat_message from message_nodes where session_id=?",
+                    (sid,)).fetchall()
+                rep.lines += len(nodes)
+                booked: dict[str, dict] = {}
+                n_users = 0
+                for (raw,) in nodes:
+                    m = dr._json_obj(raw)
+                    if not isinstance(m, dict):
+                        continue
+                    md = m.get("metadata") or {}
+                    role = m.get("role")
+                    tally.add("msg.role", str(role), "", f"{db}:{sid}")
+                    if role == "user":
+                        tele = md.get("telemetry") or {}
+                        if md.get("is_user_input") is True and \
+                                tele.get("source") == "user":
+                            n_users += 1
+                        continue
+                    if role != "assistant":
+                        continue
+                    met = md.get("metrics") or {}
+                    for k in met:
+                        tally.add("metrics", k, "", f"{db}:{sid}")
+                    rid = md.get("request_id") or f"__noid_{id(m)}"
+                    rec = booked.setdefault(rid, {})
+                    for k, v in met.items():
+                        if isinstance(v, (int, float)):
+                            rec[k] = max(rec.get(k, 0), v)
+                if "tool_call_state" in tables:
+                    calls = con.execute(
+                        "select tool_call_json, tool_call_update_json "
+                        "from tool_call_state where session_id=?",
+                        (sid,)).fetchall()
+                else:
+                    calls = []
+                rep.lines += len(calls)
+                for cj, uj in calls:
+                    call, upd = dr._json_obj(cj), dr._json_obj(uj)
+                    nm = dr._tool_name(call, upd)
+                    if nm:
+                        tally.add("tool", nm, "", f"{db}:{sid}")
+                    st = str(upd.get("status") or call.get("status") or "")
+                    if st:
+                        tally.add("tool.status", st.lower(), "", f"{db}:{sid}")
+
+                if not cross_check_reader:
+                    continue
+                try:
+                    u = dr.aggregate_usage(dr.DevinSession("db", db, sid))
+                except Exception:  # noqa: BLE001
+                    continue
+                ind = [0, 0, 0, 0]
+                for rec in booked.values():
+                    ind[0] += dr._metric_int(rec, "input_tokens")
+                    ind[1] += dr._metric_int(rec, "output_tokens")
+                    ind[2] += dr._metric_int(rec, "cache_read_tokens")
+                    ind[3] += dr._metric_int(rec, "cache_creation_tokens")
+                got = (u.input_tokens, u.output_tokens,
+                       u.cache_read_input_tokens,
+                       u.cache_creation_input_tokens)
+                if tuple(ind) != got or n_users != u.user_msgs:
+                    n_usage_bad += 1
+                    if len(usage_bad) < _EXAMPLES_PER_ISSUE:
+                        usage_bad.append(
+                            f"{db}:{sid} 独立={ind}+{n_users}u reader={got}+{u.user_msgs}u")
+                if sum(u.tool_calls.values()) != len(calls):
+                    n_tool_bad += 1
+                    if len(tool_bad) < _EXAMPLES_PER_ISSUE:
+                        tool_bad.append(
+                            f"{db}:{sid} reader={sum(u.tool_calls.values())} "
+                            f"行数={len(calls)}")
+        finally:
+            con.close()
+
+    # ── acp-messages 转录普查 ──
+    for ms_key, val in dr._message_store().items():
+        prefix = ms_key.split("/", 1)[0] if "/" in ms_key else ms_key
+        tally.add("ms.key", prefix, "", ms_key)
+        acp = dr._acp_db_for(str((val or {}).get("uuid") or ""))
+        if acp is None:
+            continue
+        rep.files += 1
+        try:
+            con = dr._connect(acp)
+        except Exception:  # noqa: BLE001
+            rep.bad_json += 1
+            continue
+        try:
+            if not dr._has_table(con, "messages"):
+                continue
+            for kind, payload in con.execute(
+                    "select kind, payload from messages"):
+                rep.lines += 1
+                tally.add("acp.kind", str(kind), "", str(acp))
+                if kind != "tool_call":
+                    continue
+                o = dr._json_obj(payload)
+                call = dr._acp_call(o)
+                ev = dr._first_str(
+                    o.get("sourceEventType"),
+                    (call.get("_meta") or {}).get("cognition.ai/eventType"))
+                if ev:
+                    tally.add("acp.event", str(ev), "", str(acp))
+                nm = dr._first_str(
+                    (call.get("_meta") or {}).get("cognition.ai/inferenceToolName"))
+                if nm:
+                    tally.add("tool", str(nm), "", str(acp))
+        finally:
+            con.close()
+
+    for (dim, value), cnt in sorted(tally.counts.items(), key=lambda kv: (kv[0][0], -kv[1])):
+        if dim == "tool":
+            status, note = _devin_tool_status(value)
+        elif dim == "acp.event":
+            if value in dr._ACP_NOISE_EVENTS:
+                status, note = _I, "进度/遥测事件，非工具"
+            elif value in dr._ACP_EVENT_TOOL:
+                status, note = _H, f"映射为 {dr._ACP_EVENT_TOOL[value]}"
+            elif value == "multi_edit_result":
+                status, note = _H, "多次编辑结果（按 kind → Edit/Read）"
+            else:
+                status, note = UNKNOWN, "未登记事件类型，需判断是否影响指标"
+        else:
+            status, note = DEVIN_REGISTRY.get(dim, {}).get(
+                value, (UNKNOWN, "未登记：reader 未处理，需判断是否影响指标"))
+        rep.entries.append(CoverageEntry(
+            dim=dim, value=value, count=cnt, status=status, note=note,
+            example=tally.where.get((dim, value), "") if status in (UNKNOWN, UNEXPECTED) else ""))
+
+    rep.checks += [
+        CoverageCheck("usage_conservation", n_usage_bad == 0, "fail",
+                      f"request_id 去重重算与 reader 不符的会话 {n_usage_bad} 个",
+                      usage_bad),
+        CoverageCheck("tool_calls_conservation", n_tool_bad == 0, "warn",
+                      f"tool_call_state 行数与 reader 工具数不符的会话 {n_tool_bad} 个",
+                      tool_bad),
+        CoverageCheck("version_within_census", True, "info",
+                      "Devin 本地库无版本列（转录/计量均实时读取）"),
+    ]
+    return rep
+
+
+# --------------------------------------------------------------------------- #
+# T3 Code — statev2.sqlite orchestration projection
+# --------------------------------------------------------------------------- #
+
+T3_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
+    "db.table": {
+        "projection_projects": (_H, "项目分组（workspace_root）"),
+        "orchestration_v2_projection_threads": (_H, "线程行：modelSelection/title"),
+        "orchestration_v2_projection_provider_turns": (_H, "回合：turnTokenUsage 有则计"),
+        "orchestration_v2_projection_turn_items": (_H, "回合项：消息/工具/diffStr"),
+        "orchestration_v2_projection_provider_sessions": (_H, "provider 会话元数据"),
+        "orchestration_v2_projection_provider_threads": (_I, "provider 线程视图，计量走 threads"),
+        "orchestration_v2_projection_subagents": (_H, "子代理折叠关系"),
+        "orchestration_v2_projection_checkpoints": (_I, "检查点投影"),
+        "orchestration_v2_projection_checkpoint_scopes": (_I, "检查点作用域"),
+        "orchestration_v2_projection_context_handoffs": (_I, "上下文交接投影"),
+        "orchestration_v2_projection_context_transfers": (_I, "上下文转移投影"),
+        "orchestration_v2_projection_messages": (_I, "消息派生投影，计量走 turn_items"),
+        "orchestration_v2_projection_metadata": (_I, "投影元数据"),
+        "orchestration_v2_projection_nodes": (_I, "节点派生投影"),
+        "orchestration_v2_projection_plans": (_I, "计划派生投影，turn_items 已有 plan 项"),
+        "orchestration_v2_projection_provider_session_bindings": (_I, "provider 绑定"),
+        "orchestration_v2_projection_runs": (_I, "运行生命周期投影"),
+        "orchestration_v2_projection_run_attempts": (_I, "运行尝试投影"),
+        "orchestration_v2_projection_runtime_requests": (_I, "运行时请求投影"),
+        "orchestration_v2_projection_thread_item_counts": (_I, "计数缓存"),
+        "orchestration_v2_projection_turn_item_counts": (_I, "计数缓存"),
+        "orchestration_v2_turn_item_positions": (_I, "项排序缓存"),
+        "orchestration_v2_thread_launch_workflows": (_I, "启动工作流"),
+        "orchestration_v2_events": (_I, "事件溯源原始事件（投影由它派生，计量走投影表）"),
+        "orchestration_v2_command_receipts": (_I, "命令回执"),
+        "orchestration_v2_effect_outbox": (_I, "副作用发件箱"),
+        "orchestration_v2_legacy_imports": (_I, "旧版导入记录"),
+        "orchestration_v2_message_search": (_I, "全文搜索索引"),
+        "orchestration_v2_message_search_config": (_I, "全文搜索配置"),
+        "orchestration_v2_message_search_data": (_I, "全文搜索索引"),
+        "orchestration_v2_message_search_docsize": (_I, "全文搜索索引"),
+        "orchestration_v2_message_search_idx": (_I, "全文搜索索引"),
+        "orchestration_events": (_I, "旧版事件表"),
+        "orchestration_command_receipts": (_I, "旧版命令回执"),
+        "effect_sql_migrations": (_I, "schema 迁移"),
+        "auth_sessions": (_I, "认证会话"),
+        "auth_connect_devices": (_I, "设备配对"),
+        "auth_pairing_links": (_I, "设备配对"),
+        "peer_environment_links": (_I, "环境链接"),
+        "projection_threads": (_I, "v1 线程投影，计量走 v2 表"),
+        "projection_thread_messages": (_I, "v1 消息投影，计量走 turn_items"),
+        "projection_thread_sessions": (_I, "v1 会话投影"),
+        "projection_thread_pull_requests": (_I, "PR 关联投影"),
+        "provider_session_runtime": (_I, "运行时状态"),
+        "pull_request_files_viewed": (_I, "PR 浏览记录"),
+        "pull_request_review_guides": (_I, "PR 评审向导"),
+        "scheduled_tasks": (_I, "定时任务"),
+        "scheduled_task_webhook_deliveries": (_I, "webhook 投递"),
+        "scheduled_task_webhook_pending": (_I, "webhook 队列"),
+        "scheduled_task_webhook_relay_deliveries": (_I, "webhook 投递"),
+        "scheduled_task_webhook_replay_keys": (_I, "webhook 幂等键"),
+        "issue_tracker_bindings": (_I, "issue 绑定"),
+        "mcp_app_model_context": (_I, "MCP 应用上下文"),
+    },
+    "item.type": {
+        "user_message": (_H, "提问"),
+        "assistant_message": (_H, "回复（est 耗时素材）"),
+        "reasoning": (_H, "思考块"),
+        "command_execution": (_H, "Bash（exitCode 裁决错误）"),
+        "dynamic_tool": (_H, "动态工具（toolName 映射规范名）"),
+        "file_change": (_H, "diffStr → LOC 回放（completed 才回放）"),
+        "file_search": (_H, "文件搜索"),
+        "todo_list": (_H, "TodoWrite"),
+        "plan": (_H, "计划项"),
+        "checkpoint": (_I, "检查点，非会话事件"),
+        "notification": (_I, "通知，非会话事件"),
+    },
+    "item.status": {
+        "completed": (_H, "成功（回放 LOC）"),
+        "failed": (_H, "工具错误"),
+        "error": (_H, "工具错误"),
+        "pending": (_H, "进行中"),
+        "in_progress": (_H, "进行中"),
+        "cancelled": (_H, "取消"),
+    },
+    "usage.status": {
+        "complete": (_H, "真实数值（有则计）"),
+        "unavailable": (_H, "provider 不报 → 不适用，绝不编数"),
+    },
+    "thread.provider": {
+        "acpRegistry_devin": (_H, "驱动真实 Devin 会话"),
+        "antigravity": (_H, "Antigravity 驱动"),
+        "claudeAgent": (_H, "Claude Agent 驱动"),
+        "codex": (_H, "Codex 驱动"),
+        "import": (_I, "import:* 导入副本，跳过防双计"),
+    },
+}
+
+_T3_CENSUS_VERSION = ""  # statev2 无版本列（desktop-last-started-version 是应用版本）
+
+
+def _t3_tool_status(name: str) -> tuple[str, str]:
+    from tcer.core import t3_reader as t3r
+    lower = name.lower().strip()
+    if lower in t3r._T3_TOOL_MAP:
+        return _H, f"映射为 {t3r._T3_TOOL_MAP[lower]}"
+    canon = {"read", "edit", "write", "grep", "glob", "bash", "task",
+             "websearch", "webfetch", "todowrite", "skill", "askuserquestion",
+             "notebookedit", "mcp"}
+    if lower in canon:
+        return _H, "原名即规范名"
+    if lower.startswith(("mcp__", "mcp_")):
+        return _I, "MCP 原名计入工具画像"
+    return UNKNOWN, "未登记工具：若是写文件类会漏计 LOC，需判断"
+
+
+def t3_coverage(db_paths: Iterable[Path] | None = None, *,
+                cross_check_reader: bool = True) -> CoverageReport:
+    """Census ``statev2.sqlite`` against :data:`T3_REGISTRY` + conservation."""
+    from tcer.core import t3_reader as t3r
+    if db_paths is None:
+        db = t3r.t3_state_db()
+        db_paths = [db] if db is not None else []
+    rep = CoverageReport(source="t3", census_version=_T3_CENSUS_VERSION)
+    tally = _Tally()
+
+    usage_bad: list[str] = []
+    tool_bad: list[str] = []
+    n_usage_bad = n_tool_bad = n_import_skipped = 0
+
+    for db in db_paths:
+        db = Path(db)
+        rep.files += 1
+        try:
+            con = t3r._connect(db)
+        except Exception:  # noqa: BLE001
+            rep.bad_json += 1
+            continue
+        try:
+            tables = {r[0] for r in con.execute(
+                "select name from sqlite_master where type='table'")}
+            for t in sorted(tables):
+                if t.endswith("_fts") or t.startswith("sqlite_"):
+                    continue
+                tally.add("db.table", t, "", str(db))
+            if t3r._T3_THREADS not in tables:
+                continue
+            threads = con.execute(
+                f"select thread_id, payload_json from {t3r._T3_THREADS}").fetchall()
+            for tid, tpayload in threads:
+                tid = str(tid)
+                if tid.startswith("import:"):
+                    n_import_skipped += 1
+                    tally.add("thread.provider", "import", "", f"{db}:{tid}")
+                    continue
+                tp = t3r._json_obj(tpayload)
+                prov = t3r._first_str(
+                    tp.get("providerInstanceId"), tp.get("provider"),
+                    (tp.get("providerInstance") or {}).get("id")
+                    if isinstance(tp.get("providerInstance"), dict) else None)
+                if prov:
+                    tally.add("thread.provider", str(prov), "", f"{db}:{tid}")
+                ptrows = (con.execute(
+                    f"select provider_turn_id, payload_json from {t3r._T3_PTURNS} "
+                    "where thread_id=?", (tid,)).fetchall()
+                    if t3r._T3_PTURNS in tables else [])
+                items = (con.execute(
+                    f"select type, status, payload_json from {t3r._T3_ITEMS} "
+                    "where thread_id=?", (tid,)).fetchall()
+                    if t3r._T3_ITEMS in tables else [])
+                rep.lines += len(ptrows) + len(items)
+
+                ind = [0, 0, 0, 0]
+                for _pid, ppayload in ptrows:
+                    p = t3r._json_obj(ppayload)
+                    usage = p.get("turnTokenUsage") if isinstance(
+                        p.get("turnTokenUsage"), dict) else {}
+                    st = str(usage.get("usageStatus") or "")
+                    if st:
+                        tally.add("usage.status", st, "", f"{db}:{tid}")
+                    if st != "complete":
+                        continue
+                    i = t3r._as_int(usage.get("inputTokens"))
+                    cr = t3r._as_int(usage.get("cachedInputTokens"))
+                    cw = t3r._as_int(usage.get("cacheCreationTokens"))
+                    ind[0] += max(0, i - cr - cw)
+                    ind[1] += t3r._as_int(usage.get("outputTokens"))
+                    ind[2] += cr
+                    ind[3] += cw
+
+                n_tool_items = 0
+                for itype, status, ipayload in items:
+                    itype = str(itype or "")
+                    tally.add("item.type", itype, "", f"{db}:{tid}")
+                    if status:
+                        tally.add("item.status", str(status).lower(), "", f"{db}:{tid}")
+                    if itype in t3r._SKIP_ITEM_TYPES:
+                        continue
+                    o = t3r._json_obj(ipayload)
+                    if itype in ("user_message", "assistant_message",
+                                 "reasoning", "plan"):
+                        continue
+                    tool = t3r._canonical_tool(
+                        str(o.get("toolName") or ""), itype, o)
+                    if not tool:
+                        continue
+                    n_tool_items += 1
+                    nm = t3r._first_str(o.get("toolName"), o.get("name"))
+                    if nm:
+                        tally.add("tool", str(nm), "", f"{db}:{tid}")
+
+                if not cross_check_reader:
+                    continue
+                try:
+                    u = t3r.aggregate_usage(db, tid)
+                except Exception:  # noqa: BLE001
+                    continue
+                got = (u.input_tokens, u.output_tokens,
+                       u.cache_read_input_tokens,
+                       u.cache_creation_input_tokens)
+                if tuple(ind) != got:
+                    n_usage_bad += 1
+                    if len(usage_bad) < _EXAMPLES_PER_ISSUE:
+                        usage_bad.append(
+                            f"{db}:{tid} 独立={ind} reader={got}")
+                if sum(u.tool_calls.values()) != n_tool_items:
+                    n_tool_bad += 1
+                    if len(tool_bad) < _EXAMPLES_PER_ISSUE:
+                        tool_bad.append(
+                            f"{db}:{tid} reader={sum(u.tool_calls.values())} "
+                            f"独立={n_tool_items}")
+        finally:
+            con.close()
+
+    for (dim, value), cnt in sorted(tally.counts.items(), key=lambda kv: (kv[0][0], -kv[1])):
+        if dim == "tool":
+            status, note = _t3_tool_status(value)
+        else:
+            status, note = T3_REGISTRY.get(dim, {}).get(
+                value, (UNKNOWN, "未登记：reader 未处理，需判断是否影响指标"))
+        rep.entries.append(CoverageEntry(
+            dim=dim, value=value, count=cnt, status=status, note=note,
+            example=tally.where.get((dim, value), "") if status in (UNKNOWN, UNEXPECTED) else ""))
+
+    rep.checks += [
+        CoverageCheck("usage_conservation", n_usage_bad == 0, "fail",
+                      f"turnTokenUsage 独立重算与 reader 不符的线程 {n_usage_bad} 个",
+                      usage_bad),
+        CoverageCheck("tool_calls_conservation", n_tool_bad == 0, "warn",
+                      f"工具项独立计数与 reader 不符的线程 {n_tool_bad} 个",
+                      tool_bad),
+        CoverageCheck("import_threads_skipped", True, "info",
+                      f"import:* 导入副本跳过 {n_import_skipped} 个（防双计）"),
+        CoverageCheck("version_within_census", True, "info",
+                      "statev2 无版本列（应用版本锚点见 desktop-last-started-version）"),
+    ]
+    return rep

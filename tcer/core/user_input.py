@@ -211,6 +211,20 @@ def _dispatch(source: str | None, path: Path | None, session_id: str | None,
     if src == "antigravity":
         from tcer.core import antigravity_reader
         return getattr(antigravity_reader, fn)(path)
+    if src == "devin":
+        if not session_id:
+            return []
+        from tcer.core import devin_reader
+        if path.name == "sessions.db":
+            return getattr(devin_reader, fn)(path, session_id)
+        # acp 转录（云端 / 本地残留）：会话即整个 db，session_id 是文件 hash
+        timed = devin_reader.read_acp_user_messages_timed(path)
+        return timed if fn.endswith("_timed") else [t for t, _ in timed]
+    if src == "t3":
+        if not session_id:
+            return []
+        from tcer.core import t3_reader
+        return getattr(t3_reader, fn)(path, session_id)
     from tcer.core import reader
     try:
         _, main, _ = reader.session_artifacts(path)

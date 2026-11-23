@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-基于真实 AI 编程助手会话数据，构建多维 AI 编程效率计量体系（TCER 为核心）。支持六个数据来源：Claude Code（`~/.claude`）、Codex（`~/.codex`）、OpenCode（`~/.local/share/opencode`，仅 SQLite `opencode.db`）、Oh My Pi / omp（`~/.omp`）、Pi / earendil-works/pi（`~/.pi`）、Antigravity（`~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide`）。**已移除**：Grok 数据源与 Grok 独有指标（xAI 模型价格保留）、OpenCode 旧版磁盘 JSON 存储兼容（2026-10）、WorkBuddy / CodeBuddy 数据源（2026-11，服务端仍展示历史上传）。
+基于真实 AI 编程助手会话数据，构建多维 AI 编程效率计量体系（TCER 为核心）。支持八个数据来源：Claude Code（`~/.claude`）、Codex（`~/.codex`）、OpenCode（`~/.local/share/opencode`，仅 SQLite `opencode.db`）、Oh My Pi / omp（`~/.omp`）、Pi / earendil-works/pi（`~/.pi`）、Antigravity（`~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide`）、Devin（`%APPDATA%/devin`：`cli/sessions.db` 计量 + `User/acp-messages` 转录，含云端会话）、T3 Code（`~/.t3/userdata/statev2.sqlite` 元编排投影）。**已移除**：Grok 数据源与 Grok 独有指标（xAI 模型价格保留）、OpenCode 旧版磁盘 JSON 存储兼容（2026-10）、WorkBuddy / CodeBuddy 数据源（2026-11，服务端仍展示历史上传）。
 
 - **GUI-only**：`python -m TCER` 启动桌面界面
 - **纯离线**：不依赖 git、不做联网操作，数据来自本地 JSONL / SQLite 文件
@@ -110,7 +110,8 @@ TCER/
 28. **`tool_variants`**：Skill/Agent 身份补录，仅 Claude 源；MCP 键自带服务器名。[data-format.md#tool-variants](doc/data-format.md#tool-variants)。
 31. **Pi 格式**：omp 的上游原生，`pi_reader` 是薄壳复用 omp 解析层；reasoning 是 output 子集，**不**再加进 output。[data-format.md#pi](doc/data-format.md#pi)。
 32. **LOC 按结果裁决**：编辑类调用等 tool_result 且**非 `is_error`** 才回放；`originalFile` 修正延迟一行；replace_all 少计是已知边界，由「LOC 可信度」暴露。[data-format.md#loc-outcome](doc/data-format.md#loc-outcome)。
-33. **数据源版本漂移基线**（2026-10-22；2026-11-19 起六源全部由覆盖审计 `--coverage` 守护，登记表外的新类型/字段/取值一律报「未知」，见 [architecture.md#coverage-audit](doc/architecture.md#coverage-audit)）：Claude 2.1.311（11-17 复核至 2.1.326 无新增，仅第三方代理块待裁决）/ Codex 0.163 / OpenCode 1.19.4 / omp 18.10.4 / Antigravity CLI 1.5.9 · App 2.32.0；升级先比对基线再改。[data-format.md#version-baseline](doc/data-format.md#version-baseline)。
+33. **数据源版本漂移基线**（2026-10-22；2026-11-19 起八源全部由覆盖审计 `--coverage` 守护，登记表外的新类型/字段/取值一律报「未知」，见 [architecture.md#coverage-audit](doc/architecture.md#coverage-audit)）：Claude 2.1.311（11-17 复核至 2.1.326 无新增，仅第三方代理块待裁决）/ Codex 0.163 / OpenCode 1.19.4 / omp 18.10.4 / Antigravity CLI 1.5.9 · App 2.32.0；升级先比对基线再改。[data-format.md#version-baseline](doc/data-format.md#version-baseline)。
+46. **Devin / T3 数据源**：Devin 计量走 `cli/sessions.db`（assistant 节点按 `request_id` 逐字段 max 去重；`metadata.metrics` 全六字段 + `ttft_ms`/`total_time_ms`）；`User/acp-messages` 转录（含 `devin-cloud` 云端会话，标题「云端」前缀）**无 token 计量 → 一律不适用**；提问口径 `is_user_input` + `telemetry.source=="user"`；云端项目身份取 `repoName`/`configOptions`（容器 cwd 不是项目）。T3 是元编排器：`turnTokenUsage.usageStatus` 只有 `complete` 才计（`inputTokens` 含缓存子集）、`unavailable` 不适用绝不编数；`import:*` 导入副本**跳过防双计**；provider_turn 整轮墙钟**不**用于 latency/output_tps（est 用回合内 assistant/reasoning 项时长和）；LOC 走 `file_change.diffStr`（completed 才回放）。[data-format.md](doc/data-format.md)。
 
 ### 评分、指标族与基准
 

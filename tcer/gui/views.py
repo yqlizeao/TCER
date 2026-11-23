@@ -95,10 +95,11 @@ def _short_name(project_hash: str) -> str:
 def project_label(project) -> str:
     """Display label for a source-aware project ref or legacy Path."""
     source = getattr(project, "source", "claude")
-    if source in ("codex", "opencode", "omp", "pi", "antigravity"):
+    if source in ("codex", "opencode", "omp", "pi", "antigravity", "devin", "t3"):
         default = {
             "codex": "Codex", "opencode": "OpenCode",
             "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
+            "devin": "Devin", "t3": "T3 Code",
         }.get(source, source)
         return getattr(project, "display_name", None) or getattr(project, "key", default)
     name = getattr(project, "name", None) or getattr(project, "key", str(project))
@@ -124,6 +125,7 @@ def project_drive(project) -> str | None:
 _SOURCE_DISPLAY = {
     "codex": "Codex", "opencode": "OpenCode",
     "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
+    "devin": "Devin", "t3": "T3 Code",
 }
 
 
@@ -201,6 +203,9 @@ def vendor_icon_key(model_or_vendor: str | None) -> str | None:
     if not model_or_vendor:
         return None
     s = str(model_or_vendor).lower().strip()
+    # Cognition 在前：fusion-*-sidekick-swe-2 等复合名同时含 claude/swe。
+    if any(k in s for k in ("swe", "cognition", "compactor", "devin")):
+        return "cognition"
     if any(k in s for k in ("claude", "anthropic")):
         return "claude"
     if any(k in s for k in ("gpt", "openai", "o1", "o3", "o4", "codex")):
@@ -264,7 +269,7 @@ def project_icon_key(project) -> str:
     """
     source = getattr(project, "source", "claude")
     if source != "claude":
-        return source  # codex / opencode / omp / pi / …
+        return source  # codex / opencode / omp / pi / devin / t3 / …
     from tcer.core.paths import is_custom_claude_root
     if is_custom_claude_root(getattr(project, "path", None)):
         return "ccswitch"
@@ -332,6 +337,14 @@ def project_open_path(project) -> str:
     if source == "antigravity":
         from tcer.core.paths import antigravity_conversations_dir
         return str(antigravity_conversations_dir())
+    if source == "devin":
+        from tcer.core.devin_reader import discover_databases
+        dbs = discover_databases()
+        return str(dbs[0].parent) if dbs else str(path or cwd or project)
+    if source == "t3":
+        from tcer.core.t3_reader import t3_state_db
+        db = t3_state_db()
+        return str(db.parent) if db else str(path or cwd or project)
     return str(path or cwd or project)
 
 
@@ -1134,6 +1147,8 @@ class FilterBar:
             "omp": "Oh My Pi",
             "pi": "Pi",
             "antigravity": "Antigravity",
+            "devin": "Devin",
+            "t3": "T3 Code",
         }
         self._source_reverse_map = {v: k for k, v in self._source_display_names.items()}
 
@@ -1172,7 +1187,7 @@ class FilterBar:
                                         bg=theme.PANEL, outline=theme.BORDER_SUBTLE)
         self._src_capsule.pack(side="right", padx=(2, 4))
         self._src_lbl = self._src_capsule
-        Tooltip(self._src_capsule, "切换会话数据来源 (全部 / ClaudeCode / Codex / OpenCode / Oh My Pi / Pi / Antigravity)")
+        Tooltip(self._src_capsule, "切换会话数据来源 (全部 / ClaudeCode / Codex / OpenCode / Oh My Pi / Pi / Antigravity / Devin / T3 Code)")
 
         # 2. 紧随来源左侧：时间下拉胶囊
         def _on_time_click(_widget):
@@ -1358,7 +1373,9 @@ class ProjectColumn:
                      "~/.local/share/opencode（OpenCode）\n"
                      "~/.omp（Oh My Pi）\n"
                      "~/.pi（Pi）\n"
-                     "~/.gemini/antigravity-cli（Antigravity）\n\n"
+                     "~/.gemini/antigravity-cli（Antigravity）\n"
+                     "%APPDATA%/devin（Devin）\n"
+                     "~/.t3/userdata（T3 Code）\n\n"
                      "或切换顶部「来源」筛选后重试。",
                 bg=theme.PANEL, fg=theme.MUTED, font=theme.FONT_UI,
                 justify="left", pady=theme.PAD_L * 2)
@@ -1414,7 +1431,15 @@ class ProjectColumn:
         bindees.append(name_lbl)
 
         drive = project_drive(project_dir)
-        if drive:
+        if str(getattr(project_dir, "key", "") or "").startswith("devin::cloud::"):
+            # 云端项目无盘符：同一槽位放云图标
+            c_img = ui_icon(row, "cloud")
+            if c_img is not None:
+                c_lbl = tk.Label(row, image=c_img, bg=theme.PANEL)
+                c_lbl.pack(side="right", padx=(4, 0))
+                Tooltip(c_lbl, "云端")
+                bindees.append(c_lbl)
+        elif drive:
             drive_lbl = tk.Label(row, text=f"{drive.upper()}:", bg=theme.PANEL,
                                  fg=theme.MUTED, font=theme.FONT_UI_SMALL, anchor="e")
             drive_lbl.pack(side="right", padx=(4, 0))
@@ -1836,6 +1861,13 @@ class SessionColumn:
         row2 = tk.Frame(card.frame, bg=card._bg)
         row2.pack(fill="x", padx=6, pady=(1, 2))
         card.track_bg(row2)
+        if getattr(r.meta, "thread_source", None) == "cloud":
+            c_img = ui_icon(row2, "cloud")
+            if c_img is not None:
+                c_lbl = tk.Label(row2, image=c_img, bg=card._bg)
+                c_lbl.pack(side="left", padx=(0, 3))
+                card.track_bg(c_lbl)
+                card.bind_to(c_lbl)
         ti_lbl = tk.Label(row2, bg=card._bg, fg=theme.FG,
                           font=theme.FONT_UI_SMALL, anchor="w")
         ti_lbl.pack(side="left", fill="x", expand=True)
@@ -2063,7 +2095,8 @@ class SessionColumn:
         menu.add_separator()
 
         # Destructive action — last item, gated behind a二次确认对话框.
-        readonly = report.meta.source in ("codex", "opencode", "omp", "pi", "antigravity")
+        readonly = report.meta.source in ("codex", "opencode", "omp", "pi",
+                                          "antigravity", "devin", "t3")
         delete_state = "disabled" if readonly else "normal"
         delete_label = "删除会话…" if not readonly else f"删除会话（{project_source_label(report.meta)} 只读）"
         menu.add_command(

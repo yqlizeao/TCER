@@ -17,6 +17,7 @@ from typing import Callable
 from tcer.core import (
     antigravity_reader,
     codex_reader,
+    devin_reader,
     loc,
     metrics,
     omp_reader,
@@ -24,6 +25,7 @@ from tcer.core import (
     pi_reader,
     pricing,
     reader,
+    t3_reader,
 )
 from tcer.core.models import ProjectRef, SessionMeta, SessionReport, TokenUsage
 from tcer.core.parse_util import normcase_path as _normcase_path
@@ -1205,7 +1207,136 @@ def analyze_antigravity_project(
 
 
 
-_ADAPTERS = (_CODEX, _OPENCODE, _OMP, _PI, _ANTIGRAVITY)
+# ---- devin hooks ----------------------------------------------------------- #
+def _devin_usage_of(ref: ProjectRef, h: devin_reader.DevinSession) -> TokenUsage:
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        h.db_path, ("devin_usage", h.kind, h.key,
+                    file_cache.sqlite_wal_signature(h.db_path)),
+        lambda: devin_reader.aggregate_usage(h))
+
+
+def _devin_loc_of(ref: ProjectRef, h: devin_reader.DevinSession, meta: SessionMeta):
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        h.db_path, ("devin_loc", h.kind, h.key,
+                    file_cache.sqlite_wal_signature(h.db_path)),
+        lambda: devin_reader._loc_scan(h, meta))
+
+
+def _devin_meta(ref: ProjectRef, h: devin_reader.DevinSession) -> SessionMeta:
+    if h.kind == "acp":
+        return devin_reader.read_acp_meta(h)
+    return devin_reader.read_session_meta(h.db_path, h.key)
+
+
+_DEVIN = _SourceAdapter(
+    source="devin",
+    entrypoint="devin",
+    resolve=devin_reader.resolve_project,
+    sessions=devin_reader.sessions_for_project,
+    read_meta=_devin_meta,
+    usage_of=_devin_usage_of,
+    loc_of=_devin_loc_of,
+    session_key=lambda ref, h: devin_reader.session_key_of(ref, h),
+    not_found="devin project '{project}' not found under %APPDATA%\\devin or ~/.local/share/devin",
+    no_sessions="no Devin sessions for '{name}'",
+    no_match="no Devin session matches '{session}'",
+    subagents_of=lambda ref, h: devin_reader.subagents_of(h),
+)
+
+
+def analyze_devin_project(
+    project: str | ProjectRef,
+    *,
+    session: str | None = None,
+    no_loc: bool = False,
+    task_type: str = metrics.DEFAULT_TASK_TYPE,
+    baseline_tcer: float | None = None,
+    baseline_cpe: float | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    cancel_event: threading.Event | None = None,
+    auto_infer: bool = False,
+) -> ProjectAnalysis:
+    """Analyze one Devin project (sessions.db metered + acp transcript/cloud)."""
+    return _analyze_source_project(
+        _DEVIN,
+        project,
+        session=session,
+        no_loc=no_loc,
+        task_type=task_type,
+        baseline_tcer=baseline_tcer,
+        baseline_cpe=baseline_cpe,
+        since=since,
+        until=until,
+        cancel_check=_make_cancel_check(cancel_event),
+        auto_infer=auto_infer,
+    )
+
+
+# ---- t3 hooks -------------------------------------------------------------- #
+def _t3_usage_of(ref: ProjectRef, tid: str) -> TokenUsage:
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        ref.path, ("t3_usage", tid, file_cache.sqlite_wal_signature(ref.path)),
+        lambda: t3_reader.aggregate_usage(ref.path, tid))
+
+
+def _t3_loc_of(ref: ProjectRef, tid: str, meta: SessionMeta):
+    from tcer.core import file_cache
+    return file_cache.get_or_compute(
+        ref.path, ("t3_loc", tid, file_cache.sqlite_wal_signature(ref.path)),
+        lambda: t3_reader._loc_scan(ref.path, tid, meta))
+
+
+_T3 = _SourceAdapter(
+    source="t3",
+    entrypoint="t3",
+    resolve=t3_reader.resolve_project,
+    sessions=t3_reader.sessions_for_project,
+    read_meta=lambda ref, tid: t3_reader.read_session_meta(ref.path, tid),
+    usage_of=_t3_usage_of,
+    loc_of=_t3_loc_of,
+    session_key=lambda ref, tid: tid,
+    not_found="t3 project '{project}' not found under ~/.t3/userdata",
+    no_sessions="no T3 threads for '{name}'",
+    no_match="no T3 thread matches '{session}'",
+    requires_path=True,
+    subagents_of=lambda ref, tid: t3_reader.subagents_of(ref.path, tid),
+)
+
+
+def analyze_t3_project(
+    project: str | ProjectRef,
+    *,
+    session: str | None = None,
+    no_loc: bool = False,
+    task_type: str = metrics.DEFAULT_TASK_TYPE,
+    baseline_tcer: float | None = None,
+    baseline_cpe: float | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    cancel_event: threading.Event | None = None,
+    auto_infer: bool = False,
+) -> ProjectAnalysis:
+    """Analyze one T3 Code project (statev2 projection; import:* skipped)."""
+    return _analyze_source_project(
+        _T3,
+        project,
+        session=session,
+        no_loc=no_loc,
+        task_type=task_type,
+        baseline_tcer=baseline_tcer,
+        baseline_cpe=baseline_cpe,
+        since=since,
+        until=until,
+        cancel_check=_make_cancel_check(cancel_event),
+        auto_infer=auto_infer,
+    )
+
+
+_ADAPTERS = (_CODEX, _OPENCODE, _OMP, _PI, _ANTIGRAVITY, _DEVIN, _T3)
 
 
 def _synth_meta(session_id: str, sample: Path) -> SessionMeta:

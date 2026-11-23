@@ -229,8 +229,10 @@ Claude 缓存写按 TTL 分档：1h 档单价 = 5m 档 × 1.6（`CACHE_1H_PREMIU
   - **Codex**（`codex_reader._RequestTimer`，移植 cc-switch `RequestTimer` 的耗时部分）：起点 = 本次请求第一个输出项前最近的「起点行」（上次 token_count / 工具结果 / user·developer 消息 / turn_context）；终点 = 同请求的 `token_usage_record`（新版），否则 token_count 时刻，若 token_count 紧跟工具结果（等工具跑完才写，差 ≤100ms）则取最后一个输出项时刻；旧布局补写在上一 token_count 之后（≤100ms）的输出项忽略；`task_started`/`turn_aborted` 作废未结算请求。输出 = 该 token_count 的 total 差分输出增量；重复投递的 token_count（差分为 0）不结算。
   - **OpenCode**：`message.data.time` 的 `streamed`（不晚于 created 时退回 `completed`）− `created`，要求有 `completed`；输出 = `output + reasoning`（与 TCER 把 reasoning 折入 output 一致）。
   - **omp / Pi**：每响应自报 `duration` / `durationMs` + 该响应 usage.output。
+  - **Devin**：每响应自报 `total_time_ms`（`metadata.metrics`，按 request_id 去重后逐响应采样）+ 该响应 `output_tokens`。
+  - **T3 Code**：provider_turn 的 completed−started 是**整轮墙钟**（含工具执行）不可用；改取回合内 `assistant_message`/`reasoning` 项自身 startedAt→completedAt 之和 + 该回合 `outputTokens`（仅 `usageStatus=complete`）。
 - **与 cc-switch 差异**：不推首字（TCER 有 Codex/omp 自报 TTFT）；OpenCode 输出含 reasoning（cc-switch 单列）；Codex 不读 `item_completed.started_at_ms`；其余门槛逐项一致。
-- **`output_tps` 不变**：仍仅 omp/Pi（自报 duration，不设门槛），Codex 的 `task_complete.duration_ms` 是任务级墙钟、Claude 只有整轮墙钟（不变量 #17），均不适用；单位文案由「字/秒」更正为「token/秒」。跨源可比请用 `est_output_tps`。
+- **`output_tps`**：仅 omp/Pi/Devin（自报逐响应耗时：omp `duration`、Pi `durationMs`、Devin `metrics.total_time_ms`，不设门槛）；Codex 的 `task_complete.duration_ms` 是任务级墙钟、Claude 只有整轮墙钟（不变量 #17）、T3 的 provider_turn 同为整轮墙钟，均不适用；单位文案由「字/秒」更正为「token/秒」。跨源可比请用 `est_output_tps`。
 - **首字延迟 `ttft`** 显示改为逐回合样本中位数（`metrics.ttft_primary_sec`），无样本回退会话最小值；`TokenUsage.time_to_first_token_ms`（min）与 merge 规则不变，`ttft_p95` 不变。Codex 在每个 `task_complete.time_to_first_token_ms` 都追加 `ttft_ms_samples`（已有）。
 - **实测量级（本机 2026-10）**：Claude 中位 ≈52 tok/s（有值会话 188/499）、Codex ≈37、omp ≈71、OpenCode ≈22；个别经代理的快模型（qwen 系）可到 800–1100 tok/s，逐响应一致、非缓冲假象，按原值显示。
 

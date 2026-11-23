@@ -2976,6 +2976,42 @@
       "_note": "缓存写 30min $10.00、12h $20.00；分段：>272k 输入/缓存翻倍、输出 1.5×；Batch 半价",
       "vendor": "OpenAI"
     },
+    "swe-2": {
+      "display_name": "SWE-2",
+      "input": 0.0,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "_note": "自助计划免费至 2026-11-30（Devin 官方定价页），12-01 起 $3/$15、缓存读 $0.30（到期须改表）；swe-2-high/max 由前缀匹配",
+      "vendor": "Cognition"
+    },
+    "swe-2-flash": {
+      "display_name": "SWE-2 Flash",
+      "input": 0.0,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "_note": "免费至 2026-12-04（Devin 官方定价页），后 $0.10/$0.50、缓存读 $0.01、缓存写 $0.125（到期须改表）",
+      "vendor": "Cognition"
+    },
+    "swe-check": {
+      "display_name": "SWE Check",
+      "input": 0.0,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "_note": "Cognition 内部校验模型，无公开 token 价；计 $0 避免 default 编数",
+      "vendor": "Cognition"
+    },
+    "compactor": {
+      "display_name": "Compactor",
+      "input": 0.0,
+      "output": 0.0,
+      "cache_read": 0.0,
+      "cache_write": 0.0,
+      "_note": "Cognition 上下文压缩内部模型，无公开 token 价；计 $0 避免 default 编数",
+      "vendor": "Cognition"
+    },
     "gpt-6.1": {
       "display_name": "GPT-6.1 Sol",
       "input": 2.0,

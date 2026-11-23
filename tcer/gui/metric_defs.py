@@ -789,18 +789,23 @@ UNSUPPORTED_LABEL = "不适用"
 SOURCE_LABELS = {
     "claude": "ClaudeCode", "codex": "Codex", "opencode": "OpenCode",
     "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
+    "devin": "Devin", "t3": "T3 Code",
 }
 
 # key → 提供该字段的数据源集合；不在表中的 key 视为全源支持。
 _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Claude 独有
-    "subagent": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
+    "subagent": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity",
+                           "devin", "t3"}),
     # Antigravity summaries.killed：被移除的 Swarm worker（其余源无此信号）
     "killed_subagents": frozenset({"antigravity"}),
     "memory_files": frozenset({"claude"}),
-    # Claude 的推理输出并入「输出」，不单独上报
-    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
-    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
+    # Claude 的推理输出并入「输出」，不单独上报；Devin metrics 无 reasoning 字段；
+    # T3 turnTokenUsage 有独立 reasoningTokens（complete 时才计）。
+    "reasoning_tokens": frozenset({"claude", "codex", "opencode", "omp", "pi",
+                                   "antigravity", "t3"}),
+    "reasoning_ratio": frozenset({"claude", "codex", "opencode", "omp", "pi",
+                                  "antigravity", "t3"}),
     # Codex 运行时信号
     "context_window": frozenset({"codex"}),
     "context_window_used": frozenset({"codex"}),
@@ -808,27 +813,32 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     # Pi（durationMs）逐响应都有。Codex 的 task_complete.duration_ms 是任务级墙钟（含工具
     # 执行，比单补全高一个数量级），Claude 只有轮级 turn_duration（整轮墙钟，messageCount
     # 可达 400+），拿来当分母会把吞吐虚低 3–10×，故二者不支持（compute 同判定置 None）；
-    # OpenCode 多步聚合无 step 级 duration。
-    "output_tps": frozenset({"omp", "pi"}),
+    # OpenCode 多步聚合无 step 级 duration。Devin metrics.total_time_ms 是逐响应
+    # 自报补全耗时（与 omp duration 同类）→ 支持；T3 provider_turn 是整轮墙钟 → 不支持。
+    "output_tps": frozenset({"omp", "pi", "devin"}),
     # 估算输出速度：逐响应「估算耗时」（含首字等待）过门槛后 Σ输出÷Σ耗时。Claude=日志时间戳
     # 链、Codex=事件顺序状态机、OpenCode=time.streamed/completed−created、omp/Pi=自报
-    # duration；Antigravity 无逐响应时间 → 不适用。
-    "est_output_tps": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
-    # 平均延迟需要每请求耗时：omp 为每响应 duration。Claude 整轮墙钟 / Codex 任务级墙钟（实测高一个数量级）
-    # → 不适用；OpenCode 无该字段（pi 有 duration，compute 门控含 pi）。
-    "latency": frozenset({"omp", "pi"}),
+    # duration、Devin=metrics.total_time_ms、T3=回合内 assistant/reasoning 项时长和；
+    # Antigravity 无逐响应时间 → 不适用。
+    "est_output_tps": frozenset({"claude", "codex", "opencode", "omp", "pi",
+                                 "devin", "t3"}),
+    # 平均延迟需要每请求耗时：omp 为每响应 duration，Devin 为 metrics.total_time_ms。
+    # Claude 整轮墙钟 / Codex 任务级墙钟（实测高一个数量级）→ 不适用；
+    # OpenCode 无该字段（pi 有 duration，compute 门控含 pi）。
+    "latency": frozenset({"omp", "pi", "devin"}),
     # 效率衰减比需要逐回合 LOC 流水（turn_net_locs）——当前仅 Claude reader 填充。
     "efficiency_decay": frozenset({"claude"}),
-    "ttft": frozenset({"codex", "omp"}),
-    "ttft_p95": frozenset({"codex", "omp"}),
+    # Devin metrics.ttft_ms 是逐响应自报首字耗时。
+    "ttft": frozenset({"codex", "omp", "devin"}),
+    "ttft_p95": frozenset({"codex", "omp", "devin"}),
     "rate_limit_peak": frozenset({"codex"}),
     "patch_success": frozenset({"codex"}),
     "aborted_tasks": frozenset({"codex", "omp", "pi"}),
-    "active_duration": frozenset({"codex", "omp", "pi"}),
+    "active_duration": frozenset({"codex", "omp", "pi", "devin"}),
     "user_modified": frozenset({"claude"}),
     "revert_events": frozenset({"opencode"}),
     "hook_overhead": frozenset({"claude"}),
-    "slash_commands": frozenset({"claude", "omp", "pi", "antigravity"}),
+    "slash_commands": frozenset({"claude", "omp", "pi", "antigravity", "devin", "t3"}),
     "plan_modes": frozenset({"claude", "omp"}),
     # 压缩代价：Claude compactMetadata / omp·pi compaction 条目；LOC 可信度（structuredPatch）仅 Claude。
     "compaction_cost": frozenset({"claude", "omp", "pi"}),
@@ -842,13 +852,16 @@ _SOURCE_SUPPORT: dict[str, frozenset[str]] = {
     "rate_limit_hits": frozenset({"claude", "codex", "omp"}),
     "task_completion": frozenset({"codex"}),
     "compactions": frozenset({"claude", "codex", "opencode", "omp", "pi", "antigravity"}),
-    "web_searches": frozenset({"claude", "codex", "omp", "pi", "antigravity"}),
+    "web_searches": frozenset({"claude", "codex", "omp", "pi", "antigravity",
+                               "devin", "t3"}),
     "image_inputs": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
-    # Codex 自 cache_write_input_tokens（input 的子集）起上报缓存写入；
-    # 更早的 rollout 无该字段读 0（部分支持，不标注）。
-    "cache_write": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
-    "cache_write_ratio": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
-    "cache_efficiency": frozenset({"claude", "codex", "opencode", "omp", "pi"}),
+    # Devin metrics.cache_creation_tokens / T3 turnTokenUsage.cacheCreationTokens。
+    "cache_write": frozenset({"claude", "codex", "opencode", "omp", "pi",
+                              "devin", "t3"}),
+    "cache_write_ratio": frozenset({"claude", "codex", "opencode", "omp", "pi",
+                                    "devin", "t3"}),
+    "cache_efficiency": frozenset({"claude", "codex", "opencode", "omp", "pi",
+                                   "devin", "t3"}),
 }
 
 

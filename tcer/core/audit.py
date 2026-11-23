@@ -521,7 +521,7 @@ def _audit_file_session(
             ))
     except Exception as e:  # noqa: BLE001
         sa.checks.append(_truth("cost_usd_ok", False, detail=str(e)))
-    # 价表覆盖检查（与 Claude 路径同款）：--strict-pricing 下对全部六源生效。
+    # 价表覆盖检查（与 Claude 路径同款）：--strict-pricing 下对全部八源生效。
     unmatched = metrics.unmatched_pricing_models(report.usage)
     sa.info["unmatched_pricing"] = unmatched
     sa.checks.append(_truth(
@@ -612,7 +612,7 @@ def _audit_opencode_session(report, *, no_loc: bool = False) -> SessionAudit:
                 f"turns={report.usage.assistant_msgs}"
             ),
         ))
-    # 价表覆盖检查（与 Claude 路径同款）：--strict-pricing 下对全部六源生效。
+    # 价表覆盖检查（与 Claude 路径同款）：--strict-pricing 下对全部八源生效。
     unmatched = metrics.unmatched_pricing_models(report.usage)
     sa.info["unmatched_pricing"] = unmatched
     sa.checks.append(_truth(
@@ -623,6 +623,57 @@ def _audit_opencode_session(report, *, no_loc: bool = False) -> SessionAudit:
     ))
     _append_metric_bound_checks(sa, report)
     sa.info["task_type"] = report.task_type
+    sa.info["net_loc"] = report.net_loc
+    return sa
+
+
+def _audit_db_session(report, source: str, *, no_loc: bool = False) -> SessionAudit:
+    """Devin (sessions.db / acp transcript) / T3 (statev2) per-session audit."""
+    from tcer.core import devin_reader, t3_reader
+    sid = report.meta.session_id or "?"
+    sa = SessionAudit(session_id=sid, source=source, path=str(report.meta.path))
+    if not report.meta.session_id:
+        sa.checks.append(_truth("has_session_id", False))
+        return sa
+    try:
+        if source == "devin":
+            h = (devin_reader.DevinSession("db", report.meta.path, sid)
+                 if report.meta.path.name == "sessions.db"
+                 else devin_reader.DevinSession("acp", report.meta.path, sid))
+            u = devin_reader.aggregate_usage(h)
+        else:
+            u = t3_reader.aggregate_usage(report.meta.path, sid)
+    except Exception as e:  # noqa: BLE001
+        sa.checks.append(_truth("rescan_usage", False, detail=str(e)))
+        return sa
+    sa.checks.append(_eq("tokens_total", u.total, report.usage.total))
+    sa.checks.append(_eq("assistant_msgs", u.assistant_msgs,
+                         report.usage.assistant_msgs))
+    sa.checks.append(_eq("user_msgs", u.user_msgs, report.usage.user_msgs))
+    if report.net_loc is not None and not no_loc:
+        try:
+            if source == "devin":
+                sloc = devin_reader.session_loc_full(h)
+            else:
+                sloc = t3_reader.session_loc_full(report.meta.path, sid)
+            sa.checks.append(_eq(
+                "net_loc", sloc.added - sloc.deleted, report.net_loc))
+        except Exception as e:  # noqa: BLE001
+            sa.checks.append(_truth("loc_rescan_ok", False, detail=str(e)))
+    try:
+        cost = metrics.cost_usd(report.usage)
+        sa.checks.append(_truth("cost_usd_ok", cost >= 0, detail=f"${cost:.4f}"))
+    except Exception as e:  # noqa: BLE001
+        sa.checks.append(_truth("cost_usd_ok", False, detail=str(e)))
+    unmatched = metrics.unmatched_pricing_models(report.usage)
+    sa.info["unmatched_pricing"] = unmatched
+    sa.checks.append(_truth(
+        "all_models_priced",
+        len(unmatched) == 0,
+        detail=f"default-fallback: {unmatched[:8]}",
+        level="info",
+    ))
+    _append_metric_bound_checks(sa, report)
     sa.info["net_loc"] = report.net_loc
     return sa
 
@@ -753,6 +804,8 @@ def audit_ref(
             sa = _audit_file_session(rep, source="pi", aggregate_fn=pi_reader.aggregate_usage)
         elif ref.source == "antigravity":
             sa = _audit_file_session(rep, source="antigravity", aggregate_fn=antigravity_reader.aggregate_usage)
+        elif ref.source in ("devin", "t3"):
+            sa = _audit_db_session(rep, ref.source, no_loc=no_loc)
         else:
             sa = SessionAudit(
                 session_id="?",
@@ -822,7 +875,8 @@ def audit_many(
         # Prefer exact source when user said all + project name
         if source == "all":
             results = []
-            for s in ("claude", "codex", "opencode", "omp", "pi", "antigravity"):
+            for s in ("claude", "codex", "opencode", "omp", "pi", "antigravity",
+                      "devin", "t3"):
                 pa = audit_project(project, source=s, top=top, task_type=task_type, no_loc=no_loc)
                 if pa.error and "not found" in (pa.error or ""):
                     continue
@@ -973,7 +1027,9 @@ def _coverage_main(args) -> int:
                "opencode": coverage.opencode_coverage,
                "omp": coverage.omp_coverage,
                "pi": coverage.pi_coverage,
-               "antigravity": coverage.antigravity_coverage}
+               "antigravity": coverage.antigravity_coverage,
+               "devin": coverage.devin_coverage,
+               "t3": coverage.t3_coverage}
     if args.source == "all":
         sources = list(runners)
     elif args.source in runners:
@@ -1007,7 +1063,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Closed-loop audit: analyze real local sessions and re-verify against raw files.",
     )
     p.add_argument("--source", default="all",
-                   choices=["all", "claude", "codex", "opencode", "omp", "pi", "antigravity"],
+                   choices=["all", "claude", "codex", "opencode", "omp", "pi",
+                            "antigravity", "devin", "t3"],
                    help="Data source (default: all when --project set, else all)")
     p.add_argument("--project", default=None,
                    help="Project key or substring (e.g. TCER, c--GitHub-TCER)")

@@ -15,7 +15,7 @@ class ProjectRef:
     are virtual groups of session JSONL files sharing the same cwd.
     """
 
-    source: str  # "claude" / "codex" / "opencode" / "omp" / "pi" / "antigravity"
+    source: str  # "claude" / "codex" / "opencode" / "omp" / "pi" / "antigravity" / "devin" / "t3"
     key: str
     display_name: str
     cwd: str | None
@@ -453,7 +453,7 @@ class SessionMeta:
     path: Path
     is_subagent: bool
     entrypoint: str | None = None  # "claude-vscode" / "claude-cli" / etc.
-    source: str = "claude"  # "claude" / "codex" / "opencode" / "omp" / "pi" / "antigravity"
+    source: str = "claude"  # "claude" / "codex" / "opencode" / "omp" / "pi" / "antigravity" / "devin" / "t3"
     cli_version: str | None = None
     model_provider: str | None = None
     thread_source: str | None = None

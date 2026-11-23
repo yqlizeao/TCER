@@ -286,6 +286,40 @@ Pi（[earendil-works/pi](https://github.com/earendil-works/pi) 的 `pi-coding-ag
 
 `SessionEntry` 行类型、工具映射、LOC 回放、子代理折叠均与 omp 一致（同 schema），详见上节。能力映射（`metric_defs._SOURCE_SUPPORT`）：pi 支持 reasoning / cache / web_search，**不支持** ttft / ttft_p95（数据无此字段）。
 
+## Devin 数据格式（CLI + 桌面，本地 + 云端）
+
+Devin 三层存储，全部只读打开：
+
+- **计量层 `%APPDATA%/devin/cli/sessions.db`**（`DEVIN_SESSIONS_DIR` 排他重定位；Unix 回退 `~/.local/share/devin`、`~/.config/devin`、legacy `cognition`）：`sessions`（`working_directory`→项目分组、`created_at` **unix 秒**、`hidden=1` 剔除）、`message_nodes`（消息森林，`chat_message` JSON）、`tool_call_state`（ACP ToolCall+Update）、`subagent_heads`（子代理链头折叠进父）。
+- **索引层 `User/globalStorage/state.vscdb`**：`ItemTable` 的 `windsurf.acp.messageStore.session.acp/` 前缀 key → `{"uuid": <acp库hash>}`。`devin-cli/<名>` 是本地转录，`devin-cloud/...` 是云端会话。
+- **转录层 `User/acp-messages/<hash>.db`**：`messages(kind,payload)` + `meta`。**无 token 计量**——转录会话用量一律「不适用」。
+
+要点：
+
+- **去重**：同一响应拆成多个 assistant node、metrics 按 `request_id` 重复携带 → 按 request_id 逐字段取 max 合并（流式快照取最新，同 Claude `message.id` 铁律）。工具按 `toolCallId` / `tool_call_state` 行去重。
+- **Token**：`metadata.metrics` 六字段 `input/output/cache_read/cache_creation/context_input_tokens`（context_input→peak）+ `ttft_ms`/`total_time_ms`/`tokens_per_sec`/`tpot_ms`（逐响应耗时 → output_tps/est/逐回合时间线）；`generation_model` → per_model。
+- **提问**：`metadata.is_user_input=true` 且 `telemetry.source=="user"`（排除 `subagent_task` 派发）。
+- **工具**：`inferenceToolName` → `_DEVIN_TOOL_MAP` 规范名；update `status` ≠ completed → 工具错误。
+- **LOC**：本地 update `content[].diff` 带**全文件** `oldText/newText`→Write+`note_write_original` / Edit；云端 `_meta["cognition.ai/fileUpdates"]` 给 `lines_added/lines_removed`→合成 Edit。只回放成功调用。
+- **转录项目身份**：本地取 `call._meta["cognition.ai/cwd"]` 多数票；云端取 `cognition.ai/repoName` 或 `info.configOptions` 仓库值（容器 cwd `/home/ubuntu` **不是**项目身份）；无 repo 的云端会话归「Devin 云端会话」桶。
+- **云端标记**：`devin-cloud` 前缀 → 会话标题前缀「云端」、`thread_source="cloud"`。
+- **噪声过滤**：`sourceEventType` ∈ acu/context_growth/rules_injected/permission 等进度事件跳过；`multi_edit_result`/`mcp_tool_call`/`computer_use`/`git_*` 等映射为工具。
+- **子代理**：`subagent_heads` 链头在同一 message_nodes 森林内，天然折叠进父会话。
+
+## T3 Code 数据格式（`~/.t3/userdata/statev2.sqlite`）
+
+T3 Code 是元编排器（驱动 `acpRegistry_devin`/`antigravity`/`claudeAgent`/`codex` 等 provider），数据是事件溯源投影（`T3_STATE_DB` 重定位）。表：`projection_projects`（`workspace_root`→项目）→ `orchestration_v2_projection_threads`（`modelSelection.model`、`providerInstanceId`、`deleted_at` 剔除）→ `provider_turns`（回合）+ `turn_items`（回合项）+ `provider_sessions` + `subagents`（`child_thread_id` 折叠）。
+
+要点：
+
+- **Token「有则计、无则不适用」**：`provider_turns.payload_json.turnTokenUsage` 带显式 `usageStatus`——`complete` 才累计（`inputTokens` **含** `cachedInputTokens`/`cacheCreationTokens` 子集 → 净输入=总量−两缓存；`reasoningTokens`→reasoning_output_tokens），`unavailable` 记 `empty_usage_skipped`，绝不编数。
+- **`import:*` 线程跳过**：`import:claudeAgent:<uuid>` 等是外部会话导入副本，计入会双计原始源。
+- **工具**：`dynamic_tool.toolName`/`command_execution`/`file_change`/`file_search`/`todo_list` → `_T3_TOOL_MAP` 规范名；`command_execution.exitCode≠0` 或 status failed/error → 工具错误；`checkpoint`/`notification` 非会话事件跳过。
+- **LOC**：`file_change.diffStr`（标准 unified diff，+/- 行计数→合成 Edit 净行差），`status=="completed"` 才回放。
+- **时长**：provider_turn 的 completed−started 是整轮墙钟（含工具执行，同 Claude turn_duration）→ **不支持** latency/output_tps；est_output_tps 用回合内 assistant_message+reasoning 项自身 startedAt→completedAt 之和。
+- **排除**：`usage-scan-cache-v17.json`（T3 自扫 `~/.claude` 等的二手缓存，计入会双计）、`server-owner.sqlite`、`logs/`。
+- **跨源重叠**：T3 驱动的 Devin/Antigravity 会话在各自源卡片各计一份——按 (source, workspace) 分卡是架构允许的各自视角。
+
 ## 实现不变量详述（自 CLAUDE.md 迁移）
 
 > 本节自 CLAUDE.md 迁移而来（2026-10 瘦身）：CLAUDE.md 只保留一行硬规则，完整细节、实测数据与历史缘由在此。条目前缀「原 #N」= 瘦身前 CLAUDE.md 的「关键注意事项」编号，可据此追溯。

@@ -405,6 +405,18 @@ def project_has_sessions(ref: ProjectRef) -> bool:
             return bool(antigravity_reader.discover_sessions(ref))
         except Exception:  # noqa: BLE001 — treat unreadable as empty
             return False
+    if ref.source == "devin":
+        from tcer.core import devin_reader
+        try:
+            return bool(devin_reader.sessions_for_project(ref))
+        except Exception:  # noqa: BLE001
+            return False
+    if ref.source == "t3":
+        from tcer.core import t3_reader
+        try:
+            return bool(t3_reader.sessions_for_project(ref))
+        except Exception:  # noqa: BLE001
+            return False
     return False
 
 
@@ -472,6 +484,18 @@ def project_latest_activity_ms(ref: ProjectRef) -> int | None:
             return opencode_reader.latest_activity_ms(ref)
         except Exception:  # noqa: BLE001 — unreadable DB → treat as no activity
             return None
+    if ref.source == "devin":
+        from tcer.core import devin_reader
+        try:
+            return devin_reader.latest_activity_ms(ref)
+        except Exception:  # noqa: BLE001
+            return None
+    if ref.source == "t3":
+        from tcer.core import t3_reader
+        try:
+            return t3_reader.latest_activity_ms(ref)
+        except Exception:  # noqa: BLE001
+            return None
     return None
 
 
@@ -515,6 +539,14 @@ def list_project_refs(source: str = "all") -> list[ProjectRef]:
         from tcer.core import antigravity_reader
 
         refs.extend(antigravity_reader.list_project_refs())
+    if source in ("all", "devin"):
+        from tcer.core import devin_reader
+
+        refs.extend(devin_reader.list_project_refs())
+    if source in ("all", "t3"):
+        from tcer.core import t3_reader
+
+        refs.extend(t3_reader.list_project_refs())
     return sorted(refs, key=lambda r: (r.source, r.display_name.lower()))
 
 

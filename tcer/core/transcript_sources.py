@@ -2371,7 +2371,58 @@ def build_transcript(src: str, path: Path, session_id: str | None, cancel=None) 
         meta = antigravity_reader.read_session_meta(path)
         return finalize(src, path, session_id or meta.session_id or path.stem, msgs,
                         title=meta.title, cwd=meta.cwd, warnings=w)
+    if src == "devin":
+        from tcer.core import devin_reader
+        if not session_id:
+            raise ValueError("Devin 需要 session_id")
+        if path.name == "sessions.db":
+            convo = devin_reader.read_conversation(path, session_id)
+            meta = devin_reader.read_session_meta(path, session_id)
+        else:
+            convo = devin_reader.read_acp_conversation(path)
+            h = devin_reader.DevinSession("acp", path, session_id,
+                                          cloud="devin-cloud" in str(path))
+            meta = devin_reader.read_acp_meta(h)
+        msgs = _convo_to_messages(convo, "devin")
+        return finalize(src, path, session_id, msgs,
+                        title=meta.title, cwd=meta.cwd)
+    if src == "t3":
+        from tcer.core import t3_reader
+        if not session_id:
+            raise ValueError("T3 需要 thread_id")
+        convo = t3_reader.read_conversation(path, session_id)
+        meta = t3_reader.read_session_meta(path, session_id)
+        msgs = _convo_to_messages(convo, "t3")
+        return finalize(src, path, session_id, msgs,
+                        title=meta.title, cwd=meta.cwd)
     raise ValueError(f"未知数据源：{src}")
+
+
+def _convo_to_messages(convo: list[dict], style: str) -> list[Message]:
+    """``reader.read_conversation`` dict 流 → 阅读器 Message 列表（Devin/T3 共用）。"""
+    msgs: list[Message] = []
+    for item in convo:
+        role = item.get("role") or "assistant"
+        ts = item.get("ts")
+        itype = item.get("type")
+        mid = item.get("id")
+        if itype == "text":
+            msgs.append(Message(role, ts, None, None, False,
+                                [TextBlock(str(item.get("text") or ""))]))
+        elif itype == "thinking":
+            msgs.append(Message("assistant", ts, None, None, False,
+                                [make_thinking(str(item.get("text") or ""))]))
+        elif itype == "tool_use":
+            cid = str(item.get("id") or "")
+            raw = str(item.get("name") or "Tool")
+            call = make_tool_call(style, cid, raw, item.get("input"))
+            msgs.append(Message("assistant", ts, cid, None, False, [call]))
+        elif itype == "tool_result":
+            status = "error" if item.get("is_error") else "success"
+            res = make_result(str(item.get("tool_use_id") or ""), status,
+                              str(item.get("text") or ""))
+            msgs.append(Message("tool", ts, mid, None, False, [res]))
+    return msgs
 
 
 # --------------------------------------------------------------------------- #
@@ -2403,6 +2454,16 @@ def _usage_of(src: str, path: Path, sid: str | None):
         return analyze._pi_usage_of(None, path)
     if src == "antigravity":
         return analyze._antigravity_usage_of(None, path)
+    if src == "devin":
+        from tcer.core import devin_reader
+        if path.name == "sessions.db" and sid:
+            h = devin_reader.DevinSession("db", path, sid)
+        else:
+            h = devin_reader.DevinSession("acp", path, sid or path.stem)
+        return devin_reader.aggregate_usage(h)
+    if src == "t3":
+        from tcer.core import t3_reader
+        return t3_reader.aggregate_usage(path, sid or "")
     return None
 
 

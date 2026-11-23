@@ -149,6 +149,7 @@ FILES_SHOWN = 8
 _SOURCE_LABELS = {
     "claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode",
     "omp": "Oh My Pi", "pi": "Pi", "antigravity": "Antigravity",
+    "devin": "Devin", "t3": "T3 Code",
 }
 
 
