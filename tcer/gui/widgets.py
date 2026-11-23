@@ -626,7 +626,10 @@ class Card:
                 except tk.TclError:
                     pass
         else:
-            self._apply_bg(self._bg)
+            # 指针仍在卡上（再点已选卡=取消选中）时统一刷成 hover 而非底色：
+            # 只刷 _bg 会让 _hovered 残留为 True，下一次 <Configure> 重绘把
+            # 画布画成 HOVER 而子件停在 PANEL_2，出现「半亮卡」色斑。
+            self._apply_bg(theme.HOVER_BG if self._hovered else self._bg)
             for w, orig_fg in self._label_fgs.items():
                 try:
                     w.configure(fg=orig_fg)

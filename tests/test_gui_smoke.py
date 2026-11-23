@@ -308,6 +308,31 @@ def test_card_hover_recolors_untracked_surface_children(root):
     frame.destroy()
 
 
+def test_card_deselect_while_hovered_stays_hover(root):
+    """再点已选卡=取消选中（指针仍在卡上）：子件须统一刷成 HOVER 而非底色。
+
+    历史 bug：set_selected(False) 只刷 _bg，_hovered 残留 True；下一次
+    <Configure> 重绘把画布画成 HOVER 而行块停在 PANEL_2，出现「半亮卡」。"""
+    from tcer.gui import theme
+    from tcer.gui.widgets import Card
+
+    frame = tk.Frame(root)
+    frame.pack()
+    card = Card(frame, on_click=lambda c: None)
+    row = tk.Frame(card.frame, bg=theme.PANEL_2)
+    row.pack(fill="x")
+    lbl = tk.Label(row, text="x", bg=theme.PANEL_2)
+    lbl.pack()
+    card._on_hover()
+    card.set_selected(True)
+    card.set_selected(False)          # 指针仍在卡上取消选中
+    assert card._hovered
+    assert row.cget("bg") == lbl.cget("bg") == theme.HOVER_BG
+    card._on_unhover()
+    assert row.cget("bg") == theme.PANEL_2
+    frame.destroy()
+
+
 def test_flow_row_wraps_when_narrow(root):
     """FlowRow：窄宽度自动折行、隐藏项不占位（LLM 报告过滤胶囊曾被单行 pack 裁掉）。"""
     from tcer.gui.widgets import FlowRow

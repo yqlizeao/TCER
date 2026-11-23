@@ -1864,10 +1864,10 @@ class SessionColumn:
         _ts = getattr(r.meta, "thread_source", None)
         _p_img, _p_tip = None, ""
         if _ts == "cloud":
-            _p_img, _p_tip = ui_icon(row2, "cloud"), "云端"
+            _p_img, _p_tip = ui_icon(card.frame, "cloud"), "云端"
         elif getattr(r.meta, "source", None) == "t3" and _ts:
             # T3 是编排器：thread_source 是真正干活的驱动来源（devin/antigravity…）
-            _p_img = source_icon(row2, _ts)
+            _p_img = source_icon(card.frame, _ts)
             _p_tip = f"驱动来源：{source_label(_ts)}"
         if _p_img is not None:
             _p_lbl = tk.Label(row2, image=_p_img, bg=card._bg)
@@ -1905,7 +1905,7 @@ class SessionColumn:
                             font=theme.FONT_VALUE, anchor="e")
         cost_lbl.pack(side="right", padx=(4, 0))
 
-        # 左侧：AI 供应商 Logo + 紧凑时长（如 19.4h），彻底去除「·」
+        # 左侧：AI 供应商 Logo + 紧凑时长，绝不发生金额截断
         v_img = vendor_icon(card.frame, vendor_name or model_key or model_name)
         if v_img is not None:
             v_lbl = tk.Label(sum_row, image=v_img, bg=card._bg, anchor="w")
