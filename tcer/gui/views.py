@@ -1861,13 +1861,20 @@ class SessionColumn:
         row2 = tk.Frame(card.frame, bg=card._bg)
         row2.pack(fill="x", padx=6, pady=(1, 2))
         card.track_bg(row2)
-        if getattr(r.meta, "thread_source", None) == "cloud":
-            c_img = ui_icon(row2, "cloud")
-            if c_img is not None:
-                c_lbl = tk.Label(row2, image=c_img, bg=card._bg)
-                c_lbl.pack(side="left", padx=(0, 3))
-                card.track_bg(c_lbl)
-                card.bind_to(c_lbl)
+        _ts = getattr(r.meta, "thread_source", None)
+        _p_img, _p_tip = None, ""
+        if _ts == "cloud":
+            _p_img, _p_tip = ui_icon(row2, "cloud"), "云端"
+        elif getattr(r.meta, "source", None) == "t3" and _ts:
+            # T3 是编排器：thread_source 是真正干活的驱动来源（devin/antigravity…）
+            _p_img = source_icon(row2, _ts)
+            _p_tip = f"驱动来源：{source_label(_ts)}"
+        if _p_img is not None:
+            _p_lbl = tk.Label(row2, image=_p_img, bg=card._bg)
+            _p_lbl.pack(side="left", padx=(0, 3))
+            Tooltip(_p_lbl, _p_tip)
+            card.track_bg(_p_lbl)
+            card.bind_to(_p_lbl)
         ti_lbl = tk.Label(row2, bg=card._bg, fg=theme.FG,
                           font=theme.FONT_UI_SMALL, anchor="w")
         ti_lbl.pack(side="left", fill="x", expand=True)

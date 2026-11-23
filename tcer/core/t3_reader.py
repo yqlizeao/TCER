@@ -228,8 +228,28 @@ def read_session_meta(db_path: Path, thread_id: str) -> SessionMeta:
         entrypoint="t3",
         source="t3",
         model_provider=pricing.normalize(model) if model else None,
-        thread_source=provider,
+        thread_source=provider_key(provider),
     )
+
+
+# T3 是编排器：providerInstanceId 才是真正干活的代理（驱动来源）。
+# ``acpRegistry_devin``/``claudeAgent``/``antigravity`` 等 → 图标/显示用 key。
+_PROVIDER_ALIASES = {
+    "acpregistry_devin": "devin", "devin": "devin",
+    "claudeagent": "claude", "claude": "claude",
+    "antigravity": "antigravity",
+    "codex": "codex", "opencode": "opencode",
+    "omp": "omp", "pi": "pi", "gemini": "antigravity",
+}
+
+
+def provider_key(provider_instance_id: str | None) -> str:
+    """``acpRegistry_devin`` → ``devin``；未知原样小写返回（不编造）。"""
+    s = str(provider_instance_id or "").strip()
+    low = s.lower()
+    if low.startswith("acpregistry_"):
+        low = low[len("acpregistry_"):]
+    return _PROVIDER_ALIASES.get(low, low)
 
 
 def subagent_ids(db_path: Path, thread_id: str) -> list[str]:

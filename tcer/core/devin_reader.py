@@ -56,12 +56,16 @@ class DevinSession:
     ``kind == "acp"``: transcript-only ``User/acp-messages/<key>.db`` —
     ``cloud`` marks ``devin-cloud`` (cloud Devin) vs ``devin-cli`` residue.
     ``ms_key`` is the messageStore key used for cloud/transcript titling.
+    ``dup_tool_ids`` are toolCallIds already claimed by another session of the
+    same project (desktop fork views mirror the same agent run into a second
+    transcript) — counting paths skip them to prevent double counting.
     """
     kind: str
     db_path: Path
     key: str
     cloud: bool = False
     ms_key: str = ""
+    dup_tool_ids: frozenset = frozenset()
 
 
 # --------------------------------------------------------------------------- #
@@ -253,6 +257,37 @@ def _iter_tool_calls(acp_db: Path):
                 yield o, _acp_call(o)
     except sqlite3.Error:
         return
+
+
+def _acp_tool_call_ids(acp_db: Path) -> set[str]:
+    """Transcript 的工具调用身份集合（与聚合路径同一 cid 口径）。"""
+    ids: set[str] = set()
+    for o, call in _iter_tool_calls(acp_db):
+        cid = _first_str(call.get("toolCallId"), call.get("id"), o.get("id"))
+        if cid:
+            ids.add(cid)
+    return ids
+
+
+def _db_tool_call_ids(db: Path, session_ids: set[str]) -> set[str]:
+    """Union of toolCallIds recorded in ``tool_call_state`` for db sessions —
+    the authoritative coverage set used to spot mirrored transcripts."""
+    ids: set[str] = set()
+    if not session_ids:
+        return ids
+    try:
+        with _connect(db) as con:
+            if not _has_table(con, "tool_call_state"):
+                return ids
+            marks = ",".join("?" * len(session_ids))
+            for (tid,) in con.execute(
+                    "select tool_call_id from tool_call_state "
+                    f"where session_id in ({marks})", tuple(session_ids)):
+                if tid:
+                    ids.add(str(tid))
+    except sqlite3.Error:
+        pass
+    return ids
 
 
 def _transcript_cwd(acp_db: Path) -> str:
@@ -494,6 +529,15 @@ def sessions_for_project(project: str | ProjectRef) -> list[DevinSession]:
                 continue
             db_sids.add(sid)
             handles.append(DevinSession("db", db, sid))
+    # 转录去重：桌面端 fork 视图会把同一 agent 运行的事件镜像进第二个 acp 库
+    # （实测 fork 转录的 toolCallId 全量 ⊂ 父会话 tool_call_state，用户消息
+    # 也逐字节相同）。按 toolCallId 覆盖度裁决：全覆盖→整卡丢弃；部分覆盖→
+    # dup_tool_ids 逐条过滤（同一项目内 db 会话与先被接受的转录均为覆盖源）。
+    covered: set[str] = set()
+    if db_sids:
+        for h in handles:
+            if h.kind == "db":
+                covered |= _db_tool_call_ids(h.db_path, {h.key})
     for ms_key, val in _message_store().items():
         cloud = ms_key.startswith("devin-cloud/")
         name = ms_key.rsplit("/", 1)[-1]
@@ -509,8 +553,13 @@ def sessions_for_project(project: str | ProjectRef) -> list[DevinSession]:
             continue                                # cloud lives under repo keys
         elif _transcript_cwd(acp) != cwd:
             continue
+        tcids = _acp_tool_call_ids(acp)
+        if tcids and tcids <= covered:
+            continue                                # 纯镜像副本，已被父会话全量计数
+        dup = frozenset(tcids & covered)
+        covered |= tcids
         handles.append(DevinSession("acp", acp, str(val["uuid"]), cloud=cloud,
-                                    ms_key=ms_key))
+                                    ms_key=ms_key, dup_tool_ids=dup))
     handles.sort(key=lambda h: (h.kind != "db", h.key))
     return handles
 
@@ -639,7 +688,7 @@ def _metric_int(metrics: dict, key: str) -> int:
 
 def aggregate_usage(handle: DevinSession) -> TokenUsage:
     if handle.kind == "acp":
-        return _aggregate_acp(handle.db_path)
+        return _aggregate_acp(handle)
     return _aggregate_db(handle.db_path, handle.key)
 
 
@@ -867,9 +916,10 @@ def _classify_tool(name: str, call: dict, upd: dict) -> tuple[str, str]:
 # Usage aggregation — acp transcripts (no token metering)
 # --------------------------------------------------------------------------- #
 
-def _aggregate_acp(acp_db: Path) -> TokenUsage:
+def _aggregate_acp(h: DevinSession) -> TokenUsage:
     u = TokenUsage()
-    with _connect(acp_db) as con:
+    dup = h.dup_tool_ids
+    with _connect(h.db_path) as con:
         if not _has_table(con, "messages"):
             return u
         rows = con.execute(
@@ -903,7 +953,7 @@ def _aggregate_acp(acp_db: Path) -> TokenUsage:
         elif kind == "tool_call":
             call = _acp_call(o)
             cid = _first_str(call.get("toolCallId"), call.get("id"), o.get("id"))
-            if cid and cid in seen_calls:
+            if cid and (cid in seen_calls or cid in dup):
                 continue
             if cid:
                 seen_calls.add(cid)
@@ -963,7 +1013,7 @@ def _loc_scan(handle: DevinSession, meta: SessionMeta):
         seen_calls: set[str] = set()
         for o, call in _iter_tool_calls(handle.db_path):
             cid = _first_str(call.get("toolCallId"), call.get("id"), o.get("id"))
-            if cid and cid in seen_calls:
+            if cid and (cid in seen_calls or cid in handle.dup_tool_ids):
                 continue
             if cid:
                 seen_calls.add(cid)

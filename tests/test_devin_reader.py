@@ -275,6 +275,44 @@ def test_acp_file_updates_loc(root):
     assert sloc.added - sloc.deleted == 7
 
 
+def test_acp_fork_transcript_dedup(root):
+    """桌面 fork 视图的转录与父会话 tool_call_state 是同一 agent 运行的镜像：
+    工具调用全覆盖 → 整卡丢弃；部分覆盖 → 保留卡但共享调用不重复计数。"""
+    db = _sessions_db(root)
+    _session(db, "s1", "c:/repo/a")
+    _tool(db, "s1", "shared1", "exec")
+    _tool(db, "s1", "shared2", "edit")
+    cwd = {"cognition.ai/cwd": "c:/repo/a"}
+    # 全覆盖镜像（fork 视图）→ 不出卡
+    _acp_db(root, "forkfull", [
+        _acp_user("hi"),
+        _acp_call("shared1", "exec", extra_meta=dict(cwd)),
+        _acp_call("shared2", "edit", extra_meta=dict(cwd)),
+    ])
+    # 部分覆盖 → 保留；shared2 的 diff 与工具计数都不再现
+    _acp_db(root, "forkpart", [
+        _acp_user("continue"),
+        _acp_call("shared1", "exec", extra_meta=dict(cwd)),
+        _acp_call("shared2", "edit", extra_meta=dict(cwd),
+                  content=[{"type": "diff", "path": "x.py",
+                            "oldText": "a\n", "newText": "a\nb\n"}]),
+        _acp_call("own1", "exec", extra_meta=dict(cwd)),
+        _acp_call("own2", "edit", extra_meta=dict(cwd),
+                  content=[{"type": "diff", "path": "y.py",
+                            "oldText": None, "newText": "c\nd\n"}]),
+    ])
+    _ms_index(root, {"devin-cli/fork-full": "forkfull",
+                     "devin-cli/fork-part": "forkpart"})
+    hs = dr.sessions_for_project(f"devin::{dr._norm_cwd('c:/repo/a')}")
+    acp = [h for h in hs if h.kind == "acp"]
+    assert [h.key for h in acp] == ["forkpart"]
+    assert acp[0].dup_tool_ids == frozenset({"shared1", "shared2"})
+    u = dr.aggregate_usage(acp[0])
+    assert u.tool_calls == {"Bash": 1, "Edit": 1}   # 共享两条已被 s1 计数
+    sloc = dr.session_loc_full(acp[0])
+    assert sloc.added - sloc.deleted == 2           # 仅 own2 的新建文件 +2
+
+
 def test_hidden_sessions_excluded(root):
     db = _sessions_db(root)
     _session(db, "s1", "c:/repo/a")

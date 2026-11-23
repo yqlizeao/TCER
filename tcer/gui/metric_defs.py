@@ -98,7 +98,8 @@ GROUPS: list[Group] = [
         Metric("cli_version", "客户端版本", "",
                "会话记录中的 CLI / 客户端版本（各源行级字段；缺失显示 -）。", "basic"),
         Metric("thread_source", "线程来源", "",
-               "本地代理线程来源分类，例如 user、automation 或其他未来来源。", "basic"),
+               "本地代理线程来源分类：Devin 为 local/cloud；T3 Code 是编排器，"
+               "显示实际干活的驱动来源（devin / antigravity / claude 等）。", "basic"),
         Metric("approval_policy", "审批策略", "",
                "本地代理记录中的审批策略，帮助解释命令是否需要用户批准。", "basic"),
         Metric("sandbox_policy", "沙箱策略", "",
@@ -646,6 +647,8 @@ def display(report: SessionReport, key: str) -> str:
     """The display string for one metric of one SessionReport (session/aggregate)."""
     if not is_supported(report, key):
         return UNSUPPORTED_LABEL
+    if key in _UNMETERED_KEYS and _unmetered(report):
+        return UNSUPPORTED_LABEL
     ext = _DISPLAY_EXTRACTORS.get(key)
     if ext is not None:
         return ext(report)
@@ -673,6 +676,8 @@ def raw_value(report, key: str) -> float | None:
     u = report.usage
     if not is_supported(report, key):
         return None  # 该源不提供此字段，图表不画点（避免把「不支持」画成 0）
+    if key in _UNMETERED_KEYS and _unmetered(report):
+        return None
     try:
         if key == "chr":
             return report.chr * 100.0 if report.chr is not None else None
@@ -785,6 +790,36 @@ MODEL_GROUPS: list[Group] = [
 # ============================================================
 
 UNSUPPORTED_LABEL = "不适用"
+
+# 会话级「未计量」：全部带用量的回合都没有 usage 字段（T3 的 devin 驱动回合
+# usageStatus=unavailable、Devin ACP 转录无 token 计量）。此时 token/成本派生
+# 指标显示「不适用」而非 0——0 是编造（真实成本存在，只是本地没有计量数据）。
+# 判定：assistant_msgs==0 且 empty_usage_skipped>0（有回合但无一被计量）。
+# 部分会话有计量部分没有 → 显示已计量的真实求和，不在此列。
+_UNMETERED_KEYS = frozenset({
+    # G2 用量统计
+    "total_tokens", "input", "output", "cache_write", "cache_read",
+    "reasoning_tokens", "context_window_used", "est_output_tps", "output_tps",
+    # G3 缓存效率（全部由 token 分量推导）
+    "chr", "io_ratio", "caf", "cache_efficiency", "cache_write_ratio",
+    "non_cached_input_ratio",
+    # G4 中由 token/补全耗时推导的项
+    "reasoning_ratio", "reasoning_time", "ttft", "ttft_p95",
+    # G1 中按请求计量的耗时项
+    "latency", "active_duration",
+    # G5 成本（全部由 token × 价推导）
+    "cost", "cost_per_mt", "cpe", "turn_cost_share", "cost_vs_reported",
+    # G6 token 派生效率
+    "tcer", "efficiency_decay",
+})
+
+
+def _unmetered(report: SessionReport) -> bool:
+    """True = 会话有代理回合但本地完全无 token 计量（非「用量为零」）。"""
+    u = getattr(report, "usage", None)
+    return (u is not None and getattr(u, "assistant_msgs", 0) == 0
+            and getattr(u, "empty_usage_skipped", 0) > 0)
+
 
 SOURCE_LABELS = {
     "claude": "ClaudeCode", "codex": "Codex", "opencode": "OpenCode",

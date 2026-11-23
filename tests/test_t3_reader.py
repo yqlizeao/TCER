@@ -107,6 +107,18 @@ def test_import_threads_skipped(db):
     assert not any(t.startswith("import:") for t in tids)
 
 
+def test_provider_thread_source(db):
+    """编排器驱动来源：providerInstanceId 归一成 provider key 进 thread_source。"""
+    _thread(db, "t1")
+    meta = t3r.read_session_meta(db, "t1")
+    assert meta.thread_source == "devin"
+    assert t3r.provider_key("acpRegistry_devin") == "devin"
+    assert t3r.provider_key("claudeAgent") == "claude"
+    assert t3r.provider_key("antigravity") == "antigravity"
+    assert t3r.provider_key(None) == ""
+    assert t3r.provider_key("futureProvider") == "futureprovider"  # 未知原样
+
+
 def test_usage_complete_counted(db):
     _thread(db, "t1")
     _pturn(db, "pt1", "t1", 0, _complete())
