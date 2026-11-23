@@ -2978,20 +2978,20 @@
     },
     "swe-2": {
       "display_name": "SWE-2",
-      "input": 0.0,
-      "output": 0.0,
-      "cache_read": 0.0,
-      "cache_write": 0.0,
-      "_note": "自助计划免费至 2026-11-30（Devin 官方定价页），12-01 起 $3/$15、缓存读 $0.30（到期须改表）；swe-2-high/max 由前缀匹配",
+      "input": 3.0,
+      "output": 15.0,
+      "cache_read": 0.3,
+      "cache_write": 3.0,
+      "_note": "官方 list 价（docs.devin.ai/desktop/models）：用于估算实际开销，自助促销期（2026-11-30 前免费）按正常价计；缓存写未公布单价，按 input 价计；swe-2-high/max 由前缀匹配",
       "vendor": "Cognition"
     },
     "swe-2-flash": {
       "display_name": "SWE-2 Flash",
-      "input": 0.0,
-      "output": 0.0,
-      "cache_read": 0.0,
-      "cache_write": 0.0,
-      "_note": "免费至 2026-12-04（Devin 官方定价页），后 $0.10/$0.50、缓存读 $0.01、缓存写 $0.125（到期须改表）",
+      "input": 0.1,
+      "output": 0.5,
+      "cache_read": 0.01,
+      "cache_write": 0.125,
+      "_note": "官方价（docs.devin.ai/desktop/models）：促销期（2026-12-04 前免费）按正常价计；三个 variant 同价",
       "vendor": "Cognition"
     },
     "swe-check": {
