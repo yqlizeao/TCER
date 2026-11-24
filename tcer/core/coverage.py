@@ -504,7 +504,7 @@ def report_dict(rep: CoverageReport) -> dict:
 # =========================================================================== #
 # 普查已覆盖到的各端版本（language server 版本，取自 ``<root>/log/*.log``）。
 ANTIGRAVITY_CENSUS_VERSIONS: dict[str, str] = {
-    "antigravity-cli": "1.5.9",   # CLI（agy）
+    "antigravity-cli": "1.5.16",  # CLI（agy）
     "antigravity": "2.32.0",      # 桌面 App 2.0
 }
 
@@ -515,15 +515,15 @@ ANTIGRAVITY_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
     "db.table": {
         "steps": (_H, "事件流：提问/工具调用/结果/压缩"),
         "gen_metadata": (_H, "逐生成 usage 与模型（权威）"),
-        "trajectory_metadata_blob": (_H, "工作区 URI + 子代理父指针（字段 5）"),
+        "trajectory_metadata_blob": (_H, "工作区 URI + 子代理父指针（字段 5 直父 / 字段 6 根会话）"),
         "trajectory_meta": (_I, "轨迹元数据，" + _NONUSE),
         "executor_metadata": (_I, "执行器元数据，" + _NONUSE),
-        "parent_references": (_I, "本机全空；子代理父指针取 summaries ∪ blob 字段 5"),
+        "parent_references": (_H, "子代理父/根指针（字段 6），blob 字段 5/6 均缺时的兜底"),
         "battle_mode_infos": (_I, "对战模式信息，" + _NONUSE),
     },
     "summaries.table": {
         "conversation_summaries": (_H, "会话目录：工作区/父指针/worker 名/killed/标题"),
-        "conversation_parents": (_I, "2.32 新增，本机为空；父指针仍取 conversation_summaries"),
+        "conversation_parents": (_H, "2.32 新增父子表（2026-11-24 起有数据）；并入父指针"),
         "search_schema_version": (_I, "全文索引版本"),
         **{t: (_I, "全文索引") for t in (
             "conversations_fts", "conversations_fts_data", "conversations_fts_idx",
@@ -543,6 +543,8 @@ ANTIGRAVITY_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
         "5": (_H, "完成但 payload 被裁剪（调用由 132 回显补回、提问取 19.3.1）"),
         "8": (_I, "生成中的瞬态（2026-11-15 实测活跃会话 step 15 先 8 后转 3）；"
                   "reader 不按非 132 步骤状态取舍，不影响计数"),
+        "6": (_I, "异步派发瞬态（2026-11-24 实测 step 15 载荷含子代理派发记录）；"
+                  "reader 不按非 132 步骤状态取舍，不影响计数"),
     },
     "status.132": {
         "3": (_H, "完成（按退出码判错）"),
@@ -551,6 +553,7 @@ ANTIGRAVITY_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
         "4": (_H, "失败（如 Invalid argument）→ 工具错误"),
         "6": (_H, "run_command 转后台任务（task-N）：仍在运行，不计工具错误、不回放 LOC"),
         "2": (_H, "常驻进程（IsDaemon）仍在运行：不计工具错误、不回放 LOC"),
+        "1": (_H, "结果未决瞬态（2026-11-24 实测活跃会话先 1 后转 3）：不计工具错误、不回放 LOC"),
     },
     "gen.field": {
         "4": (_H, "usage 块"),
@@ -577,6 +580,10 @@ _AGY_PASSTHROUGH = (
     "manage_task", "read_board", "post_message", "swarm_wait", "webview_browser",
     "enter_plan_mode", "exit_plan_mode", "schedule", "send_message", "manage_subagents",
     "define_subagent", "list_plugin_accounts", "search_marketplace",
+    # 2026-11-24 普查新增（均非写文件类）：
+    # finish = research 子代理回执；update_focus/update_steps = 焦点/进度清单；
+    # run_workflow = 工作流编排触发（派生的子会话仍经父指针折叠）。
+    "finish", "update_focus", "update_steps", "run_workflow",
 )
 
 

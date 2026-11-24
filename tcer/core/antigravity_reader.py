@@ -435,9 +435,10 @@ def _result_ok(status: int, exit_code: int) -> bool:
 
 # 命令未结束的结果状态（2026-11-15 实测 CLI）：6 = ``run_command`` 超过
 # ``WaitMsBeforeAsync`` 转后台任务（``<会话id>/task-N``，真正结果稍后经 step 101
-# 回传）、2 = 常驻进程（``IsDaemon``）仍在运行。不是失败，不计工具错误；也不是
+# 回传）、2 = 常驻进程（``IsDaemon``）仍在运行。1 = 结果未决瞬态（2026-11-24
+# 覆盖审计实测：活跃会话 132 先 1 后转 3）。不是失败，不计工具错误；也不是
 # 「已成功」，LOC 回放仍只认 0/3/5。
-_BACKGROUND_STATUS = frozenset({2, 6})
+_BACKGROUND_STATUS = frozenset({1, 2, 6})
 
 
 def _result_failed(status: int, exit_code: int) -> bool:
@@ -541,13 +542,18 @@ def _connect_ro(path: Path | str) -> sqlite3.Connection:
 # Project Discovery
 # --------------------------------------------------------------------------- #
 
-# 子代理折叠（2026-11 启用）：父指针 = summaries.parent_conversation_id ∪
-# 子会话 db 自带的 trajectory_metadata_blob 字段 5（2026-11-17 实测两者
-# 120/120 逐条一致；字段 6 = 根会话 id，4.1 = worker 名）。blob 兜底覆盖
-# summaries 尚未刷入新 worker 行 / 被 GUI Language Server 刷回子集的情形。
+# 子代理折叠（2026-11 启用）：父指针 = summaries 库（parent_conversation_id
+# 列 ∪ conversation_parents 表）∪ 子会话 db 自带指针（trajectory_metadata_blob
+# 字段 5 直接父 id → 字段 6 根会话 id → parent_references 行字段 6）。
+# 2026-11-17 实测列与 blob 字段 5 逐条一致（120/120）；字段 6 = 根会话 id、
+# 4.1 = worker 名。三条 db 侧通道各自兜底：research 子代理（118 例，
+# 2026-11-24）summaries 行 par 空、blob 无字段 5、只有字段 6 指根会话；
+# 另有子会话 blob 字段 6 误写自身、parent_references / conversation_parents
+# 记真父会话（7920d6a9/c5ec8dc9）。db 侧指针也兜底 summaries 尚未刷入
+# 新 worker 行 / 被 GUI Language Server 刷回子集的情形。
 # 缓存按 summaries 库（含 -wal）签名失效——旧版进程级快照让 TCER 运行
 # 期间新派生的 Swarm worker 全部独立成「(无标题)」卡（用户截图 2026-11-17）。
-_SummariesInfo = namedtuple("_SummariesInfo", "parents names killed titles cids")
+_SummariesInfo = namedtuple("_SummariesInfo", "parents names killed titles cids deep")
 
 # normcase(root) → (签名, summaries 快照)
 _SUMMARIES_INFO: dict[str, tuple[tuple, _SummariesInfo]] = {}
@@ -585,12 +591,13 @@ def _summaries_info(root: Path) -> _SummariesInfo:
     killed: set[str] = set()
     titles: dict[str, str] = {}
     cids: set[str] = set()
+    deep: set[str] = set()
     if summaries_db.is_file():
         try:
             with _connect_ro(summaries_db) as conn:
                 cols = {row[1] for row in conn.execute("PRAGMA table_info(conversation_summaries)")}
                 # 按列名取值（旧实现按位置取，缺中间列时会错位）
-                opt = [c for c in ("parent_conversation_id", "agent_name", "killed", "title") if c in cols]
+                opt = [c for c in ("parent_conversation_id", "agent_name", "killed", "title", "nesting_depth") if c in cols]
                 sel = ", ".join(["conversation_id", *opt])
                 for row in conn.execute(f"SELECT {sel} FROM conversation_summaries"):
                     cid = row[0]
@@ -608,13 +615,27 @@ def _summaries_info(root: Path) -> _SummariesInfo:
                     t = r.get("title")
                     if isinstance(t, str) and t.strip():
                         titles[cid] = t.strip()
+                    try:
+                        if int(r.get("nesting_depth") or 0) > 0:
+                            deep.add(cid)
+                    except (TypeError, ValueError):
+                        pass
+                # conversation_parents 表（2.32 新增，2026-11-24 起有数据）：
+                # 行可能不存在于 conversation_summaries；列指针优先。
+                tables = {row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                if "conversation_parents" in tables:
+                    for cid2, par2 in conn.execute(
+                            "SELECT conversation_id, parent_id FROM conversation_parents"):
+                        if cid2 and par2 and par2 != cid2:
+                            parents.setdefault(cid2, par2)
         except sqlite3.OperationalError as exc:
             msg = str(exc).lower()
             if "no such column" not in msg and "no such table" not in msg:
-                return _SummariesInfo(parents, names, killed, titles, cids)  # 锁冲突等瞬时错误：不写入缓存
+                return _SummariesInfo(parents, names, killed, titles, cids, deep)  # 锁冲突等瞬时错误：不写入缓存
         except Exception:
-            return _SummariesInfo(parents, names, killed, titles, cids)  # 库损坏等未知错误：同样只影响本次
-    info = _SummariesInfo(parents, names, killed, titles, cids)
+            return _SummariesInfo(parents, names, killed, titles, cids, deep)  # 库损坏等未知错误：同样只影响本次
+    info = _SummariesInfo(parents, names, killed, titles, cids, deep)
     _SUMMARIES_INFO[key] = (sig, info)
     return info
 
@@ -624,8 +645,15 @@ _BLOB_PARENT: dict[str, tuple[tuple, str]] = {}
 
 
 def _blob_parent(db: Path) -> str | None:
-    """子会话 db 自带的父指针：trajectory_metadata_blob 字段 5（主会话无此字段 → ""）。
+    """子会话 db 自带的父指针，按序取首个非自身的（2026-11-24 实测三通道）：
 
+    1. ``trajectory_metadata_blob`` 字段 5：直接父会话 id（具名 worker）。
+    2. ``trajectory_metadata_blob`` 字段 6：根会话 id（research 子代理只落
+       此字段；折叠按子树聚合，直挂根与挂中间层等价）。
+    3. ``parent_references`` 表行字段 6：父/根会话 id（blob 字段 6 误写
+       自身时真父在此）。
+
+    主会话：字段 5 缺失、字段 6 / parent_references 指自身 → ""。
     瞬时读失败返回 None（调用方据此不缓存索引）。
     """
     key = os.path.normcase(str(db))
@@ -637,10 +665,31 @@ def _blob_parent(db: Path) -> str | None:
     try:
         with _connect_ro(db) as conn:
             row = conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id='main'").fetchone()
-        if row and row[0]:
-            v = _find_field(_parse_proto_fields(row[0]), 5)
-            if isinstance(v, bytes):
-                par = v.decode("utf-8", errors="ignore").strip()
+            if row and row[0]:
+                fields = _parse_proto_fields(row[0])
+                for fn in (5, 6):
+                    v = _find_field(fields, fn)
+                    if isinstance(v, bytes):
+                        par = v.decode("utf-8", errors="ignore").strip()
+                        if par:
+                            break
+            if par in ("", db.stem):
+                try:
+                    pref_rows = conn.execute("SELECT data FROM parent_references").fetchall()
+                except sqlite3.OperationalError as exc:
+                    if "no such table" in str(exc).lower():
+                        pref_rows = []
+                    else:
+                        raise
+                for (pdata,) in pref_rows:
+                    if not pdata:
+                        continue
+                    v = _find_field(_parse_proto_fields(pdata), 6)
+                    if isinstance(v, bytes):
+                        s = v.decode("utf-8", errors="ignore").strip()
+                        if s and s != db.stem:
+                            par = s
+                            break
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc).lower():
             return None  # 瞬时锁：本次视作无父指针，不缓存
@@ -663,9 +712,11 @@ def _parent_index_full() -> tuple[dict[str, str], dict[str, list[str]]]:
     """(cid → 父 cid, 父 cid → [子 cid])，跨全部根。
 
     summaries 有该会话行则以其父指针为准（2026-11-17 普查与 blob 字段 5
-    逐条一致）；summaries 无该行（尚未刷入 / 被 Language Server 刷回子集 /
-    根无目录库）才读 db 自带 blob 字段 5 兜底——只读这一小撮，冷态不必
-    逐个打开全部会话库。任一读取瞬时失败时本次结果不缓存。
+    逐条一致）。读 db 自带指针兜底两类行：①summaries 无该行（尚未刷入 /
+    被 Language Server 刷回子集 / 根无目录库）；②summaries 有行但 par 空
+    且带子代理信号（agent_name / killed / nesting_depth>0——research 子
+    代理 par 列与 depth 全部空挂，2026-11-24 实测 118 例）。主会话无信号
+    不读 blob，冷态不必逐个打开全部会话库。任一读取瞬时失败时本次结果不缓存。
     """
     roots = antigravity_roots()
     key = tuple(
@@ -677,6 +728,7 @@ def _parent_index_full() -> tuple[dict[str, str], dict[str, list[str]]]:
     cacheable = True
     parents: dict[str, str] = {}
     known: set[str] = set()
+    workerish: set[str] = set()
     for root in roots:
         info = _summaries_info(root)
         cached = _SUMMARIES_INFO.get(os.path.normcase(str(root)))
@@ -684,6 +736,7 @@ def _parent_index_full() -> tuple[dict[str, str], dict[str, list[str]]]:
             cacheable = False  # summaries 瞬时读失败
         parents.update(info.parents)
         known |= info.cids
+        workerish |= info.names.keys() | info.killed | info.deep
     for root in roots:
         try:
             names = os.listdir(root / "conversations")
@@ -693,7 +746,7 @@ def _parent_index_full() -> tuple[dict[str, str], dict[str, list[str]]]:
             if not name.endswith(".db"):
                 continue
             cid = name[:-3]
-            if cid in known or cid in parents:
+            if cid in parents or (cid in known and cid not in workerish):
                 continue
             par = _blob_parent(root / "conversations" / name)
             if par is None:
@@ -794,7 +847,7 @@ def _is_subagent_cid(cid: str, index: dict[str, str] | None = None) -> bool:
 
 
 def subagent_dbs(path: Path) -> list[Path]:
-    """Child conversation dbs of ``path`` per the parent index (summaries ∪ blob 字段 5).
+    """Child conversation dbs of ``path`` per the parent index (summaries ∪ blob/pref 指针).
 
     children 从**所有根**枚举（best-by-mtime 选最新副本，与 `_workspace_sessions`
     的跨根去重语义一致——父副本在哪根不影响子会话发现，code-review F3）。
@@ -919,8 +972,9 @@ def _workspace_sessions() -> dict[str, list[Path]]:
     profiles (:func:`tcer.core.paths.antigravity_roots`). The same workspace across roots
     merges into one group. A conversation id present in several roots (copied
     profile) is counted once -- the most recently modified file wins.
-    子代理会话（父指针 = summaries ∪ blob 字段 5，指向存在父 db 的）不单独成
-    卡：Token/LOC 由 aggregate_usage/session_loc_full 折叠进父会话（原 #5），
+    子代理会话（父指针 = summaries ∪ conversation_parents ∪ blob 字段 5/6
+    ∪ parent_references，指向存在父 db 的）不单独成卡：Token/LOC 由
+    aggregate_usage/session_loc_full 折叠进父会话（原 #5），
     父 db 缺失的孤儿仍独立展示。
     """
     entries: list[tuple[str, list[str]]] = []

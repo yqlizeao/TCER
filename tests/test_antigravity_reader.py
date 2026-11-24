@@ -1146,10 +1146,11 @@ def test_mcp_servers_from_gen_metadata_permissions(tmp_path: Path):
 
 
 def test_background_command_status_is_not_a_tool_error(tmp_path: Path):
-    """status 6（run_command 转后台 task-N）/ 2（常驻进程）不是失败；status 4 / 7 是。
-    LOC 回放仍只认 0/3/5。"""
+    """status 6（run_command 转后台 task-N）/ 2（常驻进程）/ 1（结果未决瞬态，
+    活跃会话实测先 1 后转 3）不是失败；status 4 / 7 是。LOC 回放仍只认 0/3/5。"""
     assert antigravity_reader._result_failed(6, 0) is False
     assert antigravity_reader._result_failed(2, 0) is False
+    assert antigravity_reader._result_failed(1, 0) is False
     assert antigravity_reader._result_failed(6, 1) is True     # 有非零退出码仍算错
     assert antigravity_reader._result_failed(7, 0) is True
     assert antigravity_reader._result_failed(4, 0) is True
@@ -1227,6 +1228,89 @@ def test_blob_parent_folds_child_missing_from_summaries(tmp_path: Path, monkeypa
     assert [x.stem for x in antigravity_reader.discover_sessions(ref)] == ["p1"]
     assert antigravity_reader.read_session_meta(c).is_subagent is True
     assert antigravity_reader.read_session_meta(p).is_subagent is False
+    assert antigravity_reader.aggregate_usage(p).input_tokens == 140
+
+
+def _set_parent_references(db: Path, root_cid: str) -> None:
+    """会话库 parent_references 行：字段 6 = 父/根会话 id（2026-11-24 实测形态）。"""
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE IF NOT EXISTS parent_references (idx INTEGER PRIMARY KEY, data BLOB)")
+    conn.execute("DELETE FROM parent_references")
+    blob = _make_proto_field(1, 2, "ref-0") + _make_proto_field(6, 2, root_cid)
+    conn.execute("INSERT INTO parent_references VALUES (0, ?)", (blob,))
+    conn.commit()
+    conn.close()
+
+
+def test_research_agent_folds_via_blob_root_field(tmp_path: Path, monkeypatch):
+    """research 子代理形态（2026-11-24 实测 118 例）：summaries 有行
+    （agent_name='research'）但 par 空、depth 0；blob 无字段 5、字段 6 =
+    根会话 id → 子代理信号触发 blob 兜底，仍折叠。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    uri = "file:///C:/proj/res"
+    p = _build_db(conv / "p1.db", [_gen_row("gemini-3.8-flash", 100, 10, 0, "rp")], [])
+    _set_blob(p, _make_proto_field(1, 2, _make_proto_field(1, 2, uri)) + _make_proto_field(6, 2, "p1"))
+    c = _build_db(conv / "r1.db", [_gen_row("gemini-3.8-flash", 40, 4, 0, "rr")], [])
+    _set_blob(c, _make_proto_field(1, 2, _make_proto_field(1, 2, uri))
+              + _make_proto_field(4, 2, _make_proto_field(1, 2, "research"))
+              + _make_proto_field(6, 2, "p1"))
+    m = _build_db(conv / "s1.db", [_gen_row("gemini-3.8-flash", 10, 1, 0, "rs")], [])
+    _write_summaries_full(tmp_path, [
+        ("p1", "", uri, 3, "", 0),
+        ("r1", "", uri, 2, "research", 0),  # par 空：仅靠 worker 信号 + blob 字段 6
+        ("s1", "", uri, 1, "", 0),          # 无信号主会话：照常独立
+    ])
+
+    ref = antigravity_reader.resolve_project("res")
+    assert sorted(x.stem for x in antigravity_reader.discover_sessions(ref)) == ["p1", "s1"]
+    assert antigravity_reader.read_session_meta(c).is_subagent is True
+    assert antigravity_reader.read_session_meta(m).is_subagent is False
+    assert [x.stem for x in antigravity_reader.subagent_dbs(p)] == ["r1"]
+    assert antigravity_reader.aggregate_usage(p).input_tokens == 140
+
+
+def test_parent_references_table_folds(tmp_path: Path, monkeypatch):
+    """子 db 的 parent_references 行字段 6 兜底（2026-11-24 实测 7920d6a9/
+    c5ec8dc9 形态）：blob f5 缺失、f6 误写自身，summaries 完全无该行。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    uri = "file:///C:/proj/prefy"
+    p = _build_db(conv / "p1.db", [_gen_row("gemini-3.8-flash", 100, 10, 0, "rp")], [])
+    _set_blob(p, _make_proto_field(1, 2, _make_proto_field(1, 2, uri)) + _make_proto_field(6, 2, "p1"))
+    c = _build_db(conv / "c9.db", [_gen_row("gemini-3.8-flash", 40, 4, 0, "rc")], [])
+    _set_blob(c, _make_proto_field(1, 2, _make_proto_field(1, 2, uri)) + _make_proto_field(6, 2, "c9"))
+    _set_parent_references(c, "p1")
+    _write_summaries_with_parent(tmp_path, [("p1", "", uri, 2)])  # c9 无行
+
+    ref = antigravity_reader.resolve_project("prefy")
+    assert [x.stem for x in antigravity_reader.discover_sessions(ref)] == ["p1"]
+    assert antigravity_reader.read_session_meta(c).is_subagent is True
+    assert antigravity_reader.aggregate_usage(p).input_tokens == 140
+
+
+def test_summaries_conversation_parents_table_folds(tmp_path: Path, monkeypatch):
+    """summaries 库 conversation_parents 表（2.32 新增、2026-11-24 起有数据）
+    并入父指针；行可不存在于 conversation_summaries。"""
+    monkeypatch.setenv("ANTIGRAVITY_DIR", str(tmp_path))
+    conv = tmp_path / "conversations"
+    uri = "file:///C:/proj/cpt"
+    p = _build_db(conv / "p1.db", [_gen_row("gemini-3.8-flash", 100, 10, 0, "rp")], [])
+    _set_blob(p, _make_proto_field(1, 2, _make_proto_field(1, 2, uri)) + _make_proto_field(6, 2, "p1"))
+    c = _build_db(conv / "c8.db", [_gen_row("gemini-3.8-flash", 40, 4, 0, "rc")], [])
+    _set_blob(c, _make_proto_field(1, 2, _make_proto_field(1, 2, uri)) + _make_proto_field(6, 2, "c8"))
+    conn = sqlite3.connect(tmp_path / "conversation_summaries.db")
+    conn.execute("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, "
+                 "workspace_uris TEXT, last_modified_time INTEGER, parent_conversation_id TEXT)")
+    conn.execute("CREATE TABLE conversation_parents (conversation_id TEXT, parent_id TEXT)")
+    conn.execute("INSERT INTO conversation_summaries VALUES (?,?,?,?)", ("p1", json.dumps([uri]), 2, ""))
+    conn.execute("INSERT INTO conversation_parents VALUES (?,?)", ("c8", "p1"))
+    conn.commit()
+    conn.close()
+
+    ref = antigravity_reader.resolve_project("cpt")
+    assert [x.stem for x in antigravity_reader.discover_sessions(ref)] == ["p1"]
+    assert antigravity_reader.read_session_meta(c).is_subagent is True
     assert antigravity_reader.aggregate_usage(p).input_tokens == 140
 
 
