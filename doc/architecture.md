@@ -21,6 +21,7 @@
 | `tcer/core/format.py` | 纯值格式化器（千分位/百分比/时间戳/模型名） |
 | `tcer/core/export.py` | JSON/CSV/Markdown 序列化 + 综合效率分排名数据 + 文本条形图（`_CSV_FIELDS`/`_CSV_EXCLUDED` 有漂移护栏测试） |
 | `tcer/core/audit.py` | 闭环审计：`analyze` 结果对照原始会话文件重算（`python -m tcer.audit`） |
+| `tcer/core/artifacts.py` | 全局产物索引：各源会话侧产物文件枚举（Antigravity `brain/<cid>`/`scratch/teamwork`、Claude `plans`/`file-history`），分类标注、子代理归根会话；纯展示不进指标 |
 | `tcer/core/upload_client.py` / `upload_prefs.py` | 显式 opt-in 的上传（纯离线原则的例外之一，另有负责人） |
 | `tcer/core/llm_client.py` / `llm_prefs.py` / `llm_prompts.py` | 显式 opt-in 的 LLM 语义解读（纯 urllib 调 OpenAI-compatible 端点；数据出境范围多选 metrics/dialog/tools；结果仅展示不参与指标计算；未配置零联网零入口） |
 | `tcer/gui/` | Tkinter 图形界面（MVC 架构） |
@@ -53,6 +54,9 @@ tcer/gui/
 ├── views.py        # 面板：FilterBar/ProjectColumn/SessionColumn(含搜索)/MetricPanel/排名/模型对比
 ├── charts.py       # 图表：TrendChart(趋势/散点/仪表板/时段热力四模式)/选择器/悬浮提示
 ├── popups.py       # 弹窗：详情/工具/模型/成本/基准/记忆/雷达/上传等
+├── popups_analysis.py  # 分析弹窗：会话对比/时间线/工具序列/项目总览（popups re-export）
+├── transcript_view.py  # 会话记录阅读器（文档流 + 目录，自有后台加载）
+├── artifacts_view.py   # 全局产物索引窗（core/artifacts 数据源，后台扫描 + 筛选）
 └── html_report.py  # 自包含 HTML 报告渲染（项目级/会话级,无 Tk 依赖,可无头测试）
 ```
 

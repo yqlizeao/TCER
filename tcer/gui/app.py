@@ -1103,6 +1103,19 @@ class TcerGui:
             show_info(self.root, "项目记忆文件", "当前项目没有 memory/ 目录或目录为空。")
 
 
+    def show_artifact_browser(self) -> None:
+        """全局产物索引：各源写在项目目录之外、按会话归档的产物文件。"""
+        from .artifacts_view import ArtifactsWindow
+        win = getattr(self, "_artifacts_win", None)
+        if win is not None and getattr(win, "_alive", False):
+            try:
+                win._win.lift()
+                win._win.focus_force()
+                return
+            except tk.TclError:
+                pass
+        self._artifacts_win = ArtifactsWindow(self.root)
+
     def show_tool_sequence(self) -> None:
         report = self._rendered_report
         if not report or len(report.usage.tool_ops) < 2:

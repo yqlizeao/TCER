@@ -1254,6 +1254,7 @@ class FilterBar:
         menu.add_command(label="工具序列", command=c.show_tool_sequence)
         menu.add_command(label="会话时间线", command=c.show_session_timeline)
         menu.add_command(label="会话对比", command=c.show_session_compare)
+        menu.add_command(label="产物索引", command=c.show_artifact_browser)
 
     def _build_export_menu(self, menu) -> None:
         menu.add_command(label="生成研发周报…", command=self.controller.show_weekly_report)
