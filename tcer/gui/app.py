@@ -810,7 +810,7 @@ class TcerGui:
             # 最后一个会话被删 — 项目变空，回到项目列表状态。
             self._current = None
             self.refresh_projects()
-        self.filter.set_status(f"已删除会话 · 移除 {len(removed)} 项磁盘对象")
+        self.filter.set_status(f"已删除会话 · 移除 {len(removed)} 项磁盘对象", transient=True)
 
     def _set_session_view(self, sid: str | None) -> bool:
         """视角唯一写点：有选中会话 = 会话视角，否则项目视角。
@@ -990,9 +990,15 @@ class TcerGui:
 
     def show_transcript_for_rendered(self) -> None:
         """看板头部「会话记录」按钮：打开当前会话视角的会话；序列取会话列表当前
-        （过滤 / 排序后）结果，阅读器内可前后翻。项目汇总视角无单一会话，不响应。"""
+        （过滤 / 排序后）结果，阅读器内可前后翻。项目汇总视角无单一会话时，
+        主动打开列表当前排序下的第一个会话并用瞬时状态提示，不再静默不响应。"""
         report = self._rendered_report
         if not report or report.meta.session_id == "(aggregate)":
+            reports = list(getattr(self.session_col, "_reports", None) or [])
+            if not reports:
+                return
+            self.show_transcript(reports[0], reports)
+            self.filter.set_status("已打开最近会话记录 · 双击会话卡片可看指定会话", transient=True)
             return
         self.show_transcript(report, self.session_col._reports)
 
@@ -2134,7 +2140,7 @@ class TcerGui:
                 content = export_mod.to_markdown(a.reports, a.aggregate, a.n_sessions,
                                                  project_name=proj_name)
             Path(path).write_text(content, encoding="utf-8")
-            self.filter.set_status(f"已导出 → {Path(path).name}")
+            self.filter.set_status(f"已导出 → {Path(path).name}", transient=True)
         except OSError as e:
             show_error(self.root, "导出失败", str(e))
 

@@ -304,8 +304,10 @@ class ArtifactsWindow:
         self._projs = []
 
         def work():
+            def _prog(phase, n):
+                self._q.put(("prog", gen, (phase, n)))
             try:
-                items = artifacts.collect()
+                items = artifacts.collect(progress=_prog)
             except Exception as e:  # noqa: BLE001
                 self._q.put(("err", gen, f"{type(e).__name__}: {e}"))
                 return
@@ -328,6 +330,10 @@ class ArtifactsWindow:
                     self._status_var.set(
                         f"{len(self._data)} 项产物 · {len(self._projs)} 个项目 · "
                         f"{_fmt_size(sum(a.size for a in self._data))}")
+                elif kind == "prog":
+                    phase, n = item[2]
+                    _names = {"antigravity": "Antigravity", "claude": "Claude"}
+                    self._status_var.set(f"正在扫描 {_names.get(phase, phase)}… 已发现 {n} 项")
                 elif kind == "err":
                     self._status_var.set("扫描失败")
                     show_error(self._win, "产物索引扫描失败", item[2])

@@ -855,8 +855,21 @@ class StatusBar:
         else:
             self._ctx_lbl.configure(text="")
 
-    def set_status(self, text: str, *, fg: str | None = None) -> None:
+    def set_status(self, text: str, *, fg: str | None = None, transient: bool = False) -> None:
+        """状态栏文本。``transient=True`` 用于瞬时事件反馈（如「已复制」）：
+        数秒后自动消退并恢复到上一条常驻状态；常驻状态（transient=False）
+        会被记住作为消退后的回落底态。代际计数保证新消息不会被旧定时器覆盖。"""
         clean_text = text.strip()
+        if not transient:
+            self._persist_text = clean_text
+            self._persist_fg = fg
+        self._status_gen = getattr(self, "_status_gen", 0) + 1
+        self._apply_status(clean_text, fg)
+        if transient:
+            gen = self._status_gen
+            self.frame.after(4000, lambda: self._restore_status(gen))
+
+    def _apply_status(self, clean_text: str, fg: str | None = None) -> None:
         self._status_lbl.configure(text=clean_text)
         if "错" in clean_text or "失败" in clean_text:
             dot_color = theme.ERROR
@@ -870,6 +883,12 @@ class StatusBar:
         if fg == theme.ACCENT:
             fg = theme.CYAN  # 防止暗蓝色在深灰底上对比度不足
         self._status_lbl.configure(fg=fg or theme.FG)
+
+    def _restore_status(self, gen: int) -> None:
+        if gen != getattr(self, "_status_gen", 0):
+            return  # 期间已有新消息，放弃恢复
+        self._apply_status(getattr(self, "_persist_text", "就绪"),
+                           getattr(self, "_persist_fg", None))
 
     def update_badges(self, *, model_text: str = "",
                       turns_text: str = "", cost_text: str = "",
@@ -1341,6 +1360,7 @@ class ProjectColumn:
         self.container = sf.inner
         self._empty_hint = None
         self._filter_hint = None
+        self._filter_action = None
 
     def update(self, projects, empty_projects: set | None = None,
                preferred_uid: str | None = None,
@@ -1539,6 +1559,33 @@ class ProjectColumn:
                 text=("无匹配项目，按 Esc 清空搜索框" if tokens
                       else "当前筛选范围内无项目活动"))
 
+        # 时间/来源筛选导致部分项目被隐藏时的可点击提示行（固定在列表底部）：
+        # 计数只说「隐藏 N」，这里给出原因与一键出口——筛选状态必须在场。
+        want_action = False
+        action_text = ""
+        if h and not tokens:
+            preset = getattr(getattr(self.controller, "filter", None), "_current_preset", "all")
+            if preset != "all":
+                _names = {"today": "今天", "week": "本周", "month": "本月"}
+                want_action = True
+                action_text = f"另有 {h} 项不在「{_names.get(preset, preset)}」范围内 · 点击显示全部 →"
+        if want_action:
+            if self._filter_action is None:
+                lbl = tk.Label(self.container, text=action_text, bg=theme.PANEL,
+                               fg=theme.MUTED, font=theme.FONT_UI_SMALL,
+                               cursor=CLICK_CURSOR, anchor="center", pady=6)
+                lbl.pack(side="bottom", fill="x", padx=1, pady=(4, 2))
+                lbl.bind("<Button-1>", lambda _e: self.controller.filter._set_preset("all"))
+                lbl.bind("<Enter>", lambda _e: lbl.configure(fg=theme.ACCENT))
+                lbl.bind("<Leave>", lambda _e: lbl.configure(fg=theme.MUTED))
+                Tooltip(lbl, "把时间筛选切换为「全部」，显示所有有会话的项目")
+                self._filter_action = lbl
+            else:
+                self._filter_action.configure(text=action_text)
+        elif self._filter_action is not None:
+            self._filter_action.destroy()
+            self._filter_action = None
+
         self._refresh_count_label()
         self.scroll.update_scroll()
     def _on_right_click(self, event, idx, project_dir):
@@ -1578,7 +1625,7 @@ class ProjectColumn:
         shown = text if len(text) <= 72 else text[:44] + "…" + text[-24:]
         if "\n" in shown:
             shown = shown.split("\n", 1)[0] + "…"
-        self.controller.filter.set_status(f'已复制 "{shown}"')
+        self.controller.filter.set_status(f'已复制 "{shown}"', transient=True)
 
 
 class SessionColumn:
@@ -1814,6 +1861,7 @@ class SessionColumn:
         card = Card(self.container,
                     on_click=lambda c, s=sid: self._select(c, s),
                     on_right_click=lambda e, _r=r, _s=sid: self._on_right_click(e, _r, _s),
+                    on_double_click=lambda c, _r=r: self.controller.show_transcript(_r, self._reports),
                     bg=theme.PANEL_2, padx=2, pady=1)
 
         # 卡片刻意无状态着色（2026-10 去色决策）：原左侧 rail 与日期圆点按
@@ -2133,7 +2181,7 @@ class SessionColumn:
         shown = text if len(text) <= 72 else text[:44] + "…" + text[-24:]
         if "\n" in shown:
             shown = shown.split("\n", 1)[0] + "…"
-        self.controller.filter.set_status(f'已复制 "{shown}"')
+        self.controller.filter.set_status(f'已复制 "{shown}"', transient=True)
 
     def _open_session_file(self, report):
         from .platform import open_in_file_manager
@@ -2351,6 +2399,24 @@ class MetricPanel:
         s_lbl = tk.Label(header, text=f"{len(group.metrics)} 项", bg=header_bg, fg=theme.MUTED,
                          font=theme.FONT_UI_SMALL, anchor="e", cursor=CLICK_CURSOR)
         s_lbl.pack(side="right", padx=(0, 4))
+
+        # 上下文分析入口：用户在浏览该组指标的那一刻，正是想看对应分析的时刻——
+        # 入口出现在需求产生的位置，不占视觉主权重（muted 小字，悬停才点亮）。
+        _GROUP_ANALYSIS = {
+            "G1": ("时间线 →", "show_session_timeline", "会话时间线：逐会话起止与耗时"),
+            "G4": ("工具序列 →", "show_tool_sequence", "相邻工具调用转移：工作流模式是否健康"),
+        }
+        if group.id in _GROUP_ANALYSIS and hasattr(self, "controller"):
+            link_text, meth, tip = _GROUP_ANALYSIS[group.id]
+            link = tk.Label(header, text=link_text, bg=header_bg, fg=theme.MUTED,
+                            font=theme.FONT_UI_SMALL, cursor=CLICK_CURSOR)
+            link.pack(side="right", padx=(0, 2))
+            fn = getattr(self.controller, meth, None)
+            if fn is not None:
+                link.bind("<Button-1>", lambda _e, f=fn: f())
+            link.bind("<Enter>", lambda _e, l=link: l.configure(fg=theme.ACCENT))
+            link.bind("<Leave>", lambda _e, l=link: l.configure(fg=theme.MUTED))
+            Tooltip(link, tip)
 
         body = tk.Frame(gframe, bg=theme.SURFACE_CARD)
         body.pack(fill="x", padx=6, pady=(0, 6))

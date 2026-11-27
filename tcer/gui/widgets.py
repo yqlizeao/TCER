@@ -473,11 +473,12 @@ class Card:
 
     def __init__(self, parent, on_click, on_right_click=None,
                  bg: str = theme.PANEL_2, padx: int = 4, pady: int = 2,
-                 radius: int = theme.RADIUS_M) -> None:
+                 radius: int = theme.RADIUS_M, on_double_click=None) -> None:
         self._bg = bg
         self._parent_bg = str(parent.cget("bg")) if hasattr(parent, "cget") else theme.PANEL
         self._on_click = on_click
         self._on_right_click = on_right_click
+        self._on_double_click = on_double_click
         self._selected = False
         self._hovered = False
         self._state_rail_color: str | None = None
@@ -499,6 +500,8 @@ class Card:
         self.rail.pack_propagate(False)
 
         self.frame.bind("<Button-1>", lambda e: on_click(self))
+        if on_double_click:
+            self.frame.bind("<Double-Button-1>", lambda e: on_double_click(self))
         self.frame.bind("<Enter>", self._on_hover, add="+")
         self.frame.bind("<Leave>", self._on_unhover, add="+")
         if on_right_click:
@@ -599,6 +602,8 @@ class Card:
             except tk.TclError:
                 pass
         widget.bind("<Button-1>", lambda e: self._on_click(self), add="+")
+        if self._on_double_click:
+            widget.bind("<Double-Button-1>", lambda e: self._on_double_click(self), add="+")
         if self._on_right_click:
             widget.bind("<Button-3>", self._on_right_click, add="+")
         return widget
