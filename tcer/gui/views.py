@@ -1566,9 +1566,8 @@ class ProjectColumn:
         if h and not tokens:
             preset = getattr(getattr(self.controller, "filter", None), "_current_preset", "all")
             if preset != "all":
-                _names = {"today": "今天", "week": "本周", "month": "本月"}
                 want_action = True
-                action_text = f"另有 {h} 项不在「{_names.get(preset, preset)}」范围内 · 点击显示全部 →"
+                action_text = f"显示全部项目（{n_total}） →"
         if want_action:
             if self._filter_action is None:
                 lbl = tk.Label(self.container, text=action_text, bg=theme.PANEL,
@@ -1578,7 +1577,8 @@ class ProjectColumn:
                 lbl.bind("<Button-1>", lambda _e: self.controller.filter._set_preset("all"))
                 lbl.bind("<Enter>", lambda _e: lbl.configure(fg=theme.ACCENT))
                 lbl.bind("<Leave>", lambda _e: lbl.configure(fg=theme.MUTED))
-                Tooltip(lbl, "把时间筛选切换为「全部」，显示所有有会话的项目")
+                Tooltip(lbl, f"另有 {h} 个项目在当前时间范围无会话活动\n"
+                             "点击把时间筛选切换为「全部」")
                 self._filter_action = lbl
             else:
                 self._filter_action.configure(text=action_text)
