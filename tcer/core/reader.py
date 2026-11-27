@@ -228,6 +228,17 @@ def record_tool_variant(u: TokenUsage, tool_name: str, inp) -> None:
             return
 
 
+def _mcp_block_tool_name(item: dict) -> str:
+    """Anthropic MCP content block → ``mcp__<server>__<tool>``（无 server 时退回工具名）。"""
+    name = item.get("name")
+    if not isinstance(name, str) or not name:
+        return "mcp"
+    server = item.get("server_name")
+    if isinstance(server, str) and server:
+        return f"mcp__{server}__{name}"
+    return name
+
+
 def aggregate_usage(
     path: Path,
     *,
@@ -949,13 +960,18 @@ def _scan_session_uncached(
                         # 重发去重：Claude Code 2.1.227+ rewind/重连后会把历史
                         # （同 message.id + 同 tool_use id）重写进同一 jsonl——
                         # token 有 message.id 去重保护，tool_calls/tool_ops/LOC
-                        # 回放没有则双计（实测一文件 13 对重发）。按 tool_use id
+                        # 回放没有则双计（实测一文件 13 对重发）。按 (块类型, id)
                         # 只计一次；无 id 的块退回逐条计（同 message.id 惯例）。
+                        # 键含块类型：第三方代理曾把同一 call_* id 同时发给
+                        # server_tool_use 与一个畸形 tool_use（2026-11 普查），
+                        # 两个命名空间在标准 Claude 数据里本不冲突，不能因为
+                        # 代理串号而吞掉后一个真实调用。
                         tuid = item.get("id")
                         if isinstance(tuid, str) and tuid:
-                            if tuid in seen_tool_uses:
+                            tkey = ("tool_use", tuid)
+                            if tkey in seen_tool_uses:
                                 continue
-                            seen_tool_uses.add(tuid)
+                            seen_tool_uses.add(tkey)
                         tool_name = item.get("name")
                         if isinstance(tool_name, str):
                             u.tool_calls[tool_name] = u.tool_calls.get(tool_name, 0) + 1
@@ -987,19 +1003,56 @@ def _scan_session_uncached(
                     elif item_type == "server_tool_use":
                         # MCP 服务端工具（2.1.2xx+）：与 tool_use 同口径进
                         # tool_calls/tool_ops（调用在服务端执行，仍是工具行为）。
-                        # 重发去重与 tool_use 同族（srvtoolu_ 与 toolu_ id 不冲突）。
                         stid = item.get("id")
                         if isinstance(stid, str) and stid:
-                            if stid in seen_tool_uses:
+                            skey = ("server_tool_use", stid)
+                            if skey in seen_tool_uses:
                                 continue
-                            seen_tool_uses.add(stid)
+                            seen_tool_uses.add(skey)
                         st_name = item.get("name")
                         if isinstance(st_name, str) and st_name:
                             u.tool_calls[st_name] = u.tool_calls.get(st_name, 0) + 1
+                            if stid:
+                                call_id_to_name[stid] = st_name
                             u.tool_ops.append(ToolOp(
                                 turn=current_turn, tool=st_name, path=""))
                             if u.turn_stats and u.turn_stats[-1].turn == current_turn:
                                 u.turn_stats[-1].tool_calls += 1
+                    elif item_type == "mcp_tool_use":
+                        # 第三方代理（实测 glm-5.3 经 ccswitch 写入）使用 Anthropic
+                        # MCP 原生块而不是 Claude tool_use/server_tool_use。它们是真实
+                        # 工具调用；server_name + name 转成 mcp__server__tool，符合
+                        # MCP 键自带服务器名的既有约定。Token/LOC 口径不受影响。
+                        mid_tool = item.get("id")
+                        if isinstance(mid_tool, str) and mid_tool:
+                            mkey = ("mcp_tool_use", mid_tool)
+                            if mkey in seen_tool_uses:
+                                continue
+                            seen_tool_uses.add(mkey)
+                        mc_name = _mcp_block_tool_name(item)
+                        u.tool_calls[mc_name] = u.tool_calls.get(mc_name, 0) + 1
+                        if isinstance(mid_tool, str) and mid_tool:
+                            call_id_to_name[mid_tool] = mc_name
+                        u.tool_ops.append(ToolOp(turn=current_turn, tool=mc_name, path=""))
+                        if u.turn_stats and u.turn_stats[-1].turn == current_turn:
+                            u.turn_stats[-1].tool_calls += 1
+                    elif item_type == "mcp_tool_result":
+                        # 同一非标准 MCP 通道的结果块也写在 assistant 行内。它与
+                        # user/tool_result 同语义，只是容器不同：按 tool_use_id 去重，
+                        # is_error 计入工具错误并归因到已见调用。
+                        tid = item.get("tool_use_id")
+                        if isinstance(tid, str) and tid in seen_tool_results:
+                            continue
+                        if isinstance(tid, str) and tid:
+                            seen_tool_results.add(tid)
+                        if item.get("is_error"):
+                            u.tool_errors += 1
+                            if u.turn_stats:
+                                u.turn_stats[-1].errors += 1
+                            if isinstance(tid, str):
+                                tname = call_id_to_name.get(tid)
+                                if tname:
+                                    u.tool_errors_by_tool[tname] = u.tool_errors_by_tool.get(tname, 0) + 1
                     elif item_type == "thinking":
                         u.thinking_count += 1
 

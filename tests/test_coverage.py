@@ -157,6 +157,34 @@ def test_reader_cross_check_catches_duplicate_server_tool_use(tmp_path: Path):
     assert _check(rep, "reader_tool_calls_match").ok
 
 
+def test_mcp_blocks_and_cross_namespace_id_collision(tmp_path: Path):
+    call_id = "call_shared"
+    rows = [
+        {"type": "user", "version": "2.1.330",
+         "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}},
+        _asst("m3", content=[
+            {"type": "server_tool_use", "id": call_id, "name": "analyze_image", "input": {}},
+            _tool_use(call_id, "Bash"),
+            {"type": "mcp_tool_use", "id": "mc1", "server_name": "web_reader",
+             "name": "webReader", "input": {"url": "https://example.invalid"}},
+            {"type": "mcp_tool_result", "tool_use_id": "mc1", "is_error": True,
+             "content": [{"type": "text", "text": "failed"}]},
+            {"type": "tool_result", "tool_use_id": call_id,
+             "content": [{"type": "text", "text": "ok"}]},
+        ]),
+    ]
+    path = _write(tmp_path / "p" / "s.jsonl", rows)
+    u = reader.aggregate_usage(path)
+    assert u.tool_calls == {"analyze_image": 1, "Bash": 1,
+                            "mcp__web_reader__webReader": 1}
+    assert u.tool_errors == 1
+    assert u.tool_errors_by_tool == {"mcp__web_reader__webReader": 1}
+    rep = _run([path])
+    assert rep.ok, coverage.format_report(rep)
+    assert _check(rep, "reader_tool_calls_match").ok
+    assert _check(rep, "tool_results_have_calls").ok
+
+
 def test_registry_has_no_empty_notes():
     """登记表每一项都必须写明处理方式或忽略理由。"""
     for dim, reg in coverage.CLAUDE_REGISTRY.items():
@@ -417,6 +445,24 @@ def test_omp_orphan_result_and_missing_parent(tmp_path: Path):
     sub = _write(tmp_path / "d2" / "2026_x_s9" / "sub.jsonl", _omp_rows())
     rep2 = coverage.omp_coverage([sub])
     assert not _check(rep2, "subagent_parent_exists").ok
+
+
+def test_omp_duplicate_tool_call_ids_are_independent_calls(tmp_path: Path):
+    rows = _omp_rows() + [
+        {"type": "message", "message": {"role": "assistant",
+                                        "content": [{"type": "toolCall", "id": "dup",
+                                                     "name": "read", "arguments": {}}]}},
+        {"type": "message", "message": {"role": "toolResult", "toolCallId": "dup",
+                                        "toolName": "read", "content": "x", "isError": False}},
+        {"type": "message", "message": {"role": "assistant",
+                                        "content": [{"type": "toolCall", "id": "dup",
+                                                     "name": "grep", "arguments": {}}]}},
+        {"type": "message", "message": {"role": "toolResult", "toolCallId": "dup",
+                                        "toolName": "grep", "content": "x", "isError": False}},
+    ]
+    rep = coverage.omp_coverage([_write(tmp_path / "d" / "s.jsonl", rows)])
+    assert rep.ok, coverage.format_report(rep)
+    assert _check(rep, "reader_tool_calls_match").ok
 
 
 def test_omp_reasoning_over_output_is_info(tmp_path: Path):

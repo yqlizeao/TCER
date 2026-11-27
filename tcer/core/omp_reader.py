@@ -111,7 +111,7 @@ def discover_sessions() -> list[Path]:
     base = omp_sessions_dir()
     if not base.is_dir():
         return []
-    return sorted(base.rglob("*.jsonl"))
+    return sorted(p for p in base.rglob("*.jsonl") if p.name != "changes.jsonl")
 
 
 def _subagent_dir(main_file: Path) -> Path:
@@ -130,7 +130,7 @@ def _subagent_files(main_file: Path) -> list[Path]:
     if not d.is_dir():
         return []
     try:
-        return sorted(d.glob("*.jsonl"))
+        return sorted(p for p in d.glob("*.jsonl") if p.name != "changes.jsonl")
     except OSError:
         return []
 
@@ -381,7 +381,8 @@ def _usage_from_events(events, *, is_subagent: bool = False) -> TokenUsage:
         if typ == "mode_change":
             # 计划模式生命周期（mode=plan 进入；plan_paused/none 退出不计）。
             data = obj.get("data")
-            mode = data.get("mode") if isinstance(data, dict) else None
+            mode = _first_str(obj.get("mode"),
+                              data.get("mode") if isinstance(data, dict) else None)
             if mode == "plan":
                 u.plan_mode_count += 1
             continue
@@ -675,9 +676,12 @@ def _loc_from_events(events):
                     continue
                 name = block.get("name")
                 cid = block.get("id")
-                if name in _EDIT_TOOLS and isinstance(cid, str):
+                kind = ("write" if name in ("write", "Write")
+                        else "edit" if name in ("edit", "Edit", "ast_edit")
+                        else "")
+                if kind and isinstance(cid, str):
                     args = block.get("arguments")
-                    pending[cid] = (name, args if isinstance(args, dict) else {})
+                    pending[cid] = (kind, args if isinstance(args, dict) else {})
             continue
 
         if role != "toolResult" or mm.get("isError") is True:
@@ -689,7 +693,7 @@ def _loc_from_events(events):
         details = mm.get("details") if isinstance(mm.get("details"), dict) else {}
 
         if name == "write":
-            fp = _first_str(details.get("resolvedPath"), args.get("path"))
+            fp = _first_str(details.get("resolvedPath"), args.get("path"), args.get("file_path"))
             if not fp:
                 continue
             has_signal = True
@@ -700,8 +704,15 @@ def _loc_from_events(events):
                 "file_path": fp,
                 "content": content if isinstance(content, str) else "",
             })
-        else:  # edit / ast_edit
-            changes = _edit_changes(args, details)
+        else:  # edit / Edit / ast_edit
+            if isinstance(args.get("old_string"), str) or isinstance(args.get("new_string"), str):
+                fp = _first_str(args.get("file_path"), args.get("path"),
+                                details.get("path"), details.get("resolvedPath"))
+                changes = [(fp or "",
+                            args.get("old_string") if isinstance(args.get("old_string"), str) else "",
+                            args.get("new_string") if isinstance(args.get("new_string"), str) else "")]
+            else:
+                changes = _edit_changes(args, details)
             if not changes:
                 continue
             has_signal = True

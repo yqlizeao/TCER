@@ -123,7 +123,7 @@ JSONL 中时间戳可能是三种格式：
 
 ## 工具调用统计
 
-`reader.aggregate_usage` 从 assistant 消息的 `content` 中提取 `tool_use` 块，按 `message.id` 去重后统计每种工具的调用次数。
+`reader.aggregate_usage` 从 assistant 消息的 `content` 中提取 `tool_use` 块，按 `message.id` 去重后统计每种工具的调用次数。`server_tool_use`（Claude 服务端工具）同口径计数；rewind 重发按 `(块类型, tool id)` 去重——第三方代理曾把同一 `call_*` id 同时用于 `server_tool_use` 与畸形 `tool_use`，跨块类型不能互相吞掉。2.1.318+ 的第三方代理数据还出现 Anthropic MCP 原生块：`mcp_tool_use` 是真实工具调用，规范化为 `mcp__<server_name>__<name>`；`mcp_tool_result` 写在 assistant 行内，显式 `is_error:true` 计入工具错误。同渠道另有无 `is_error` 键的 assistant 内 `tool_result`，因缺少可靠失败裁决仍只用于守恒配对、不猜错误。
 
 ---
 
@@ -184,7 +184,7 @@ Codex `resume` 复用同一 `session_id` 写**新 rollout 文件并重放整段�
 
 ## OpenCode 数据格式
 
-OpenCode 把会话持久化在 `~/.local/share/opencode/opencode.db`（SQLite，TCER 以只读 URI 打开），读 `project` / `session` / `message` / `part` 表；**仅支持 SQLite**。
+OpenCode 把会话持久化在 `~/.local/share/opencode/opencode.db`（SQLite，TCER 以只读 URI 打开），读 `project` / `session` / `message` / `part` 表；**仅支持 SQLite**。2026-11 本机库新增 `event`/`event_sequence`（事件溯源底账，投影已计量，不能再双计）、账号/凭据/权限/分享/迁移表、以及 `project_directory`/`workspace`/`todo`/`session_input` 等元数据表；均不含独立 token/LOC 权威字段，登记为已知忽略。新 part `step-start` 只带快照 hash，无 token/工具参数，忽略；计量仍以 `step-finish`/session 列为准。
 
 - **子会话折叠**：task 工具派生的子会话带 `session.parent_id`，`sessions_for_project` 只返回顶层，`aggregate_usage`/`_loc_scan` 递归折叠子会话（真实成本保留，不单独计 session），`subagent_ids` 供 `n_subagents`。
 - **Token**：按逐 assistant 消息 `modelID` 的 `tokens` 分桶，余量记会话主模型；`tokens_reasoning` 折入输出。峰值输入只取 `step-finish` 快照，多回合无快照时留 0。
@@ -211,6 +211,7 @@ omp（[oh-my-pi](https://omp.sh)）把会话持久化在 `~/.omp/agent/sessions/
 ~/.omp/agent/sessions/<dir-encoded>/<ts>_<sessionId>/        # 子代理会话（同 stem 子目录）
   *.jsonl
 ~/.omp/agent/blobs/<sha256>      # 大字符串/图片外部化（未解析）
+~/.omp/agent/sessions/<dir-encoded>/<ts>/changes.jsonl   # 文件变更 journal（change/call/commit），不是会话转录，发现与覆盖审计均排除
 ```
 
 `<dir-encoded>`：cwd 在 home 内 → `-<相对>`；在 temp 内 → `-tmp-<相对>`；其他 → `--<绝对>--`（`/ \ :` 替换为 `-`）。
@@ -226,7 +227,7 @@ omp（[oh-my-pi](https://omp.sh)）把会话持久化在 `~/.omp/agent/sessions/
 | `thinking_level_change` | 推理强度 | `thinkingLevel`（如 `high`）→ `reasoning_effort`；末个非空值胜出 |
 | `message` | 回合流 | `message.role` ∈ `user`/`assistant`/`toolResult` |
 | `compaction` | 上下文压缩 | → `compaction_count` / `compaction_turns` |
-| `mode_change` | 模式切换 | `plan` → 计划模式 |
+| `mode_change` | 模式切换 | `plan` → 计划模式；18.x 后实测 `mode` 可位于顶层（`data` 只带 `planFilePath`），顶层优先、兼容 `data.mode` |
 | `custom` / `custom_message` 等 | 忽略 | — |
 
 ### Token 用量（`message.usage`，仅 assistant）
@@ -260,9 +261,11 @@ user `content` 里的 `{type:"image", mimeType, data}`（内联 base64 图片）
 | `grep`·`search` / `glob`·`find` / `bash`·`eval`·`ssh` | Grep / Glob / Bash |
 | `todo` / `task` / `web_search` / `ask` | TodoWrite / Task / WebSearch / AskUserQuestion |
 
+19.x 部分会话内嵌 Claude 风格工具名（`Read`/`Write`/`Edit`/`Bash`/`Agent`/`AskUserQuestion`/`EnterPlanMode` 等），参数也用 Claude schema；这些原名即规范名。`advise`/`hub`/`yield`/`wait`/`browser`/`editor_query` 是 omp advisor、后台 job 或编排控制面工具，非写文件类，原名计入工具画像。`toolCallId` 不再可假设全局唯一：实测同一 id 会在不同父消息下复用于不同调用，覆盖审计按出现次数（而非 id 集合）核对调用/结果配平。
+
 ### LOC
 
-`write` 取 `arguments.content` + `details.resolvedPath`（首写 `unseen_writes++`）；`edit`/`ast_edit` 优先取 `details.{oldText,newText,path}`，缺失时依次回退 `arguments.edits[{oldText,newText}]`、`perFileResults[*].diff`、`details.diff`（`+N|text` / `-N|text` 行号前缀 diff）重建新旧文本，经同一 `_LocAccumulator`（净增行差 + 自返工）。`details.snapshotsPruned`（无 oldText/newText）的 edit 跳过。无编辑工具的会话 `net_loc=0`。
+`write` 取 `arguments.content` + `details.resolvedPath`（首写 `unseen_writes++`）；`edit`/`ast_edit` 优先取 `details.{oldText,newText,path}`，缺失时依次回退 `arguments.edits[{oldText,newText}]`、`perFileResults[*].diff`、`details.diff`（`+N|text` / `-N|text` 行号前缀 diff）重建新旧文本，经同一 `_LocAccumulator`（净增行差 + 自返工）。Claude 风格大写 `Write`/`Edit` 没有 details 快照：`Write` 取 `file_path/content`，`Edit` 取 `file_path/old_string/new_string`；仍只在 toolResult 非 `isError` 时回放，`replace_all` 少计沿用已知边界。`details.snapshotsPruned`（无 oldText/newText）的 edit 跳过。无编辑工具的会话 `net_loc=0`。
 
 ### 子代理折叠
 
@@ -302,11 +305,11 @@ Devin 三层存储，全部只读打开：
 - **去重**：同一响应拆成多个 assistant node、metrics 按 `request_id` 重复携带 → 按 request_id 逐字段取 max 合并（流式快照取最新，同 Claude `message.id` 铁律）。工具按 `toolCallId` / `tool_call_state` 行去重。
 - **Token**：`metadata.metrics` 六字段 `input/output/cache_read/cache_creation/context_input_tokens`（context_input→peak）+ `ttft_ms`/`total_time_ms`/`tokens_per_sec`/`tpot_ms`（逐响应耗时 → output_tps/est/逐回合时间线）；`generation_model` → per_model。
 - **提问**：`metadata.is_user_input=true` 且 `telemetry.source=="user"`（排除 `subagent_task` 派发）。
-- **工具**：`inferenceToolName` → `_DEVIN_TOOL_MAP` 规范名；update `status` ≠ completed → 工具错误。
+- **工具**：`inferenceToolName` → `_DEVIN_TOOL_MAP` 规范名；`sidekick` 是子代理交接，归 `Task`；update `status` ≠ completed → 工具错误。
 - **LOC**：本地 update `content[].diff` 带**全文件** `oldText/newText`→Write+`note_write_original` / Edit；云端 `_meta["cognition.ai/fileUpdates"]` 给 `lines_added/lines_removed`→合成 Edit。只回放成功调用。
 - **转录项目身份**：本地取 `call._meta["cognition.ai/cwd"]` 多数票；云端取 `cognition.ai/repoName` 或 `info.configOptions` 仓库值（容器 cwd `/home/ubuntu` **不是**项目身份）；无 repo 的云端会话归「Devin 云端会话」桶。
 - **云端标记**：`devin-cloud` 前缀 → 会话标题前缀「云端」、`thread_source="cloud"`。
-- **噪声过滤**：`sourceEventType` ∈ acu/context_growth/rules_injected/permission 等进度事件跳过；`multi_edit_result`/`mcp_tool_call`/`computer_use`/`git_*` 等映射为工具。
+- **噪声过滤**：`sourceEventType` ∈ acu/context_growth/rules_injected/permission 等进度事件跳过；2026-11 新增 `pr_comment`/`git_comment_on_pr`/`pr_merge_conflict`/测试模式与录屏生命周期事件同属状态展示，非工具调用。`multi_edit_result`/`mcp_tool_call`/`computer_use`/`git_commit`/`git_push` 等映射为工具。
 - **子代理**：`subagent_heads` 链头在同一 message_nodes 森林内，天然折叠进父会话。
 
 ## T3 Code 数据格式（`~/.t3/userdata/statev2.sqlite`）
@@ -317,7 +320,8 @@ T3 Code 是元编排器（驱动 `acpRegistry_devin`/`antigravity`/`claudeAgent`
 
 - **Token「有则计、无则不适用」**：`provider_turns.payload_json.turnTokenUsage` 带显式 `usageStatus`——`complete` 才累计（`inputTokens` **含** `cachedInputTokens`/`cacheCreationTokens` 子集 → 净输入=总量−两缓存；`reasoningTokens`→reasoning_output_tokens），`unavailable` 记 `empty_usage_skipped`，绝不编数。
 - **`import:*` 线程跳过**：`import:claudeAgent:<uuid>` 等是外部会话导入副本，计入会双计原始源。
-- **工具**：`dynamic_tool.toolName`/`command_execution`/`file_change`/`file_search`/`todo_list` → `_T3_TOOL_MAP` 规范名；`command_execution.exitCode≠0` 或 status failed/error → 工具错误；`checkpoint`/`notification` 非会话事件跳过。
+- **工具**：`dynamic_tool.toolName`/`command_execution`/`file_change`/`file_search`/`todo_list` → `_T3_TOOL_MAP` 规范名；`Run manage_task` 是 Antigravity 后台任务管理（非写文件、非子代理），原名计入工具画像；`command_execution.exitCode≠0` 或 status failed/error → 工具错误；`checkpoint`/`notification` 非会话事件跳过。
+- **工作流表**：2026-11 新增 `workflow_runs/steps/signals/waits/hooks/mail/marks/store/triggers/run_references`、`agent_feedback`、`issue_tracker_accounts`、`task_folders` 等应用自动化/元数据表（本机实测为空）；provider token 仍在 `turnTokenUsage`、会话事件仍在 `turn_items`，这些表登记为忽略以避免双计。
 - **LOC**：`file_change.diffStr`（标准 unified diff，+/- 行计数→合成 Edit 净行差），`status=="completed"` 才回放。
 - **时长**：provider_turn 的 completed−started 是整轮墙钟（含工具执行，同 Claude turn_duration）→ **不支持** latency/output_tps；est_output_tps 用回合内 assistant_message+reasoning 项自身 startedAt→completedAt 之和。
 - **排除**：`usage-scan-cache-v17.json`（T3 自扫 `~/.claude` 等的二手缓存，计入会双计）、`server-owner.sqlite`、`logs/`。
@@ -438,13 +442,13 @@ T3 Code 是元编排器（驱动 `acpRegistry_devin`/`antigravity`/`claudeAgent`
   - **reasoning/output 归并（已闭环）**：上游 `packages/ai/src/types.ts` 明示 reasoning 是 `output` 的子集（docs/message-types.md：「already included in output; do not add it again」），omp 本机 32757 条响应 `input+output+cacheRead+cacheWrite == totalTokens` 全成立——reader 只填比率字段、**不**加进 output。工具映射 `_PI_TOOL_MAP = _OMP_TOOL_MAP`（同源子集，未知名 pass-through）；子代理折叠复用 `_is_subagent_file`（布局相同则折叠，否则当主会话不崩）。能力映射（`metric_defs._SOURCE_SUPPORT`）：pi 支持 reasoning/reasoning_ratio/web_searches/cache_write/cache_write_ratio/cache_efficiency，**不支持** ttft/ttft_p95（无 ttft 字段）及 context_window/rate_limit 等。GUI 显示名「Pi」，与 omp 并存（不同目录/用户群）。
 
 <a id="version-baseline"></a>
-### 原 #33 数据源版本漂移基线（2026-10-22 校准；2026-11-15 复核 Claude / Antigravity）
+### 原 #33 数据源版本漂移基线（2026-10-22 校准；2026-11-25 复核八源）
 
 - 各源按此基线核对，下次升级先比对再改。
-  - ①**Claude Code 2.1.311**（2026-10-27 覆盖审计：本机 699 文件 / 22.5 万行逐值普查，登记表 `core/coverage.CLAUDE_REGISTRY`，`python -m tcer.audit --coverage`）：所有行类型 / system 子类型 / attachment 子类型 / 内容块 / usage 键均已登记为「已处理」或「已知忽略（附理由）」，无未知项；计价相关取值 `speed`/`service_tier` 全为 standard、`inference_geo` 仅 ""/global/not_available（白名单外即报）；`api-request`（2.1.300+）只记主线程/子代理/sdk 请求，**标题生成、离开摘要等附带 LLM 调用的用量不落盘，本地无法计入**；请求 7905 / 有用量回复 7615，差额为报错/拒绝/中断请求，是否计费本地无法判断。2.1.307 时的记录：见 #1 `usage.estimated`、#17 cost-state；工具名 `Agent` 取代 `Task`（`_VARIANT_KEYS` 已覆盖二者）；`server_tool_use` 块名新增 `analyze_image`/`webReader`；子代理布局、message.id 重复、1h/5m 缓存档、`usage.iterations`（全为单项）无漂移。**2026-11-15 复核**：本机数据最高 **2.1.325**（近 14 天 2.1.312~2.1.325，791 文件 / 28.8 万行），Claude Code 自身无新行类型 / 字段 / 取值；覆盖审计 FAIL 的 2 个未知项（`block.assistant` = `mcp_tool_use` ×33 / `mcp_tool_result` ×32）与 1 个失败检查（`reader_tool_calls_match`：同一 id 被 `server_tool_use` 与 `tool_use` 共用，reader 共用去重集合吞掉 1 次 Bash）全部来自第三方代理 glm-5.3-flash 写进 assistant 的非标准块，只影响工具调用 / 工具错误计数（webReader 少计 33 次、其中 4 次 `is_error`），Token / 成本 / LOC / 提问不受影响。`CLAUDE_CENSUS_VERSION` 暂留 2.1.311：这两项待裁决（是否计入工具调用、`mcp_tool_result` 是否计错误、去重集合是否分开）后登记再提升。
+  - ①**Claude Code 2.1.330**（2026-11-25 覆盖审计复核；此前 2026-10-27 覆盖审计：本机 699 文件 / 22.5 万行逐值普查，登记表 `core/coverage.CLAUDE_REGISTRY`，`python -m tcer.audit --coverage`）：所有行类型 / system 子类型 / attachment 子类型 / 内容块 / usage 键均已登记为「已处理」或「已知忽略（附理由）」，无未知项；计价相关取值 `speed`/`service_tier` 全为 standard、`inference_geo` 仅 ""/global/not_available（白名单外即报）；`api-request`（2.1.300+）只记主线程/子代理/sdk 请求，**标题生成、离开摘要等附带 LLM 调用的用量不落盘，本地无法计入**；请求 7905 / 有用量回复 7615，差额为报错/拒绝/中断请求，是否计费本地无法判断。2.1.307 时的记录：见 #1 `usage.estimated`、#17 cost-state；工具名 `Agent` 取代 `Task`（`_VARIANT_KEYS` 已覆盖二者）；`server_tool_use` 块名新增 `analyze_image`/`webReader`；子代理布局、message.id 重复、1h/5m 缓存档、`usage.iterations`（全为单项）无漂移。**2026-11-25 复核**：本机数据最高 **2.1.330**，覆盖审计 PASS。此前两项第三方代理漂移已裁决：`mcp_tool_use` 是真实 MCP 调用并按 `mcp__server__tool` 计数；`mcp_tool_result` 的显式 `is_error` 计工具错误；tool id 去重按 `(块类型,id)` 分命名空间，避免 `server_tool_use` 与畸形 `tool_use` 串号互吞。assistant 内无 `is_error` 键的 `tool_result` 仍只用于守恒配对、不猜错误。
   - ②**Codex rust-v0.163.0**（上游源码，本机数据停在 0.142.5，**新格式仅 mock 验证**）：见 #1 cache_write、#5 子代理、#27 线程 id 去重与 `.jsonl.zst`；未确认：子代理 rollout 的 `subagent_history_start_ordinal` 继承段若含 token_count 可能轻微重复计。
-  - ③**OpenCode v1.19.4**（本机 db 1.19.2）：仅 SQLite（`session`/`message`/`part`）。LOC：只回放 `state.status=='completed'` 的工具（同 #32 口径，无 state 的旧形状放行）；edit 优先 `state.metadata.filediff.{additions,deletions}`（消除 replaceAll 少计）、`apply_patch` 读 `metadata.files[{filePath,type,additions,deletions}]`（缺失回退解析 `patchText`，`type=add` 视为确认新文件）、write 的 `metadata.exists===false` 撤销 unseen；混合模型按逐 assistant 消息 `modelID` 的 `tokens` 分桶、余量记会话主模型。上游 dev 分支的 v2 存储（`session_v2`/`session_message`、`opencode-next.db`）**未发布未实现**。
-  - ④**omp 18.10.4 / Pi**：见 #26（diff 回退、compaction、429）、#31（`durationMs`、`provider+modelId`、reasoning 已闭环）。
+  - ③**OpenCode v1.19.4**（本机 db 1.19.2）：仅 SQLite（`session`/`message`/`part`）。LOC：只回放 `state.status=='completed'` 的工具（同 #32 口径，无 state 的旧形状放行）；edit 优先 `state.metadata.filediff.{additions,deletions}`（消除 replaceAll 少计）、`apply_patch` 读 `metadata.files[{filePath,type,additions,deletions}]`（缺失回退解析 `patchText`，`type=add` 视为确认新文件）、write 的 `metadata.exists===false` 撤销 unseen；2026-11 本机库新增事件溯源/账号/工作区/工作流元数据表与 `step-start` part，均无独立计量权威字段（详 OpenCode 节）；混合模型按逐 assistant 消息 `modelID` 的 `tokens` 分桶、余量记会话主模型。上游 dev 分支的 v2 存储（`session_v2`/`session_message`、`opencode-next.db`）**未发布未实现**。
+  - ④**omp 19.0.0 / Pi**：见 #26（diff 回退、compaction、429）、#31（`durationMs`、`provider+modelId`、reasoning 已闭环）。
   - ⑤**Antigravity**（`~/.gemini/antigravity-cli` + `antigravity` + `antigravity-ide`，本机 26 会话）：新版工具参数 `write_file{Path,Content}`/`edit_file{Path,Target,Replacement}`/`read_file{Path}` 与旧 `TargetFile`/`CodeContent` 两套都认（旧版只认旧名，LOC 全丢）；`call_mcp_tool{ServerName,ToolName}` 记为 `mcp__<server>__<tool>`（#28）。摘要库子代理字段漂移：2026-10 全空 → 2026-11 桌面 App 根已有 10 行 `parent_conversation_id`/`nesting_depth`/`agent_name`，子代理折叠已启用（见「子代理折叠」节；CLI 根仍全空）；2026-11-13 官方文档核实 + 本机普查（65 会话库）：`agent_name` 出现具名 worker（Swarm 编排，13 个名字）、`killed=1` 6 行（已采集，见「killed worker」节）；`battle_id`/`winning_conversation_id`/`group_id`/`not_fully_idle` 仍全空不采集；gen_metadata 模型名含内部实验桶后缀（`-trial/-s/-e/-control/exp-a`，四级匹配落主 SKU）；`~/.gemini/config/sidecars/` 与 `sidecar_data/` 本机为空（自动化 sidecar 启用前无数据，启用后其 agentapi 会话会落 summaries+conversations，届时评估「自动化会话」识别）。
     - **2026-11-15 基线：CLI 1.5.9 / 桌面 App 2.32.0**（language server 版本，取自 `<root>/log/*.log`；CLI 另见 `~/.gemini/bin/agy.version.json`）。首次覆盖审计 `python -m tcer.audit --coverage --source antigravity`（登记表 `coverage.ANTIGRAVITY_REGISTRY`，105 会话库 / 4.7 万步，4 秒），逐项结论：
       - **提问提取（已修）**：字段 19 存在即权威——为空（长度 0）或只有技能 chip + 空白正文（无参数技能调用）时返回空串，多个 19.3 副本逐个找正文；兜底扫描（仅无字段 19 的旧格式）跳过字段 5 元数据并拒绝纯 UUID。修前 369 条提问中 10 条是 5.12 step id（UUID），其中 4 条在后一个 19.3 副本里找回真实提问、6 条确无正文；`user_msgs` 按 step 14 计数，不受影响（黄金快照逐字段一致）。

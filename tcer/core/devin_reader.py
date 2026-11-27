@@ -354,6 +354,14 @@ _ACP_NOISE_EVENTS = frozenset({
     "review_started",
     "review_findings_available",
     "session_analysis_update",
+    "git_comment_on_pr",
+    "pr_comment",
+    "pr_merge_conflict",
+    "imessage_connect_prompt",
+    "approve_test_app",
+    "enter_test_mode",
+    "recording_started",
+    "recording_stopped",
 })
 
 # sourceEventType → canonical tool (cloud transcripts).
@@ -881,6 +889,7 @@ _DEVIN_TOOL_MAP = {
     "webfetch": "WebFetch",
     "web_search": "WebSearch",
     "run_subagent": "Task",
+    "sidekick": "Task",
     "skill": "Skill",
     "todo_write": "TodoWrite",
     "ask_user_question": "AskUserQuestion",

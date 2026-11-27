@@ -322,3 +322,11 @@ def test_hidden_sessions_excluded(root):
     con.commit(); con.close()
     hs = dr.sessions_for_project(f"devin::{dr._norm_cwd('c:/repo/a')}")
     assert [h.key for h in hs] == ["s1"]
+
+
+def test_sidekick_and_new_acp_lifecycle_events():
+    assert dr._classify_tool("sidekick", {}, {})[0] == "Task"
+    for event in ("git_comment_on_pr", "pr_comment", "pr_merge_conflict",
+                  "imessage_connect_prompt", "approve_test_app", "enter_test_mode",
+                  "recording_started", "recording_stopped"):
+        assert dr._acp_tool({"sourceEventType": event}, {}) == ""

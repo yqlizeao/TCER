@@ -395,6 +395,36 @@ def test_has_loc_signal_read_only(tmp_path):
     assert omp_reader.session_loc_full(p).added == 0
 
 
+def test_loc_claude_style_write_edit(tmp_path):
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        _user("write and edit"),
+        _assistant([_tool_call("Write", "cw", {"file_path": "new.py", "content": "a\nb\n"})],
+                   _usage(10, 5)),
+        _tool_result("cw", "Write"),
+        _assistant([_tool_call("Edit", "ce", {
+            "file_path": "new.py", "old_string": "a\nb\n",
+            "new_string": "a\nb\nc\nd\n", "replace_all": False})], _usage(10, 5)),
+        _tool_result("ce", "Edit"),
+    ])
+    sloc, has = omp_reader._loc_scan(p)
+    assert has is True
+    assert sloc.added == 4
+    assert sloc.unseen_writes == 1
+
+
+def test_mode_change_top_level_mode(tmp_path):
+    p = _write_omp(tmp_path / "s.jsonl", [
+        _session(),
+        {"type": "mode_change", "mode": "plan", "data": {"planFilePath": "x.md"}},
+        {"type": "mode_change", "mode": "none", "data": {}},
+        {"type": "mode_change", "mode": "plan", "data": {}},
+        _user("x"),
+        _assistant([_text("ok")], _usage(5, 2)),
+    ])
+    assert omp_reader.aggregate_usage(p).plan_mode_count == 2
+
+
 def test_read_session_meta(tmp_path):
     p = _write_omp(tmp_path / "s.jsonl", [
         _session(cwd=r"C:\repo\app", sid="sid-xyz", title="my title"),

@@ -30,7 +30,7 @@ UNKNOWN = "unknown"
 UNEXPECTED = "unexpected"
 
 # 普查已覆盖到的最高版本：登记表按此版本及以下的真实数据整理（2026-10-27）。
-CLAUDE_CENSUS_VERSION = "2.1.311"
+CLAUDE_CENSUS_VERSION = "2.1.330"
 
 # --------------------------------------------------------------------------- #
 # Claude 登记表：维度 → {值: (状态, 说明)}
@@ -93,6 +93,8 @@ CLAUDE_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
     "block.assistant": {
         "tool_use": (_H, "工具调用/LOC 回放"),
         "server_tool_use": (_H, "服务端工具调用"),
+        "mcp_tool_use": (_H, "MCP 原生调用块（第三方代理），按 mcp__server__tool 计"),
+        "mcp_tool_result": (_H, "MCP 原生结果块（assistant 内），is_error 计工具错误"),
         "thinking": (_H, "思考块计数"),
         "text": (_I, "回复正文，不计数"),
         "redacted_thinking": (_I, "加密思考块"),
@@ -278,7 +280,12 @@ def claude_coverage(
         uses: dict[str, str] = {}
         server_uses: set[str] = set()
         server_uses_noid = 0
+        mcp_uses: set[str] = set()
+        mcp_uses_noid = 0
         results: set[str] = set()
+        results_client: set[str] = set()
+        results_agent: set[str] = set()
+        results_mcp: set[str] = set()
         first_bill: dict[str, tuple[int, int, int]] = {}
         resp_ids: set[str] = set()
         n_req = 0
@@ -339,10 +346,22 @@ def claude_coverage(
                                 server_uses.add(tid)
                             else:
                                 server_uses_noid += 1
-                        elif role == "user" and bt == "tool_result":
+                        elif role == "assistant" and bt == "mcp_tool_use":
+                            tid = it.get("id")
+                            if isinstance(tid, str) and tid:
+                                mcp_uses.add(tid)
+                            else:
+                                mcp_uses_noid += 1
+                        elif bt in ("tool_result", "mcp_tool_result"):
                             tid = it.get("tool_use_id")
                             if isinstance(tid, str) and tid:
                                 results.add(tid)
+                                if bt == "mcp_tool_result":
+                                    results_mcp.add(tid)
+                                elif role == "assistant":
+                                    results_agent.add(tid)
+                                else:
+                                    results_client.add(tid)
                 if role != "assistant":
                     continue
                 usage = msg.get("usage")
@@ -380,8 +399,14 @@ def claude_coverage(
                         if len(multi_iter) < _EXAMPLES_PER_ISSUE:
                             multi_iter.append(f"{where} len={len(its)} sum={sums} top={bill}")
 
-        orphans = results - set(uses)
-        pend = set(uses) - results
+        regular_ids = set(uses)
+        server_ids = set(server_uses)
+        mcp_ids = set(mcp_uses)
+        any_ids = regular_ids | server_ids | mcp_ids
+        orphans = ((results_client - regular_ids)
+                   | (results_agent - any_ids)
+                   | (results_mcp - any_ids))
+        pend = regular_ids - results
         n_orphan += len(orphans)
         n_pending += len(pend)
         if orphans and len(orphan_results) < _EXAMPLES_PER_ISSUE:
@@ -399,7 +424,8 @@ def claude_coverage(
             from tcer.core import reader
             u, _ = reader._scan_session_uncached(
                 path, with_loc=False, include_user_texts=False, cancel_check=None)
-            expect = len(uses) + len(server_uses) + server_uses_noid
+            expect = (len(uses) + len(server_uses) + server_uses_noid
+                      + len(mcp_uses) + mcp_uses_noid)
             got = sum(u.tool_calls.values())
             if got != expect:
                 reader_mismatch.append(f"{path} reader={got} 独立计数={expect}")
@@ -1109,7 +1135,7 @@ def codex_coverage(files: Iterable[Path] | None = None, *,
 # =========================================================================== #
 # omp / Pi 覆盖审计（2026-11-19 起；同族 JSONL，登记表共用、Pi 字段为超集）
 # =========================================================================== #
-OMP_CENSUS_VERSION = "18.10.4"
+OMP_CENSUS_VERSION = "19.0.0"
 PI_CENSUS_VERSION = ""  # Pi 无已知版本锚点（上游仓库未发版号到本地数据）
 
 OMP_PI_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
@@ -1128,11 +1154,16 @@ OMP_PI_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
         "branch_summary": (_I, "分支摘要；其 usage 属辅助用量，不并入"),
         "custom": (_I, "自定义事件，无用量"),
         "custom_message": (_I, "自定义消息，无用量"),
+        "session_init": (_I, "子代理初始化元数据（系统提示/输出 schema），无用量"),
+        "service_tier_change": (_I, "服务档位切换标记；用量仍在 message.usage"),
+        "ttsr_injection": (_I, "规则注入标记，无用量"),
     },
     "role": {
         "user": (_H, "提问（agent 注入有 attribution/synthetic 标记，剔除）"),
         "assistant": (_H, "回复：usage/模型/工具/思考/stopReason"),
         "toolResult": (_H, "工具结果：isError/LOC 裁决/details"),
+        "developer": (_I, "agent 内部前导/注入，非真人提问、无用量"),
+        "custom": (_I, "agent 自定义上下文块（display=false），无用量"),
     },
     "block.assistant": {
         "thinking": (_H, "思考块计数"),
@@ -1177,6 +1208,12 @@ OMP_PI_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
     },
     "snapshot": {  # contextSnapshot 键（omp fork 字段；Pi 无）
         "promptTokens": (_H, "整轮输入（peak_input）"),
+        "nonMessageTokens": (_I, "上下文非消息构成合计；peak 口径仍取 promptTokens"),
+        "toolSchemaTokens": (_I, "工具 schema 上下文分量；不重复计入 peak"),
+        "compactionEpoch": (_I, "压缩代际编号，不是 Token 数"),
+    },
+    "service_tier": {
+        "null": (_I, "未指定档位；本机实测仅此值"),
     },
     "mode": {  # mode_change data.mode
         "plan": (_H, "计划模式计入"),
@@ -1190,6 +1227,14 @@ def _omp_tool_status(name: str) -> tuple[str, str]:
     from tcer.core import omp_reader as ompr
     if name in ompr._OMP_TOOL_MAP:
         return _H, f"映射为 {ompr._OMP_TOOL_MAP[name]}"
+    canonical = {"Read", "Write", "Edit", "Grep", "Glob", "Bash", "Agent",
+                 "AskUserQuestion", "ListAgents", "EnterPlanMode", "ExitPlanMode"}
+    if name in canonical:
+        return _H, "原名即规范名（omp 内嵌 Claude 工具形态）"
+    if name in {"advise", "hub", "yield", "wait", "browser", "editor_query"}:
+        return _H, "omp 内部/编排工具，非写文件类，原名计入工具画像"
+    if any(ch.isspace() for ch in name):
+        return _H, "模型幻觉出的非法工具名（上游 Tool not found），原名计数"
     if name.startswith("mcp"):
         return _I, "MCP 原名计入工具画像（非读写类）"
     return UNKNOWN, "未登记工具：若是写文件类会漏计 LOC，需判断"
@@ -1225,8 +1270,9 @@ def omp_pi_coverage(files: Iterable[Path], *, source: str,
 
     for path in files:
         rep.files += 1
-        uses: dict[str, str] = {}
-        results: set[str] = set()
+        uses: Counter[str] = Counter()
+        use_names: dict[str, str] = {}
+        results: Counter[str] = Counter()
         saw_session = False
         try:
             fh = open(path, encoding="utf-8", errors="replace")
@@ -1247,14 +1293,24 @@ def omp_pi_coverage(files: Iterable[Path], *, source: str,
                     continue
                 where = f"{path}:{ln}"
                 typ = o.get("type")
-                tally.add("type", typ, "", where)
+                ver = ""
+                rt = o.get("runtime")
+                if isinstance(rt, dict) and isinstance(rt.get("version"), str):
+                    ver = rt["version"]
+                    if _vkey(ver) > _vkey(rep.max_version):
+                        rep.max_version = ver
+                tally.add("type", typ, ver, where)
                 if typ == "session":
                     saw_session = True
                     continue
+                if typ == "service_tier_change":
+                    tally.add("service_tier", o.get("serviceTier"), ver, where)
+                    continue
                 if typ == "mode_change":
                     data = o.get("data")
-                    tally.add("mode", data.get("mode") if isinstance(data, dict) else None,
-                              "", where)
+                    mode = o.get("mode") if "mode" in o else (
+                        data.get("mode") if isinstance(data, dict) else None)
+                    tally.add("mode", mode, ver, where)
                     continue
                 if typ != "message":
                     continue
@@ -1276,7 +1332,8 @@ def omp_pi_coverage(files: Iterable[Path], *, source: str,
                                 if isinstance(nm, str) and nm:
                                     tally.add("tool", nm, "", where)
                                 if isinstance(cid, str) and cid:
-                                    uses[cid] = str(nm or "")
+                                    uses[cid] += 1
+                                    use_names.setdefault(cid, str(nm or ""))
                 sr = mm.get("stopReason")
                 if sr is not None:
                     tally.add("stop_reason", sr, "", where)
@@ -1287,7 +1344,7 @@ def omp_pi_coverage(files: Iterable[Path], *, source: str,
                 if role == "toolResult":
                     cid = mm.get("toolCallId")
                     if isinstance(cid, str) and cid:
-                        results.add(cid)
+                        results[cid] += 1
                 if role != "assistant":
                     continue
                 usage = mm.get("usage")
@@ -1324,22 +1381,23 @@ def omp_pi_coverage(files: Iterable[Path], *, source: str,
                         zero_usage.append(where)
         if not saw_session:
             no_session.append(str(path))
-        orphans = results - set(uses)
-        pend = set(uses) - results
-        n_orphan += len(orphans)
-        n_pending += len(pend)
+        orphans = results - uses
+        pend = uses - results
+        n_orphan += sum(orphans.values())
+        n_pending += sum(pend.values())
         if orphans and len(orphan_results) < _EXAMPLES_PER_ISSUE:
-            orphan_results.append(f"{path} ×{len(orphans)}")
+            orphan_results.append(f"{path} ×{sum(orphans.values())}")
         if pend and len(pending_calls) < 10:
-            names = Counter(uses[t] for t in pend)
+            names = Counter({use_names.get(t, ""): c for t, c in pend.items()})
             pending_calls.append(f"{path} {dict(names)}")
 
         if cross_check_reader:
             u = ompr._usage_from_events(ompr.iter_events(path),
                                         is_subagent=ompr._is_subagent_file(path))
             got = sum(u.tool_calls.values())
-            if got != len(uses):
-                reader_mismatch.append(f"{path} reader={got} 独立计数={len(uses)}")
+            independent = sum(uses.values())
+            if got != independent:
+                reader_mismatch.append(f"{path} reader={got} 独立计数={independent}")
 
     missing_parent = sorted(
         str(p) for p in sub_files if p.parent.with_suffix(".jsonl") not in files
@@ -1375,8 +1433,9 @@ def omp_pi_coverage(files: Iterable[Path], *, source: str,
         CoverageCheck("subagent_parent_exists", not missing_parent, "warn",
                       f"找不到主文件的子代理 {len(missing_parent)} 个",
                       missing_parent[:_EXAMPLES_PER_ISSUE]),
-        CoverageCheck("version_within_census", True, "info",
-                      f"普查版本 {census_version or '未登记'}（本地数据无版本字段）"),
+        CoverageCheck("version_within_census", not rep.newer_than_census, "info",
+                      f"数据最高运行版本 {rep.max_version or '-'}，普查版本 "
+                      f"{census_version or '未登记'}"),
     ]
     if cross_check_reader:
         rep.checks.insert(2, CoverageCheck(
@@ -1419,6 +1478,21 @@ OPENCODE_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
         "project": (_H, "项目行：worktree/name"),
         "session_v2": (_I, "上游 dev 分支 v2 存储，未发布未实现"),
         "session_message": (_I, "v2 存储，未发布"),
+        "account": (_I, "账号凭据表，非会话计量"),
+        "account_state": (_I, "当前账号状态，非会话计量"),
+        "control_account": (_I, "控制账号凭据，非会话计量"),
+        "credential": (_I, "外部集成凭据，非会话计量且绝不读取"),
+        "data_migration": (_I, "数据迁移标记"),
+        "migration": (_I, "schema 迁移标记"),
+        "event": (_I, "事件溯源原始事件；计量以 session/message/part 投影为准，防双计"),
+        "event_sequence": (_I, "事件序号簿记，非会话计量"),
+        "permission": (_I, "权限规则，非会话计量"),
+        "project_directory": (_I, "项目目录元数据；session.directory 已是分组权威"),
+        "session_context_epoch": (_I, "上下文纪元簿记，无独立用量"),
+        "session_input": (_I, "输入队列投影；真实提问以 message/part 为准"),
+        "session_share": (_I, "分享链接/密钥元数据，非会话计量"),
+        "todo": (_I, "todo 状态投影；工具行为以 part 为准，防双计"),
+        "workspace": (_I, "工作区元数据；session.directory 已是分组权威"),
     },
     "role": {
         "user": (_H, "提问（合成/注入行有 synthetic/ignored 标记剔除）"),
@@ -1435,6 +1509,7 @@ OPENCODE_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
         "tool-output": (_H, "工具结果旧形"),
         "step-finish": (_H, "步末 Token 快照（peak/逐回合时间线）"),
         "step_finish": (_H, "步末快照旧形"),
+        "step-start": (_I, "步开始快照指针，无用量"),
         "compaction": (_H, "压缩计数"),
     },
     "tokens": {  # message data.tokens
@@ -1964,6 +2039,19 @@ T3_REGISTRY: dict[str, dict[str, tuple[str, str]]] = {
         "scheduled_task_webhook_replay_keys": (_I, "webhook 幂等键"),
         "issue_tracker_bindings": (_I, "issue 绑定"),
         "mcp_app_model_context": (_I, "MCP 应用上下文"),
+        "agent_feedback": (_I, "代理反馈/遥测，非会话计量"),
+        "issue_tracker_accounts": (_I, "issue tracker 账号元数据，非会话计量"),
+        "task_folders": (_I, "任务文件夹/仓库元数据；projection_projects 已是项目权威"),
+        "workflow_hooks": (_I, "工作流 hook 元数据，非会话计量"),
+        "workflow_mail": (_I, "工作流邮箱信号，非会话计量"),
+        "workflow_marks": (_I, "工作流标记，非会话计量"),
+        "workflow_run_references": (_I, "工作流外部引用，非会话计量"),
+        "workflow_runs": (_I, "工作流运行编排；provider 用量仍在 turnTokenUsage"),
+        "workflow_signals": (_I, "工作流信号，非会话计量"),
+        "workflow_steps": (_I, "工作流步骤编排；turn_items 已是会话事件权威"),
+        "workflow_store": (_I, "工作流键值存储，非会话计量"),
+        "workflow_triggers": (_I, "工作流触发器，非会话计量"),
+        "workflow_waits": (_I, "工作流等待状态，非会话计量"),
     },
     "item.type": {
         "user_message": (_H, "提问"),
@@ -2012,6 +2100,8 @@ def _t3_tool_status(name: str) -> tuple[str, str]:
              "notebookedit", "mcp"}
     if lower in canon:
         return _H, "原名即规范名"
+    if lower in {"manage_task", "run manage_task"}:
+        return _H, "后台任务管理（非写文件类），原名计入工具画像"
     if lower.startswith(("mcp__", "mcp_")):
         return _I, "MCP 原名计入工具画像"
     return UNKNOWN, "未登记工具：若是写文件类会漏计 LOC，需判断"
